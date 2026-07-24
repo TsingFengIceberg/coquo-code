@@ -80,6 +80,13 @@ from leonervis_code.session_store import (
     SessionStoreError,
     SessionWriter,
 )
+from leonervis_code.tools.delete_file import (
+    DELETE_FILE_TOOL_NAME,
+    DeleteFileOutcome,
+    DeleteFilePreparationError,
+    DeleteFileTool,
+    PreparedDeleteFile,
+)
 from leonervis_code.tools.edit_file import (
     EDIT_FILE_TOOL_NAME,
     EditFileOutcome,
@@ -322,6 +329,7 @@ class ProjectSession:
         run_command: RunCommandTool | None = None,
         mkdir: MkdirTool | None = None,
         move_file: MoveFileTool | None = None,
+        delete_file: DeleteFileTool | None = None,
         *,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -343,6 +351,7 @@ class ProjectSession:
         self._run_command = run_command or RunCommandTool(workspace)
         self._mkdir = mkdir or MkdirTool(workspace)
         self._move_file = move_file or MoveFileTool(workspace)
+        self._delete_file = delete_file or DeleteFileTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -385,6 +394,7 @@ class ProjectSession:
         run_command_factory: Callable[[Path, Mapping[str, str]], RunCommandTool] = RunCommandTool,
         mkdir_factory: Callable[[Path], MkdirTool] = MkdirTool,
         move_file_factory: Callable[[Path], MoveFileTool] = MoveFileTool,
+        delete_file_factory: Callable[[Path], DeleteFileTool] = DeleteFileTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -426,6 +436,7 @@ class ProjectSession:
             run_command = run_command_factory(resolved_workspace, resolved_environment)
             mkdir = mkdir_factory(resolved_workspace)
             move_file = move_file_factory(resolved_workspace)
+            delete_file = delete_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -444,6 +455,7 @@ class ProjectSession:
                     run_command,
                     mkdir,
                     move_file,
+                    delete_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -493,6 +505,7 @@ class ProjectSession:
                     run_command,
                     mkdir,
                     move_file,
+                    delete_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1048,6 +1061,7 @@ class ProjectSession:
         prepared_command: PreparedRunCommand | None = None
         prepared_mkdir: PreparedMkdir | None = None
         prepared_move: PreparedMoveFile | None = None
+        prepared_delete: PreparedDeleteFile | None = None
         if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1086,6 +1100,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_move.action
             precondition = prepared_move.precondition
+        elif request.name == DELETE_FILE_TOOL_NAME:
+            try:
+                prepared_delete = self._delete_file.prepare(request)
+            except DeleteFilePreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_delete.action
+            precondition = prepared_delete.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1122,6 +1143,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_move is not None:
                 refreshed = self._move_file.refresh_precondition(prepared_move)
+                return replace(current, precondition=refreshed)
+            if prepared_delete is not None:
+                refreshed = self._delete_file.refresh_precondition(prepared_delete)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -1197,6 +1221,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=move_result.result_code,
                     audit_message=move_result.audit_message,
+                )
+            elif request.name == DELETE_FILE_TOOL_NAME and prepared_delete is not None:
+                delete_result = self._delete_file.execute_detailed(prepared_delete)
+                outcome = {
+                    DeleteFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    DeleteFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    DeleteFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[delete_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=delete_result.tool_result,
+                    outcome=outcome,
+                    result_code=delete_result.result_code,
+                    audit_message=delete_result.audit_message,
                 )
             else:
                 result = ToolResult(

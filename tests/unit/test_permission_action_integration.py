@@ -17,8 +17,16 @@ from leonervis_code.core.contracts import (
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
 from leonervis_code.session import ProjectSession
-from leonervis_code.session_records import ActionAuditStatus, ActionExecutionOutcome
-from leonervis_code.session_store import SessionStore, SessionStoreError
+from leonervis_code.session_records import (
+    ActionAuditStatus,
+    ActionExecutionFinished,
+    ActionExecutionOutcome,
+)
+from leonervis_code.session_store import (
+    ActionOutcomeAuditError,
+    SessionStore,
+    SessionStoreError,
+)
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -1111,6 +1119,277 @@ def test_move_execution_start_audit_failure_prevents_destination_creation(
         assert (tmp_path / "source.txt").exists()
         assert not (tmp_path / "destination.txt").exists()
         assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()
+
+
+def delete_call(path: str = "obsolete.txt", *, tool_use_id: str = "delete-1") -> ToolUse:
+    return ToolUse(tool_use_id, "delete_file", ToolArguments.from_mapping({"path": path}))
+
+
+def test_model_visible_delete_read_only_denial_is_audited_and_keeps_file(tmp_path: Path) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("keep\n", encoding="utf-8")
+    call = delete_call()
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("delete it") == "denied"
+        denied = ToolResult("delete-1", "permission denied: denied_read_only_mode", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.DENIED
+        assert audit.identity.action.value == "workspace-delete"
+    finally:
+        session.close()
+
+
+def test_model_visible_delete_auto_succeeds_and_commits_exact_causality(tmp_path: Path) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("remove\n", encoding="utf-8")
+    call = delete_call()
+    provider = ToolProvider([call, AssistantText("deleted")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("delete it") == "deleted"
+        result = ToolResult("delete-1", '{"operation":"deleted","path":"obsolete.txt"}\n')
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (UserMessage("delete it"), call, result, AssistantText("deleted"))
+        assert not target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "file_deleted"
+    finally:
+        session.close()
+
+
+def test_model_visible_delete_ask_reject_keeps_file(tmp_path: Path) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("keep\n", encoding="utf-8")
+    approvals: list[HumanApprovalRequest] = []
+
+    def reject(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        return ApprovalResolution.REJECT
+
+    call = delete_call()
+    provider = ToolProvider([call, AssistantText("rejected")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=reject,
+    )
+    try:
+        assert session.prompt("delete it") == "rejected"
+        assert approvals[0].identity.arguments.as_mapping() == {"path": "obsolete.txt"}
+        assert target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.REJECTED
+    finally:
+        session.close()
+
+
+def test_hard_rejected_delete_has_no_action_audit(tmp_path: Path) -> None:
+    call = delete_call("missing.txt")
+    provider = ToolProvider([call, AssistantText("missing")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("delete missing") == "missing"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "delete-1", "delete_file target does not exist", is_error=True
+        )
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_delete_approval_wait_target_change_fails_stale_and_keeps_replacement(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("old\n", encoding="utf-8")
+
+    def replace_target(_request: HumanApprovalRequest) -> ApprovalResolution:
+        target.unlink()
+        target.write_text("replacement\n", encoding="utf-8")
+        return ApprovalResolution.ACCEPT
+
+    call = delete_call()
+    provider = ToolProvider([call, AssistantText("stale")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=replace_target,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("delete it")
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert target.read_text(encoding="utf-8") == "replacement\n"
+        assert session.history == ()
+    finally:
+        session.close()
+
+
+def test_delete_partial_durability_is_audited_and_not_hidden(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("remove\n", encoding="utf-8")
+    provider = ToolProvider([delete_call(), AssistantText("inspect before retry")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        "leonervis_code.tools.delete_file._fsync_directory",
+        lambda _fd: (_ for _ in ()).throw(OSError("injected")),
+    )
+    try:
+        assert session.prompt("delete it") == "inspect before retry"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult) and result.is_error
+        assert "do not retry automatically" in result.content
+        assert not target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.PARTIAL
+        assert audit.result_code == "file_deleted_durability_unknown"
+    finally:
+        session.close()
+
+
+def test_provider_continuation_failure_after_delete_preserves_effect_and_audit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("remove\n", encoding="utf-8")
+    provider = ToolProvider([delete_call(), RuntimeError("provider continuation failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider continuation failed"):
+            session.prompt("delete it")
+        assert not target.exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_turn_commit_failure_after_delete_preserves_effect_and_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("remove\n", encoding="utf-8")
+    provider = ToolProvider([delete_call(), AssistantText("deleted")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "append_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected turn commit failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="injected turn commit failure"):
+            session.prompt("delete it")
+        assert not target.exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_delete_execution_start_audit_failure_prevents_deletion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("keep\n", encoding="utf-8")
+    provider = ToolProvider([delete_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "action_execution_started",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected action_execution_started failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="action_execution_started"):
+            session.prompt("delete it")
+        assert target.read_text(encoding="utf-8") == "keep\n"
+        assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()
+
+
+def test_delete_final_audit_failure_reports_known_effect_with_unknown_audit_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "obsolete.txt"
+    target.write_text("remove\n", encoding="utf-8")
+    provider = ToolProvider([delete_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    original_append_audit = session._writer.append_audit
+
+    def fail_final_audit(record):
+        if isinstance(record, ActionExecutionFinished):
+            raise SessionStoreError("injected final audit failure")
+        return original_append_audit(record)
+
+    monkeypatch.setattr(session._writer, "append_audit", fail_final_audit)
+    try:
+        with pytest.raises(ActionOutcomeAuditError) as captured:
+            session.prompt("delete it")
+        assert not target.exists()
+        assert captured.value.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert captured.value.result_code == "file_deleted"
+        assert session.history == ()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.OUTCOME_UNKNOWN
+        assert audit.execution_outcome is None
+        assert audit.result_code is None
         assert len(provider.requests) == 1
     finally:
         session.close()

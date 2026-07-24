@@ -328,6 +328,11 @@ def move_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[7]
 
 
+def delete_file_tool_definition() -> dict[str, object]:
+    """Return the canonical delete_file definition used by Anthropic requests."""
+    return model_tool_definitions()[8]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

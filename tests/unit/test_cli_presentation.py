@@ -626,3 +626,31 @@ def test_action_audit_renders_move_relative_paths_and_result() -> None:
     assert "approval: accepted" in rendered
     assert "result: succeeded (file_moved)" in rendered
     assert "/root/" not in rendered
+
+
+def test_action_audit_renders_delete_relative_path_and_result() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="delete_file",
+            action=PermissionAction.WORKSPACE_DELETE,
+            arguments=ToolArguments.from_mapping({"path": "obsolete.txt"}),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_DELETE,
+        ),
+        approval_outcome=ApprovalAuditOutcome.ACCEPTED,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="file_deleted",
+        requested_sequence=10,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #10: delete_file" in rendered
+    assert "class: workspace-delete" in rendered
+    assert "path: 'obsolete.txt'" in rendered
+    assert "permission: ask (approval_required_workspace_delete)" in rendered
+    assert "approval: accepted" in rendered
+    assert "result: succeeded (file_deleted)" in rendered
+    assert "/root/" not in rendered

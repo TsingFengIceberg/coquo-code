@@ -20,6 +20,7 @@ def test_catalog_exposes_move_file_last_with_shared_closed_schema() -> None:
         "run_command",
         "mkdir",
         "move_file",
+        "delete_file",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -131,3 +132,19 @@ def test_catalog_validates_closed_move_file_input() -> None:
 def test_catalog_rejects_malformed_move_file_inputs(tool_input: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="move_file"):
         tool_use_from_input("move-1", "move_file", tool_input)
+
+
+def test_catalog_validates_closed_delete_file_input() -> None:
+    call = tool_use_from_input("delete-1", "delete_file", {"path": "src/obsolete.py"})
+    assert call == ToolUse(
+        "delete-1",
+        "delete_file",
+        ToolArguments.from_mapping({"path": "src/obsolete.py"}),
+    )
+    assert tool_input_from_use(call) == {"path": "src/obsolete.py"}
+
+
+@pytest.mark.parametrize("tool_input", [{}, {"path": 1}, {"path": ""}, {"path": "a", "extra": "x"}])
+def test_catalog_rejects_malformed_delete_file_inputs(tool_input: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="delete_file"):
+        tool_use_from_input("delete-1", "delete_file", tool_input)

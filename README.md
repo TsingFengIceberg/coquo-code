@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir`/`move_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 加入受控本地命令执行，Foundation 4D 加入受控单目录创建，Foundation 4E 现已加入受控且禁止覆盖的普通文件移动。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、delete 与目录移动仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir`/`move_file`/`delete_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 加入受控本地命令执行，Foundation 4D 加入受控单目录创建，Foundation 4E 加入受控且禁止覆盖的普通文件移动，Foundation 4F 现已加入受控普通文件删除。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、目录删除与目录移动仍未实现。
 
 ## 目录
 
@@ -83,7 +83,7 @@ uv run leonervis-code session --help
 
 `prompt` 用于脚本和一次性任务；裸命令用于有状态多轮 REPL。成功 turn 会自动保存到 workspace Session transcript。
 
-权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入或目录创建的相对路径、移动的source/destination、写入byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
+权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入、目录创建或文件删除的相对路径、移动的source/destination、写入byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
 
 `write_file(path, content)`写入一个文件的**完整**UTF-8内容，不是patch。模型不能自报create/overwrite：Host根据目标是否存在分类，并在执行前重新检查审批绑定的absent或SHA-256状态。工具不跟随symlink、不创建parent directory，content上限为4096 characters且4096 UTF-8 bytes；overwrite只接受最多1 MiB的现有UTF-8普通文件、保留mode并拒绝stale/conflicting target。Permission或auto approval都不能绕过这些hard bounds。
 
@@ -94,6 +94,8 @@ uv run leonervis-code session --help
 `mkdir(path)`是第七个model-visible工具，只创建一个缺失的workspace相对目录。它固定属于`workspace-create`：`read-only`拒绝，`workspace-write`或`danger-full-access`按ask/auto继续。Parent directory必须已存在且整条路径不能含symlink；工具不递归创建parent，也不把已存在目录当作成功。Approval后目标若已出现会以stale拒绝；创建成功会fsync新目录和parent，若目录已可见但durability确认失败则返回partial并要求不要自动重试。
 
 `move_file(source, destination)`是第八个model-visible工具，只移动一个现有普通文件到一个缺失的workspace相对目标。它属于独立的`workspace-move`：`read-only`拒绝，两个可写mode按ask/auto继续。两端parent必须存在、路径不得含symlink、source和destination必须同filesystem，destination任何已存在entry都不会被覆盖。Host在approval后复查source、destination和两端parent；执行采用exclusive hard-link、destination parent fsync、source unlink、source parent fsync。由于这不是单步transaction，若destination已出现但source仍保留或durability未知，会返回partial并要求先检查两个路径、不要自动重试。
+
+`delete_file(path)`是第九个model-visible工具，只永久删除一个现有的非symlink普通文件。它属于独立的`workspace-delete`：`read-only`拒绝，两个可写mode按ask/auto继续。Parent必须已存在且路径不能含symlink；missing target、目录和symlink会在permission前hard reject，不创建Action Audit。Host在approval后复查target与parent identity，再unlink并fsync parent。若文件名已消失但parent durability无法确认，会返回partial；此时不能自动重试，也没有trash、backup或undo。
 
 ### 配置 Provider
 
@@ -235,6 +237,7 @@ git diff --check
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
 - [Controlled No-overwrite File Move](./docs/decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)：双路径identity、workspace-move审批、no-overwrite hard-link/unlink、stale检查与truthful partial。
+- [Controlled Regular-file Deletion](./docs/decisions/0033-foundation-4f-controlled-regular-file-deletion.md)：单文件workspace-delete审批、target/parent identity、unlink durability与不可自动重试的partial。
 - [Controlled Single-directory Creation](./docs/decisions/0031-foundation-4d-controlled-single-directory-creation.md)：单目录path合同、workspace-create审批、stale检查、fsync与partial durability。
 - [Durable Model-visible Command Integration](./docs/decisions/0030-foundation-4c-durable-model-visible-command-integration.md)：spawn前durable commit point、CLI approval/audit、六工具顺序、provider adapter v8、system prompt v7与兼容性。
 - [Bounded Command Execution与Process-group Cleanup](./docs/decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)：direct argv、closed environment、有界output、UTF-8/base64、timeout/cancel与TERM→KILL清理。
@@ -261,6 +264,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`、单目录`mkdir`与普通文件`move_file`；八者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；mkdir属于`workspace-create`；move_file属于`workspace-move`，要求source/destination parent已存在、拒绝symlink、stale state、跨filesystem与existing destination，并与其他副作用工具共用PermissionGate、approval及durable Action Audit。
+当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`、单目录`mkdir`、普通文件`move_file`与普通文件`delete_file`；九者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；mkdir、move_file与delete_file分别使用`workspace-create`、`workspace-move`与`workspace-delete`，并与其他副作用工具共用PermissionGate、approval及durable Action Audit。
 
-Foundation 4E现已完成。Canonical system prompt为v9，provider adapter contract为v10；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、delete、directory move、recursive mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。下一独立方向建议设计file-only delete，再单独设计empty-directory removal；不直接加入递归删除。完整决策见[ADR 0032](./docs/decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)。
+Foundation 4F现已完成。Canonical system prompt为v10，provider adapter contract为v11，empty full-context identity为`ctx-v1-42200fbe6c48a76d91ac0dde71e12be0e41674b1ad06c8b82bf82a541e3049e8`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、directory move、empty-directory removal、recursive mkdir/delete、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。下一独立方向建议单独设计empty-directory removal，继续明确禁止递归删除。完整决策见[ADR 0033](./docs/decisions/0033-foundation-4f-controlled-regular-file-deletion.md)。
