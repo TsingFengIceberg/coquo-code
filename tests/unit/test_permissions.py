@@ -35,6 +35,7 @@ def test_permission_contract_values_are_stable() -> None:
         "workspace-read",
         "workspace-create",
         "workspace-overwrite",
+        "workspace-move",
         "dangerous",
         "unknown",
     ]
@@ -43,9 +44,11 @@ def test_permission_contract_values_are_stable() -> None:
         "allowed_workspace_read",
         "allowed_workspace_create_auto",
         "allowed_workspace_overwrite_auto",
+        "allowed_workspace_move_auto",
         "allowed_dangerous_auto",
         "approval_required_workspace_create",
         "approval_required_workspace_overwrite",
+        "approval_required_workspace_move",
         "approval_required_dangerous",
         "denied_read_only_mode",
         "denied_workspace_write_mode",
@@ -78,6 +81,11 @@ def test_workspace_reads_are_always_allowed(permission_mode, approval_mode) -> N
             PermissionAction.WORKSPACE_OVERWRITE,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
             PermissionReason.ALLOWED_WORKSPACE_OVERWRITE_AUTO,
+        ),
+        (
+            PermissionAction.WORKSPACE_MOVE,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_MOVE,
+            PermissionReason.ALLOWED_WORKSPACE_MOVE_AUTO,
         ),
     ],
 )

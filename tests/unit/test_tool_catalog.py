@@ -10,7 +10,7 @@ from leonervis_code.tools.catalog import (
 )
 
 
-def test_catalog_exposes_mkdir_last_with_shared_closed_schema() -> None:
+def test_catalog_exposes_move_file_last_with_shared_closed_schema() -> None:
     assert [definition.name for definition in TOOL_CATALOG] == [
         "read_file",
         "glob",
@@ -19,6 +19,7 @@ def test_catalog_exposes_mkdir_last_with_shared_closed_schema() -> None:
         "edit_file",
         "run_command",
         "mkdir",
+        "move_file",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -108,3 +109,25 @@ def test_catalog_validates_closed_mkdir_input() -> None:
 def test_catalog_rejects_malformed_mkdir_inputs(tool_input: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="mkdir"):
         tool_use_from_input("mkdir-1", "mkdir", tool_input)
+
+
+def test_catalog_validates_closed_move_file_input() -> None:
+    call = tool_use_from_input(
+        "move-1", "move_file", {"source": "src/a.py", "destination": "src/b.py"}
+    )
+    assert tool_input_from_use(call) == {"source": "src/a.py", "destination": "src/b.py"}
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {},
+        {"source": "a"},
+        {"source": "a", "destination": "b", "extra": "x"},
+        {"source": 1, "destination": "b"},
+        {"source": "a", "destination": ""},
+    ],
+)
+def test_catalog_rejects_malformed_move_file_inputs(tool_input: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="move_file"):
+        tool_use_from_input("move-1", "move_file", tool_input)

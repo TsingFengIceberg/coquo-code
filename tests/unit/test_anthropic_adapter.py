@@ -31,6 +31,7 @@ from leonervis_code.providers.anthropic import (
     glob_tool_definition,
     grep_tool_definition,
     mkdir_tool_definition,
+    move_file_tool_definition,
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
@@ -523,6 +524,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 edit_file_tool_definition(),
                 run_command_tool_definition(),
                 mkdir_tool_definition(),
+                move_file_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -796,3 +798,10 @@ def test_mkdir_schema_and_parser_preserve_exact_path_argument() -> None:
         "mkdir",
         ToolArguments.from_mapping({"path": "src/pkg"}),
     )
+
+
+def test_move_file_tool_definition_is_canonical_and_closed() -> None:
+    definition = move_file_tool_definition()
+    assert definition["name"] == "move_file"
+    assert definition["input_schema"]["required"] == ["source", "destination"]
+    assert definition["input_schema"]["additionalProperties"] is False

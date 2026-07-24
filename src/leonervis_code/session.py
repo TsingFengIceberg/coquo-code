@@ -96,6 +96,13 @@ from leonervis_code.tools.mkdir import (
     MkdirTool,
     PreparedMkdir,
 )
+from leonervis_code.tools.move_file import (
+    MOVE_FILE_TOOL_NAME,
+    MoveFileOutcome,
+    MoveFilePreparationError,
+    MoveFileTool,
+    PreparedMoveFile,
+)
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 from leonervis_code.tools.glob import GLOB_TOOL_NAME
 from leonervis_code.tools.grep import GREP_TOOL_NAME
@@ -314,6 +321,7 @@ class ProjectSession:
         edit_file: EditFileTool | None = None,
         run_command: RunCommandTool | None = None,
         mkdir: MkdirTool | None = None,
+        move_file: MoveFileTool | None = None,
         *,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -334,6 +342,7 @@ class ProjectSession:
         self._edit_file = edit_file or EditFileTool(workspace)
         self._run_command = run_command or RunCommandTool(workspace)
         self._mkdir = mkdir or MkdirTool(workspace)
+        self._move_file = move_file or MoveFileTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -375,6 +384,7 @@ class ProjectSession:
         edit_file_factory: Callable[[Path], EditFileTool] = EditFileTool,
         run_command_factory: Callable[[Path, Mapping[str, str]], RunCommandTool] = RunCommandTool,
         mkdir_factory: Callable[[Path], MkdirTool] = MkdirTool,
+        move_file_factory: Callable[[Path], MoveFileTool] = MoveFileTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -415,6 +425,7 @@ class ProjectSession:
             edit_file = edit_file_factory(resolved_workspace)
             run_command = run_command_factory(resolved_workspace, resolved_environment)
             mkdir = mkdir_factory(resolved_workspace)
+            move_file = move_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -432,6 +443,7 @@ class ProjectSession:
                     edit_file,
                     run_command,
                     mkdir,
+                    move_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -480,6 +492,7 @@ class ProjectSession:
                     edit_file,
                     run_command,
                     mkdir,
+                    move_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1034,6 +1047,7 @@ class ProjectSession:
         prepared_edit: PreparedEditFile | None = None
         prepared_command: PreparedRunCommand | None = None
         prepared_mkdir: PreparedMkdir | None = None
+        prepared_move: PreparedMoveFile | None = None
         if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1065,6 +1079,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_mkdir.action
             precondition = prepared_mkdir.precondition
+        elif request.name == MOVE_FILE_TOOL_NAME:
+            try:
+                prepared_move = self._move_file.prepare(request)
+            except MoveFilePreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_move.action
+            precondition = prepared_move.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1098,6 +1119,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_mkdir is not None:
                 refreshed = self._mkdir.refresh_precondition(prepared_mkdir)
+                return replace(current, precondition=refreshed)
+            if prepared_move is not None:
+                refreshed = self._move_file.refresh_precondition(prepared_move)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -1160,6 +1184,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=mkdir_result.result_code,
                     audit_message=mkdir_result.audit_message,
+                )
+            elif request.name == MOVE_FILE_TOOL_NAME and prepared_move is not None:
+                move_result = self._move_file.execute_detailed(prepared_move)
+                outcome = {
+                    MoveFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    MoveFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    MoveFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[move_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=move_result.tool_result,
+                    outcome=outcome,
+                    result_code=move_result.result_code,
+                    audit_message=move_result.audit_message,
                 )
             else:
                 result = ToolResult(

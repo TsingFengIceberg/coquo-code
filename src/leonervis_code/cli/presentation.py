@@ -165,6 +165,12 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
         arguments = identity.arguments.as_mapping()
         path = arguments.get("path")
         path_line = f"\n  path: {path!r}" if isinstance(path, str) else ""
+        move_line = ""
+        if identity.tool_name == "move_file":
+            source = arguments.get("source")
+            destination = arguments.get("destination")
+            if isinstance(source, str) and isinstance(destination, str):
+                move_line = f"\n  source: {source!r}\n  destination: {destination!r}"
         command_line = ""
         if identity.tool_name == "run_command":
             argv = arguments.get("argv")
@@ -201,7 +207,7 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
             result_line += f" ({_safe_inline(audit.result_code)})"
         entries.append(
             f"Action #{audit.requested_sequence}: {identity.tool_name}\n"
-            f"  class: {identity.action.value}{path_line}{command_line}\n"
+            f"  class: {identity.action.value}{path_line}{move_line}{command_line}\n"
             f"  permission: {permission_line}\n"
             f"  approval: {approval_line}\n"
             f"  result: {result_line}"

@@ -37,6 +37,7 @@ from leonervis_code.providers.openai_compat import (
     glob_tool_definition,
     grep_tool_definition,
     mkdir_tool_definition,
+    move_file_tool_definition,
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
@@ -552,3 +553,11 @@ def test_mkdir_schema_and_parser_preserve_exact_path_argument() -> None:
         "mkdir",
         ToolArguments.from_mapping({"path": "src/pkg"}),
     )
+
+
+def test_move_file_tool_definition_is_canonical_and_closed() -> None:
+    definition = move_file_tool_definition()
+    assert definition["function"]["name"] == "move_file"
+    parameters = definition["function"]["parameters"]
+    assert parameters["required"] == ["source", "destination"]
+    assert parameters["additionalProperties"] is False

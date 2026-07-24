@@ -323,6 +323,11 @@ def mkdir_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[6]
 
 
+def move_file_tool_definition() -> dict[str, object]:
+    """Return the canonical move_file definition used by Anthropic requests."""
+    return model_tool_definitions()[7]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

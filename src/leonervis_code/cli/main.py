@@ -69,6 +69,7 @@ from leonervis_code.session_store import (
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.mkdir import MkdirTool
+from leonervis_code.tools.move_file import MoveFileTool
 from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.edit_file import EditFileTool
@@ -593,6 +594,10 @@ def terminal_approval_handler(stdin: TextIO, stdout: TextIO):
             timeout = arguments.get("timeout_seconds")
             rendered_argv = repr(tuple(argv)) if isinstance(argv, list) else "<unknown>"
             detail = f" argv={rendered_argv} cwd={cwd!r} timeout={timeout!r}s"
+        elif request.identity.tool_name == "move_file":
+            source = arguments.get("source", "<unknown>")
+            destination = arguments.get("destination", "<unknown>")
+            detail = f" source={source!r} destination={destination!r}"
         else:
             path = arguments.get("path", "<unknown>")
             content = arguments.get("content")
@@ -790,6 +795,7 @@ def main(
             edit_file_factory=EditFileTool,
             run_command_factory=RunCommandTool,
             mkdir_factory=MkdirTool,
+            move_file_factory=MoveFileTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

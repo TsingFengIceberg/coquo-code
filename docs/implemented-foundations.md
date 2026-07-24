@@ -21,6 +21,7 @@
 - [Foundation 4C Slice 4–6：Bounded Command Execution与Process-group Cleanup](#foundation-4c-slice-46bounded-command-execution与process-group-cleanup)
 - [Foundation 4C Slice 7–9：Durable Model-visible Command Integration](#foundation-4c-slice-79durable-model-visible-command-integration)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
+- [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -44,9 +45,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 8。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D再加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`。七个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 9。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E再加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`。八个model-visible tools共享三次顺序预算。
 
-它明确不声称具备regex/fuzzy/multi-edit patch、delete/rename、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
+它明确不声称具备regex/fuzzy/multi-edit patch、delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -377,6 +378,18 @@ Provider continuation或turn commit失败不会删除已创建目录；durable A
 
 Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir`，七个工具继续共享每个user turn三次顺序预算。Anthropic与OpenAI-compatible ordinary count/create投影相同closed schema，compact-summary不暴露工具。Provider adapter contract升级为v9，canonical system prompt升级为v8，empty full-context golden更新为`ctx-v1-12b7d8f648ac4909132c0176de74297f8d00805b887e190d51767b6fc1e2c986`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。详见[0031：Foundation 4D Controlled Single-directory Creation](./decisions/0031-foundation-4d-controlled-single-directory-creation.md)。
 
+## Foundation 4E Slice 0–9：Controlled No-overwrite File Move
+
+新增第八个model-visible工具`move_file(source, destination)`，只把一个现有的non-symlink regular file移动到一个完全不存在的workspace相对目标。Source与destination都使用有界portable `/`路径；两端parent必须已存在、是真实目录且整条路径不得包含symlink，source与destination parent还必须位于同一filesystem。Directory source、相同路径、缺失parent、cross-filesystem和任何已存在destination entry都会在permission之前hard reject，不创建Action Audit，也不会自动创建parent或覆盖目标。
+
+Prepare无副作用，并把source的device/inode/mode/size/mtime/ctime/link count、两端parent identity和destination absence组合为`expected-state-sha256`。移动使用独立的`workspace-move`权限分类：`read-only`拒绝，`workspace-write`与`danger-full-access`按ask/auto处理。Approval绑定exact ActionIdentity与一次性grant；等待期间source、destination或任一parent变化都会在执行前以stale precondition拒绝。CLI approval与Action Audit只展示source/destination两个workspace相对路径和生命周期结果，不泄露绝对路径、fingerprint或内部ID。
+
+只有`action_execution_started`成功append+fsync后才允许产生filesystem副作用。Executor再次通过directory descriptor复查两端parent、source identity与destination absence，然后执行`exclusive hard-link destination → fsync destination parent → unlink source → fsync source parent`。使用exclusive hard link而不是普通`rename()`，确保并发出现的destination不会被覆盖，也不读取文件内容，因此binary或较大的普通文件同样可以移动。
+
+Hard-link加unlink不是单步filesystem transaction。Destination link创建后若durability确认或source unlink失败，系统会如实返回partial：可能两个名称同时存在，也可能文件已移动但source removal durability未知；模型必须先检查两个路径，不能自动重试。Provider continuation或turn commit失败不会撤销真实文件效果，durable Action Audit保留已知结果，candidate turn仍不提交；若`action_execution_started`持久化失败，则destination绝不能出现。
+
+Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file`，八个工具继续共享每个user turn最多三次顺序执行。Anthropic与OpenAI-compatible ordinary count/create投影相同closed schema，compact-summary不暴露工具。Provider adapter contract升级为v10，canonical system prompt升级为v9，empty full-context golden更新为`ctx-v1-b18f599515bec3196b10a2bf877d39f1da19f6a9eb3b4f1e123ccc3cd16da760`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、普通Session schema、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。目录移动、覆盖目标、cross-filesystem copy/delete fallback、file delete与recursive delete仍不在范围；详见[0032：Foundation 4E Controlled No-overwrite File Move](./decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -574,3 +587,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 29. [0029：Foundation 4C Bounded Command Execution与Process-group Cleanup](./decisions/0029-foundation-4c-bounded-command-execution-and-process-cleanup.md)
 30. [0030：Foundation 4C Durable Model-visible Command Integration](./decisions/0030-foundation-4c-durable-model-visible-command-integration.md)
 31. [0031：Foundation 4D Controlled Single-directory Creation](./decisions/0031-foundation-4d-controlled-single-directory-creation.md)
+32. [0032：Foundation 4E Controlled No-overwrite File Move](./decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)

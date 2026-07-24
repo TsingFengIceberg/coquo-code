@@ -597,3 +597,32 @@ def test_action_audit_renders_mkdir_relative_path_and_result() -> None:
     assert "approval: accepted" in rendered
     assert "result: succeeded (directory_created)" in rendered
     assert "/root/" not in rendered
+
+
+def test_action_audit_renders_move_relative_paths_and_result() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="move_file",
+            action=PermissionAction.WORKSPACE_MOVE,
+            arguments=ToolArguments.from_mapping({"source": "src/a.py", "destination": "dst/b.py"}),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_MOVE,
+        ),
+        approval_outcome=ApprovalAuditOutcome.ACCEPTED,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="file_moved",
+        requested_sequence=9,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #9: move_file" in rendered
+    assert "class: workspace-move" in rendered
+    assert "source: 'src/a.py'" in rendered
+    assert "destination: 'dst/b.py'" in rendered
+    assert "permission: ask (approval_required_workspace_move)" in rendered
+    assert "approval: accepted" in rendered
+    assert "result: succeeded (file_moved)" in rendered
+    assert "/root/" not in rendered

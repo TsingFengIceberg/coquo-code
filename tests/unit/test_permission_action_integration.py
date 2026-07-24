@@ -827,3 +827,290 @@ def test_mkdir_execution_start_audit_failure_prevents_directory_creation(
         assert len(provider.requests) == 1
     finally:
         session.close()
+
+
+def move_call(
+    source: str = "source.txt",
+    destination: str = "destination.txt",
+    *,
+    tool_use_id: str = "move-1",
+) -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "move_file",
+        ToolArguments.from_mapping({"source": source, "destination": destination}),
+    )
+
+
+def test_model_visible_move_read_only_denial_is_audited_and_keeps_source(tmp_path: Path) -> None:
+    (tmp_path / "source.txt").write_text("source\n", encoding="utf-8")
+    call = move_call()
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("move it") == "denied"
+        denied = ToolResult("move-1", "permission denied: denied_read_only_mode", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert (tmp_path / "source.txt").exists()
+        assert not (tmp_path / "destination.txt").exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.DENIED
+        assert audit.identity.action.value == "workspace-move"
+    finally:
+        session.close()
+
+
+def test_model_visible_move_auto_succeeds_and_commits_exact_causality(tmp_path: Path) -> None:
+    (tmp_path / "source.txt").write_text("source\n", encoding="utf-8")
+    call = move_call()
+    provider = ToolProvider([call, AssistantText("moved")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("move it") == "moved"
+        result = ToolResult(
+            "move-1",
+            '{"destination":"destination.txt","operation":"moved","source":"source.txt"}\n',
+        )
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (UserMessage("move it"), call, result, AssistantText("moved"))
+        assert not (tmp_path / "source.txt").exists()
+        assert (tmp_path / "destination.txt").read_text(encoding="utf-8") == "source\n"
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "file_moved"
+    finally:
+        session.close()
+
+
+def test_model_visible_move_ask_accept_binds_both_paths(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dst").mkdir()
+    (tmp_path / "src/a.py").write_text("x\n", encoding="utf-8")
+    call = move_call("src/a.py", "dst/b.py")
+    provider = ToolProvider([call, AssistantText("moved")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        assert (tmp_path / "src/a.py").exists()
+        assert not (tmp_path / "dst/b.py").exists()
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("move source") == "moved"
+        assert len(approvals) == 1
+        assert approvals[0].identity.tool_name == "move_file"
+        assert approvals[0].identity.arguments == call.arguments
+        assert session.action_audits()[-1].approval_outcome.value == "accepted"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_status", "message"),
+    [
+        (ApprovalResolution.REJECT, ActionAuditStatus.REJECTED, "action approval rejected"),
+        (ApprovalResolution.CANCEL, ActionAuditStatus.CANCELLED, "action approval cancelled"),
+    ],
+)
+def test_model_visible_move_reject_or_cancel_has_no_filesystem_effect(
+    tmp_path: Path,
+    resolution: ApprovalResolution,
+    expected_status: ActionAuditStatus,
+    message: str,
+) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("stopped")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=lambda _request: resolution,
+    )
+    try:
+        assert session.prompt("move it") == "stopped"
+        assert provider.requests[1].history[-1] == ToolResult("move-1", message, is_error=True)
+        assert (tmp_path / "source.txt").exists()
+        assert not (tmp_path / "destination.txt").exists()
+        assert session.action_audits()[-1].status == expected_status
+    finally:
+        session.close()
+
+
+def test_model_visible_move_hard_rejection_has_no_action_audit(tmp_path: Path) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    (tmp_path / "destination.txt").write_text("existing", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("unchanged")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("move it") == "unchanged"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "move-1", "move_file destination already exists", is_error=True
+        )
+        assert session.action_audits() == ()
+        assert (tmp_path / "destination.txt").read_text(encoding="utf-8") == "existing"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("stale_part", ["source", "destination"])
+def test_model_visible_move_accepted_approval_rejects_stale_state(
+    tmp_path: Path, stale_part: str
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("must not be reached")])
+
+    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+        if stale_part == "source":
+            source.write_text("changed", encoding="utf-8")
+        else:
+            (tmp_path / "destination.txt").write_text("external", encoding="utf-8")
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=mutate_then_accept,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("move it")
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert len(provider.requests) == 1
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
+    finally:
+        session.close()
+
+
+def test_provider_continuation_failure_after_move_preserves_effect_and_audit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), RuntimeError("provider continuation failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider continuation failed"):
+            session.prompt("move it")
+        assert not (tmp_path / "source.txt").exists()
+        assert (tmp_path / "destination.txt").exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_turn_commit_failure_after_move_preserves_effect_and_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("moved")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "append_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected turn commit failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="injected turn commit failure"):
+            session.prompt("move it")
+        assert not (tmp_path / "source.txt").exists()
+        assert (tmp_path / "destination.txt").exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_model_visible_move_partial_is_audited_truthfully(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("inspect both paths")])
+    monkeypatch.setattr(
+        "leonervis_code.tools.move_file.os.unlink",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected")),
+    )
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("move it") == "inspect both paths"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult) and result.is_error
+        assert "do not retry automatically" in result.content
+        assert (tmp_path / "source.txt").exists()
+        assert (tmp_path / "destination.txt").exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.PARTIAL
+        assert audit.execution_outcome == ActionExecutionOutcome.PARTIAL
+        assert audit.result_code == "destination_linked_source_retained"
+    finally:
+        session.close()
+
+
+def test_move_execution_start_audit_failure_prevents_destination_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.txt").write_text("source", encoding="utf-8")
+    provider = ToolProvider([move_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "action_execution_started",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected action_execution_started failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="action_execution_started"):
+            session.prompt("move it")
+        assert (tmp_path / "source.txt").exists()
+        assert not (tmp_path / "destination.txt").exists()
+        assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()
