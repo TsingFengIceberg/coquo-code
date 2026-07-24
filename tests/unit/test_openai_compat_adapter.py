@@ -33,6 +33,7 @@ from leonervis_code.providers.openai_compat import (
     build_compact_summary_request,
     build_request,
     create_openai_compatible_provider,
+    delete_directory_tool_definition,
     delete_file_tool_definition,
     edit_file_tool_definition,
     glob_tool_definition,
@@ -567,6 +568,14 @@ def test_move_file_tool_definition_is_canonical_and_closed() -> None:
 def test_delete_file_tool_definition_is_canonical_and_closed() -> None:
     definition = delete_file_tool_definition()
     assert definition["function"]["name"] == "delete_file"
+    parameters = definition["function"]["parameters"]
+    assert parameters["required"] == ["path"]
+    assert parameters["additionalProperties"] is False
+
+
+def test_delete_directory_tool_definition_is_canonical_and_closed() -> None:
+    definition = delete_directory_tool_definition()
+    assert definition["function"]["name"] == "delete_directory"
     parameters = definition["function"]["parameters"]
     assert parameters["required"] == ["path"]
     assert parameters["additionalProperties"] is False

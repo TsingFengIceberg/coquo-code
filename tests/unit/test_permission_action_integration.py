@@ -1393,3 +1393,283 @@ def test_delete_final_audit_failure_reports_known_effect_with_unknown_audit_comm
         assert len(provider.requests) == 1
     finally:
         session.close()
+
+
+def delete_directory_call(path: str = "empty-dir", *, tool_use_id: str = "rmdir-1") -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "delete_directory",
+        ToolArguments.from_mapping({"path": path}),
+    )
+
+
+def test_model_visible_delete_directory_read_only_denial_is_audited(tmp_path: Path) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    call = delete_directory_call()
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("remove empty directory") == "denied"
+        denied = ToolResult("rmdir-1", "permission denied: denied_read_only_mode", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert target.is_dir()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.DENIED
+        assert audit.identity.action.value == "workspace-delete"
+        assert audit.identity.tool_name == "delete_directory"
+    finally:
+        session.close()
+
+
+def test_model_visible_delete_directory_auto_succeeds_with_exact_causality(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    call = delete_directory_call()
+    provider = ToolProvider([call, AssistantText("deleted")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("remove empty directory") == "deleted"
+        result = ToolResult("rmdir-1", '{"operation":"deleted","path":"empty-dir"}\n')
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (
+            UserMessage("remove empty directory"),
+            call,
+            result,
+            AssistantText("deleted"),
+        )
+        assert not target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "directory_deleted"
+    finally:
+        session.close()
+
+
+def test_delete_directory_ask_reject_keeps_directory(tmp_path: Path) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    approvals: list[HumanApprovalRequest] = []
+
+    def reject(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        return ApprovalResolution.REJECT
+
+    provider = ToolProvider([delete_directory_call(), AssistantText("rejected")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=reject,
+    )
+    try:
+        assert session.prompt("remove empty directory") == "rejected"
+        assert approvals[0].identity.arguments.as_mapping() == {"path": "empty-dir"}
+        assert target.is_dir()
+        assert session.action_audits()[-1].status == ActionAuditStatus.REJECTED
+    finally:
+        session.close()
+
+
+def test_hard_rejected_non_empty_directory_has_no_action_audit(tmp_path: Path) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    (target / "child.txt").write_text("keep", encoding="utf-8")
+    provider = ToolProvider([delete_directory_call(), AssistantText("not empty")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("remove directory") == "not empty"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "rmdir-1", "delete_directory target must be empty", is_error=True
+        )
+        assert target.is_dir()
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_delete_directory_child_created_during_approval_fails_stale_and_keeps_tree(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+
+    def create_child(_request: HumanApprovalRequest) -> ApprovalResolution:
+        (target / "child.txt").write_text("keep", encoding="utf-8")
+        return ApprovalResolution.ACCEPT
+
+    provider = ToolProvider([delete_directory_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=create_child,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("remove directory")
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert (target / "child.txt").read_text(encoding="utf-8") == "keep"
+        assert session.history == ()
+    finally:
+        session.close()
+
+
+def test_delete_directory_execution_start_failure_prevents_removal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    provider = ToolProvider([delete_directory_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "action_execution_started",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected action_execution_started failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="action_execution_started"):
+            session.prompt("remove directory")
+        assert target.is_dir()
+        assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()
+
+
+def test_delete_directory_partial_durability_is_audited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    provider = ToolProvider([delete_directory_call(), AssistantText("inspect before retry")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        "leonervis_code.tools.delete_directory._fsync_directory",
+        lambda _fd: (_ for _ in ()).throw(OSError("injected")),
+    )
+    try:
+        assert session.prompt("remove directory") == "inspect before retry"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult) and result.is_error
+        assert "do not retry automatically" in result.content
+        assert not target.exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.PARTIAL
+        assert audit.result_code == "directory_deleted_durability_unknown"
+    finally:
+        session.close()
+
+
+def test_provider_failure_after_delete_directory_preserves_effect_and_audit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    provider = ToolProvider([delete_directory_call(), RuntimeError("provider failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider failed"):
+            session.prompt("remove directory")
+        assert not target.exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_turn_commit_failure_after_delete_directory_preserves_effect_and_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    provider = ToolProvider([delete_directory_call(), AssistantText("deleted")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "append_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected turn commit failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="injected turn commit failure"):
+            session.prompt("remove directory")
+        assert not target.exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_delete_directory_final_audit_failure_reports_known_effect_with_unknown_audit_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    provider = ToolProvider([delete_directory_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    original_append_audit = session._writer.append_audit
+
+    def fail_final_audit(record):
+        if isinstance(record, ActionExecutionFinished):
+            raise SessionStoreError("injected final audit failure")
+        return original_append_audit(record)
+
+    monkeypatch.setattr(session._writer, "append_audit", fail_final_audit)
+    try:
+        with pytest.raises(ActionOutcomeAuditError) as captured:
+            session.prompt("remove directory")
+        assert not target.exists()
+        assert captured.value.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert captured.value.result_code == "directory_deleted"
+        assert session.history == ()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.OUTCOME_UNKNOWN
+        assert audit.execution_outcome is None
+        assert audit.result_code is None
+        assert len(provider.requests) == 1
+    finally:
+        session.close()

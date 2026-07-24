@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.tools.delete_directory import (
+    DELETE_DIRECTORY_TOOL_NAME,
+    delete_directory_tool_snapshot,
+)
 from leonervis_code.tools.delete_file import DELETE_FILE_TOOL_NAME, delete_file_tool_snapshot
 from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_snapshot
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
@@ -39,6 +43,7 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     mkdir_tool_snapshot(),
     move_file_tool_snapshot(),
     delete_file_tool_snapshot(),
+    delete_directory_tool_snapshot(),
 )
 
 
@@ -94,6 +99,8 @@ def _expected_keys(name: str) -> set[str]:
     if name == MOVE_FILE_TOOL_NAME:
         return {"source", "destination"}
     if name == DELETE_FILE_TOOL_NAME:
+        return {"path"}
+    if name == DELETE_DIRECTORY_TOOL_NAME:
         return {"path"}
     raise ValueError(f"unsupported tool: {name}")
 

@@ -66,6 +66,7 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from leonervis_code.tools.delete_directory import DeleteDirectoryTool
 from leonervis_code.tools.delete_file import DeleteFileTool
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -798,6 +799,7 @@ def main(
             mkdir_factory=MkdirTool,
             move_file_factory=MoveFileTool,
             delete_file_factory=DeleteFileTool,
+            delete_directory_factory=DeleteDirectoryTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

@@ -333,6 +333,11 @@ def delete_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[8]
 
 
+def delete_directory_tool_definition() -> dict[str, object]:
+    """Return the canonical delete_directory definition used by Anthropic requests."""
+    return model_tool_definitions()[9]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

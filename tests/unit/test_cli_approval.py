@@ -395,3 +395,37 @@ def test_terminal_delete_approval_shows_only_relative_path() -> None:
     assert "Approval required: workspace-delete delete_file path='obsolete.txt'" in rendered
     assert "/root/" not in rendered
     assert "333333" not in rendered
+
+
+def test_terminal_delete_directory_approval_shows_only_relative_path() -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="rmdir-1",
+        tool_name="delete_directory",
+        arguments=ToolArguments.from_mapping({"path": "build/empty"}),
+        action=PermissionAction.WORKSPACE_DELETE,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.expected_state("3" * 64),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_DELETE,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert "Approval required: workspace-delete delete_directory path='build/empty'" in rendered
+    assert "/root/" not in rendered
+    assert "333333" not in rendered

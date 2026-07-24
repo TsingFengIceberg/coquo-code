@@ -23,6 +23,7 @@
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
+- [Foundation 4G Slice 0–6：Controlled Empty-directory Deletion](#foundation-4g-slice-06controlled-empty-directory-deletion)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -46,9 +47,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 10。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`。九个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 11。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`；Foundation 4G加入只永久删除一个现有空目录、拒绝symlink/非空目录且最终依赖OS `rmdir`原子空条件的`delete_directory`。十个model-visible tools共享三次顺序预算。
 
-它明确不声称具备regex/fuzzy/multi-edit patch、directory delete、directory move、recursive mkdir/delete、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
+它明确不声称具备regex/fuzzy/multi-edit patch、non-empty/recursive directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -403,6 +404,18 @@ Prepare无副作用，并冻结target的device/inode/mode/size/mtime/ctime/link 
 
 Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file`，九个工具继续共享每个user turn最多三次顺序执行。Anthropic与OpenAI-compatible ordinary count/create投影相同closed schema，compact-summary不暴露工具。Provider adapter contract升级为v11，canonical system prompt升级为v10，empty full-context golden更新为`ctx-v1-42200fbe6c48a76d91ac0dde71e12be0e41674b1ad06c8b82bf82a541e3049e8`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、普通Session schema、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。下一独立slice只应考虑empty-directory removal并重新证明目录为空、并发child与parent durability边界，不能直接扩展为recursive delete；详见[0033：Foundation 4F Controlled Regular-file Deletion](./decisions/0033-foundation-4f-controlled-regular-file-deletion.md)。
 
+## Foundation 4G Slice 0–6：Controlled Empty-directory Deletion
+
+新增第十个model-visible工具`delete_directory(path)`，只永久删除一个现有的empty non-symlink directory。Path继续使用有界portable workspace-relative语法；parent必须已存在、为真实目录且整条路径不得包含symlink。Missing target、regular file、symlink、non-empty target、无效path或不安全parent都会在permission之前hard reject，不创建Action Audit。空path无法表达workspace root，因此workspace本身不可删除；glob、batch、recursive、trash、backup与undo都不在范围。
+
+Prepare无副作用，并冻结target directory的device/inode/mode/mtime/ctime/link count、parent identity与观察到的empty状态，组合为`expected-state-sha256`。目录删除复用`workspace-delete`：`read-only`拒绝，两个可写mode按ask/auto处理。Approval只展示workspace相对path，并绑定exact ActionIdentity、prepared-turn lease与single-use grant；等待期间target、parent或目录内容变化会以stale precondition fail closed。
+
+Filesystem effect之前必须先append+fsync `action_execution_started`。Executor通过real parent和no-follow target directory descriptor再次核对identity与empty状态，随后调用OS `rmdir`并fsync parent。最后的`rmdir`本身原子要求目标仍为空，因此empty预检后并发出现child会安全失败并保留目录内容；但identity检查与按名称`rmdir`之间仍存在极小TOCTOU窗口，本地单用户合同不声称抵抗敌对并发。
+
+成功返回`succeeded / directory_deleted`和`{"operation":"deleted","path":"..."}`；明确未删除返回`failed / directory_not_deleted`；目录名已删除但parent durability未知返回`partial / directory_deleted_durability_unknown`。Partial后不得自动重试。Provider continuation或turn commit失败不会撤销真实删除，durable Action Audit保留而candidate turn不提交；final audit失败则留下`outcome-unknown`恢复语义。
+
+Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory`，十个工具继续共享每个user turn最多三次顺序执行。Provider adapter contract升级为v12，canonical system prompt升级为v11，empty full-context golden更新为`ctx-v1-64ce77996397ddd1f84a27248ddd3e47224948563db506e3bfbda96939799406`。ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、普通Session schema、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。递归或非空目录删除仍被明确禁止；详见[0034：Foundation 4G Controlled Empty-directory Deletion](./decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -602,3 +615,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 31. [0031：Foundation 4D Controlled Single-directory Creation](./decisions/0031-foundation-4d-controlled-single-directory-creation.md)
 32. [0032：Foundation 4E Controlled No-overwrite File Move](./decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)
 33. [0033：Foundation 4F Controlled Regular-file Deletion](./decisions/0033-foundation-4f-controlled-regular-file-deletion.md)
+34. [0034：Foundation 4G Controlled Empty-directory Deletion](./decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)

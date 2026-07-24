@@ -21,6 +21,7 @@ def test_catalog_exposes_move_file_last_with_shared_closed_schema() -> None:
         "mkdir",
         "move_file",
         "delete_file",
+        "delete_directory",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -148,3 +149,21 @@ def test_catalog_validates_closed_delete_file_input() -> None:
 def test_catalog_rejects_malformed_delete_file_inputs(tool_input: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="delete_file"):
         tool_use_from_input("delete-1", "delete_file", tool_input)
+
+
+def test_catalog_validates_closed_delete_directory_input() -> None:
+    call = tool_use_from_input("rmdir-1", "delete_directory", {"path": "build/empty"})
+    assert call == ToolUse(
+        "rmdir-1",
+        "delete_directory",
+        ToolArguments.from_mapping({"path": "build/empty"}),
+    )
+    assert tool_input_from_use(call) == {"path": "build/empty"}
+
+
+@pytest.mark.parametrize("tool_input", [{}, {"path": 1}, {"path": ""}, {"path": "a", "extra": "x"}])
+def test_catalog_rejects_malformed_delete_directory_inputs(
+    tool_input: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="delete_directory"):
+        tool_use_from_input("rmdir-1", "delete_directory", tool_input)

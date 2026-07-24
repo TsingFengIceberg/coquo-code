@@ -27,6 +27,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
     create_anthropic_provider,
+    delete_directory_tool_definition,
     delete_file_tool_definition,
     edit_file_tool_definition,
     glob_tool_definition,
@@ -527,6 +528,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 mkdir_tool_definition(),
                 move_file_tool_definition(),
                 delete_file_tool_definition(),
+                delete_directory_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -812,5 +814,12 @@ def test_move_file_tool_definition_is_canonical_and_closed() -> None:
 def test_delete_file_tool_definition_is_canonical_and_closed() -> None:
     definition = delete_file_tool_definition()
     assert definition["name"] == "delete_file"
+    assert definition["input_schema"]["required"] == ["path"]
+    assert definition["input_schema"]["additionalProperties"] is False
+
+
+def test_delete_directory_tool_definition_is_canonical_and_closed() -> None:
+    definition = delete_directory_tool_definition()
+    assert definition["name"] == "delete_directory"
     assert definition["input_schema"]["required"] == ["path"]
     assert definition["input_schema"]["additionalProperties"] is False
