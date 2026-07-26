@@ -343,6 +343,11 @@ def list_directory_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[10]
 
 
+def copy_file_tool_definition() -> dict[str, object]:
+    """Return the canonical copy_file definition used by Anthropic requests."""
+    return model_tool_definitions()[11]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

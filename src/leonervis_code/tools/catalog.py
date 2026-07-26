@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.tools.copy_file import COPY_FILE_TOOL_NAME, copy_file_tool_snapshot
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
     delete_directory_tool_snapshot,
@@ -49,6 +50,7 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     delete_file_tool_snapshot(),
     delete_directory_tool_snapshot(),
     list_directory_tool_snapshot(),
+    copy_file_tool_snapshot(),
 )
 
 
@@ -109,6 +111,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"path"}
     if name == LIST_DIRECTORY_TOOL_NAME:
         return {"path"}
+    if name == COPY_FILE_TOOL_NAME:
+        return {"source", "destination"}
     raise ValueError(f"unsupported tool: {name}")
 
 

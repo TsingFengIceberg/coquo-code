@@ -166,7 +166,7 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
         path = arguments.get("path")
         path_line = f"\n  path: {path!r}" if isinstance(path, str) else ""
         move_line = ""
-        if identity.tool_name == "move_file":
+        if identity.tool_name in {"move_file", "copy_file"}:
             source = arguments.get("source")
             destination = arguments.get("destination")
             if isinstance(source, str) and isinstance(destination, str):

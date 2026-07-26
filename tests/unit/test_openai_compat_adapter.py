@@ -33,6 +33,7 @@ from leonervis_code.providers.openai_compat import (
     build_compact_summary_request,
     build_request,
     create_openai_compatible_provider,
+    copy_file_tool_definition,
     delete_directory_tool_definition,
     delete_file_tool_definition,
     edit_file_tool_definition,
@@ -601,4 +602,24 @@ def test_list_directory_schema_and_parser_preserve_exact_path_argument() -> None
         "list-provider",
         "list_directory",
         ToolArguments.from_mapping({"path": "."}),
+    )
+
+
+def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
+    definition = copy_file_tool_definition()
+    assert definition["function"]["name"] == "copy_file"
+    parameters = definition["function"]["parameters"]
+    assert parameters["required"] == ["source", "destination"]
+    assert parameters["additionalProperties"] is False
+    call = tool_call(
+        call_id="copy-provider",
+        name="copy_file",
+        arguments='{"source":"src/a.bin","destination":"dst/b.bin"}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "copy-provider",
+        "copy_file",
+        ToolArguments.from_mapping({"source": "src/a.bin", "destination": "dst/b.bin"}),
     )

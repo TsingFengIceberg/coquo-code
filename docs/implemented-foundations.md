@@ -47,9 +47,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 12。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 1E加入只列一层、包含hidden entry与entry type且不跟随symlink的`list_directory`；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`；Foundation 4G加入只永久删除一个现有空目录、拒绝symlink/非空目录且最终依赖OS `rmdir`原子空条件的`delete_directory`。十一个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 13。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 1E加入只列一层、包含hidden entry与entry type且不跟随symlink的`list_directory`；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`；Foundation 4G加入只永久删除一个现有空目录、拒绝symlink/非空目录且最终依赖OS `rmdir`原子空条件的`delete_directory`；Foundation 4H加入最多1 MiB、禁止覆盖且保留source的binary `copy_file`。十二个model-visible tools共享三次顺序预算。
 
-它明确不声称具备recursive tree listing、metadata/stat、ignore-aware listing、regex/fuzzy/multi-edit patch、non-empty/recursive directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
+它明确不声称具备recursive copy/tree listing、metadata/stat、ignore-aware listing、regex/fuzzy/multi-edit patch、non-empty/recursive directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -426,6 +426,18 @@ Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_
 
 Anthropic与OpenAI-compatible ordinary count/create投影相同第十一个closed schema，compact-summary继续no-tools且parallel calls关闭。Provider adapter contract升级到v13，canonical system prompt升级到v12，empty full-context golden更新为`ctx-v1-7776df09d6ace66621cee46719755307b7d816bccde25f61064b4205c689b3b2`；ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation保持不变。Recursive tree、metadata/stat、symlink target与ignore-aware view仍不在范围；详见[0035：Foundation 1E Bounded One-level Directory Listing](./decisions/0035-foundation-1e-bounded-directory-listing.md)。
 
+## Foundation 4H：Controlled Bounded Regular-file Copy
+
+新增第十二个model-visible工具`copy_file(source, destination)`。两条路径都是有界portable workspace-relative file path，双方parent必须已存在且整条路径不得包含symlink；source必须是最多1 MiB的existing regular file，destination必须完全不存在。工具复制原始bytes与source基本`rwx` permission bits，清除setuid/setgid/sticky特殊位且source自身保持不变；不要求UTF-8，也不复制owner、timestamps、ACL、xattr、sparse/reflink或hard-link关系。
+
+Side-effect-free prepare通过`O_NOFOLLOW`有界读取source，冻结source device/inode/mode/size/mtime/ctime/link count、content SHA-256、两侧parent identity和destination absence。Approval后与execute开始时重新验证exact state；source内容/identity、任一parent或destination变化都会stale/conflict fail closed。Prepared bytes是获准复制的snapshot，executor不会重新解释文本或跟随pathname替换。
+
+Filesystem effect前必须先durable append `action_execution_started`。Executor在destination parent内exclusive创建hidden temporary file，写入prepared bytes、设置basic rwx permission bits并fsync file，再以exclusive hard-link安装missing destination，删除temporary name并fsync parent。成功返回`file_copied`和包含source、destination、bytes_copied的compact JSON；destination race永不覆盖。
+
+安装前普通失败且cleanup成功返回`failed / file_not_copied`；若temporary cleanup失败则返回`partial / temporary_cleanup_failed_destination_absent`。Destination安装后的cleanup或durability不确定返回对应partial result，要求inspect workspace且不得自动重试。Provider continuation或turn commit失败不撤销真实copy，Action Audit仍持久记录effect而candidate turn不提交。
+
+Copy复用`workspace-create`，因此`read-only`拒绝，两个可写mode按ask/auto处理。Approval和脱敏Action Audit展示source/destination两个relative paths，不展示source bytes、digest、precondition或absolute path。Canonical tool order追加`copy_file`，十二个工具共享每user turn三次顺序预算。Provider adapter contract升级到v14，canonical system prompt升级到v13，empty full-context golden更新为`ctx-v1-0cd5ddd1c14a00ddcfc01b8879bc83e49a7f8fb5113d5e3d00d98a6f25c413f3`；ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation保持不变。Recursive/directory copy与destination overwrite仍不在范围；详见[0036：Foundation 4H Controlled Bounded Regular-file Copy](./decisions/0036-foundation-4h-controlled-bounded-file-copy.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -627,3 +639,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 33. [0033：Foundation 4F Controlled Regular-file Deletion](./decisions/0033-foundation-4f-controlled-regular-file-deletion.md)
 34. [0034：Foundation 4G Controlled Empty-directory Deletion](./decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)
 35. [0035：Foundation 1E Bounded One-level Directory Listing](./decisions/0035-foundation-1e-bounded-directory-listing.md)
+36. [0036：Foundation 4H Controlled Bounded Regular-file Copy](./decisions/0036-foundation-4h-controlled-bounded-file-copy.md)

@@ -87,6 +87,13 @@ from leonervis_code.tools.delete_directory import (
     DeleteDirectoryTool,
     PreparedDeleteDirectory,
 )
+from leonervis_code.tools.copy_file import (
+    COPY_FILE_TOOL_NAME,
+    CopyFileOutcome,
+    CopyFilePreparationError,
+    CopyFileTool,
+    PreparedCopyFile,
+)
 from leonervis_code.tools.delete_file import (
     DELETE_FILE_TOOL_NAME,
     DeleteFileOutcome,
@@ -343,6 +350,7 @@ class ProjectSession:
         move_file: MoveFileTool | None = None,
         delete_file: DeleteFileTool | None = None,
         delete_directory: DeleteDirectoryTool | None = None,
+        copy_file: CopyFileTool | None = None,
         *,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -367,6 +375,7 @@ class ProjectSession:
         self._move_file = move_file or MoveFileTool(workspace)
         self._delete_file = delete_file or DeleteFileTool(workspace)
         self._delete_directory = delete_directory or DeleteDirectoryTool(workspace)
+        self._copy_file = copy_file or CopyFileTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -412,6 +421,7 @@ class ProjectSession:
         move_file_factory: Callable[[Path], MoveFileTool] = MoveFileTool,
         delete_file_factory: Callable[[Path], DeleteFileTool] = DeleteFileTool,
         delete_directory_factory: Callable[[Path], DeleteDirectoryTool] = DeleteDirectoryTool,
+        copy_file_factory: Callable[[Path], CopyFileTool] = CopyFileTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -456,6 +466,7 @@ class ProjectSession:
             move_file = move_file_factory(resolved_workspace)
             delete_file = delete_file_factory(resolved_workspace)
             delete_directory = delete_directory_factory(resolved_workspace)
+            copy_file = copy_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -477,6 +488,7 @@ class ProjectSession:
                     move_file,
                     delete_file,
                     delete_directory,
+                    copy_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -530,6 +542,7 @@ class ProjectSession:
                     move_file,
                     delete_file,
                     delete_directory,
+                    copy_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1090,6 +1103,7 @@ class ProjectSession:
         prepared_move: PreparedMoveFile | None = None
         prepared_delete: PreparedDeleteFile | None = None
         prepared_delete_directory: PreparedDeleteDirectory | None = None
+        prepared_copy: PreparedCopyFile | None = None
         if request.name in {
             READ_FILE_TOOL_NAME,
             GLOB_TOOL_NAME,
@@ -1147,6 +1161,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_delete_directory.action
             precondition = prepared_delete_directory.precondition
+        elif request.name == COPY_FILE_TOOL_NAME:
+            try:
+                prepared_copy = self._copy_file.prepare(request)
+            except CopyFilePreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_copy.action
+            precondition = prepared_copy.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1189,6 +1210,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_delete_directory is not None:
                 refreshed = self._delete_directory.refresh_precondition(prepared_delete_directory)
+                return replace(current, precondition=refreshed)
+            if prepared_copy is not None:
+                refreshed = self._copy_file.refresh_precondition(prepared_copy)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -1294,6 +1318,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=delete_result.result_code,
                     audit_message=delete_result.audit_message,
+                )
+            elif request.name == COPY_FILE_TOOL_NAME and prepared_copy is not None:
+                copy_result = self._copy_file.execute_detailed(prepared_copy)
+                outcome = {
+                    CopyFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    CopyFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    CopyFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[copy_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=copy_result.tool_result,
+                    outcome=outcome,
+                    result_code=copy_result.result_code,
+                    audit_message=copy_result.audit_message,
                 )
             else:
                 result = ToolResult(

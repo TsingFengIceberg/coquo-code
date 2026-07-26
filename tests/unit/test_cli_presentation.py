@@ -223,6 +223,33 @@ def test_action_audits_explain_nonexecuted_and_interrupted_lifecycles() -> None:
     assert "approval: accepted\n  result: outcome-unknown" in rendered
 
 
+def test_action_audit_renders_copy_paths_without_internal_state() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="copy_file",
+            action=PermissionAction.WORKSPACE_CREATE,
+            arguments=ToolArguments.from_mapping(
+                {"source": "src/a.bin", "destination": "backup/a.bin"}
+            ),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ALLOW,
+            PermissionReason.ALLOWED_WORKSPACE_CREATE_AUTO,
+        ),
+        approval_outcome=None,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="file_copied",
+        requested_sequence=12,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #12: copy_file" in rendered
+    assert "source: 'src/a.bin'" in rendered
+    assert "destination: 'backup/a.bin'" in rendered
+    assert "result: succeeded (file_copied)" in rendered
+
+
 def test_prompt_omits_model_and_sanitizes_runtime_fields() -> None:
     first = status(mode="real", profile="safe|name\x1b[31m", provider="custom", model="one")
     second = status(mode="real", profile="safe|name\x1b[31m", provider="custom", model="two")

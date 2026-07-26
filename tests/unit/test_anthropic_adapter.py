@@ -27,6 +27,7 @@ from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
     create_anthropic_provider,
+    copy_file_tool_definition,
     delete_directory_tool_definition,
     delete_file_tool_definition,
     edit_file_tool_definition,
@@ -532,6 +533,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 delete_file_tool_definition(),
                 delete_directory_tool_definition(),
                 list_directory_tool_definition(),
+                copy_file_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -844,4 +846,22 @@ def test_list_directory_schema_and_parser_preserve_exact_path_argument() -> None
         "list-provider",
         "list_directory",
         ToolArguments.from_mapping({"path": "."}),
+    )
+
+
+def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
+    definition = copy_file_tool_definition()
+    assert definition["name"] == "copy_file"
+    assert definition["input_schema"]["required"] == ["source", "destination"]
+    assert definition["input_schema"]["additionalProperties"] is False
+    block = ToolUseBlock(
+        id="copy-provider",
+        name="copy_file",
+        input={"source": "src/a.bin", "destination": "dst/b.bin"},
+        type="tool_use",
+    )
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "copy-provider",
+        "copy_file",
+        ToolArguments.from_mapping({"source": "src/a.bin", "destination": "dst/b.bin"}),
     )

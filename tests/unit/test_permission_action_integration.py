@@ -1161,6 +1161,270 @@ def test_move_execution_start_audit_failure_prevents_destination_creation(
         session.close()
 
 
+def copy_call(
+    source: str = "source.bin",
+    destination: str = "destination.bin",
+    *,
+    tool_use_id: str = "copy-1",
+) -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "copy_file",
+        ToolArguments.from_mapping({"source": source, "destination": destination}),
+    )
+
+
+def test_model_visible_copy_read_only_denial_is_audited_and_has_no_effect(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    call = copy_call()
+    provider = ToolProvider([call, AssistantText("denied")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("copy it") == "denied"
+        denied = ToolResult("copy-1", "permission denied: denied_read_only_mode", is_error=True)
+        assert provider.requests[1].history[-2:] == (call, denied)
+        assert (tmp_path / "source.bin").read_bytes() == b"source"
+        assert not (tmp_path / "destination.bin").exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.DENIED
+        assert audit.identity.action.value == "workspace-create"
+    finally:
+        session.close()
+
+
+def test_model_visible_copy_auto_succeeds_and_commits_exact_causality(tmp_path: Path) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    call = copy_call()
+    provider = ToolProvider([call, AssistantText("copied")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("copy it") == "copied"
+        result = ToolResult(
+            "copy-1",
+            '{"bytes_copied":6,"destination":"destination.bin",'
+            '"operation":"copied","source":"source.bin"}\n',
+        )
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (UserMessage("copy it"), call, result, AssistantText("copied"))
+        assert (tmp_path / "source.bin").read_bytes() == b"source"
+        assert (tmp_path / "destination.bin").read_bytes() == b"source"
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "file_copied"
+    finally:
+        session.close()
+
+
+def test_model_visible_copy_ask_accept_binds_both_paths(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dst").mkdir()
+    (tmp_path / "src/a.bin").write_bytes(b"x")
+    call = copy_call("src/a.bin", "dst/b.bin")
+    provider = ToolProvider([call, AssistantText("copied")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        assert (tmp_path / "src/a.bin").exists()
+        assert not (tmp_path / "dst/b.bin").exists()
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("copy source") == "copied"
+        assert len(approvals) == 1
+        assert approvals[0].identity.tool_name == "copy_file"
+        assert approvals[0].identity.arguments == call.arguments
+        assert session.action_audits()[-1].approval_outcome.value == "accepted"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("stale_part", ["source", "destination"])
+def test_model_visible_copy_accepted_approval_rejects_stale_state(
+    tmp_path: Path, stale_part: str
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"source")
+    provider = ToolProvider([copy_call(), AssistantText("must not be reached")])
+
+    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+        if stale_part == "source":
+            source.write_bytes(b"changed")
+        else:
+            (tmp_path / "destination.bin").write_bytes(b"external")
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=mutate_then_accept,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("copy it")
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert len(provider.requests) == 1
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
+    finally:
+        session.close()
+
+
+def test_model_visible_copy_hard_rejection_has_no_action_audit(tmp_path: Path) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    (tmp_path / "destination.bin").write_bytes(b"existing")
+    provider = ToolProvider([copy_call(), AssistantText("unchanged")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("copy it") == "unchanged"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "copy-1", "copy_file destination already exists", is_error=True
+        )
+        assert session.action_audits() == ()
+        assert (tmp_path / "destination.bin").read_bytes() == b"existing"
+    finally:
+        session.close()
+
+
+def test_provider_continuation_failure_after_copy_preserves_effect_and_audit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    provider = ToolProvider([copy_call(), RuntimeError("provider continuation failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider continuation failed"):
+            session.prompt("copy it")
+        assert (tmp_path / "source.bin").exists()
+        assert (tmp_path / "destination.bin").exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+        assert session._writer.state.records[-1].record_type == "turn_failed"
+    finally:
+        session.close()
+
+
+def test_turn_commit_failure_after_copy_preserves_effect_and_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    provider = ToolProvider([copy_call(), AssistantText("copied")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "append_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected turn commit failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="injected turn commit failure"):
+            session.prompt("copy it")
+        assert (tmp_path / "source.bin").exists()
+        assert (tmp_path / "destination.bin").exists()
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_model_visible_copy_partial_is_audited_truthfully(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    provider = ToolProvider([copy_call(), AssistantText("inspect destination")])
+    real_fsync = __import__("os").fsync
+    calls = 0
+
+    def fail_second(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected")
+        real_fsync(fd)
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr("leonervis_code.tools.copy_file._fsync", fail_second)
+    try:
+        assert session.prompt("copy it") == "inspect destination"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult) and result.is_error
+        assert "do not retry automatically" in result.content
+        assert (tmp_path / "source.bin").exists()
+        assert (tmp_path / "destination.bin").exists()
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.PARTIAL
+        assert audit.execution_outcome == ActionExecutionOutcome.PARTIAL
+        assert audit.result_code == "file_copied_durability_unknown"
+    finally:
+        session.close()
+
+
+def test_copy_execution_start_audit_failure_prevents_destination_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"source")
+    provider = ToolProvider([copy_call(), AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    monkeypatch.setattr(
+        session._writer,
+        "action_execution_started",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SessionStoreError("injected action_execution_started failure")
+        ),
+    )
+    try:
+        with pytest.raises(SessionStoreError, match="action_execution_started"):
+            session.prompt("copy it")
+        assert not (tmp_path / "destination.bin").exists()
+        assert session.history == ()
+        assert len(provider.requests) == 1
+    finally:
+        session.close()
+
+
 def delete_call(path: str = "obsolete.txt", *, tool_use_id: str = "delete-1") -> ToolUse:
     return ToolUse(tool_use_id, "delete_file", ToolArguments.from_mapping({"path": path}))
 
