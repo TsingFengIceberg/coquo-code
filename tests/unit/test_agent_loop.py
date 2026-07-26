@@ -76,6 +76,11 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "delete_directory",
         "list_directory",
         "copy_file",
+        "read_file_lines",
+        "stat_path",
+        "list_tree",
+        "grep_regex",
+        "patch_file",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)

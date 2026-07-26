@@ -348,6 +348,26 @@ def copy_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[11]
 
 
+def read_file_lines_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[12]
+
+
+def stat_path_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[13]
+
+
+def list_tree_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[14]
+
+
+def grep_regex_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[15]
+
+
+def patch_file_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[16]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

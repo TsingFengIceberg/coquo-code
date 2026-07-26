@@ -75,6 +75,10 @@ def uuid_factory():
             "52345678-1234-4234-9234-123456789abc",
             "62345678-1234-4234-9234-123456789abc",
             "72345678-1234-4234-9234-123456789abc",
+            "82345678-1234-4234-9234-123456789abc",
+            "92345678-1234-4234-9234-123456789abc",
+            "a2345678-1234-4234-9234-123456789abc",
+            "b2345678-1234-4234-9234-123456789abc",
         ]
     )
     return lambda: UUID(next(values))
@@ -1972,5 +1976,218 @@ def test_delete_directory_final_audit_failure_reports_known_effect_with_unknown_
         assert audit.execution_outcome is None
         assert audit.result_code is None
         assert len(provider.requests) == 1
+    finally:
+        session.close()
+
+
+def test_new_read_tools_execute_as_workspace_read_and_share_durable_audit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "app.py"
+    target.write_text("one\ntask_42 = True\nthree\n", encoding="utf-8")
+    calls = [
+        ToolUse(
+            "lines-1",
+            "read_file_lines",
+            ToolArguments.from_mapping({"path": "src/app.py", "start_line": 2, "line_count": 1}),
+        ),
+        ToolUse(
+            "stat-1",
+            "stat_path",
+            ToolArguments.from_mapping({"path": "src/app.py"}),
+        ),
+        ToolUse(
+            "tree-1",
+            "list_tree",
+            ToolArguments.from_mapping({"path": "src", "max_depth": 1}),
+        ),
+        ToolUse(
+            "regex-1",
+            "grep_regex",
+            ToolArguments.from_mapping({"pattern": r"task_\d+", "include": "src/*.py"}),
+        ),
+    ]
+    responses = []
+    for call in calls:
+        responses.extend((call, AssistantText(f"finished {call.name}")))
+    provider = ToolProvider(responses)
+    approvals: list[HumanApprovalRequest] = []
+    session = open_session(
+        tmp_path,
+        provider,
+        approval_handler=lambda request: approvals.append(request),
+    )
+    try:
+        for call in calls:
+            assert session.prompt(call.name) == f"finished {call.name}"
+
+        assert approvals == []
+        tool_results = [provider.requests[index].history[-1] for index in (1, 3, 5, 7)]
+        assert '"line":2,"text":"task_42 = True"' in tool_results[0].content
+        assert '"path":"src/app.py"' in tool_results[1].content
+        assert '"type":"file"' in tool_results[1].content
+        assert tool_results[2].content == ('{"depth":1,"path":"src/app.py","type":"file"}\n')
+        assert '"path":"src/app.py","line":2,"text":"task_42 = True"' in (tool_results[3].content)
+        audits = session.action_audits()
+        assert [audit.identity.tool_name for audit in audits] == [
+            "read_file_lines",
+            "stat_path",
+            "list_tree",
+            "grep_regex",
+        ]
+        assert all(audit.identity.action.value == "workspace-read" for audit in audits)
+        assert all(audit.status == ActionAuditStatus.SUCCEEDED for audit in audits)
+    finally:
+        session.close()
+
+
+def test_new_tools_retain_shared_three_call_budget(tmp_path: Path) -> None:
+    calls = [
+        ToolUse(
+            f"stat-{index}",
+            "stat_path",
+            ToolArguments.from_mapping({"path": "."}),
+        )
+        for index in range(1, 5)
+    ]
+    provider = ToolProvider([*calls, AssistantText("stopped")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("inspect repeatedly") == "stopped"
+
+        assert len(session.action_audits()) == 3
+        assert provider.requests[-1].history[-1] == ToolResult(
+            "stat-4",
+            "tool call limit reached for this conversation turn",
+            is_error=True,
+        )
+    finally:
+        session.close()
+
+
+def patch_call(*, tool_use_id: str = "patch-1") -> ToolUse:
+    return ToolUse(
+        tool_use_id,
+        "patch_file",
+        ToolArguments.from_mapping(
+            {
+                "path": "note.txt",
+                "edits": [
+                    {"old_text": "alpha", "new_text": "A"},
+                    {"old_text": "gamma", "new_text": "G"},
+                ],
+            }
+        ),
+    )
+
+
+def test_model_visible_patch_ask_accept_is_atomic_audited_and_redacted(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha beta gamma\n", encoding="utf-8")
+    call = patch_call()
+    provider = ToolProvider([call, AssistantText("patched")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        assert target.read_text(encoding="utf-8") == "alpha beta gamma\n"
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+    )
+    try:
+        assert session.prompt("patch both anchors") == "patched"
+
+        assert target.read_text(encoding="utf-8") == "A beta G\n"
+        assert len(approvals) == 1
+        assert approvals[0].identity.arguments == call.arguments
+        audit = session.action_audits()[-1]
+        assert audit.identity.action.value == "workspace-overwrite"
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.result_code == "patched"
+        rendered = session._session_store.action_audits(SESSION_ID)[-1]
+        assert "alpha" not in (rendered.message or "")
+        assert "gamma" not in (rendered.message or "")
+    finally:
+        session.close()
+
+
+def test_patch_hard_rejection_precedes_permission_and_audit(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("alpha alpha", encoding="utf-8")
+    call = patch_call()
+    provider = ToolProvider([call, AssistantText("invalid")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("invalid patch") == "invalid"
+
+        result = provider.requests[1].history[-1]
+        assert result.is_error
+        assert "matches more than once" in result.content
+        assert session.action_audits() == ()
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "alpha alpha"
+    finally:
+        session.close()
+
+
+def test_accepted_patch_becomes_stale_before_execution(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha beta gamma\n", encoding="utf-8")
+    provider = ToolProvider([patch_call(), AssistantText("must not be reached")])
+
+    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+        target.write_text("external\n", encoding="utf-8")
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=mutate_then_accept,
+    )
+    try:
+        with pytest.raises(ApprovalGrantError) as caught:
+            session.prompt("patch")
+
+        assert caught.value.code == ApprovalGrantRejection.STALE_PRECONDITION
+        assert target.read_text(encoding="utf-8") == "external\n"
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.ABANDONED
+    finally:
+        session.close()
+
+
+def test_provider_failure_after_patch_preserves_effect_and_audit_without_turn_commit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("alpha beta gamma\n", encoding="utf-8")
+    provider = ToolProvider([patch_call(), RuntimeError("provider continuation failed")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="provider continuation failed"):
+            session.prompt("patch")
+
+        assert target.read_text(encoding="utf-8") == "A beta G\n"
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.SUCCEEDED
     finally:
         session.close()

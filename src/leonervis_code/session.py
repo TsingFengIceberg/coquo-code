@@ -110,10 +110,12 @@ from leonervis_code.tools.edit_file import (
 )
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
 from leonervis_code.tools.list_directory import (
     LIST_DIRECTORY_TOOL_NAME,
     ListDirectoryTool,
 )
+from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
 from leonervis_code.tools.mkdir import (
     MKDIR_TOOL_NAME,
     MkdirOutcome,
@@ -128,7 +130,15 @@ from leonervis_code.tools.move_file import (
     MoveFileTool,
     PreparedMoveFile,
 )
+from leonervis_code.tools.patch_file import (
+    PATCH_FILE_TOOL_NAME,
+    PatchFileOutcome,
+    PatchFilePreparationError,
+    PatchFileTool,
+    PreparedPatchFile,
+)
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
+from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, ReadFileLinesTool
 from leonervis_code.tools.glob import GLOB_TOOL_NAME
 from leonervis_code.tools.grep import GREP_TOOL_NAME
 from leonervis_code.tools.run_command import (
@@ -145,6 +155,7 @@ from leonervis_code.tools.write_file import (
     WriteFilePreparationError,
     WriteFileTool,
 )
+from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 
 class ResumeEffect(StrEnum):
@@ -352,6 +363,11 @@ class ProjectSession:
         delete_directory: DeleteDirectoryTool | None = None,
         copy_file: CopyFileTool | None = None,
         *,
+        read_file_lines: ReadFileLinesTool | None = None,
+        stat_path: StatPathTool | None = None,
+        list_tree: ListTreeTool | None = None,
+        grep_regex: GrepRegexTool | None = None,
+        patch_file: PatchFileTool | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -376,6 +392,11 @@ class ProjectSession:
         self._delete_file = delete_file or DeleteFileTool(workspace)
         self._delete_directory = delete_directory or DeleteDirectoryTool(workspace)
         self._copy_file = copy_file or CopyFileTool(workspace)
+        self._read_file_lines = read_file_lines or ReadFileLinesTool(workspace)
+        self._stat_path = stat_path or StatPathTool(workspace)
+        self._list_tree = list_tree or ListTreeTool(workspace)
+        self._grep_regex = grep_regex or GrepRegexTool(workspace)
+        self._patch_file = patch_file or PatchFileTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -422,6 +443,11 @@ class ProjectSession:
         delete_file_factory: Callable[[Path], DeleteFileTool] = DeleteFileTool,
         delete_directory_factory: Callable[[Path], DeleteDirectoryTool] = DeleteDirectoryTool,
         copy_file_factory: Callable[[Path], CopyFileTool] = CopyFileTool,
+        read_file_lines_factory: Callable[[Path], ReadFileLinesTool] = ReadFileLinesTool,
+        stat_path_factory: Callable[[Path], StatPathTool] = StatPathTool,
+        list_tree_factory: Callable[[Path], ListTreeTool] = ListTreeTool,
+        grep_regex_factory: Callable[[Path], GrepRegexTool] = GrepRegexTool,
+        patch_file_factory: Callable[[Path], PatchFileTool] = PatchFileTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -467,6 +493,11 @@ class ProjectSession:
             delete_file = delete_file_factory(resolved_workspace)
             delete_directory = delete_directory_factory(resolved_workspace)
             copy_file = copy_file_factory(resolved_workspace)
+            read_file_lines = read_file_lines_factory(resolved_workspace)
+            stat_path = stat_path_factory(resolved_workspace)
+            list_tree = list_tree_factory(resolved_workspace)
+            grep_regex = grep_regex_factory(resolved_workspace)
+            patch_file = patch_file_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -489,6 +520,11 @@ class ProjectSession:
                     delete_file,
                     delete_directory,
                     copy_file,
+                    read_file_lines=read_file_lines,
+                    stat_path=stat_path,
+                    list_tree=list_tree,
+                    grep_regex=grep_regex,
+                    patch_file=patch_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -503,6 +539,10 @@ class ProjectSession:
                     glob,
                     grep,
                     list_directory,
+                    read_file_lines,
+                    stat_path,
+                    list_tree,
+                    grep_regex,
                     commit_turn=lambda turn: writer_holder["writer"].append_turn(
                         turn.items,
                         binding=binding_from_status(manager.status()),
@@ -543,6 +583,11 @@ class ProjectSession:
                     delete_file,
                     delete_directory,
                     copy_file,
+                    read_file_lines=read_file_lines,
+                    stat_path=stat_path,
+                    list_tree=list_tree,
+                    grep_regex=grep_regex,
+                    patch_file=patch_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -648,6 +693,10 @@ class ProjectSession:
                     self._glob,
                     self._grep,
                     self._list_directory,
+                    self._read_file_lines,
+                    self._stat_path,
+                    self._list_tree,
+                    self._grep_regex,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
@@ -1063,13 +1112,29 @@ class ProjectSession:
         self.close()
 
     @staticmethod
-    def _loop_from_state(state, read_file, glob, grep, list_directory, *, commit_turn) -> AgentLoop:
+    def _loop_from_state(
+        state,
+        read_file,
+        glob,
+        grep,
+        list_directory,
+        read_file_lines,
+        stat_path,
+        list_tree,
+        grep_regex,
+        *,
+        commit_turn,
+    ) -> AgentLoop:
         return AgentLoop(
             None,
             read_file,
             glob,
             grep,
             list_directory,
+            read_file_lines,
+            stat_path,
+            list_tree,
+            grep_regex,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -1084,6 +1149,10 @@ class ProjectSession:
             self._glob,
             self._grep,
             self._list_directory,
+            self._read_file_lines,
+            self._stat_path,
+            self._list_tree,
+            self._grep_regex,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
         loop.install_action_dispatcher(self._dispatch_action)
@@ -1104,11 +1173,16 @@ class ProjectSession:
         prepared_delete: PreparedDeleteFile | None = None
         prepared_delete_directory: PreparedDeleteDirectory | None = None
         prepared_copy: PreparedCopyFile | None = None
+        prepared_patch: PreparedPatchFile | None = None
         if request.name in {
             READ_FILE_TOOL_NAME,
             GLOB_TOOL_NAME,
             GREP_TOOL_NAME,
             LIST_DIRECTORY_TOOL_NAME,
+            READ_FILE_LINES_TOOL_NAME,
+            STAT_PATH_TOOL_NAME,
+            LIST_TREE_TOOL_NAME,
+            GREP_REGEX_TOOL_NAME,
         }:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1168,6 +1242,13 @@ class ProjectSession:
                 return ToolResult(request.tool_use_id, str(error), is_error=True)
             action = prepared_copy.action
             precondition = prepared_copy.precondition
+        elif request.name == PATCH_FILE_TOOL_NAME:
+            try:
+                prepared_patch = self._patch_file.prepare(request)
+            except PatchFilePreparationError as error:
+                return ToolResult(request.tool_use_id, str(error), is_error=True)
+            action = prepared_patch.action
+            precondition = prepared_patch.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -1214,6 +1295,9 @@ class ProjectSession:
             if prepared_copy is not None:
                 refreshed = self._copy_file.refresh_precondition(prepared_copy)
                 return replace(current, precondition=refreshed)
+            if prepared_patch is not None:
+                refreshed = self._patch_file.refresh_precondition(prepared_patch)
+                return replace(current, precondition=refreshed)
             return current
 
         def execute(current: ActionIdentity) -> ActionExecutionResult:
@@ -1226,6 +1310,14 @@ class ProjectSession:
                 result = self._grep.execute(request)
             elif request.name == LIST_DIRECTORY_TOOL_NAME:
                 result = self._list_directory.execute(request)
+            elif request.name == READ_FILE_LINES_TOOL_NAME:
+                result = self._read_file_lines.execute(request)
+            elif request.name == STAT_PATH_TOOL_NAME:
+                result = self._stat_path.execute(request)
+            elif request.name == LIST_TREE_TOOL_NAME:
+                result = self._list_tree.execute(request)
+            elif request.name == GREP_REGEX_TOOL_NAME:
+                result = self._grep_regex.execute(request)
             elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
                 write_result = self._write_file.execute_detailed(prepared_write)
                 outcome = {
@@ -1331,6 +1423,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=copy_result.result_code,
                     audit_message=copy_result.audit_message,
+                )
+            elif request.name == PATCH_FILE_TOOL_NAME and prepared_patch is not None:
+                patch_result = self._patch_file.execute_detailed(prepared_patch)
+                outcome = {
+                    PatchFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    PatchFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    PatchFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[patch_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=patch_result.tool_result,
+                    outcome=outcome,
+                    result_code=patch_result.result_code,
+                    audit_message=patch_result.audit_message,
                 )
             else:
                 result = ToolResult(

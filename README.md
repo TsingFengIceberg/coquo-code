@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir`/`move_file`/`delete_file`/`delete_directory`/`list_directory`/`copy_file` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A–4H已贯通受控写入、exact edit、命令、单目录创建、普通文件移动、文件/空目录删除与有界普通文件复制；Foundation 1E提供受限的一层目录浏览。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、递归目录复制/浏览/删除、非空目录删除与目录移动仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具：原有读取/写入/命令/目录与文件操作，加上`read_file_lines`、`stat_path`、`list_tree`、`grep_regex`和`patch_file`。新增能力提供按行读取、no-follow metadata、受限递归tree、进程隔离regex搜索和结构化multi-edit patch；全部继续经过共享三次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂未开始；shell source string、interactive PTY、OS sandbox、fuzzy/free-form patch、递归目录复制/删除、非空目录删除与目录移动仍未实现。
 
 ## 目录
 
@@ -102,6 +102,12 @@ uv run leonervis-code session --help
 `list_directory(path)`是第十一个model-visible工具，只读列出一个目录的直接子项；用`.`表示workspace root。结果按UTF-8路径稳定排序，以JSONL返回`path`及`file`/`directory`/`symlink`/`other`类型，包括hidden entry但不递归、不跟随symlink、不读取内容。工具最多扫描10,000个直接子项、返回200条且输出不超过32 KiB；扫描上限会安全报错，条数或字节上限会附加`{"truncated":true}`。它属于`workspace-read`，任何permission mode都无需人工approval，但仍经过Action Audit与共享tool budget。
 
 `copy_file(source, destination)`是第十二个model-visible工具，只复制一个最多1 MiB的普通文件到缺失目标，并保持source不变。两端parent必须已存在，路径不得含symlink，destination任何现有entry都不会被覆盖。它按原始bytes复制并只保留基本`rwx`权限位；`read-only`拒绝，两个可写mode按`workspace-create`的ask/auto策略继续。Host在approval后复查source内容、两端parent与destination absence，再通过已fsync的temporary file和exclusive install落位；若destination已出现但cleanup或durability不确定，会返回partial且不得自动重试。
+
+`read_file_lines(path, start_line, line_count)`从一个最多1 MiB的UTF-8普通文件读取1-based logical-line范围，一次最多200行、输出最多32 KiB；适合继续读取`read_file`被截断后的后部。`stat_path(path)`以no-follow方式返回file/directory/symlink/other类型、基本`rwx` mode与mtime，普通文件额外返回size。`list_tree(path, max_depth)`递归列出最多16层的有界tree，包含hidden entry但绝不跟随symlink；扫描上限整体报错，500条或32 KiB结果上限返回truncated sentinel。三者都属于`workspace-read`。
+
+`grep_regex(pattern, include)`把case-sensitive Python regex独立应用到每个logical line，沿用literal grep的候选文件、UTF-8、读取量、匹配数和32 KiB输出限制。整个selector/read/match过程在独立worker process内执行，Host最多等待1秒；超时会终止并回收worker，返回错误而不是卡住主Agent进程。它不支持跨行、flags参数、index或ignore-aware搜索；能用literal `grep`时应优先使用literal版本。
+
+`patch_file(path, edits)`对一个existing UTF-8普通文件原子应用1–16个结构化exact replacements。每个`old_text`必须在同一原始snapshot中恰好出现一次，所有match不得重叠；全部验证成功后才构造一份完整candidate。它复用`workspace-overwrite`审批、source digest复查与atomic replace，approval和Action Audit只显示path而不显示edit文本；partial结果表示candidate可能已安装但durability未知，此时不得自动重试。它不是unified diff、regex patch或fuzzy patch。
 
 ### 配置 Provider
 
@@ -272,6 +278,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`、单目录`mkdir`、普通文件`move_file`、普通文件`delete_file`、空目录`delete_directory`、一层`list_directory`与普通文件`copy_file`；十二者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；list_directory复用`workspace-read`，mkdir/copy_file、move_file以及delete_file/delete_directory分别使用`workspace-create`、`workspace-move`与`workspace-delete`，所有工具都经过统一PermissionGate和durable Action Audit。
+当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`；17个工具共享每个user turn最多三次顺序调用。四个新增读取/导航工具复用`workspace-read`，`patch_file`复用`workspace-overwrite`，其余action class保持不变；全部经过统一PermissionGate和durable Action Audit。
 
-Foundation 4H现已完成。Canonical system prompt为v13，provider adapter contract为v14，empty full-context identity为`ctx-v1-0cd5ddd1c14a00ddcfc01b8879bc83e49a7f8fb5113d5e3d00d98a6f25c413f3`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive copy/tree listing、metadata/stat、ignore-aware listing、regex/index search、fuzzy或multi-edit patch、directory move、non-empty/recursive delete、recursive mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。完整决策见[ADR 0036](./docs/decisions/0036-foundation-4h-controlled-bounded-file-copy.md)。
+工具批次A/B/C现已完成，Foundation 5A仍暂缓。Canonical system prompt为v14，provider adapter contract为v15，empty full-context identity为`ctx-v1-ac2b833bb46894c250e2b31370d47911b3464cfa2c71c23ded504f0ea65fd4cf`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。完整决策见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)。

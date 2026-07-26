@@ -33,16 +33,21 @@ from leonervis_code.providers.anthropic import (
     edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
+    grep_regex_tool_definition,
     list_directory_tool_definition,
+    list_tree_tool_definition,
     mkdir_tool_definition,
     move_file_tool_definition,
+    patch_file_tool_definition,
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
     read_file_tool_definition,
+    read_file_lines_tool_definition,
     run_command_tool_definition,
     serialize_history,
     write_file_tool_definition,
+    stat_path_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
@@ -534,6 +539,11 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 delete_directory_tool_definition(),
                 list_directory_tool_definition(),
                 copy_file_tool_definition(),
+                read_file_lines_tool_definition(),
+                stat_path_tool_definition(),
+                list_tree_tool_definition(),
+                grep_regex_tool_definition(),
+                patch_file_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -864,4 +874,50 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
         "copy-provider",
         "copy_file",
         ToolArguments.from_mapping({"source": "src/a.bin", "destination": "dst/b.bin"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("definition_factory", "name", "tool_input"),
+    [
+        (
+            read_file_lines_tool_definition,
+            "read_file_lines",
+            {"path": "src/app.py", "start_line": 20, "line_count": 10},
+        ),
+        (stat_path_tool_definition, "stat_path", {"path": "."}),
+        (list_tree_tool_definition, "list_tree", {"path": "src", "max_depth": 3}),
+        (
+            grep_regex_tool_definition,
+            "grep_regex",
+            {"pattern": r"test_\d+", "include": "**/*.py"},
+        ),
+        (
+            patch_file_tool_definition,
+            "patch_file",
+            {
+                "path": "src/app.py",
+                "edits": [{"old_text": "before", "new_text": "after"}],
+            },
+        ),
+    ],
+)
+def test_new_tool_schemas_and_parser_preserve_structured_arguments(
+    definition_factory,
+    name: str,
+    tool_input: dict[str, object],
+) -> None:
+    definition = definition_factory()
+    assert definition["name"] == name
+    assert definition["input_schema"]["additionalProperties"] is False
+    block = ToolUseBlock(
+        id="new-provider",
+        name=name,
+        input=tool_input,
+        type="tool_use",
+    )
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "new-provider",
+        name,
+        ToolArguments.from_mapping(tool_input),
     )

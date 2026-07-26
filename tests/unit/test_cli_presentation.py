@@ -711,3 +711,34 @@ def test_action_audit_renders_delete_directory_relative_path_and_result() -> Non
     assert "approval: accepted" in rendered
     assert "result: succeeded (directory_deleted)" in rendered
     assert "/root/" not in rendered
+
+
+def test_action_audit_renders_patch_path_without_edit_content() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="patch_file",
+            action=PermissionAction.WORKSPACE_OVERWRITE,
+            arguments=ToolArguments.from_mapping(
+                {
+                    "path": "src/app.py",
+                    "edits": [{"old_text": "secret-before", "new_text": "secret-after"}],
+                }
+            ),
+        ),
+        permission_result=PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
+        ),
+        approval_outcome=ApprovalAuditOutcome.ACCEPTED,
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="patched",
+        requested_sequence=12,
+    )
+
+    rendered = render_action_audits((audit,), 20)
+
+    assert "Action #12: patch_file" in rendered
+    assert "path: 'src/app.py'" in rendered
+    assert "result: succeeded (patched)" in rendered
+    assert "secret-before" not in rendered
+    assert "secret-after" not in rendered

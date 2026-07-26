@@ -32,8 +32,12 @@ from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import MAX_TOOL_EXECUTIONS_PER_TURN, TOOL_CATALOG
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
 from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
+from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
 from leonervis_code.tools.list_directory import LIST_DIRECTORY_TOOL_NAME, ListDirectoryTool
+from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
+from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, ReadFileLinesTool
+from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult]
@@ -84,6 +88,10 @@ class AgentLoop:
         glob: GlobTool,
         grep: GrepTool,
         list_directory: ListDirectoryTool,
+        read_file_lines: ReadFileLinesTool | None = None,
+        stat_path: StatPathTool | None = None,
+        list_tree: ListTreeTool | None = None,
+        grep_regex: GrepRegexTool | None = None,
         *,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
@@ -99,6 +107,10 @@ class AgentLoop:
         self._glob = glob
         self._grep = grep
         self._list_directory = list_directory
+        self._read_file_lines = read_file_lines
+        self._stat_path = stat_path
+        self._list_tree = list_tree
+        self._grep_regex = grep_regex
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -286,6 +298,14 @@ class AgentLoop:
             return self._grep.execute(request)
         if request.name == LIST_DIRECTORY_TOOL_NAME:
             return self._list_directory.execute(request)
+        if request.name == READ_FILE_LINES_TOOL_NAME and self._read_file_lines is not None:
+            return self._read_file_lines.execute(request)
+        if request.name == STAT_PATH_TOOL_NAME and self._stat_path is not None:
+            return self._stat_path.execute(request)
+        if request.name == LIST_TREE_TOOL_NAME and self._list_tree is not None:
+            return self._list_tree.execute(request)
+        if request.name == GREP_REGEX_TOOL_NAME and self._grep_regex is not None:
+            return self._grep_regex.execute(request)
         return ToolResult(
             tool_use_id=request.tool_use_id,
             content=f"unknown tool: {request.name}",

@@ -195,6 +195,26 @@ def copy_file_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[11])
 
 
+def read_file_lines_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[12])
+
+
+def stat_path_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[13])
+
+
+def list_tree_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[14])
+
+
+def grep_regex_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[15])
+
+
+def patch_file_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[16])
+
+
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())

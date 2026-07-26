@@ -10,7 +10,7 @@ from leonervis_code.tools.catalog import (
 )
 
 
-def test_catalog_exposes_copy_file_last_with_shared_closed_schema() -> None:
+def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema() -> None:
     assert [definition.name for definition in TOOL_CATALOG] == [
         "read_file",
         "glob",
@@ -24,6 +24,11 @@ def test_catalog_exposes_copy_file_last_with_shared_closed_schema() -> None:
         "delete_directory",
         "list_directory",
         "copy_file",
+        "read_file_lines",
+        "stat_path",
+        "list_tree",
+        "grep_regex",
+        "patch_file",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -209,3 +214,50 @@ def test_catalog_rejects_malformed_list_directory_inputs(
 ) -> None:
     with pytest.raises(ValueError, match="list_directory"):
         tool_use_from_input("list-1", "list_directory", tool_input)
+
+
+def test_catalog_validates_new_navigation_regex_and_patch_inputs() -> None:
+    assert tool_input_from_use(
+        tool_use_from_input(
+            "lines-1",
+            "read_file_lines",
+            {"path": "src/app.py", "start_line": 20, "line_count": 10},
+        )
+    ) == {"path": "src/app.py", "start_line": 20, "line_count": 10}
+    assert tool_input_from_use(
+        tool_use_from_input("tree-1", "list_tree", {"path": ".", "max_depth": 4})
+    ) == {"path": ".", "max_depth": 4}
+    assert tool_input_from_use(
+        tool_use_from_input(
+            "patch-1",
+            "patch_file",
+            {
+                "path": "src/app.py",
+                "edits": [{"old_text": "before", "new_text": "after"}],
+            },
+        )
+    ) == {
+        "path": "src/app.py",
+        "edits": [{"old_text": "before", "new_text": "after"}],
+    }
+    tool_use_from_input("stat-1", "stat_path", {"path": "."})
+    tool_use_from_input("regex-1", "grep_regex", {"pattern": r"test_\d+", "include": "**/*.py"})
+
+
+@pytest.mark.parametrize(
+    ("name", "tool_input"),
+    [
+        ("read_file_lines", {"path": "a", "start_line": True, "line_count": 1}),
+        ("read_file_lines", {"path": "a", "start_line": 1, "line_count": 0}),
+        ("list_tree", {"path": ".", "max_depth": 0}),
+        ("grep_regex", {"pattern": "x", "include": 1}),
+        ("patch_file", {"path": "a", "edits": []}),
+        ("patch_file", {"path": "a", "edits": [{"old_text": "x"}]}),
+    ],
+)
+def test_catalog_rejects_malformed_new_tool_inputs(
+    name: str,
+    tool_input: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match=name):
+        tool_use_from_input("call-1", name, tool_input)

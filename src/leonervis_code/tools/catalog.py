@@ -13,13 +13,32 @@ from leonervis_code.tools.delete_file import DELETE_FILE_TOOL_NAME, delete_file_
 from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_snapshot
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
+from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, grep_regex_tool_snapshot
 from leonervis_code.tools.list_directory import (
     LIST_DIRECTORY_TOOL_NAME,
     list_directory_tool_snapshot,
 )
+from leonervis_code.tools.list_tree import (
+    LIST_TREE_TOOL_NAME,
+    MAX_LIST_TREE_DEPTH,
+    list_tree_tool_snapshot,
+)
 from leonervis_code.tools.mkdir import MKDIR_TOOL_NAME, mkdir_tool_snapshot
 from leonervis_code.tools.move_file import MOVE_FILE_TOOL_NAME, move_file_tool_snapshot
+from leonervis_code.tools.patch_file import (
+    MAX_PATCH_FILE_EDITS,
+    MAX_PATCH_FILE_TEXT_BYTES,
+    MAX_PATCH_FILE_TEXT_CHARACTERS,
+    PATCH_FILE_TOOL_NAME,
+    patch_file_tool_snapshot,
+)
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, read_file_tool_snapshot
+from leonervis_code.tools.read_file_lines import (
+    MAX_READ_FILE_LINES_COUNT,
+    MAX_READ_FILE_LINES_START,
+    READ_FILE_LINES_TOOL_NAME,
+    read_file_lines_tool_snapshot,
+)
 from leonervis_code.tools.run_command import (
     MAX_COMMAND_ARGUMENTS,
     MAX_COMMAND_ARGUMENT_BYTES,
@@ -33,6 +52,7 @@ from leonervis_code.tools.run_command import (
     run_command_tool_snapshot,
 )
 from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
+from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, stat_path_tool_snapshot
 
 MAX_TOOL_EXECUTIONS_PER_TURN = 3
 MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
@@ -51,6 +71,11 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     delete_directory_tool_snapshot(),
     list_directory_tool_snapshot(),
     copy_file_tool_snapshot(),
+    read_file_lines_tool_snapshot(),
+    stat_path_tool_snapshot(),
+    list_tree_tool_snapshot(),
+    grep_regex_tool_snapshot(),
+    patch_file_tool_snapshot(),
 )
 
 
@@ -113,6 +138,16 @@ def _expected_keys(name: str) -> set[str]:
         return {"path"}
     if name == COPY_FILE_TOOL_NAME:
         return {"source", "destination"}
+    if name == READ_FILE_LINES_TOOL_NAME:
+        return {"path", "start_line", "line_count"}
+    if name == STAT_PATH_TOOL_NAME:
+        return {"path"}
+    if name == LIST_TREE_TOOL_NAME:
+        return {"path", "max_depth"}
+    if name == GREP_REGEX_TOOL_NAME:
+        return {"pattern", "include"}
+    if name == PATCH_FILE_TOOL_NAME:
+        return {"path", "edits"}
     raise ValueError(f"unsupported tool: {name}")
 
 
@@ -151,6 +186,57 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
                 "run_command timeout_seconds must be an integer from "
                 f"{MIN_COMMAND_TIMEOUT_SECONDS} to {MAX_COMMAND_TIMEOUT_SECONDS}"
             )
+        return
+
+    if name == READ_FILE_LINES_TOOL_NAME:
+        _validate_input_string(tool_input["path"], label="read_file_lines path")
+        start_line = tool_input["start_line"]
+        line_count = tool_input["line_count"]
+        if type(start_line) is not int or not 1 <= start_line <= MAX_READ_FILE_LINES_START:
+            raise ValueError("read_file_lines start_line is invalid")
+        if type(line_count) is not int or not 1 <= line_count <= MAX_READ_FILE_LINES_COUNT:
+            raise ValueError("read_file_lines line_count is invalid")
+        return
+
+    if name == LIST_TREE_TOOL_NAME:
+        _validate_input_string(tool_input["path"], label="list_tree path")
+        max_depth = tool_input["max_depth"]
+        if type(max_depth) is not int or not 1 <= max_depth <= MAX_LIST_TREE_DEPTH:
+            raise ValueError("list_tree max_depth is invalid")
+        return
+
+    if name == PATCH_FILE_TOOL_NAME:
+        _validate_input_string(tool_input["path"], label="patch_file path")
+        edits = tool_input["edits"]
+        if not isinstance(edits, list) or not 1 <= len(edits) <= MAX_PATCH_FILE_EDITS:
+            raise ValueError("patch_file edits are invalid")
+        for index, edit in enumerate(edits):
+            if not isinstance(edit, dict) or set(edit) != {"old_text", "new_text"}:
+                raise ValueError(f"patch_file edits[{index}] is malformed")
+            _validate_input_string(
+                edit["old_text"],
+                label=f"patch_file edits[{index}].old_text",
+                allow_whitespace=True,
+                max_characters=MAX_PATCH_FILE_TEXT_CHARACTERS,
+                max_bytes=MAX_PATCH_FILE_TEXT_BYTES,
+            )
+            _validate_input_string(
+                edit["new_text"],
+                label=f"patch_file edits[{index}].new_text",
+                allow_whitespace=True,
+                allow_empty=True,
+                max_characters=MAX_PATCH_FILE_TEXT_CHARACTERS,
+                max_bytes=MAX_PATCH_FILE_TEXT_BYTES,
+            )
+        return
+
+    if name == GREP_REGEX_TOOL_NAME:
+        _validate_input_string(
+            tool_input["pattern"],
+            label="grep_regex pattern",
+            allow_whitespace=True,
+        )
+        _validate_input_string(tool_input["include"], label="grep_regex include")
         return
 
     for key in expected:
