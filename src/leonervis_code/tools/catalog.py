@@ -54,7 +54,7 @@ from leonervis_code.tools.run_command import (
 from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, stat_path_tool_snapshot
 
-MAX_TOOL_EXECUTIONS_PER_TURN = 3
+MAX_TOOL_EXECUTIONS_PER_TURN = 6
 MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
 MAX_TOOL_INPUT_STRING_BYTES = 4096
 

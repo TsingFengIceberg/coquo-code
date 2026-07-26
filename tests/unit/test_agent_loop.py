@@ -126,6 +126,9 @@ def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
             ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
             ToolUse("glob-2", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
             ToolUse("read-2", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
+            ToolUse("glob-3", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
+            ToolUse("read-3", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
+            ToolUse("glob-4", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
             AssistantText("bounded"),
         ]
     )
@@ -139,9 +142,17 @@ def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
 
     assert loop.run("inspect") == "bounded"
     results = [item for item in loop.history if isinstance(item, ToolResult)]
-    assert [result.tool_use_id for result in results] == ["glob-1", "read-1", "glob-2", "read-2"]
+    assert [result.tool_use_id for result in results] == [
+        "glob-1",
+        "read-1",
+        "glob-2",
+        "read-2",
+        "glob-3",
+        "read-3",
+        "glob-4",
+    ]
     assert results[-1] == ToolResult(
-        "read-2", "tool call limit reached for this conversation turn", is_error=True
+        "glob-4", "tool call limit reached for this conversation turn", is_error=True
     )
 
 
@@ -277,7 +288,7 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
             name="read_file",
             arguments=ToolArguments.from_mapping({"path": "README.md"}),
         )
-        for number in range(1, 5)
+        for number in range(1, 8)
     ]
     provider = ScriptedFakeProvider([*requests, AssistantText(text="Finished after the limit.")])
     loop = AgentLoop(
@@ -290,9 +301,17 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
 
     assert loop.run("Read repeatedly") == "Finished after the limit."
     results = [item for item in loop.history if isinstance(item, ToolResult)]
-    assert [result.tool_use_id for result in results] == ["read-1", "read-2", "read-3", "read-4"]
+    assert [result.tool_use_id for result in results] == [
+        "read-1",
+        "read-2",
+        "read-3",
+        "read-4",
+        "read-5",
+        "read-6",
+        "read-7",
+    ]
     assert results[-1] == ToolResult(
-        tool_use_id="read-4",
+        tool_use_id="read-7",
         content="tool call limit reached for this conversation turn",
         is_error=True,
     )
@@ -308,7 +327,7 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
                     name="read_file",
                     arguments=ToolArguments.from_mapping({"path": "README.md"}),
                 )
-                for number in range(1, 6)
+                for number in range(1, 9)
             ]
         ]
     )
@@ -326,6 +345,42 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
     assert loop.history == ()
     assert loop.effective_history == ()
     assert loop.turns == ()
+
+
+def test_tool_budget_resets_for_each_user_turn(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("contents", encoding="utf-8")
+    first_turn = [
+        ToolUse(
+            tool_use_id=f"first-{number}",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        )
+        for number in range(1, 7)
+    ]
+    second_turn = [
+        ToolUse(
+            tool_use_id=f"second-{number}",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        )
+        for number in range(1, 7)
+    ]
+    provider = ScriptedFakeProvider(
+        [*first_turn, AssistantText("first done"), *second_turn, AssistantText("second done")]
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert loop.run("first") == "first done"
+    assert loop.run("second") == "second done"
+    results = [item for item in loop.history if isinstance(item, ToolResult)]
+    assert len(results) == 12
+    assert all(not result.is_error for result in results)
 
 
 def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
@@ -581,14 +636,14 @@ def test_action_dispatcher_receives_the_same_lease_across_tool_continuations(tmp
     assert provider.received_requests[2].history[-1] == ToolResult("glob-1", "resolved glob")
 
 
-def test_fourth_tool_call_gets_limit_result_without_entering_action_dispatch(tmp_path) -> None:
+def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tmp_path) -> None:
     calls = [
         ToolUse(
             f"read-{index}",
             "read_file",
             ToolArguments.from_mapping({"path": f"{index}.txt"}),
         )
-        for index in range(1, 5)
+        for index in range(1, 8)
     ]
     provider = ScriptedFakeProvider([*calls, AssistantText("stopped")])
     loop = AgentLoop(
@@ -609,9 +664,9 @@ def test_fourth_tool_call_gets_limit_result_without_entering_action_dispatch(tmp
     loop.install_action_dispatcher(dispatch)
 
     assert loop.run_prepared(prepared.with_action_lease(lease), provider=provider) == "stopped"
-    assert dispatched == ["read-1", "read-2", "read-3"]
+    assert dispatched == ["read-1", "read-2", "read-3", "read-4", "read-5", "read-6"]
     assert provider.received_requests[-1].history[-1] == ToolResult(
-        "read-4",
+        "read-7",
         "tool call limit reached for this conversation turn",
         is_error=True,
     )

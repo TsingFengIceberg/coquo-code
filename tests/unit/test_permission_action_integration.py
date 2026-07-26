@@ -2042,23 +2042,23 @@ def test_new_read_tools_execute_as_workspace_read_and_share_durable_audit(
         session.close()
 
 
-def test_new_tools_retain_shared_three_call_budget(tmp_path: Path) -> None:
+def test_new_tools_share_six_call_budget(tmp_path: Path) -> None:
     calls = [
         ToolUse(
             f"stat-{index}",
             "stat_path",
             ToolArguments.from_mapping({"path": "."}),
         )
-        for index in range(1, 5)
+        for index in range(1, 8)
     ]
     provider = ToolProvider([*calls, AssistantText("stopped")])
     session = open_session(tmp_path, provider)
     try:
         assert session.prompt("inspect repeatedly") == "stopped"
 
-        assert len(session.action_audits()) == 3
+        assert len(session.action_audits()) == 6
         assert provider.requests[-1].history[-1] == ToolResult(
-            "stat-4",
+            "stat-7",
             "tool call limit reached for this conversation turn",
             is_error=True,
         )

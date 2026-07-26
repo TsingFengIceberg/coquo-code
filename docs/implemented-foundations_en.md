@@ -27,6 +27,7 @@
 - [Tool Batch A: Bounded Workspace Navigation](#tool-batch-a-bounded-workspace-navigation)
 - [Tool Batch B: Process-isolated Regex Grep](#tool-batch-b-process-isolated-regex-grep)
 - [Tool Batch C: Structured Exact Multi-edit Patch](#tool-batch-c-structured-exact-multi-edit-patch)
+- [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -50,7 +51,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 14. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a three-call sequential budget.
+The canonical model system prompt is now version 15. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a six-call sequential budget.
 
 It explicitly does not claim recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, non-empty directory deletion, directory movement, recursive mkdir, shell source strings, interactive PTYs, OS/network sandboxing, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, exact-state conflict, timeout/process cleanup, causality, audit, and durability constraints.
 
@@ -461,6 +462,14 @@ Patch reuses `workspace-overwrite`, a source SHA-256 precondition, post-approval
 
 Batches A/B/C extend canonical order to 17 tools while retaining the shared three-call sequential budget. The provider adapter contract advances to v15, the canonical system prompt advances to v14, and the empty full-context golden becomes `ctx-v1-ac2b833bb46894c250e2b31370d47911b3464cfa2c71c23ded504f0ea65fd4cf`. ToolArguments v1 already canonically stores nested JSON edits, so ToolArguments, ActionIdentity, Session/Action Audit, compaction, and `ctx-v1`/`ctx-v2` representation versions do not advance. Old transcripts are not rewritten. Foundation 5A remains deferred.
 
+## Shared Six-call Tool Budget
+
+As the model-visible surface grew to 17 tools, the original shared three-call budget no longer covered a normal search, read, modify, verify, and recheck workflow within one turn. The current fixed Host limit is six sequential requests per user turn, shared by every tool. Success, tool errors, permission denial, approval rejection/cancellation, and executor failure all consume a request that entered normal dispatch and do not refund it. Approval mode does not change the budget.
+
+The first six requests pass through validation, PermissionGate, optional approval, Action Audit, and execution as usual. A seventh request enters none of those boundaries and receives only the structured limit result paired with its original `tool_use_id`. The model must then return final text; an eighth tool request deterministically stops without committing the candidate turn. A new user turn receives a fresh six-call budget, and the Host neither opens turns nor continues tasks automatically.
+
+The canonical system prompt advances to v15. Tool schemas, order, and provider projection logic do not change, so the provider adapter contract remains v15. The empty full-context golden becomes `ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`. ToolArguments, ActionIdentity, Session/Action Audit, compaction, and context representation versions remain unchanged, and old transcripts are not rewritten. See [0040: Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -666,3 +675,4 @@ This slice establishes capacity facts only. It does not count current request to
 37. [0037: Tool Batch A Bounded Workspace Navigation](./decisions/0037-batch-a-bounded-workspace-navigation.md)
 38. [0038: Tool Batch B Process-isolated Regex Grep](./decisions/0038-batch-b-process-isolated-regex-grep.md)
 39. [0039: Tool Batch C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
+40. [0040: Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)

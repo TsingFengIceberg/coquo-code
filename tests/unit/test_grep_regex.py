@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import leonervis_code.tools.grep_regex as grep_regex_module
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.tools.grep_regex import (
     MAX_GREP_REGEX_FILE_BYTES,
@@ -25,7 +26,14 @@ def records(content: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in content.splitlines()]
 
 
-def test_searches_case_sensitive_python_regex_per_logical_line(tmp_path: Path) -> None:
+@pytest.fixture
+def non_timeout_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(grep_regex_module, "GREP_REGEX_TIMEOUT_SECONDS", 5.0)
+
+
+def test_searches_case_sensitive_python_regex_per_logical_line(
+    tmp_path: Path, non_timeout_worker: None
+) -> None:
     (tmp_path / "b.py").write_text("task_20 = True\nTASK_30 = False", encoding="utf-8")
     (tmp_path / "a.py").write_bytes(b"task_10 = False\r\nother\rfinal_99")
 
@@ -39,7 +47,7 @@ def test_searches_case_sensitive_python_regex_per_logical_line(tmp_path: Path) -
     ]
 
 
-def test_empty_match_set_is_success(tmp_path: Path) -> None:
+def test_empty_match_set_is_success(tmp_path: Path, non_timeout_worker: None) -> None:
     (tmp_path / "a.txt").write_text("alpha", encoding="utf-8")
 
     result = GrepRegexTool(tmp_path).execute(request(r"^beta$", "*.txt"))
@@ -57,7 +65,9 @@ def test_empty_match_set_is_success(tmp_path: Path) -> None:
         ("(", "pattern is invalid"),
     ],
 )
-def test_rejects_invalid_patterns(tmp_path: Path, pattern: str, message: str) -> None:
+def test_rejects_invalid_patterns(
+    tmp_path: Path, pattern: str, message: str, non_timeout_worker: None
+) -> None:
     result = GrepRegexTool(tmp_path).execute(request(pattern, "*.txt"))
 
     assert result.is_error
@@ -84,7 +94,9 @@ def test_rejects_malformed_input(tmp_path: Path, call: ToolUse) -> None:
     assert result.content == "grep_regex input is malformed"
 
 
-def test_rejects_symlink_binary_and_large_selected_files(tmp_path: Path) -> None:
+def test_rejects_symlink_binary_and_large_selected_files(
+    tmp_path: Path, non_timeout_worker: None
+) -> None:
     outside = tmp_path.parent / "outside-regex.txt"
     outside.write_text("secret", encoding="utf-8")
     (tmp_path / "link.txt").symlink_to(outside)
@@ -98,7 +110,7 @@ def test_rejects_symlink_binary_and_large_selected_files(tmp_path: Path) -> None
     assert "per-file limit" in tool.execute(request("x", "*.txt")).content
 
 
-def test_truncates_after_bounded_complete_matches(tmp_path: Path) -> None:
+def test_truncates_after_bounded_complete_matches(tmp_path: Path, non_timeout_worker: None) -> None:
     (tmp_path / "many.txt").write_text(
         "\n".join(["match"] * (MAX_GREP_REGEX_MATCHES + 10)),
         encoding="utf-8",

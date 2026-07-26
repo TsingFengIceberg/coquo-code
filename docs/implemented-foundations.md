@@ -27,6 +27,7 @@
 - [工具批次 A：Bounded Workspace Navigation](#工具批次-abounded-workspace-navigation)
 - [工具批次 B：Process-isolated Regex Grep](#工具批次-bprocess-isolated-regex-grep)
 - [工具批次 C：Structured Exact Multi-edit Patch](#工具批次-cstructured-exact-multi-edit-patch)
+- [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -50,7 +51,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 14。它继续声明普通Agent不能主动compact，并保留Host summary信任边界。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 15。它继续声明普通Agent不能主动compact，并保留Host summary信任边界。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -461,6 +462,14 @@ Patch复用`workspace-overwrite`、source SHA-256 precondition、approval后reva
 
 批次A/B/C把canonical order扩展到17个工具并保持共享三次顺序预算。Provider adapter contract升级到v15，canonical system prompt升级到v14，empty full-context golden更新为`ctx-v1-ac2b833bb46894c250e2b31370d47911b3464cfa2c71c23ded504f0ea65fd4cf`。ToolArguments v1已经能够规范保存nested JSON edits，因此ToolArguments、ActionIdentity、Session/Action Audit、compaction和`ctx-v1`/`ctx-v2`representation均不升级；旧transcript不重写。Foundation 5A仍暂缓。
 
+## Shared Six-call Tool Budget
+
+随着model-visible surface扩展到17个工具，原共享三次预算不足以在一个普通turn内完成“搜索、读取、修改、验证、复查”。当前固定Host上限提升为每user turn六次顺序请求，全部工具共用；成功、工具错误、permission denial、approval rejection/cancel与executor failure都消耗已进入normal dispatch的名额且不退款。Approval mode不会改变额度。
+
+前六次照常经过validation、PermissionGate、optional approval、Action Audit和executor。第七次不进入这些边界，只得到与原`tool_use_id`匹配的structured limit result；模型随后必须输出final text，若第八次仍请求工具则candidate turn不提交并确定性停止。新user turn重新获得六次额度，Host不会自动开启turn或继续任务。
+
+Canonical system prompt升级到v15；工具schema、顺序及provider projection逻辑不变，所以provider adapter contract保持v15。Empty full-context golden更新为`ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`；ToolArguments、ActionIdentity、Session/Action Audit、compaction和ctx representation版本均不升级，旧transcript不重写。完整决策见[0040：Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -666,3 +675,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 37. [0037：工具批次 A Bounded Workspace Navigation](./decisions/0037-batch-a-bounded-workspace-navigation.md)
 38. [0038：工具批次 B Process-isolated Regex Grep](./decisions/0038-batch-b-process-isolated-regex-grep.md)
 39. [0039：工具批次 C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
+40. [0040：Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)
