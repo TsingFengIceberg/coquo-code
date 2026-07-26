@@ -70,6 +70,7 @@ from leonervis_code.tools.delete_directory import DeleteDirectoryTool
 from leonervis_code.tools.delete_file import DeleteFileTool
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.mkdir import MkdirTool
 from leonervis_code.tools.move_file import MoveFileTool
 from leonervis_code.tools.read_file import ReadFileTool
@@ -265,6 +266,7 @@ def render_demo_read(workspace: Path, path: str, stdout: TextIO) -> int:
         ReadFileTool(workspace),
         GlobTool(workspace),
         GrepTool(workspace),
+        ListDirectoryTool(workspace),
     )
     stdout.write(f"[demo] provider requested read_file: {path}\n")
     response = demo_loop.run(f"Demo read {path}")
@@ -793,6 +795,7 @@ def main(
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
             grep_factory=GrepTool,
+            list_directory_factory=ListDirectoryTool,
             write_file_factory=WriteFileTool,
             edit_file_factory=EditFileTool,
             run_command_factory=RunCommandTool,

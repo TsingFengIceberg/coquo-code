@@ -185,6 +185,11 @@ def delete_directory_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[9])
 
 
+def list_directory_tool_definition() -> dict[str, object]:
+    """Return the canonical list_directory definition in OpenAI tool shape."""
+    return _compatible_tool_definition(model_tool_definitions()[10])
+
+
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())

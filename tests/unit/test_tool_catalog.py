@@ -10,7 +10,7 @@ from leonervis_code.tools.catalog import (
 )
 
 
-def test_catalog_exposes_move_file_last_with_shared_closed_schema() -> None:
+def test_catalog_exposes_list_directory_last_with_shared_closed_schema() -> None:
     assert [definition.name for definition in TOOL_CATALOG] == [
         "read_file",
         "glob",
@@ -22,6 +22,7 @@ def test_catalog_exposes_move_file_last_with_shared_closed_schema() -> None:
         "move_file",
         "delete_file",
         "delete_directory",
+        "list_directory",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -167,3 +168,21 @@ def test_catalog_rejects_malformed_delete_directory_inputs(
 ) -> None:
     with pytest.raises(ValueError, match="delete_directory"):
         tool_use_from_input("rmdir-1", "delete_directory", tool_input)
+
+
+def test_catalog_validates_closed_list_directory_input() -> None:
+    call = tool_use_from_input("list-1", "list_directory", {"path": "."})
+    assert call == ToolUse(
+        "list-1",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "."}),
+    )
+    assert tool_input_from_use(call) == {"path": "."}
+
+
+@pytest.mark.parametrize("tool_input", [{}, {"path": 1}, {"path": ""}, {"path": ".", "x": 1}])
+def test_catalog_rejects_malformed_list_directory_inputs(
+    tool_input: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="list_directory"):
+        tool_use_from_input("list-1", "list_directory", tool_input)

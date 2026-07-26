@@ -46,7 +46,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-64ce77996397ddd1f84a27248ddd3e47224948563db506e3bfbda96939799406"
+        == "ctx-v1-7776df09d6ace66621cee46719755307b7d816bccde25f61064b4205c689b3b2"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0

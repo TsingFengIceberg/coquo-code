@@ -338,6 +338,11 @@ def delete_directory_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[9]
 
 
+def list_directory_tool_definition() -> dict[str, object]:
+    """Return the canonical list_directory definition used by Anthropic requests."""
+    return model_tool_definitions()[10]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

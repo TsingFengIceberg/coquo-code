@@ -32,6 +32,7 @@ from leonervis_code.providers.anthropic import (
     edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
+    list_directory_tool_definition,
     mkdir_tool_definition,
     move_file_tool_definition,
     normalize_sdk_error,
@@ -47,6 +48,7 @@ from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -529,6 +531,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 move_file_tool_definition(),
                 delete_file_tool_definition(),
                 delete_directory_tool_definition(),
+                list_directory_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -747,6 +750,7 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
     )
 
     with pytest.raises(ProviderAdapterError):
@@ -823,3 +827,21 @@ def test_delete_directory_tool_definition_is_canonical_and_closed() -> None:
     assert definition["name"] == "delete_directory"
     assert definition["input_schema"]["required"] == ["path"]
     assert definition["input_schema"]["additionalProperties"] is False
+
+
+def test_list_directory_schema_and_parser_preserve_exact_path_argument() -> None:
+    definition = list_directory_tool_definition()
+    assert definition["name"] == "list_directory"
+    assert definition["input_schema"]["required"] == ["path"]
+    assert definition["input_schema"]["additionalProperties"] is False
+    block = ToolUseBlock(
+        id="list-provider",
+        name="list_directory",
+        input={"path": "."},
+        type="tool_use",
+    )
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "list-provider",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "."}),
+    )

@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir`/`move_file`/`delete_file`/`delete_directory` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A 已贯通 permission、approval、durable Action Audit 与受控写入，Foundation 4B 加入唯一exact edit，Foundation 4C 加入受控本地命令执行，Foundation 4D 加入受控单目录创建，Foundation 4E 加入受控且禁止覆盖的普通文件移动，Foundation 4F加入受控普通文件删除，Foundation 4G现已加入受控空目录删除。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、递归或非空目录删除与目录移动仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、受限 `read_file`/`glob`/literal `grep`/`write_file`/`edit_file`/`run_command`/`mkdir`/`move_file`/`delete_file`/`delete_directory`/`list_directory` 顺序工具循环、provider-owned 模型限制、target-specific preflight、切换前 screening、provider-neutral Effective Context、手动与自动 compaction，以及 target-aware resume。Foundation 4A–4G已贯通受控写入、exact edit、命令、单目录创建、普通文件移动与文件/空目录删除；Foundation 1E现已补充受限的一层目录浏览。Shell source string、interactive PTY、OS sandbox、regex/fuzzy patch、递归目录浏览或删除、非空目录删除与目录移动仍未实现。
 
 ## 目录
 
@@ -98,6 +98,8 @@ uv run leonervis-code session --help
 `delete_file(path)`是第九个model-visible工具，只永久删除一个现有的非symlink普通文件。它属于独立的`workspace-delete`：`read-only`拒绝，两个可写mode按ask/auto继续。Parent必须已存在且路径不能含symlink；missing target、目录和symlink会在permission前hard reject，不创建Action Audit。Host在approval后复查target与parent identity，再unlink并fsync parent。若文件名已消失但parent durability无法确认，会返回partial；此时不能自动重试，也没有trash、backup或undo。
 
 `delete_directory(path)`是第十个model-visible工具，只永久删除一个现有的empty non-symlink directory，并复用`workspace-delete`。Non-empty target、普通文件、symlink、missing target或不安全parent会在permission前hard reject。Approval后Host复查target、parent和empty状态；执行前先持久化`action_execution_started`，随后使用OS `rmdir`的原子empty条件并fsync parent。若目录名已消失但durability未知，会返回partial且不得自动重试；不支持recursive delete、trash、backup或undo。
+
+`list_directory(path)`是第十一个model-visible工具，只读列出一个目录的直接子项；用`.`表示workspace root。结果按UTF-8路径稳定排序，以JSONL返回`path`及`file`/`directory`/`symlink`/`other`类型，包括hidden entry但不递归、不跟随symlink、不读取内容。工具最多扫描10,000个直接子项、返回200条且输出不超过32 KiB；扫描上限会安全报错，条数或字节上限会附加`{"truncated":true}`。它属于`workspace-read`，任何permission mode都无需人工approval，但仍经过Action Audit与共享tool budget。
 
 ### 配置 Provider
 
@@ -200,7 +202,7 @@ Session 绑定 workspace，并使用 append-only JSONL 保存完整成功 turn�
 
 Ctrl-D、EOF 或在等待输入时按 Ctrl-C 也会正常退出。`/context` 不调用模型生成、不修改 Session，也不写 transcript；compact 后它会明确区分完整 transcript、summary、保留的 real turns与latest checkpoint trigger。`/compact` 只在至少 4 个完整 effective turns 时工作，固定保留最近 2 个 turns，使用当前真实 provider 发起一次不暴露工具的 summary 请求；成功时只 append+fsync typed checkpoint，完整 `/history` 不变。普通 one-shot/REPL prompt也复用同一transaction：exact initial request的input + reserve达到known window的80%时最多proactive compact一次，known context overflow时最多mandatory compact一次；pending user参与前后计量但不进入summary/checkpoint。Proactive安全precommit failure会warning后继续原known-fit turn，mandatory failure不发送普通generation；事件不显示pending或summary原文。Fake runtime、unknown/non-reducing candidate 或任何 precommit failure 都不会提交 compact。`/resume` screening 也不调用 generation/tool；known overflow 保持 current Session、runtime、latest 与 target transcript 不变，unknown/fake 则以明确 warning 应用恢复。Anthropic official route 的 exact inspection/compact/resume count 可能发起 count-only `messages.count_tokens` 请求，OpenAI-compatible 使用本地 estimate。终端颜色只在 TTY 中启用；设置 `NO_COLOR=1` 可关闭。
 
-`read_file`、`glob`与literal `grep`是当前模型可见的三个只读工具，共享每个user turn最多3次顺序执行预算。`glob`接受workspace-relative、`/`分隔pattern，支持component `*`、`?`、bracket class与whole-component `**`；只返回stable sorted的non-symlink regular-file paths，不读取内容、不跟随link，hidden component必须显式以`.`匹配。`grep(query, include)`以相同portable selector选择UTF-8 regular files，再做case-sensitive literal line search，按path与1-based line稳定输出JSONL；它不支持regex、index或`.gitignore`。Glob与grep output最多32 KiB，grep另受1,000 candidates、1 MiB/file、16 MiB aggregate与200 matching lines限制；明确truncation不证明被省略的path或match不存在。
+`read_file`、`glob`、literal `grep`与`list_directory`是当前模型可见的四个只读工具，并与其他工具共享每个user turn最多3次顺序执行预算。`glob`接受workspace-relative、`/`分隔pattern，支持component `*`、`?`、bracket class与whole-component `**`；只返回stable sorted的non-symlink regular-file paths，不读取内容、不跟随link，hidden component必须显式以`.`匹配。`grep(query, include)`以相同portable selector选择UTF-8 regular files，再做case-sensitive literal line search，按path与1-based line稳定输出JSONL；它不支持regex、index或`.gitignore`。`list_directory`补充一层目录与entry-type观察，但不替代递归glob或内容搜索。所有截断结果都不证明被省略的path、entry或match不存在。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -238,6 +240,7 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Bounded One-level Directory Listing](./docs/decisions/0035-foundation-1e-bounded-directory-listing.md)：一层目录观察、entry type、no-follow路径、扫描/输出上限与empty/truncated语义。
 - [Controlled No-overwrite File Move](./docs/decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)：双路径identity、workspace-move审批、no-overwrite hard-link/unlink、stale检查与truthful partial。
 - [Controlled Empty-directory Deletion](./docs/decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)：空目录workspace-delete审批、empty-state/identity复查、rmdir原子空条件与parent durability。
 - [Controlled Regular-file Deletion](./docs/decisions/0033-foundation-4f-controlled-regular-file-deletion.md)：单文件workspace-delete审批、target/parent identity、unlink durability与不可自动重试的partial。
@@ -267,6 +270,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`、单目录`mkdir`、普通文件`move_file`、普通文件`delete_file`与空目录`delete_directory`；十者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；mkdir、move_file以及delete_file/delete_directory分别使用`workspace-create`、`workspace-move`与`workspace-delete`，并与其他副作用工具共用PermissionGate、approval及durable Action Audit。
+当前model-visible surface按固定顺序包含`read_file`、`glob`、literal `grep`、完整内容`write_file`、唯一exact `edit_file`、direct-argv `run_command`、单目录`mkdir`、普通文件`move_file`、普通文件`delete_file`、空目录`delete_directory`与一层`list_directory`；十一者共享每个user turn最多三次顺序调用。Command仍要求`danger-full-access`；list_directory复用`workspace-read`，mkdir、move_file以及delete_file/delete_directory分别使用`workspace-create`、`workspace-move`与`workspace-delete`，所有工具都经过统一PermissionGate和durable Action Audit。
 
-Foundation 4G现已完成。Canonical system prompt为v11，provider adapter contract为v12，empty full-context identity为`ctx-v1-64ce77996397ddd1f84a27248ddd3e47224948563db506e3bfbda96939799406`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Regex/index/ignore-aware search、fuzzy或multi-edit patch、directory move、non-empty/recursive delete、recursive mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。递归删除若未来开展，必须另行设计tree bounds、symlink、partial tree effect与恢复边界，不能扩展当前`delete_directory`合同。完整决策见[ADR 0034](./docs/decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)。
+Foundation 1E现已完成。Canonical system prompt为v12，provider adapter contract为v13，empty full-context identity为`ctx-v1-7776df09d6ace66621cee46719755307b7d816bccde25f61064b4205c689b3b2`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive tree listing、metadata/stat、ignore-aware listing、regex/index search、fuzzy或multi-edit patch、directory move、non-empty/recursive delete、recursive mkdir、shell source string、interactive PTY、network tool、streaming、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。完整决策见[ADR 0035](./docs/decisions/0035-foundation-1e-bounded-directory-listing.md)。

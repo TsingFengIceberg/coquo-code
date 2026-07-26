@@ -38,6 +38,7 @@ from leonervis_code.providers.openai_compat import (
     edit_file_tool_definition,
     glob_tool_definition,
     grep_tool_definition,
+    list_directory_tool_definition,
     mkdir_tool_definition,
     move_file_tool_definition,
     parse_compact_summary_response,
@@ -52,6 +53,7 @@ from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -499,6 +501,7 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
     )
 
     assert loop.run("Read README") == "I read it."
@@ -579,3 +582,23 @@ def test_delete_directory_tool_definition_is_canonical_and_closed() -> None:
     parameters = definition["function"]["parameters"]
     assert parameters["required"] == ["path"]
     assert parameters["additionalProperties"] is False
+
+
+def test_list_directory_schema_and_parser_preserve_exact_path_argument() -> None:
+    definition = list_directory_tool_definition()
+    assert definition["function"]["name"] == "list_directory"
+    parameters = definition["function"]["parameters"]
+    assert parameters["required"] == ["path"]
+    assert parameters["additionalProperties"] is False
+    call = tool_call(
+        call_id="list-provider",
+        name="list_directory",
+        arguments='{"path":"."}',
+    )
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "list-provider",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "."}),
+    )

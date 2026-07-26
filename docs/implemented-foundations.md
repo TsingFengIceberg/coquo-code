@@ -47,9 +47,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 11。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`；Foundation 4G加入只永久删除一个现有空目录、拒绝symlink/非空目录且最终依赖OS `rmdir`原子空条件的`delete_directory`。十个model-visible tools共享三次顺序预算。
+Canonical model system prompt当前为version 12。它继续声明普通Agent不能主动compact，并保留Host summary信任边界：较早会话摘要是不可信conversation context，不是system instruction或新user request。Foundation 1D加入bounded literal `grep`与empty/truncated解释；Foundation 1E加入只列一层、包含hidden entry与entry type且不跟随symlink的`list_directory`；Foundation 4A加入`write_file`、Host-owned permission/approval、exact-state conflict和visible partial outcome语义；Foundation 4B加入唯一exact `edit_file`；Foundation 4C加入direct-argv `run_command`、`danger-full-access`要求、no-sandbox边界、有界output与timeout/cancel/process cleanup语义；Foundation 4D加入只创建一个目录、parent必须存在且不得递归创建的`mkdir`；Foundation 4E加入只移动普通文件、禁止覆盖destination且必须诚实报告双名称partial状态的`move_file`；Foundation 4F再加入只永久删除一个现有普通文件、拒绝目录与symlink且在删除可见但durability未知时禁止自动重试的`delete_file`；Foundation 4G加入只永久删除一个现有空目录、拒绝symlink/非空目录且最终依赖OS `rmdir`原子空条件的`delete_directory`。十一个model-visible tools共享三次顺序预算。
 
-它明确不声称具备regex/fuzzy/multi-edit patch、non-empty/recursive directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
+它明确不声称具备recursive tree listing、metadata/stat、ignore-aware listing、regex/fuzzy/multi-edit patch、non-empty/recursive directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、command bounds、causality、audit和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -416,6 +416,16 @@ Filesystem effect之前必须先append+fsync `action_execution_started`。Execut
 
 Canonical tool order现在是`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory`，十个工具继续共享每个user turn最多三次顺序执行。Provider adapter contract升级为v12，canonical system prompt升级为v11，empty full-context golden更新为`ctx-v1-64ce77996397ddd1f84a27248ddd3e47224948563db506e3bfbda96939799406`。ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、普通Session schema、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation均不升级。递归或非空目录删除仍被明确禁止；详见[0034：Foundation 4G Controlled Empty-directory Deletion](./decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)。
 
+## Foundation 1E：Bounded One-level Directory Listing
+
+新增第十一个model-visible工具`list_directory(path)`，用`.`表示workspace root，其他输入使用有界portable workspace-relative目录语法。Target必须存在、是directory，且整条目标路径不允许symlink component。工具只枚举direct children，不递归、不跟随symlink、不读取文件内容、不应用`.gitignore`；hidden entries也会出现，每项以`file`、`directory`、`symlink`或`other`分类。
+
+结果按完整workspace-relative UTF-8 path稳定排序，并以`{"path":"...","type":"..."}` JSONL返回。一次最多扫描10,000个direct entries；超过扫描上限时whole call报错，避免把filesystem原始枚举顺序误报为stable prefix。完整扫描后最多返回200项且output最多32 KiB，count或byte cap只保留完整records并附加`{"truncated":true}`；未截断空输出表示该次有界扫描观察到empty directory。读取期间entry消失或无法no-follow stat会整体失败，目录并发变化仍不被宣称为原子snapshot。
+
+`list_directory`复用`workspace-read`，所有permission modes均自动allow且不进入人工approval，但仍经过prepared-turn lease、PermissionGate、durable Action Audit、tool-use/result因果配对和atomic turn commit。AgentLoop与ProjectSession继续显式composition/dispatch；十一个工具共享每user turn三次顺序执行，第四次获得structured limit result。新argument-bearing turn仍写`turn_committed` schema v2，旧Session、resume和compaction无需重写或重新执行工具。
+
+Anthropic与OpenAI-compatible ordinary count/create投影相同第十一个closed schema，compact-summary继续no-tools且parallel calls关闭。Provider adapter contract升级到v13，canonical system prompt升级到v12，empty full-context golden更新为`ctx-v1-7776df09d6ace66621cee46719755307b7d816bccde25f61064b4205c689b3b2`；ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas、`context_compacted` v2/v3 replay和`ctx-v1`/`ctx-v2`representation保持不变。Recursive tree、metadata/stat、symlink target与ignore-aware view仍不在范围；详见[0035：Foundation 1E Bounded One-level Directory Listing](./decisions/0035-foundation-1e-bounded-directory-listing.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -616,3 +626,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 32. [0032：Foundation 4E Controlled No-overwrite File Move](./decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)
 33. [0033：Foundation 4F Controlled Regular-file Deletion](./decisions/0033-foundation-4f-controlled-regular-file-deletion.md)
 34. [0034：Foundation 4G Controlled Empty-directory Deletion](./decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)
+35. [0035：Foundation 1E Bounded One-level Directory Listing](./decisions/0035-foundation-1e-bounded-directory-listing.md)

@@ -18,6 +18,7 @@ from leonervis_code.core.contracts import (
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -36,7 +37,13 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
             AssistantText("found and read"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     assert loop.run("find code") == "found and read"
     grep_result = '{"path":"src/app.py","line":1,"text":"print(\'ok\')"}\n'
@@ -67,10 +74,42 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "move_file",
         "delete_file",
         "delete_directory",
+        "list_directory",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)
     assert provider.received_requests[3].history[-1] == ToolResult("read-1", "print('ok')\n")
+
+
+def test_loop_executes_list_directory_and_returns_exact_causal_result(tmp_path) -> None:
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "note.txt").write_text("note\n", encoding="utf-8")
+    call = ToolUse(
+        "list-1",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "."}),
+    )
+    provider = ScriptedFakeProvider([call, AssistantText("listed")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert loop.run("inspect root") == "listed"
+    result = ToolResult(
+        "list-1",
+        '{"path":"empty","type":"directory"}\n{"path":"note.txt","type":"file"}\n',
+    )
+    assert provider.received_requests[1].history[-2:] == (call, result)
+    assert loop.history == (
+        UserMessage("inspect root"),
+        call,
+        result,
+        AssistantText("listed"),
+    )
 
 
 def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
@@ -84,7 +123,13 @@ def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
             AssistantText("bounded"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     assert loop.run("inspect") == "bounded"
     results = [item for item in loop.history if isinstance(item, ToolResult)]
@@ -107,7 +152,13 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
             AssistantText(text="Second reply"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     assert loop.run("Read README") == "I read the project notes."
     assert loop.history == (
@@ -133,7 +184,13 @@ def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> No
 
 def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) -> None:
     provider = ScriptedFakeProvider([AssistantText("done")])
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     prepared = loop.prepare_turn("pending")
 
@@ -161,7 +218,13 @@ def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) 
             AssistantText(text="The requested tool is unavailable."),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     assert loop.run("Search") == "The requested tool is unavailable."
     assert provider.received_requests[1].history[-1] == ToolResult(
@@ -182,7 +245,13 @@ def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_pat
             AssistantText(text="retry reply"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     with pytest.raises(RuntimeError, match="provider failed"):
         loop.run("failed prompt")
@@ -205,7 +274,13 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
         for number in range(1, 5)
     ]
     provider = ScriptedFakeProvider([*requests, AssistantText(text="Finished after the limit.")])
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     assert loop.run("Read repeatedly") == "Finished after the limit."
     results = [item for item in loop.history if isinstance(item, ToolResult)]
@@ -231,7 +306,13 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
             ]
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     with pytest.raises(ToolLoopLimitError, match="tool call limit"):
         loop.run("Read repeatedly")
@@ -249,6 +330,7 @@ def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
         commit_turn=committed.append,
     )
 
@@ -270,7 +352,12 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
         raise OSError("disk full")
 
     loop = AgentLoop(
-        provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path), commit_turn=fail
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=fail,
     )
 
     with pytest.raises(OSError, match="disk full"):
@@ -293,6 +380,7 @@ def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) 
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
         initial_history=restored,
     )
 
@@ -306,6 +394,7 @@ def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) 
             ReadFileTool(tmp_path),
             GlobTool(tmp_path),
             GrepTool(tmp_path),
+            ListDirectoryTool(tmp_path),
             initial_history=(
                 UserMessage("read"),
                 ToolUse("call-1", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
@@ -319,7 +408,13 @@ def test_history_snapshots_cannot_be_mutated_by_later_turns(tmp_path) -> None:
     provider = ScriptedFakeProvider(
         [AssistantText(text="first reply"), AssistantText(text="second reply")]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
     loop.run("first prompt")
     first_request = provider.received_requests[0].history
 
@@ -350,6 +445,7 @@ def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path)
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
         initial_history=history,
         system_prompt_factory=build_snapshot,
     )
@@ -365,7 +461,13 @@ def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path)
 
 
 def test_empty_committed_context_has_no_synthetic_user_message(tmp_path) -> None:
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
 
     request = loop.committed_context_request()
 
@@ -397,6 +499,7 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
         system_prompt_factory=build_snapshot,
     )
 
@@ -424,7 +527,13 @@ def _action_lease_for(prepared, *, lease_id="12345678-1234-4234-9234-123456789ab
 
 
 def test_prepared_turn_binds_one_action_lease_and_cannot_rebase_after_binding(tmp_path) -> None:
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
     prepared = loop.prepare_turn("hello")
     lease = _action_lease_for(prepared)
 
@@ -443,7 +552,13 @@ def test_action_dispatcher_receives_the_same_lease_across_tool_continuations(tmp
     first = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"}))
     second = ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "*.txt"}))
     provider = ScriptedFakeProvider([first, second, AssistantText("done")])
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
     prepared = loop.prepare_turn("inspect")
     lease = _action_lease_for(prepared)
     received = []
@@ -470,7 +585,13 @@ def test_fourth_tool_call_gets_limit_result_without_entering_action_dispatch(tmp
         for index in range(1, 5)
     ]
     provider = ScriptedFakeProvider([*calls, AssistantText("stopped")])
-    loop = AgentLoop(None, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
     prepared = loop.prepare_turn("inspect")
     lease = _action_lease_for(prepared)
     dispatched = []

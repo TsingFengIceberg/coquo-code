@@ -26,6 +26,7 @@ from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionInfo
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -173,7 +174,13 @@ def test_repl_displays_only_completed_turns_without_creating_a_turn(tmp_path) ->
             AssistantText(text="second reply"),
         ]
     )
-    loop = AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
     output = io.StringIO()
 
     run_repl(
@@ -216,7 +223,13 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
     output = io.StringIO()
 
     run_repl(
-        AgentLoop(provider, ReadFileTool(tmp_path), GlobTool(tmp_path), GrepTool(tmp_path)),
+        AgentLoop(
+            provider,
+            ReadFileTool(tmp_path),
+            GlobTool(tmp_path),
+            GrepTool(tmp_path),
+            ListDirectoryTool(tmp_path),
+        ),
         stdin=io.StringIO("first prompt\nsecond prompt\n/exit\n"),
         stdout=output,
         version="0.1.0",

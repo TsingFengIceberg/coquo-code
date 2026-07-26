@@ -103,6 +103,10 @@ from leonervis_code.tools.edit_file import (
 )
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import (
+    LIST_DIRECTORY_TOOL_NAME,
+    ListDirectoryTool,
+)
 from leonervis_code.tools.mkdir import (
     MKDIR_TOOL_NAME,
     MkdirOutcome,
@@ -331,6 +335,7 @@ class ProjectSession:
         read_file: ReadFileTool,
         glob: GlobTool,
         grep: GrepTool,
+        list_directory: ListDirectoryTool,
         write_file: WriteFileTool | None = None,
         edit_file: EditFileTool | None = None,
         run_command: RunCommandTool | None = None,
@@ -354,6 +359,7 @@ class ProjectSession:
         self._read_file = read_file
         self._glob = glob
         self._grep = grep
+        self._list_directory = list_directory
         self._write_file = write_file or WriteFileTool(workspace)
         self._edit_file = edit_file or EditFileTool(workspace)
         self._run_command = run_command or RunCommandTool(workspace)
@@ -398,6 +404,7 @@ class ProjectSession:
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
+        list_directory_factory: Callable[[Path], ListDirectoryTool] = ListDirectoryTool,
         write_file_factory: Callable[[Path], WriteFileTool] = WriteFileTool,
         edit_file_factory: Callable[[Path], EditFileTool] = EditFileTool,
         run_command_factory: Callable[[Path, Mapping[str, str]], RunCommandTool] = RunCommandTool,
@@ -441,6 +448,7 @@ class ProjectSession:
             read_file = read_file_factory(resolved_workspace)
             glob = glob_factory(resolved_workspace)
             grep = grep_factory(resolved_workspace)
+            list_directory = list_directory_factory(resolved_workspace)
             write_file = write_file_factory(resolved_workspace)
             edit_file = edit_file_factory(resolved_workspace)
             run_command = run_command_factory(resolved_workspace, resolved_environment)
@@ -461,6 +469,7 @@ class ProjectSession:
                     read_file,
                     glob,
                     grep,
+                    list_directory,
                     write_file,
                     edit_file,
                     run_command,
@@ -481,6 +490,7 @@ class ProjectSession:
                     read_file,
                     glob,
                     grep,
+                    list_directory,
                     commit_turn=lambda turn: writer_holder["writer"].append_turn(
                         turn.items,
                         binding=binding_from_status(manager.status()),
@@ -512,6 +522,7 @@ class ProjectSession:
                     read_file,
                     glob,
                     grep,
+                    list_directory,
                     write_file,
                     edit_file,
                     run_command,
@@ -623,6 +634,7 @@ class ProjectSession:
                     self._read_file,
                     self._glob,
                     self._grep,
+                    self._list_directory,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
@@ -1038,12 +1050,13 @@ class ProjectSession:
         self.close()
 
     @staticmethod
-    def _loop_from_state(state, read_file, glob, grep, *, commit_turn) -> AgentLoop:
+    def _loop_from_state(state, read_file, glob, grep, list_directory, *, commit_turn) -> AgentLoop:
         return AgentLoop(
             None,
             read_file,
             glob,
             grep,
+            list_directory,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -1057,6 +1070,7 @@ class ProjectSession:
             self._read_file,
             self._glob,
             self._grep,
+            self._list_directory,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
         loop.install_action_dispatcher(self._dispatch_action)
@@ -1076,7 +1090,12 @@ class ProjectSession:
         prepared_move: PreparedMoveFile | None = None
         prepared_delete: PreparedDeleteFile | None = None
         prepared_delete_directory: PreparedDeleteDirectory | None = None
-        if request.name in {READ_FILE_TOOL_NAME, GLOB_TOOL_NAME, GREP_TOOL_NAME}:
+        if request.name in {
+            READ_FILE_TOOL_NAME,
+            GLOB_TOOL_NAME,
+            GREP_TOOL_NAME,
+            LIST_DIRECTORY_TOOL_NAME,
+        }:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
         elif request.name == WRITE_FILE_TOOL_NAME:
@@ -1181,6 +1200,8 @@ class ProjectSession:
                 result = self._glob.execute(request)
             elif request.name == GREP_TOOL_NAME:
                 result = self._grep.execute(request)
+            elif request.name == LIST_DIRECTORY_TOOL_NAME:
+                result = self._list_directory.execute(request)
             elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
                 write_result = self._write_file.execute_detailed(prepared_write)
                 outcome = {

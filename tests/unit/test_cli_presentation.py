@@ -53,6 +53,7 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
+from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 
 
@@ -268,6 +269,7 @@ def inspection(tmp_path, report=None, diagnostic=None, *history):
         ReadFileTool(tmp_path),
         GlobTool(tmp_path),
         GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
         initial_history=tuple(history),
     )
     target = CurrentTargetContextAssessment(status(), report, diagnostic)

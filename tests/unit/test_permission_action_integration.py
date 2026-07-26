@@ -132,6 +132,43 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         session.close()
 
 
+def test_list_directory_is_workspace_read_audited_and_committed_without_approval(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "target" / "empty").mkdir(parents=True)
+    call = ToolUse(
+        "list-1",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "target"}),
+    )
+    provider = ToolProvider([call, AssistantText("listed")])
+    approvals = []
+    session = open_session(
+        tmp_path,
+        provider,
+        approval_handler=lambda approval: approvals.append(approval),
+    )
+    try:
+        assert session.prompt("inspect target") == "listed"
+        result = ToolResult("list-1", '{"path":"target/empty","type":"directory"}\n')
+        assert provider.requests[1].history[-2:] == (call, result)
+        assert session.history == (
+            UserMessage("inspect target"),
+            call,
+            result,
+            AssistantText("listed"),
+        )
+        assert approvals == []
+        audit = session.action_audits()[-1]
+        assert audit.status == ActionAuditStatus.SUCCEEDED
+        assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+        assert audit.result_code == "ok"
+        assert audit.identity.action.value == "workspace-read"
+        assert audit.identity.tool_name == "list_directory"
+    finally:
+        session.close()
+
+
 def test_hard_rejected_write_returns_tool_error_without_action_audit(
     tmp_path: Path,
 ) -> None:
