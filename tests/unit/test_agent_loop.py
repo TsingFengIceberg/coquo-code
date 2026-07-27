@@ -5,6 +5,13 @@ from dataclasses import replace
 import pytest
 
 from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
+from leonervis_code.agent.tool_events import (
+    ToolDispatchResult,
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestLimited,
+    ToolRequestStarted,
+)
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
     ToolArguments,
@@ -656,6 +663,7 @@ def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tm
     prepared = loop.prepare_turn("inspect")
     lease = _action_lease_for(prepared)
     dispatched = []
+    events = []
 
     def dispatch(request, _lease):
         dispatched.append(request.tool_use_id)
@@ -663,10 +671,120 @@ def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tm
 
     loop.install_action_dispatcher(dispatch)
 
-    assert loop.run_prepared(prepared.with_action_lease(lease), provider=provider) == "stopped"
+    assert (
+        loop.run_prepared(
+            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+        )
+        == "stopped"
+    )
     assert dispatched == ["read-1", "read-2", "read-3", "read-4", "read-5", "read-6"]
     assert provider.received_requests[-1].history[-1] == ToolResult(
         "read-7",
         "tool call limit reached for this conversation turn",
         is_error=True,
     )
+    assert len(events) == 13
+    assert isinstance(events[-1], ToolRequestLimited)
+    assert events[-1].call_index == 7
+    assert events[-1].call_limit == 6
+
+
+def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_path) -> None:
+    first = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"}))
+    second = ToolUse(
+        "grep-1",
+        "grep",
+        ToolArguments.from_mapping({"query": "secret query", "include": "*.txt"}),
+    )
+    provider = ScriptedFakeProvider([first, second, AssistantText("done")])
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    prepared = loop.prepare_turn("inspect")
+    lease = _action_lease_for(prepared)
+
+    def dispatch(request, _lease):
+        if request.name == "read_file":
+            return ToolDispatchResult(
+                ToolResult(request.tool_use_id, "bounded", truncated=True),
+                ToolEventStatus.SUCCEEDED,
+                "ok",
+            )
+        return ToolDispatchResult(
+            ToolResult(request.tool_use_id, "denied", is_error=True),
+            ToolEventStatus.DENIED,
+            "denied_read_only_mode",
+        )
+
+    loop.install_action_dispatcher(dispatch)
+    events = []
+
+    assert (
+        loop.run_prepared(
+            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+        )
+        == "done"
+    )
+    assert events == [
+        ToolRequestStarted("read_file", 1, 6, "path='a.txt'"),
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok", truncated=True),
+        ToolRequestStarted("grep", 2, 6, "include='*.txt' query_bytes=12"),
+        ToolRequestFinished("grep", 2, 6, ToolEventStatus.DENIED, "denied_read_only_mode"),
+    ]
+    assert "secret query" not in repr(events)
+
+
+def test_tool_event_sink_failure_does_not_change_execution_or_commit(tmp_path) -> None:
+    (tmp_path / "a.txt").write_text("ok\n", encoding="utf-8")
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"})),
+            AssistantText("done"),
+        ]
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    def broken_sink(_event):
+        raise OSError("terminal closed")
+
+    assert loop.run("inspect", event_sink=broken_sink) == "done"
+    assert loop.turns[-1].assistant == AssistantText("done")
+
+
+def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -> None:
+    call = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"}))
+    provider = ScriptedFakeProvider([call])
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    prepared = loop.prepare_turn("inspect")
+    lease = _action_lease_for(prepared)
+    loop.install_action_dispatcher(
+        lambda _request, _lease: (_ for _ in ()).throw(RuntimeError("audit failed"))
+    )
+    events = []
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        loop.run_prepared(
+            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+        )
+
+    assert events == [
+        ToolRequestStarted("read_file", 1, 6, "path='a.txt'"),
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.OUTCOME_UNKNOWN),
+    ]
+    assert loop.history == ()

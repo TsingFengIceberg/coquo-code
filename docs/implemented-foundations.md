@@ -28,6 +28,7 @@
 - [工具批次 B：Process-isolated Regex Grep](#工具批次-bprocess-isolated-regex-grep)
 - [工具批次 C：Structured Exact Multi-edit Patch](#工具批次-cstructured-exact-multi-edit-patch)
 - [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
+- [Live Redacted Tool Activity](#live-redacted-tool-activity)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -470,6 +471,14 @@ Patch复用`workspace-overwrite`、source SHA-256 precondition、approval后reva
 
 Canonical system prompt升级到v15；工具schema、顺序及provider projection逻辑不变，所以provider adapter contract保持v15。Empty full-context golden更新为`ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`；ToolArguments、ActionIdentity、Session/Action Audit、compaction和ctx representation版本均不升级，旧transcript不重写。完整决策见[0040：Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)。
 
+## Live Redacted Tool Activity
+
+AgentLoop现在为每次正常工具dispatch发出typed started/finished事件，并复用共享六次预算的index。第七次请求只发limited事件且不进入dispatch；若dispatch异常后effect不能可靠判断，结束状态明确为`outcome-unknown`。ProjectSession从结构化PermissionGate、approval resolution和ActionCoordinator execution metadata映射`error | denied | rejected | cancelled | succeeded | failed | partial`，不解析ToolResult文本。
+
+摘要按工具类型最小化：显示workspace-relative path、include、byte/edit/argument count、command basename、cwd和timeout；不显示file/edit/query内容、完整argv、absolute path、digest、lease、内部ID或raw result。参数执行校验前出现的absolute path会隐藏为`<absolute>`，控制字符被转义，摘要长度有界。One-shot通过可复用`TerminalEventSink`把事件写到stderr并保持stdout只有最终回答；REPL写到自身stdout。Sink异常被隔离，不能改变工具执行、Action Audit、turn commit或Session state。
+
+Live events不写append-only transcript、不参与resume/compaction、不进入model history，也不能替代durable Action Audit。该Host-only slice不改变工具schema/order、system prompt v15、provider adapter v15、empty Effective Context identity或任何Session/Action Audit/context representation version。完整决策见[0041：Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -676,3 +685,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 38. [0038：工具批次 B Process-isolated Regex Grep](./decisions/0038-batch-b-process-isolated-regex-grep.md)
 39. [0039：工具批次 C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
 40. [0040：Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)
+41. [0041：Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)

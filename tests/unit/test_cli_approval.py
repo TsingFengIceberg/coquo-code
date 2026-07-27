@@ -197,7 +197,11 @@ def test_one_shot_auto_requires_explicit_write_capability_and_executes(tmp_path:
 
     assert status == 0
     assert stdout.getvalue() == "finished\n"
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == (
+        "[tool 1/6] write_file path='note.txt' content_bytes=21\n"
+        "[tool 1/6] succeeded code=created\n"
+    )
+    assert "secret model content" not in stderr.getvalue()
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"
 
 
@@ -233,6 +237,8 @@ def test_repl_ask_uses_terminal_confirmation_and_does_not_echo_content(tmp_path:
     assert status == 0
     rendered = stdout.getvalue()
     assert "Approval required: workspace-create write_file path='note.txt' bytes=21" in rendered
+    assert "[tool 1/6] write_file path='note.txt' content_bytes=21" in rendered
+    assert "[tool 1/6] succeeded code=created" in rendered
     assert "secret model content" not in rendered
     assert "finished" in rendered
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"

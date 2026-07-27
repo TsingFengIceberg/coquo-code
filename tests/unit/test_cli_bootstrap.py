@@ -7,6 +7,11 @@ from uuid import UUID
 import pytest
 
 from leonervis_code import __version__
+from leonervis_code.agent.tool_events import (
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestStarted,
+)
 from leonervis_code.cli.main import main
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.contracts import AssistantText, ToolArguments
@@ -18,6 +23,7 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
 )
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import (
     ActionAuthorization,
     ActionExecutionOutcome,
@@ -52,6 +58,41 @@ def test_prompt_command_runs_the_deterministic_foundation_loop(capsys, tmp_path)
     captured = capsys.readouterr()
     assert captured.out == "Fake response: Hello\n"
     assert captured.err == ""
+
+
+def test_prompt_command_keeps_final_text_on_stdout_and_tool_events_on_stderr(
+    monkeypatch, tmp_path
+) -> None:
+    class EventSession:
+        startup_resume_result = None
+
+        def prompt(self, text, *, event_sink=None):
+            assert text == "inspect"
+            event_sink(ToolRequestStarted("read_file", 1, 6, "path='README.md'"))
+            event_sink(ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
+            return "final answer"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: EventSession())
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["prompt", "inspect"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 0
+    )
+    assert output.getvalue() == "final answer\n"
+    assert errors.getvalue() == (
+        "[tool 1/6] read_file path='README.md'\n[tool 1/6] succeeded code=ok\n"
+    )
 
 
 def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_path) -> None:

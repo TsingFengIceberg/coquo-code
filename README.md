@@ -81,33 +81,18 @@ uv run leonervis-code session --help
 | 一次性自动运行获准命令 | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
 | 查看版本 | `uv run leonervis-code --version` |
 
-`prompt` 用于脚本和一次性任务；裸命令用于有状态多轮 REPL。成功 turn 会自动保存到 workspace Session transcript。
+`prompt`用于脚本和一次性任务；裸命令用于有状态多轮REPL。成功turn会自动保存，工具执行时会显示脱敏的`[tool 1/6] ...`状态行。
 
-权限默认是`read-only + ask`。`--permission-mode`是能力上限，`--approval`决定范围内动作逐次询问还是自动继续，两者相互独立。One-shot `prompt`遇到`ask`会安全取消且不会读取stdin；只有REPL会展示写入、目录创建或文件删除的相对路径、移动的source/destination、写入byte count，或命令的argv/cwd/timeout，并接受`y/yes`、`n/no`或`c/cancel`。`run_command`固定属于`dangerous`，因此`read-only`和`workspace-write`都会拒绝，只有`danger-full-access`能够按ask/auto继续。
+常用权限模式：
 
-`write_file(path, content)`写入一个文件的**完整**UTF-8内容，不是patch。模型不能自报create/overwrite：Host根据目标是否存在分类，并在执行前重新检查审批绑定的absent或SHA-256状态。工具不跟随symlink、不创建parent directory，content上限为4096 characters且4096 UTF-8 bytes；overwrite只接受最多1 MiB的现有UTF-8普通文件、保留mode并拒绝stale/conflicting target。Permission或auto approval都不能绕过这些hard bounds。
+```bash
+uv run leonervis-code                                      # read-only REPL
+uv run leonervis-code --permission-mode workspace-write --approval ask
+uv run leonervis-code --permission-mode danger-full-access --approval ask
+uv run leonervis-code --permission-mode workspace-write --approval auto prompt "修改并验证项目"
+```
 
-`edit_file(path, old_text, new_text)`现已是第五个model-visible工具，用于对现有UTF-8文件做一次唯一exact replacement。它复用`workspace-overwrite`审批、源SHA-256复查、原子replace与durable Action Audit，并拒绝零匹配、多匹配（含重叠匹配）、no-op、symlink和stale source。`new_text`可为空以做精确删除；它不会创建文件或parent directory，也不支持regex、模糊匹配或一次替换多处。
-
-`run_command(argv, cwd, timeout_seconds)`是第六个model-visible工具，用于运行测试、lint和build verification。Host直接执行argv而不解析shell source，stdin关闭，cwd必须是已存在且无symlink的workspace相对目录，timeout为1–300秒，stdout/stderr各最多保留32 KiB。命令只继承Host固定allowlist环境，并在timeout、取消或残留process group时执行有界TERM→KILL清理；但它没有OS、filesystem、network或credential sandbox，也不能回滚已发生副作用。
-
-`mkdir(path)`是第七个model-visible工具，只创建一个缺失的workspace相对目录。它固定属于`workspace-create`：`read-only`拒绝，`workspace-write`或`danger-full-access`按ask/auto继续。Parent directory必须已存在且整条路径不能含symlink；工具不递归创建parent，也不把已存在目录当作成功。Approval后目标若已出现会以stale拒绝；创建成功会fsync新目录和parent，若目录已可见但durability确认失败则返回partial并要求不要自动重试。
-
-`move_file(source, destination)`是第八个model-visible工具，只移动一个现有普通文件到一个缺失的workspace相对目标。它属于独立的`workspace-move`：`read-only`拒绝，两个可写mode按ask/auto继续。两端parent必须存在、路径不得含symlink、source和destination必须同filesystem，destination任何已存在entry都不会被覆盖。Host在approval后复查source、destination和两端parent；执行采用exclusive hard-link、destination parent fsync、source unlink、source parent fsync。由于这不是单步transaction，若destination已出现但source仍保留或durability未知，会返回partial并要求先检查两个路径、不要自动重试。
-
-`delete_file(path)`是第九个model-visible工具，只永久删除一个现有的非symlink普通文件。它属于独立的`workspace-delete`：`read-only`拒绝，两个可写mode按ask/auto继续。Parent必须已存在且路径不能含symlink；missing target、目录和symlink会在permission前hard reject，不创建Action Audit。Host在approval后复查target与parent identity，再unlink并fsync parent。若文件名已消失但parent durability无法确认，会返回partial；此时不能自动重试，也没有trash、backup或undo。
-
-`delete_directory(path)`是第十个model-visible工具，只永久删除一个现有的empty non-symlink directory，并复用`workspace-delete`。Non-empty target、普通文件、symlink、missing target或不安全parent会在permission前hard reject。Approval后Host复查target、parent和empty状态；执行前先持久化`action_execution_started`，随后使用OS `rmdir`的原子empty条件并fsync parent。若目录名已消失但durability未知，会返回partial且不得自动重试；不支持recursive delete、trash、backup或undo。
-
-`list_directory(path)`是第十一个model-visible工具，只读列出一个目录的直接子项；用`.`表示workspace root。结果按UTF-8路径稳定排序，以JSONL返回`path`及`file`/`directory`/`symlink`/`other`类型，包括hidden entry但不递归、不跟随symlink、不读取内容。工具最多扫描10,000个直接子项、返回200条且输出不超过32 KiB；扫描上限会安全报错，条数或字节上限会附加`{"truncated":true}`。它属于`workspace-read`，任何permission mode都无需人工approval，但仍经过Action Audit与共享tool budget。
-
-`copy_file(source, destination)`是第十二个model-visible工具，只复制一个最多1 MiB的普通文件到缺失目标，并保持source不变。两端parent必须已存在，路径不得含symlink，destination任何现有entry都不会被覆盖。它按原始bytes复制并只保留基本`rwx`权限位；`read-only`拒绝，两个可写mode按`workspace-create`的ask/auto策略继续。Host在approval后复查source内容、两端parent与destination absence，再通过已fsync的temporary file和exclusive install落位；若destination已出现但cleanup或durability不确定，会返回partial且不得自动重试。
-
-`read_file_lines(path, start_line, line_count)`从一个最多1 MiB的UTF-8普通文件读取1-based logical-line范围，一次最多200行、输出最多32 KiB；适合继续读取`read_file`被截断后的后部。`stat_path(path)`以no-follow方式返回file/directory/symlink/other类型、基本`rwx` mode与mtime，普通文件额外返回size。`list_tree(path, max_depth)`递归列出最多16层的有界tree，包含hidden entry但绝不跟随symlink；扫描上限整体报错，500条或32 KiB结果上限返回truncated sentinel。三者都属于`workspace-read`。
-
-`grep_regex(pattern, include)`把case-sensitive Python regex独立应用到每个logical line，沿用literal grep的候选文件、UTF-8、读取量、匹配数和32 KiB输出限制。整个selector/read/match过程在独立worker process内执行，Host最多等待1秒；超时会终止并回收worker，返回错误而不是卡住主Agent进程。它不支持跨行、flags参数、index或ignore-aware搜索；能用literal `grep`时应优先使用literal版本。
-
-`patch_file(path, edits)`对一个existing UTF-8普通文件原子应用1–16个结构化exact replacements。每个`old_text`必须在同一原始snapshot中恰好出现一次，所有match不得重叠；全部验证成功后才构造一份完整candidate。它复用`workspace-overwrite`审批、source digest复查与atomic replace，approval和Action Audit只显示path而不显示edit文本；partial结果表示candidate可能已安装但durability未知，此时不得自动重试。它不是unified diff、regex patch或fuzzy patch。
+One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。17个工具的参数、权限、workspace/symlink、timeout、stale-state和durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
 
 ### 配置 Provider
 
@@ -173,7 +158,7 @@ uv run leonervis-code provider show vendor
 uv run leonervis-code --profile vendor route
 ```
 
-Runtime 按字段独立解析 context window 与 model max output：profile exact override → exact built-in catalog → fresh private discovery cache → provider-owned live discovery → `unknown`。每次 provider invocation（包括工具 continuation）都会用当前 requested output reserve 做 preflight；Anthropic official endpoint 优先 exact count，OpenAI-compatible 使用明确标记的 deterministic estimate，unknown 时不猜测并允许 provider 最终裁决。普通 prompt 在 exact initial request 的 input + reserve 达到 known window 的 80% 时最多 proactive compact 一次，在 known context overflow 时最多 mandatory compact 一次；unknown不触发，model-output overflow直接拒绝，成功compact后的真实invocation仍执行完整preflight。REPL 的 `/provider use` 与 `/model` 还会在提交切换前计量当前已提交历史：known overflow 保留旧 runtime/selection，unknown 则以 warning 允许切换；下一次真实 invocation 仍执行完整 preflight。
+使用`route`查看离线解析结果，在REPL中使用`/status`和`/context`查看当前runtime与context状态。Capability解析、request preflight、自动compact和切换前screening的完整规则见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ### 管理 Session
 
@@ -186,7 +171,7 @@ uv run leonervis-code --resume latest prompt "继续上一轮"
 uv run leonervis-code --resume <session-uuid>
 ```
 
-Session 绑定 workspace，并使用 append-only JSONL 保存完整成功 turn。`session actions latest`默认显示最近20条脱敏action lifecycle，`--limit 1..100`可调整数量；它严格只读重放已有transcript，不创建或修复Session状态。恢复 Session 只恢复历史；当前 provider 仍由本次 CLI selector 或 active profile 决定。Startup `--resume` 与 REPL `/resume` 会先以只读独占 lease 重放目标，并用当前 runtime 检查目标 Effective Context；known context/model-output overflow 在写入 `SessionResumed` 或更新 `latest.json` 前拒绝，`UNKNOWN` 以 warning fail open，fake runtime 明确不执行 provider 请求。Compacted Session 按 Host summary + retained real-turn suffix 计量，而不是按完整 transcript。`/resume latest` 对准备期间的 pointer 变化执行 exact CAS；恢复当前 Session 是不写 record 的 no-op。下一次真实 invocation 仍执行完整 preflight。
+Session绑定workspace，并以append-only JSONL保存成功turn。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ### REPL 命令
 
@@ -208,9 +193,18 @@ Session 绑定 workspace，并使用 append-only JSONL 保存完整成功 turn�
 | `/resume <latest\|id>` | 保持当前 runtime，切换 Session |
 | `/exit`、`/quit` | 正常退出 |
 
-Ctrl-D、EOF 或在等待输入时按 Ctrl-C 也会正常退出。`/context` 不调用模型生成、不修改 Session，也不写 transcript；compact 后它会明确区分完整 transcript、summary、保留的 real turns与latest checkpoint trigger。`/compact` 只在至少 4 个完整 effective turns 时工作，固定保留最近 2 个 turns，使用当前真实 provider 发起一次不暴露工具的 summary 请求；成功时只 append+fsync typed checkpoint，完整 `/history` 不变。普通 one-shot/REPL prompt也复用同一transaction：exact initial request的input + reserve达到known window的80%时最多proactive compact一次，known context overflow时最多mandatory compact一次；pending user参与前后计量但不进入summary/checkpoint。Proactive安全precommit failure会warning后继续原known-fit turn，mandatory failure不发送普通generation；事件不显示pending或summary原文。Fake runtime、unknown/non-reducing candidate 或任何 precommit failure 都不会提交 compact。`/resume` screening 也不调用 generation/tool；known overflow 保持 current Session、runtime、latest 与 target transcript 不变，unknown/fake 则以明确 warning 应用恢复。Anthropic official route 的 exact inspection/compact/resume count 可能发起 count-only `messages.count_tokens` 请求，OpenAI-compatible 使用本地 estimate。终端颜色只在 TTY 中启用；设置 `NO_COLOR=1` 可关闭。
+常用REPL操作：
 
-`read_file`、`glob`、literal `grep`与`list_directory`是当前模型可见的四个只读工具，并与其他工具共享每个user turn最多6次顺序执行预算。`glob`接受workspace-relative、`/`分隔pattern，支持component `*`、`?`、bracket class与whole-component `**`；只返回stable sorted的non-symlink regular-file paths，不读取内容、不跟随link，hidden component必须显式以`.`匹配。`grep(query, include)`以相同portable selector选择UTF-8 regular files，再做case-sensitive literal line search，按path与1-based line稳定输出JSONL；它不支持regex、index或`.gitignore`。`list_directory`补充一层目录与entry-type观察，但不替代递归glob或内容搜索。所有截断结果都不证明被省略的path、entry或match不存在。
+```text
+/status
+/context
+/actions
+/compact
+/resume latest
+/history 5
+```
+
+Ctrl-D、EOF或等待输入时按Ctrl-C可正常退出。终端颜色只在TTY中启用；可设置`NO_COLOR=1`关闭。Context、compaction、resume、工具预算及只读工具的完整语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -248,6 +242,7 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [Live Redacted Tool Activity Events](./docs/decisions/0041-live-redacted-tool-activity-events.md)：typed工具生命周期、终端输出通道、脱敏摘要、sink失败隔离及不改变模型/Session契约的依据。
 - [Bounded One-level Directory Listing](./docs/decisions/0035-foundation-1e-bounded-directory-listing.md)：一层目录观察、entry type、no-follow路径、扫描/输出上限与empty/truncated语义。
 - [Controlled No-overwrite File Move](./docs/decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)：双路径identity、workspace-move审批、no-overwrite hard-link/unlink、stale检查与truthful partial。
 - [Controlled Empty-directory Deletion](./docs/decisions/0034-foundation-4g-controlled-empty-directory-deletion.md)：空目录workspace-delete审批、empty-state/identity复查、rmdir原子空条件与parent durability。
@@ -280,4 +275,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`；17个工具共享每个user turn最多六次顺序调用。第七次请求只得到structured limit result，不进入permission、approval、executor或Action Audit；模型若继续请求工具则candidate turn不提交。四个新增读取/导航工具复用`workspace-read`，`patch_file`复用`workspace-overwrite`，其余action class保持不变。
 
-工具批次A/B/C现已完成，Foundation 5A仍暂缓。Canonical system prompt为v15，provider adapter contract保持v15，empty full-context identity为`ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。工具批次设计见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)，六次预算见[ADR 0040](./docs/decisions/0040-shared-six-call-tool-budget.md)。
+工具批次A/B/C、六次预算和脱敏live tool activity现已完成，Foundation 5A仍暂缓。Canonical system prompt为v15，provider adapter contract保持v15，empty full-context identity为`ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。工具批次设计见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)，六次预算见[ADR 0040](./docs/decisions/0040-shared-six-call-tool-budget.md)，live activity见[ADR 0041](./docs/decisions/0041-live-redacted-tool-activity-events.md)。

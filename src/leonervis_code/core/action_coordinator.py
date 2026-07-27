@@ -65,6 +65,15 @@ class ActionCoordinatorResult:
     permission_result: PermissionResult
     approval_resolution: ApprovalResolution | None
     executed: bool
+    execution_outcome: ActionExecutionOutcome | None = None
+    result_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.executed:
+            if self.execution_outcome is None or self.result_code is None:
+                raise ValueError("executed action result requires execution metadata")
+        elif self.execution_outcome is not None or self.result_code is not None:
+            raise ValueError("unexecuted action result cannot carry execution metadata")
 
 
 class ActionIdentityChangedError(RuntimeError):
@@ -208,6 +217,8 @@ class ActionCoordinator:
             permission,
             resolution,
             True,
+            execution.outcome,
+            execution.result_code,
         )
 
 

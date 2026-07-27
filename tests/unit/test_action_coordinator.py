@@ -129,6 +129,8 @@ def test_policy_allow_durably_starts_before_executor_and_finishes_afterward() ->
     assert result.executed
     assert result.approval_resolution is None
     assert result.tool_result == ToolResult("tool-1", "ok")
+    assert result.execution_outcome == ActionExecutionOutcome.SUCCEEDED
+    assert result.result_code == "ok"
     assert order == ["execute"]
     assert writer.calls == [
         ("action_requested", exact.digest),
@@ -158,6 +160,8 @@ def test_policy_deny_never_prompts_revalidates_or_executes() -> None:
 
     assert result.executed is False
     assert result.approval_resolution is None
+    assert result.execution_outcome is None
+    assert result.result_code is None
     assert result.tool_result.is_error
     assert "denied_read_only_mode" in result.tool_result.content
     assert approval_calls == []
@@ -189,6 +193,8 @@ def test_ask_reject_or_cancel_is_terminal_without_execution(
 
     assert result.executed is False
     assert result.approval_resolution == resolution
+    assert result.execution_outcome is None
+    assert result.result_code is None
     assert result.tool_result.is_error
     assert message in result.tool_result.content
     assert writer.calls[-1] == ("approval_resolved", audit_outcome, None)
@@ -322,6 +328,8 @@ def test_known_partial_executor_outcome_is_durably_distinct_from_failure() -> No
     )
 
     assert result.tool_result.is_error
+    assert result.execution_outcome == ActionExecutionOutcome.PARTIAL
+    assert result.result_code == "durability_unknown"
     assert writer.calls[-1] == (
         "action_execution_finished",
         ActionExecutionOutcome.PARTIAL,

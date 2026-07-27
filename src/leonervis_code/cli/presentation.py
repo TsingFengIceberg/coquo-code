@@ -5,7 +5,18 @@ from __future__ import annotations
 import re
 from typing import Literal, Protocol
 
+from leonervis_code.agent.tool_events import (
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestLimited,
+    ToolRequestStarted,
+)
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
+from leonervis_code.session import (
+    AutoCompactionCommitted,
+    AutoCompactionNotApplied,
+    AutoCompactionStarted,
+)
 
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
@@ -417,10 +428,47 @@ def render_resume_rejection(report: ContextFitReport, *, startup: bool = False) 
 
 
 def render_prompt_event(event: object) -> tuple[str, MessageKind]:
-    """Render one safe automatic-compaction lifecycle event."""
-    name = type(event).__name__
+    """Render one safe ephemeral prompt lifecycle event."""
+    if isinstance(event, ToolRequestStarted):
+        detail = f" {event.safe_summary}" if event.safe_summary else ""
+        return (
+            f"[tool {event.call_index}/{event.call_limit}] {event.tool_name}{detail}",
+            "info",
+        )
+    if isinstance(event, ToolRequestFinished):
+        detail = f" code={event.result_code}" if event.result_code is not None else ""
+        if event.truncated:
+            detail += " truncated=true"
+        kind: MessageKind
+        if event.status == ToolEventStatus.SUCCEEDED:
+            kind = "success"
+        elif event.status in {
+            ToolEventStatus.DENIED,
+            ToolEventStatus.REJECTED,
+            ToolEventStatus.CANCELLED,
+            ToolEventStatus.PARTIAL,
+        }:
+            kind = "warning"
+        else:
+            kind = "error"
+        return (
+            f"[tool {event.call_index}/{event.call_limit}] {event.status.value}{detail}",
+            kind,
+        )
+    if isinstance(event, ToolRequestLimited):
+        return (
+            f"[tool {event.call_index}/{event.call_limit}] {event.tool_name} not executed: "
+            "tool-call limit reached",
+            "warning",
+        )
+
+    if not isinstance(
+        event,
+        (AutoCompactionStarted, AutoCompactionCommitted, AutoCompactionNotApplied),
+    ):
+        raise ValueError("unsupported prompt event")
     trigger = event.trigger.value.replace("_", " ")
-    if name == "AutoCompactionStarted":
+    if isinstance(event, AutoCompactionStarted):
         threshold = (
             f" at the {event.high_water_percent}% high-water mark"
             if event.high_water_percent is not None
@@ -432,7 +480,7 @@ def render_prompt_event(event: object) -> tuple[str, MessageKind]:
             f"window={event.context_window_tokens}; trigger={trigger}.",
             "info",
         )
-    if name == "AutoCompactionCommitted":
+    if isinstance(event, AutoCompactionCommitted):
         result = event.result
         return (
             f"Automatic compact committed ({trigger}): summarized "

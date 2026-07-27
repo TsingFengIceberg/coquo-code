@@ -4,6 +4,11 @@ import io
 from pathlib import Path
 
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.agent.tool_events import (
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestStarted,
+)
 from leonervis_code.cli.presentation import render_recent_history, render_session_summary
 from leonervis_code.cli.repl import (
     complete_command,
@@ -350,6 +355,29 @@ def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
     assert "Unknown command: /modelx gpt-5" in rendered
     assert "Unknown provider command: usex" in rendered
     assert "Usage: /provider <list|current|use>" in rendered
+
+
+def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
+    class EventSession:
+        def prompt(self, prompt, *, event_sink=None):
+            event_sink(ToolRequestStarted("grep", 1, 6, "include='*.py' query_bytes=6"))
+            event_sink(ToolRequestFinished("grep", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
+            return f"reply: {prompt}"
+
+    output = io.StringIO()
+
+    run_repl(
+        EventSession(),
+        stdin=io.StringIO("search\n/exit\n"),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+    )
+
+    rendered = output.getvalue()
+    assert "[tool 1/6] grep include='*.py' query_bytes=6\n" in rendered
+    assert "[tool 1/6] succeeded code=ok\nreply: search\n" in rendered
 
 
 def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -> None:

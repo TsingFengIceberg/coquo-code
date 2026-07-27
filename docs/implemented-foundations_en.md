@@ -28,6 +28,7 @@
 - [Tool Batch B: Process-isolated Regex Grep](#tool-batch-b-process-isolated-regex-grep)
 - [Tool Batch C: Structured Exact Multi-edit Patch](#tool-batch-c-structured-exact-multi-edit-patch)
 - [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
+- [Live Redacted Tool Activity](#live-redacted-tool-activity)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -470,6 +471,14 @@ The first six requests pass through validation, PermissionGate, optional approva
 
 The canonical system prompt advances to v15. Tool schemas, order, and provider projection logic do not change, so the provider adapter contract remains v15. The empty full-context golden becomes `ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`. ToolArguments, ActionIdentity, Session/Action Audit, compaction, and context representation versions remain unchanged, and old transcripts are not rewritten. See [0040: Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md).
 
+## Live Redacted Tool Activity
+
+AgentLoop now emits typed started/finished events around every normal tool dispatch using the shared six-call budget index. A seventh request emits only a limited event and does not enter dispatch. If dispatch raises after the effect can no longer be stated reliably, the terminal status is explicitly `outcome-unknown`. ProjectSession maps `error | denied | rejected | cancelled | succeeded | failed | partial` from structured PermissionGate, approval-resolution, and ActionCoordinator execution metadata rather than parsing ToolResult text.
+
+Summaries are minimized per tool: workspace-relative paths, includes, byte/edit/argument counts, command basename, cwd, and timeout may appear; file/edit/query content, full argv, absolute paths, digests, leases, internal IDs, and raw results may not. Absolute paths observed before execution validation become `<absolute>`, control characters are escaped, and summary lengths are bounded. A reusable `TerminalEventSink` writes one-shot events to stderr while leaving stdout final-answer-only; the REPL writes them to its own stdout. Sink exceptions are isolated and cannot change tool execution, Action Audit, turn commit, or Session state.
+
+Live events are not written to the append-only transcript, do not participate in resume or compaction, never enter model history, and cannot replace durable Action Audit. This Host-only slice leaves tool schemas/order, system prompt v15, provider adapter v15, the empty Effective Context identity, and all Session/Action Audit/context representation versions unchanged. See [0041: Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -676,3 +685,4 @@ This slice establishes capacity facts only. It does not count current request to
 38. [0038: Tool Batch B Process-isolated Regex Grep](./decisions/0038-batch-b-process-isolated-regex-grep.md)
 39. [0039: Tool Batch C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
 40. [0040: Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)
+41. [0041: Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)

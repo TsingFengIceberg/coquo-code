@@ -3,7 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.agent.tool_events import (
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestLimited,
+    ToolRequestStarted,
+)
 from leonervis_code.cli.presentation import (
     BLUE,
     GREEN,
@@ -547,6 +555,50 @@ def test_semantic_colors_are_traditional_and_optional() -> None:
     assert render_message("usage", "warning", color=True) == f"{YELLOW}usage{RESET}"
     assert render_message("info", "info", color=True) == f"{BLUE}info{RESET}"
     assert render_message("failed", "error", color=False) == "failed"
+
+
+def test_tool_prompt_events_render_stable_safe_lines_and_semantic_kinds() -> None:
+    assert render_prompt_event(
+        ToolRequestStarted("grep_regex", 1, 6, "include='src/**/*.py' pattern_bytes=14")
+    ) == (
+        "[tool 1/6] grep_regex include='src/**/*.py' pattern_bytes=14",
+        "info",
+    )
+    assert render_prompt_event(
+        ToolRequestFinished(
+            "grep_regex",
+            1,
+            6,
+            ToolEventStatus.SUCCEEDED,
+            "ok",
+            truncated=True,
+        )
+    ) == ("[tool 1/6] succeeded code=ok truncated=true", "success")
+    assert render_prompt_event(ToolRequestLimited("read_file", 7, 6, "path='secret.txt'")) == (
+        "[tool 7/6] read_file not executed: tool-call limit reached",
+        "warning",
+    )
+
+    expected_kinds = {
+        ToolEventStatus.ERROR: "error",
+        ToolEventStatus.DENIED: "warning",
+        ToolEventStatus.REJECTED: "warning",
+        ToolEventStatus.CANCELLED: "warning",
+        ToolEventStatus.FAILED: "error",
+        ToolEventStatus.PARTIAL: "warning",
+        ToolEventStatus.OUTCOME_UNKNOWN: "error",
+    }
+    for status, expected_kind in expected_kinds.items():
+        message, kind = render_prompt_event(
+            ToolRequestFinished("write_file", 2, 6, status, "stable_code")
+        )
+        assert message == f"[tool 2/6] {status.value} code=stable_code"
+        assert kind == expected_kind
+
+
+def test_unknown_prompt_event_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unsupported prompt event"):
+        render_prompt_event(object())
 
 
 def test_colored_readline_prompt_marks_only_nonprinting_sequences() -> None:

@@ -5,6 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from leonervis_code.agent.tool_events import (
+    ToolDispatchResult,
+    ToolPromptEvent,
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestLimited,
+    ToolRequestStarted,
+    infer_tool_dispatch_result,
+    safe_result_code,
+    safe_tool_request_summary,
+)
 from leonervis_code.core.actions import ActionLease
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
@@ -40,7 +51,8 @@ from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, Read
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
-ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult]
+ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
+ToolEventSink = Callable[[ToolPromptEvent], None]
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -199,15 +211,19 @@ class AgentLoop:
         prompt: str,
         *,
         provider: ConversationProvider | None = None,
+        event_sink: ToolEventSink | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
-        return self.run_prepared(self.prepare_turn(prompt), provider=provider)
+        return self.run_prepared(
+            self.prepare_turn(prompt), provider=provider, event_sink=event_sink
+        )
 
     def run_prepared(
         self,
         prepared: PreparedAgentTurn,
         *,
         provider: ConversationProvider | None = None,
+        event_sink: ToolEventSink | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         turn_provider = provider or self._provider
@@ -226,6 +242,15 @@ class AgentLoop:
 
             pending += (response,)
             if tool_calls == MAX_TOOL_EXECUTIONS_PER_TURN:
+                self._emit_tool_event(
+                    event_sink,
+                    ToolRequestLimited(
+                        response.name,
+                        tool_calls + 1,
+                        MAX_TOOL_EXECUTIONS_PER_TURN,
+                        safe_tool_request_summary(response),
+                    ),
+                )
                 pending += (
                     ToolResult(
                         tool_use_id=response.tool_use_id,
@@ -242,7 +267,40 @@ class AgentLoop:
                 raise ToolLoopLimitError("provider requested a tool after the tool call limit")
 
             tool_calls += 1
-            pending += (self._execute(response, prepared.action_lease),)
+            self._emit_tool_event(
+                event_sink,
+                ToolRequestStarted(
+                    response.name,
+                    tool_calls,
+                    MAX_TOOL_EXECUTIONS_PER_TURN,
+                    safe_tool_request_summary(response),
+                ),
+            )
+            try:
+                dispatch = self._execute(response, prepared.action_lease)
+            except Exception:
+                self._emit_tool_event(
+                    event_sink,
+                    ToolRequestFinished(
+                        response.name,
+                        tool_calls,
+                        MAX_TOOL_EXECUTIONS_PER_TURN,
+                        ToolEventStatus.OUTCOME_UNKNOWN,
+                    ),
+                )
+                raise
+            self._emit_tool_event(
+                event_sink,
+                ToolRequestFinished(
+                    response.name,
+                    tool_calls,
+                    MAX_TOOL_EXECUTIONS_PER_TURN,
+                    dispatch.status,
+                    safe_result_code(dispatch.result_code),
+                    dispatch.tool_result.truncated,
+                ),
+            )
+            pending += (dispatch.tool_result,)
 
     def install_action_dispatcher(self, dispatcher: ActionDispatcher) -> None:
         """Install the ProjectSession-owned permission/audit dispatch seam exactly once."""
@@ -284,33 +342,49 @@ class AgentLoop:
         self._effective_history += items
         self._turns += (ConversationTurn(user=user, assistant=assistant),)
 
-    def _execute(self, request: ToolUse, lease: ActionLease | None) -> ToolResult:
+    def _execute(self, request: ToolUse, lease: ActionLease | None) -> ToolDispatchResult:
         """Dispatch one current tool through the Host action boundary when installed."""
         if self._action_dispatcher is not None:
             if lease is None:
                 raise RuntimeError("prepared action lease is required")
-            return self._action_dispatcher(request, lease)
+            result = self._action_dispatcher(request, lease)
+            if isinstance(result, ToolDispatchResult):
+                return result
+            if type(result) is ToolResult:
+                return infer_tool_dispatch_result(result)
+            raise ValueError("action dispatcher returned an invalid result")
         if request.name == READ_FILE_TOOL_NAME:
-            return self._read_file.execute(request)
-        if request.name == GLOB_TOOL_NAME:
-            return self._glob.execute(request)
-        if request.name == GREP_TOOL_NAME:
-            return self._grep.execute(request)
-        if request.name == LIST_DIRECTORY_TOOL_NAME:
-            return self._list_directory.execute(request)
-        if request.name == READ_FILE_LINES_TOOL_NAME and self._read_file_lines is not None:
-            return self._read_file_lines.execute(request)
-        if request.name == STAT_PATH_TOOL_NAME and self._stat_path is not None:
-            return self._stat_path.execute(request)
-        if request.name == LIST_TREE_TOOL_NAME and self._list_tree is not None:
-            return self._list_tree.execute(request)
-        if request.name == GREP_REGEX_TOOL_NAME and self._grep_regex is not None:
-            return self._grep_regex.execute(request)
-        return ToolResult(
-            tool_use_id=request.tool_use_id,
-            content=f"unknown tool: {request.name}",
-            is_error=True,
-        )
+            result = self._read_file.execute(request)
+        elif request.name == GLOB_TOOL_NAME:
+            result = self._glob.execute(request)
+        elif request.name == GREP_TOOL_NAME:
+            result = self._grep.execute(request)
+        elif request.name == LIST_DIRECTORY_TOOL_NAME:
+            result = self._list_directory.execute(request)
+        elif request.name == READ_FILE_LINES_TOOL_NAME and self._read_file_lines is not None:
+            result = self._read_file_lines.execute(request)
+        elif request.name == STAT_PATH_TOOL_NAME and self._stat_path is not None:
+            result = self._stat_path.execute(request)
+        elif request.name == LIST_TREE_TOOL_NAME and self._list_tree is not None:
+            result = self._list_tree.execute(request)
+        elif request.name == GREP_REGEX_TOOL_NAME and self._grep_regex is not None:
+            result = self._grep_regex.execute(request)
+        else:
+            result = ToolResult(
+                tool_use_id=request.tool_use_id,
+                content=f"unknown tool: {request.name}",
+                is_error=True,
+            )
+        return infer_tool_dispatch_result(result)
+
+    @staticmethod
+    def _emit_tool_event(sink: ToolEventSink | None, event: ToolPromptEvent) -> None:
+        if sink is None:
+            return
+        try:
+            sink(event)
+        except Exception:
+            pass
 
 
 def restore_history(

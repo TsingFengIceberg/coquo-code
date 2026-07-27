@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from leonervis_code.agent.tool_events import ToolEventStatus, ToolRequestFinished
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
 from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
 from leonervis_code.core.contracts import (
@@ -27,6 +28,7 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from leonervis_code.tools import grep_regex as grep_regex_module
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -113,8 +115,9 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
     call = write_call()
     provider = ToolProvider([call, AssistantText("not written")])
     session = open_session(tmp_path, provider)
+    events = []
     try:
-        assert session.prompt("write a note") == "not written"
+        assert session.prompt("write a note", event_sink=events.append) == "not written"
 
         denied = ToolResult(
             "write-1",
@@ -132,6 +135,13 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         audit = session.action_audits()[-1]
         assert audit.status == ActionAuditStatus.DENIED
         assert audit.execution_outcome is None
+        assert events[-1] == ToolRequestFinished(
+            "write_file",
+            1,
+            6,
+            ToolEventStatus.DENIED,
+            "denied_read_only_mode",
+        )
     finally:
         session.close()
 
@@ -184,8 +194,9 @@ def test_hard_rejected_write_returns_tool_error_without_action_audit(
         permission_mode=PermissionMode.WORKSPACE_WRITE,
         approval_mode=ApprovalMode.AUTO,
     )
+    events = []
     try:
-        assert session.prompt("write an invalid path") == "invalid path"
+        assert session.prompt("write an invalid path", event_sink=events.append) == "invalid path"
 
         rejected = ToolResult(
             "write-1",
@@ -201,6 +212,9 @@ def test_hard_rejected_write_returns_tool_error_without_action_audit(
         )
         assert session._writer.state.action_audits == ()
         assert not (tmp_path / "nested").exists()
+        assert events[-1] == ToolRequestFinished(
+            "write_file", 1, 6, ToolEventStatus.ERROR, "invalid_request"
+        )
     finally:
         session.close()
 
@@ -222,8 +236,9 @@ def test_workspace_write_ask_accept_creates_and_commits_exact_causality(tmp_path
         approval_mode=ApprovalMode.ASK,
         approval_handler=approve,
     )
+    events = []
     try:
-        assert session.prompt("create it") == "created"
+        assert session.prompt("create it", event_sink=events.append) == "created"
 
         result = ToolResult(
             "write-1",
@@ -239,6 +254,9 @@ def test_workspace_write_ask_accept_creates_and_commits_exact_causality(tmp_path
         assert audit.status == ActionAuditStatus.SUCCEEDED
         assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
         assert audit.result_code == "created"
+        assert events[-1] == ToolRequestFinished(
+            "write_file", 1, 6, ToolEventStatus.SUCCEEDED, "created"
+        )
     finally:
         session.close()
 
@@ -264,13 +282,28 @@ def test_workspace_write_ask_reject_or_cancel_returns_tool_error_and_commits(
         approval_mode=ApprovalMode.ASK,
         approval_handler=lambda _request: resolution,
     )
+    events = []
     try:
-        assert session.prompt("write") == "stopped"
+        assert session.prompt("write", event_sink=events.append) == "stopped"
 
         result = provider.requests[1].history[-1]
         assert result == ToolResult("write-1", message, is_error=True)
         assert not (tmp_path / "note.txt").exists()
         assert session._writer.state.action_audits[-1].status == expected_status
+        expected_event_status = (
+            ToolEventStatus.REJECTED
+            if resolution == ApprovalResolution.REJECT
+            else ToolEventStatus.CANCELLED
+        )
+        assert events[-1] == ToolRequestFinished(
+            "write_file",
+            1,
+            6,
+            expected_event_status,
+            "approval_rejected"
+            if resolution == ApprovalResolution.REJECT
+            else "approval_cancelled",
+        )
     finally:
         session.close()
 
@@ -1982,7 +2015,9 @@ def test_delete_directory_final_audit_failure_reports_known_effect_with_unknown_
 
 def test_new_read_tools_execute_as_workspace_read_and_share_durable_audit(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(grep_regex_module, "GREP_REGEX_TIMEOUT_SECONDS", 5.0)
     (tmp_path / "src").mkdir()
     target = tmp_path / "src" / "app.py"
     target.write_text("one\ntask_42 = True\nthree\n", encoding="utf-8")

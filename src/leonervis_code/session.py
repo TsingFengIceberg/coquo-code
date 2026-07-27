@@ -11,6 +11,11 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
+from leonervis_code.agent.tool_events import (
+    ToolDispatchResult,
+    ToolEventStatus,
+    ToolPromptEvent,
+)
 from leonervis_code.core.action_coordinator import (
     ActionCoordinator,
     ActionExecutionResult,
@@ -241,7 +246,9 @@ class AutoCompactionNotApplied:
     prompt_continues: bool
 
 
-PromptEvent = AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied
+PromptEvent = (
+    AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied | ToolPromptEvent
+)
 PromptEventSink = Callable[[PromptEvent], None]
 
 
@@ -772,7 +779,7 @@ class ProjectSession:
                     prepared = prepared.with_action_lease(lease)
                     self._active_action_lease = lease
                     self._active_action_binding = binding
-                    return loop.run_prepared(prepared, provider=runtime)
+                    return loop.run_prepared(prepared, provider=runtime, event_sink=event_sink)
             except BaseException as error:
                 self._record_failure(
                     binding or binding_from_status(self._manager.status()),
@@ -1158,7 +1165,7 @@ class ProjectSession:
         loop.install_action_dispatcher(self._dispatch_action)
         return loop
 
-    def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolResult:
+    def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolDispatchResult:
         """Prepare and run one model tool request through the exact Host boundary."""
         self._assert_action_lease(lease)
         binding = self._active_action_binding
@@ -1190,63 +1197,63 @@ class ProjectSession:
             try:
                 prepared_write = self._write_file.prepare(request)
             except WriteFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_write.action
             precondition = prepared_write.precondition
         elif request.name == EDIT_FILE_TOOL_NAME:
             try:
                 prepared_edit = self._edit_file.prepare(request)
             except EditFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_edit.action
             precondition = prepared_edit.precondition
         elif request.name == RUN_COMMAND_TOOL_NAME:
             try:
                 prepared_command = self._run_command.prepare(request)
             except RunCommandPreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_command.action
             precondition = prepared_command.precondition
         elif request.name == MKDIR_TOOL_NAME:
             try:
                 prepared_mkdir = self._mkdir.prepare(request)
             except MkdirPreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_mkdir.action
             precondition = prepared_mkdir.precondition
         elif request.name == MOVE_FILE_TOOL_NAME:
             try:
                 prepared_move = self._move_file.prepare(request)
             except MoveFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_move.action
             precondition = prepared_move.precondition
         elif request.name == DELETE_FILE_TOOL_NAME:
             try:
                 prepared_delete = self._delete_file.prepare(request)
             except DeleteFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_delete.action
             precondition = prepared_delete.precondition
         elif request.name == DELETE_DIRECTORY_TOOL_NAME:
             try:
                 prepared_delete_directory = self._delete_directory.prepare(request)
             except DeleteDirectoryPreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_delete_directory.action
             precondition = prepared_delete_directory.precondition
         elif request.name == COPY_FILE_TOOL_NAME:
             try:
                 prepared_copy = self._copy_file.prepare(request)
             except CopyFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_copy.action
             precondition = prepared_copy.precondition
         elif request.name == PATCH_FILE_TOOL_NAME:
             try:
                 prepared_patch = self._patch_file.prepare(request)
             except PatchFilePreparationError as error:
-                return ToolResult(request.tool_use_id, str(error), is_error=True)
+                return _invalid_tool_request(request, error)
             action = prepared_patch.action
             precondition = prepared_patch.precondition
         else:
@@ -1453,14 +1460,34 @@ class ProjectSession:
                 audit_message=f"{request.name} {'failed' if result.is_error else 'succeeded'}",
             )
 
-        return coordinator.run(
+        coordinated = coordinator.run(
             identity=identity,
             binding=binding,
             permission_mode=self._permission_mode,
             approval_mode=self._approval_mode,
             revalidate=revalidate,
             execute=execute,
-        ).tool_result
+        )
+        if not coordinated.executed:
+            if coordinated.permission_result.decision.value == "deny":
+                status = ToolEventStatus.DENIED
+                result_code = coordinated.permission_result.reason.value
+            elif coordinated.approval_resolution == ApprovalResolution.REJECT:
+                status = ToolEventStatus.REJECTED
+                result_code = "approval_rejected"
+            elif coordinated.approval_resolution == ApprovalResolution.CANCEL:
+                status = ToolEventStatus.CANCELLED
+                result_code = "approval_cancelled"
+            else:
+                raise RuntimeError("unexecuted action has no terminal resolution")
+        else:
+            status = {
+                ActionExecutionOutcome.SUCCEEDED: ToolEventStatus.SUCCEEDED,
+                ActionExecutionOutcome.FAILED: ToolEventStatus.FAILED,
+                ActionExecutionOutcome.PARTIAL: ToolEventStatus.PARTIAL,
+            }[coordinated.execution_outcome]
+            result_code = coordinated.result_code
+        return ToolDispatchResult(coordinated.tool_result, status, result_code)
 
     def _assert_action_lease(self, lease: ActionLease) -> None:
         active = self._active_action_lease
@@ -1586,6 +1613,14 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
         generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
+    )
+
+
+def _invalid_tool_request(request: ToolUse, error: Exception) -> ToolDispatchResult:
+    return ToolDispatchResult(
+        ToolResult(request.tool_use_id, str(error), is_error=True),
+        ToolEventStatus.ERROR,
+        "invalid_request",
     )
 
 

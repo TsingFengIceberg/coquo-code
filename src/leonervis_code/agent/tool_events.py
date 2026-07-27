@@ -1,0 +1,245 @@
+"""Typed, redacted lifecycle events for sequential model-requested tools."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import PurePosixPath, PureWindowsPath
+
+from leonervis_code.core.contracts import ToolResult, ToolUse
+
+MAX_TOOL_EVENT_SUMMARY_CHARACTERS = 512
+MAX_TOOL_EVENT_VALUE_CHARACTERS = 160
+
+
+class ToolEventStatus(StrEnum):
+    """Host-observed terminal status for one normally dispatched tool request."""
+
+    SUCCEEDED = "succeeded"
+    ERROR = "error"
+    DENIED = "denied"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    OUTCOME_UNKNOWN = "outcome-unknown"
+
+
+@dataclass(frozen=True)
+class ToolRequestStarted:
+    tool_name: str
+    call_index: int
+    call_limit: int
+    safe_summary: str
+
+    def __post_init__(self) -> None:
+        _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
+        _validate_safe_text(self.safe_summary, "tool event summary")
+
+
+@dataclass(frozen=True)
+class ToolRequestFinished:
+    tool_name: str
+    call_index: int
+    call_limit: int
+    status: ToolEventStatus
+    result_code: str | None = None
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
+        if type(self.status) is not ToolEventStatus:
+            raise ValueError("tool event status is invalid")
+        if self.result_code is not None:
+            _validate_safe_text(self.result_code, "tool event result code")
+        if type(self.truncated) is not bool:
+            raise ValueError("tool event truncated flag is invalid")
+
+
+@dataclass(frozen=True)
+class ToolRequestLimited:
+    tool_name: str
+    call_index: int
+    call_limit: int
+    safe_summary: str
+
+    def __post_init__(self) -> None:
+        _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
+        if self.call_index <= self.call_limit:
+            raise ValueError("limited tool event must exceed the call limit")
+        _validate_safe_text(self.safe_summary, "tool event summary")
+
+
+ToolPromptEvent = ToolRequestStarted | ToolRequestFinished | ToolRequestLimited
+
+
+@dataclass(frozen=True)
+class ToolDispatchResult:
+    """Keep Host-only outcome metadata beside the exact model-visible ToolResult."""
+
+    tool_result: ToolResult
+    status: ToolEventStatus
+    result_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.tool_result) is not ToolResult:
+            raise ValueError("tool dispatch result is invalid")
+        if type(self.status) is not ToolEventStatus:
+            raise ValueError("tool dispatch status is invalid")
+        if self.status == ToolEventStatus.SUCCEEDED and self.tool_result.is_error:
+            raise ValueError("successful tool dispatch cannot carry an error result")
+        if self.status != ToolEventStatus.SUCCEEDED and not self.tool_result.is_error:
+            raise ValueError("non-successful tool dispatch must carry an error result")
+        if self.result_code is not None and (
+            not isinstance(self.result_code, str) or not self.result_code
+        ):
+            raise ValueError("tool dispatch result code is invalid")
+
+
+def infer_tool_dispatch_result(result: ToolResult) -> ToolDispatchResult:
+    """Describe legacy/direct dispatch results without parsing their untrusted content."""
+    return ToolDispatchResult(
+        tool_result=result,
+        status=ToolEventStatus.ERROR if result.is_error else ToolEventStatus.SUCCEEDED,
+    )
+
+
+def safe_tool_request_summary(request: ToolUse) -> str:
+    """Return a bounded terminal-safe summary that excludes content-bearing arguments."""
+    try:
+        arguments = request.arguments.as_mapping()
+    except Exception:
+        return "arguments=<redacted>"
+
+    name = request.name
+    if name in {
+        "read_file",
+        "stat_path",
+        "list_directory",
+        "delete_file",
+        "delete_directory",
+        "mkdir",
+    }:
+        summary = f"path={_safe_path(arguments.get('path'))}"
+    elif name == "glob":
+        summary = f"pattern={_safe_path(arguments.get('pattern'))}"
+    elif name == "grep":
+        summary = (
+            f"include={_safe_path(arguments.get('include'))} "
+            f"query_bytes={_utf8_size(arguments.get('query'))}"
+        )
+    elif name == "write_file":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"content_bytes={_utf8_size(arguments.get('content'))}"
+        )
+    elif name == "edit_file":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"old_bytes={_utf8_size(arguments.get('old_text'))} "
+            f"new_bytes={_utf8_size(arguments.get('new_text'))}"
+        )
+    elif name == "run_command":
+        argv = arguments.get("argv")
+        executable = argv[0] if isinstance(argv, list) and argv else None
+        argument_count = len(argv) - 1 if isinstance(argv, list) and argv else "<invalid>"
+        summary = (
+            f"command={_safe_executable(executable)} args={argument_count} "
+            f"cwd={_safe_path(arguments.get('cwd'))} "
+            f"timeout={_safe_number(arguments.get('timeout_seconds'))}s"
+        )
+    elif name in {"move_file", "copy_file"}:
+        summary = (
+            f"source={_safe_path(arguments.get('source'))} "
+            f"destination={_safe_path(arguments.get('destination'))}"
+        )
+    elif name == "read_file_lines":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"start_line={_safe_number(arguments.get('start_line'))} "
+            f"line_count={_safe_number(arguments.get('line_count'))}"
+        )
+    elif name == "list_tree":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"max_depth={_safe_number(arguments.get('max_depth'))}"
+        )
+    elif name == "grep_regex":
+        summary = (
+            f"include={_safe_path(arguments.get('include'))} "
+            f"pattern_bytes={_utf8_size(arguments.get('pattern'))}"
+        )
+    elif name == "patch_file":
+        edits = arguments.get("edits")
+        edit_count = len(edits) if isinstance(edits, list) else "<invalid>"
+        summary = f"path={_safe_path(arguments.get('path'))} edits={edit_count}"
+    else:
+        summary = "arguments=<redacted>"
+    return summary[:MAX_TOOL_EVENT_SUMMARY_CHARACTERS]
+
+
+def safe_result_code(value: str | None) -> str | None:
+    """Escape one stable Host result code before placing it in a terminal event."""
+    if value is None:
+        return None
+    rendered = _safe_inline(value)
+    return rendered or None
+
+
+def _safe_argument(value: object) -> str:
+    if not isinstance(value, str):
+        return "<invalid>"
+    rendered = repr(value)
+    if len(rendered) <= MAX_TOOL_EVENT_VALUE_CHARACTERS:
+        return rendered
+    prefix = value[: max(1, MAX_TOOL_EVENT_VALUE_CHARACTERS // 2)]
+    return f"{prefix!r}..."
+
+
+def _safe_path(value: object) -> str:
+    if not isinstance(value, str):
+        return "<invalid>"
+    if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute():
+        return "<absolute>"
+    return _safe_argument(value)
+
+
+def _safe_executable(value: object) -> str:
+    if not isinstance(value, str):
+        return "<invalid>"
+    name = PureWindowsPath(value).name if "\\" in value else PurePosixPath(value).name
+    return _safe_argument(name)
+
+
+def _safe_inline(value: str) -> str:
+    rendered = repr(value)[1:-1]
+    return rendered[:MAX_TOOL_EVENT_VALUE_CHARACTERS]
+
+
+def _utf8_size(value: object) -> int | str:
+    if not isinstance(value, str):
+        return "<invalid>"
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return "<invalid>"
+
+
+def _safe_number(value: object) -> int | str:
+    return value if type(value) is int else "<invalid>"
+
+
+def _validate_event_identity(tool_name: str, call_index: int, call_limit: int) -> None:
+    if not isinstance(tool_name, str) or not tool_name or not tool_name.isascii():
+        raise ValueError("tool event name is invalid")
+    if type(call_index) is not int or call_index <= 0:
+        raise ValueError("tool event call index is invalid")
+    if type(call_limit) is not int or call_limit <= 0:
+        raise ValueError("tool event call limit is invalid")
+
+
+def _validate_safe_text(value: str, label: str) -> None:
+    if not isinstance(value, str) or len(value) > MAX_TOOL_EVENT_SUMMARY_CHARACTERS:
+        raise ValueError(f"{label} is invalid")
+    if any(character in value for character in ("\x00", "\r", "\n", "\x1b")):
+        raise ValueError(f"{label} contains terminal control characters")
