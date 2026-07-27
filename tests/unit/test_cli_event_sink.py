@@ -11,6 +11,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
 )
 from leonervis_code.cli.event_sink import TerminalEventSink
+from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import GREEN, RESET
 
 
@@ -139,3 +140,72 @@ def test_nonstream_tool_companion_uses_the_same_markdown_renderer() -> None:
     assert "Inspecting app.py" in stream.getvalue()
     assert "**" not in stream.getvalue()
     assert "`" not in stream.getvalue()
+
+
+def test_tty_feedback_replaces_waiting_with_plain_assistant_role_markers() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        show_role_markers=True,
+        show_waiting=True,
+    )
+
+    sink.start_waiting()
+    sink(AssistantToolTextReceived("I will inspect."))
+    sink(ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
+    sink.begin_final_output()
+    stream.write("Done.\n")
+
+    assert stream.getvalue() == (
+        "• Working...\r\x1b[2K• I will inspect.\n[tool 1/6] succeeded code=ok\n• Done.\n"
+    )
+
+
+def test_tty_feedback_marks_streamed_markdown_without_rendering_marker_as_a_list() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        render_markdown=True,
+        show_role_markers=True,
+        show_waiting=True,
+    )
+
+    sink.start_waiting()
+    sink(AssistantResponseTextDeltaReceived("**Done**"))
+    sink(AssistantFinalTextStreamCommitted("**Done**"))
+
+    rendered = stream.getvalue()
+    assert rendered.startswith("• Working...\r\x1b[2K• Done")
+    assert "Done" in rendered
+    assert "**" not in rendered
+
+
+def test_tty_feedback_keeps_nonstream_markdown_final_on_the_role_marker_line() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        render_markdown=True,
+        show_role_markers=True,
+        show_waiting=True,
+    )
+
+    sink.start_waiting()
+    sink.begin_final_output()
+    write_markdown_document(stream, "**HISTORY_TEST_OK**", color=False)
+
+    assert stream.getvalue() == "• Working...\r\x1b[2K• HISTORY_TEST_OK\n"
+
+
+def test_default_sink_contract_has_no_waiting_or_role_marker() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(stream, color=False)
+
+    sink.start_waiting()
+    sink(AssistantToolTextReceived("Inspecting."))
+    sink.begin_final_output()
+    stream.write("Done.\n")
+
+    assert stream.getvalue() == "Inspecting.\nDone.\n"

@@ -3,54 +3,38 @@
 from __future__ import annotations
 
 from pathlib import Path
-import readline
-import sys
 from typing import TextIO
 
 from leonervis_code.cli.brand import render_banner
 from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
+from leonervis_code.cli.prompt_editor import (
+    MAX_PROMPT_BYTES,
+    MAX_PROMPT_CHARACTERS,
+    MAX_PROMPT_HISTORY_BYTES,
+    MAX_PROMPT_HISTORY_ENTRIES,
+    PromptEditor,
+    PromptInputError,
+    PromptReadKind,
+    TerminalPromptEditor,
+    create_prompt_editor,
+)
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.cli.presentation import (
+    CLEAR_SCREEN,
     render_message,
     render_prompt,
+    render_prompt_toolbar,
     render_runtime_status,
     render_session_info,
 )
-from leonervis_code.cli.slash import TOP_LEVEL_COMMANDS, dispatch_slash
+from leonervis_code.cli.slash import dispatch_slash
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import RuntimeProviderStateError
 from leonervis_code.providers.profile import ProviderProfileError
 from leonervis_code.providers.request_context import ContextPreflightError
 from leonervis_code.session_store import SessionStoreError
-
-PLAIN_PROMPT = "leonervis> "
-
-
-def complete_command(text: str, state: int) -> str | None:
-    """Return the next top-level slash-command completion for readline."""
-    matches = [command for command in TOP_LEVEL_COMMANDS if command.startswith(text)]
-    return matches[state] if state < len(matches) else None
-
-
-def configure_tab_completion() -> None:
-    """Configure readline to complete the REPL's supported slash commands."""
-    readline.set_completer(complete_command)
-    readline.set_completer_delims(readline.get_completer_delims().replace("/", ""))
-    readline.parse_and_bind("tab: complete")
-
-
-def read_prompt(stdin: TextIO, stdout: TextIO, prompt: str = PLAIN_PROMPT) -> str:
-    """Read one prompt, enabling readline editing for the real terminal streams."""
-    if stdin is sys.stdin and stdout is sys.stdout:
-        return input(prompt)
-    stdout.write(prompt)
-    stdout.flush()
-    line = stdin.readline()
-    if line == "":
-        raise EOFError
-    return line.rstrip("\r\n")
 
 
 def parse_history_count(command: str) -> int | None:
@@ -76,9 +60,11 @@ def run_repl(
     cwd: Path,
     color: bool,
     render_markdown: bool = False,
+    prompt_editor: PromptEditor | None = None,
 ) -> int:
     """Read input, dispatch local commands, and route ordinary text to the model."""
-    configure_tab_completion()
+    editor = prompt_editor or create_prompt_editor(stdin, stdout)
+    terminal_ui = isinstance(editor, TerminalPromptEditor)
     stdout.write(f"\n{render_banner(version=version, cwd=cwd, color=color)}\n")
     status = _snapshot(session, "status")
     if status is not None:
@@ -92,23 +78,30 @@ def run_repl(
     while True:
         status = _snapshot(session, "status")
         session_info = _snapshot(session, "session_info")
-        real_readline = stdin is sys.stdin and stdout is sys.stdout
         prompt_text = render_prompt(
             status,
             session_info,
             color=color,
-            readline=real_readline,
+            readline=False,
         )
+        prompt_toolbar = render_prompt_toolbar(status, cwd, color=color)
         try:
-            prompt = read_prompt(stdin, stdout, prompt_text)
-        except KeyboardInterrupt:
+            editor.set_history(_session_prompt_history(session))
+            prompt_read = editor.read(prompt_text, bottom_toolbar=prompt_toolbar)
+        except PromptInputError as error:
+            stdout.write(f"{render_message(f'Input error: {error}', 'error', color=color)}\n")
+            stdout.flush()
+            continue
+        if prompt_read.kind == PromptReadKind.CANCEL:
+            stdout.write("\n")
+            stdout.flush()
+            continue
+        if prompt_read.kind == PromptReadKind.EXIT:
             stdout.write("\n")
             stdout.flush()
             return 0
-        except EOFError:
-            stdout.write("\n")
-            stdout.flush()
-            return 0
+        assert prompt_read.text is not None
+        prompt = prompt_read.text
 
         if not prompt.strip():
             continue
@@ -122,6 +115,9 @@ def run_repl(
             stdout.flush()
             continue
         if result.handled:
+            if result.clear_screen:
+                stdout.write(CLEAR_SCREEN)
+                stdout.flush()
             if result.message is not None:
                 stdout.write(f"{render_message(result.message, result.kind, color=color)}\n")
                 stdout.flush()
@@ -135,7 +131,10 @@ def run_repl(
                 stdout,
                 color=color,
                 render_markdown=render_markdown,
+                show_role_markers=terminal_ui,
+                show_waiting=terminal_ui,
             )
+            event_sink.start_waiting()
             if callable(prompt_method):
                 response = prompt_method(
                     prompt,
@@ -144,6 +143,7 @@ def run_repl(
             else:
                 response = getattr(session, "run")(prompt)
             if not event_sink.final_text_was_streamed:
+                event_sink.begin_final_output()
                 if render_markdown:
                     write_markdown_document(stdout, response, color=color)
                 else:
@@ -189,6 +189,32 @@ def _snapshot(session: object, method_name: str):
         return method()
     except Exception:
         return None
+
+
+def _session_prompt_history(session: object) -> tuple[str, ...]:
+    turns = getattr(session, "turns", ())
+    if not isinstance(turns, tuple):
+        return ()
+    selected: list[str] = []
+    total_bytes = 0
+    for turn in reversed(turns):
+        user = getattr(turn, "user", None)
+        text = getattr(user, "text", None)
+        if not isinstance(text, str):
+            continue
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            continue
+        if "\x00" in text or len(text) > MAX_PROMPT_CHARACTERS or len(encoded) > MAX_PROMPT_BYTES:
+            continue
+        if len(selected) == MAX_PROMPT_HISTORY_ENTRIES:
+            break
+        if total_bytes + len(encoded) > MAX_PROMPT_HISTORY_BYTES:
+            break
+        selected.append(text)
+        total_bytes += len(encoded)
+    return tuple(reversed(selected))
 
 
 def _report_aborted_stream(

@@ -44,7 +44,9 @@ uv run leonervis-code
 A bare invocation starts the REPL in a real terminal. Without a selected real provider, it uses the deterministic fake provider and performs no network access:
 
 ```text
-leonervis[3fe4bb27|fake]>
+›
+
+  fake · ~/Projects/leonervis-code
 ```
 
 The formal command is `leonervis-code`; `leonervis` is a shorthand. A module entry point is also available:
@@ -191,6 +193,7 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. U
 | `/session list` | List workspace Sessions |
 | `/session new` | Start an empty Session while preserving the runtime |
 | `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
+| `/clear` | Clear only the current terminal screen without changing Session or history |
 | `/exit`, `/quit` | Exit normally |
 
 Common REPL operations:
@@ -204,7 +207,7 @@ Common REPL operations:
 /history 5
 ```
 
-Ctrl-D, EOF, or Ctrl-C while waiting for input exits normally. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete context, compaction, resume, tool-budget, and read-tool semantics.
+A real TTY uses a `›` input marker and `model · workspace` status line. Enter submits and Alt+Enter inserts a newline; if the terminal intercepts Alt, press Esc and then Enter. Tab completes slash commands with short descriptions, including second-level `/provider` and `/session` commands. Up/Ctrl-R read committed user prompts from the current Session and switch after `/resume` or `/session new`; slash, cancelled, and failed input is excluded. After submission, `• Working...` remains until the first visible event replaces it, and assistant output begins with `•`. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete boundaries.
 
 For a deterministic view of the bounded tool loop:
 
@@ -246,6 +249,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [AgentLoop, Runtime, and Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md): stream preflight, complete tool assembly, live REPL display, and durable final confirmation.
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md): safe-block streaming, TTY layout, raw redirects, and terminal-control boundaries.
 - [Exact Bounded Informed Approval Previews](./docs/decisions/0052-exact-bounded-informed-approval-previews.md): prepared candidate diffs, exact-action binding, risk summaries, terminal safety, and stale revalidation.
+- [TTY Prompt Editor and Interaction Feedback](./docs/decisions/0053-tty-multiline-prompt-editor.md): exact multiline input, Session-derived history, slash completion, screen clearing, and ephemeral assistant status.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.

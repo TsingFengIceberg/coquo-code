@@ -49,6 +49,39 @@ TOP_LEVEL_COMMANDS = (
     "/model",
     "/session",
     "/resume",
+    "/clear",
+)
+
+
+@dataclass(frozen=True)
+class SlashCompletionSpec:
+    """One static Host command completion and its terminal-only description."""
+
+    text: str
+    description: str
+    top_level: bool = False
+
+
+SLASH_COMPLETIONS = (
+    SlashCompletionSpec("/help", "Show Host commands", True),
+    SlashCompletionSpec("/history", "Show recent Session turns", True),
+    SlashCompletionSpec("/actions", "Show recent Action Audit", True),
+    SlashCompletionSpec("/status", "Show runtime status", True),
+    SlashCompletionSpec("/context", "Inspect Effective Context", True),
+    SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
+    SlashCompletionSpec("/provider", "Provider commands", True),
+    SlashCompletionSpec("/model", "Override the current model", True),
+    SlashCompletionSpec("/session", "Session commands", True),
+    SlashCompletionSpec("/resume", "Resume a Session", True),
+    SlashCompletionSpec("/clear", "Clear terminal output", True),
+    SlashCompletionSpec("/exit", "Exit the REPL", True),
+    SlashCompletionSpec("/quit", "Exit the REPL", True),
+    SlashCompletionSpec("/provider list", "List provider profiles"),
+    SlashCompletionSpec("/provider current", "Show the current provider"),
+    SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
+    SlashCompletionSpec("/session show", "Show the current Session"),
+    SlashCompletionSpec("/session list", "List workspace Sessions"),
+    SlashCompletionSpec("/session new", "Start an empty Session"),
 )
 
 
@@ -88,6 +121,7 @@ class SlashResult:
     exit: bool = False
     message: str | None = None
     kind: MessageKind = "plain"
+    clear_screen: bool = False
 
 
 _NOT_HANDLED = SlashResult(handled=False)
@@ -95,7 +129,7 @@ _NOT_HANDLED = SlashResult(handled=False)
 
 def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
     """Dispatch one exact slash command without writing terminal output."""
-    if not command.startswith("/"):
+    if not command.startswith("/") or "\n" in command or "\r" in command:
         return _NOT_HANDLED
     if command in {"/exit", "/quit"}:
         return SlashResult(handled=True, exit=True)
@@ -106,6 +140,10 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _info(HELP_TEXT)
     if command.startswith("/help "):
         return _usage("Usage: /help")
+    if command == "/clear":
+        return SlashResult(handled=True, clear_screen=True)
+    if command.startswith("/clear "):
+        return _usage("Usage: /clear")
     if command == "/session":
         return _info(SESSION_HELP)
     if command == "/provider":

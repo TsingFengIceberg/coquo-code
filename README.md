@@ -44,7 +44,9 @@ uv run leonervis-code
 裸命令会在真实终端中启动 REPL。未选择真实 provider 时使用确定性的 fake provider，不访问网络：
 
 ```text
-leonervis[3fe4bb27|fake]>
+›
+
+  fake · ~/Projects/leonervis-code
 ```
 
 正式命令为 `leonervis-code`，`leonervis` 是简写；也可使用模块入口：
@@ -191,6 +193,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。使用上面�
 | `/session list` | 列出 workspace Session |
 | `/session new` | 保持当前 runtime，开始空白 Session |
 | `/resume <latest\|id>` | 保持当前 runtime，切换 Session |
+| `/clear` | 只清空当前终端画面，不修改 Session 或 history |
 | `/exit`、`/quit` | 正常退出 |
 
 常用REPL操作：
@@ -204,7 +207,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。使用上面�
 /history 5
 ```
 
-Ctrl-D、EOF或等待输入时按Ctrl-C可正常退出。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。Context、compaction、resume、工具预算及只读工具的完整语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+真实TTY使用`›`输入标记和`model · workspace`状态栏。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。Tab会补全slash命令并显示简短说明，也支持`/provider`和`/session`二级命令。Up/Ctrl-R读取当前Session已提交的user prompts，`/resume`或`/session new`后自动切换；slash、取消和失败输入不会进入。提交后先显示`• Working...`，首个可见事件会替换它，assistant内容以`•`开头。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -246,6 +249,7 @@ git diff --check
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
 - [Exact Bounded Informed Approval Previews](./docs/decisions/0052-exact-bounded-informed-approval-previews.md)：prepared candidate diff、exact action绑定、风险摘要、terminal安全与stale revalidation。
+- [TTY Prompt Editor 与交互反馈](./docs/decisions/0053-tty-multiline-prompt-editor.md)：exact多行输入、Session派生历史、slash补全、清屏与临时assistant状态。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

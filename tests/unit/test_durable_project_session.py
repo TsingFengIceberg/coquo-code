@@ -107,6 +107,34 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     second.close()
 
 
+def test_project_session_persists_exact_multiline_prompt_as_one_turn(tmp_path: Path) -> None:
+    prompt = "  explain this:\n    value = 1\n"
+    first = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    assert first.prompt(prompt) == f"Fake response: {prompt}"
+    assert first.history == (UserMessage(prompt), AssistantText(f"Fake response: {prompt}"))
+    first.close()
+
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    assert resumed.turns[0].user.text == prompt
+    assert resumed.history[0] == UserMessage(prompt)
+    resumed.close()
+
+
 def test_project_session_persists_and_resumes_grep_causality(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")

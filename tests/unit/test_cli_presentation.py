@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +24,7 @@ from leonervis_code.cli.presentation import (
     render_action_audits,
     render_message,
     render_prompt,
+    render_prompt_toolbar,
     render_prompt_event,
     render_resume_rejection,
     render_runtime_status,
@@ -87,23 +89,18 @@ def status(*, mode="fake", profile=None, provider="fake", model=None):
     )
 
 
-def test_prompt_uses_short_session_and_runtime_identity_only() -> None:
-    assert render_prompt(status(), Info(), color=False) == "leonervis[12345678|fake]> "
-    assert (
-        render_prompt(
-            status(mode="real", profile="work-openai", provider="openai", model="gpt-5"),
-            Info(),
-            color=False,
-        )
-        == "leonervis[12345678|work-openai]> "
+def test_prompt_is_minimal_and_toolbar_shows_model_and_workspace() -> None:
+    assert render_prompt(status(), Info(), color=False) == "› "
+    assert render_prompt_toolbar(status(), Path("/workspace"), color=False) == (
+        "  fake · /workspace"
     )
     assert (
-        render_prompt(
-            status(mode="real", provider="openai", model="openai/gpt-5"),
-            Info(),
+        render_prompt_toolbar(
+            status(mode="real", profile="work-openai", provider="openai", model="gpt-5"),
+            Path.home() / "Projects" / "leonervis-code",
             color=False,
         )
-        == "leonervis[12345678|direct:openai]> "
+        == "  gpt-5 · ~/Projects/leonervis-code"
     )
 
 
@@ -259,24 +256,34 @@ def test_action_audit_renders_copy_paths_without_internal_state() -> None:
     assert "result: succeeded (file_copied)" in rendered
 
 
-def test_prompt_omits_model_and_sanitizes_runtime_fields() -> None:
+def test_toolbar_sanitizes_and_bounds_model_fields() -> None:
     first = status(mode="real", profile="safe|name\x1b[31m", provider="custom", model="one")
     second = status(mode="real", profile="safe|name\x1b[31m", provider="custom", model="two")
 
-    assert render_prompt(first, Info(), color=False) == "leonervis[12345678|safe?name??31m]> "
-    assert render_prompt(first, Info(), color=False) == render_prompt(second, Info(), color=False)
+    assert render_prompt_toolbar(first, Path("/workspace"), color=False).startswith("  one · ")
+    assert render_prompt_toolbar(second, Path("/workspace"), color=False).startswith("  two · ")
 
-    long = status(mode="real", profile="a" * 40, provider="custom")
-    assert render_prompt(long, Info(), color=False) == (
-        "leonervis[12345678|aaaaaaaaaaaaaaaaaaaaa...]> "
+    unsafe = status(mode="real", provider="custom", model="safe\x1b[31m\nmodel")
+    assert render_prompt_toolbar(unsafe, Path("/workspace"), color=False) == (
+        "  safe?[31m?model · /workspace"
+    )
+    long = status(mode="real", provider="custom", model="a" * 60)
+    assert render_prompt_toolbar(long, Path("/workspace"), color=False).startswith(
+        "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa... · "
     )
 
 
-def test_prompt_has_safe_fallbacks() -> None:
-    assert render_prompt(None, None, color=False) == "leonervis> "
-    assert render_prompt(status(), None, color=False) == "leonervis[fake]> "
-    assert render_prompt(None, Info(), color=False) == "leonervis[12345678]> "
-    assert render_prompt(status(), Info("bad"), color=False) == "leonervis[unknown|fake]> "
+def test_prompt_and_toolbar_have_safe_fallbacks() -> None:
+    assert render_prompt(None, None, color=False) == "› "
+    assert render_prompt_toolbar(None, Path("/workspace"), color=False) == "  /workspace"
+    assert (
+        render_prompt_toolbar(
+            status(mode="real", provider="custom", model=None),
+            Path("/workspace"),
+            color=False,
+        )
+        == "  custom · /workspace"
+    )
 
 
 def test_runtime_status_renders_context_capability_without_changing_prompt() -> None:
@@ -296,7 +303,7 @@ def test_runtime_status_renders_context_capability_without_changing_prompt() -> 
     rendered = render_runtime_status(resolved)
 
     assert "Context window: 1000000 tokens (builtin_catalog)" in rendered
-    assert "1000000" not in render_prompt(resolved, Info(), color=False)
+    assert "1000000" not in render_prompt_toolbar(resolved, Path("/workspace"), color=False)
 
 
 def inspection(tmp_path, report=None, diagnostic=None, *history):
@@ -612,7 +619,7 @@ def test_colored_readline_prompt_marks_only_nonprinting_sequences() -> None:
     assert "\001" in prompt and "\002" in prompt
     assert prompt.count("\001") == prompt.count("\002")
     assert "\x1b[" in prompt
-    assert prompt.endswith(">\001\x1b[0m\002 ")
+    assert prompt.endswith("›\001\x1b[0m\002 ")
 
 
 def test_colored_non_readline_prompt_has_no_readline_markers() -> None:
@@ -621,6 +628,17 @@ def test_colored_non_readline_prompt_has_no_readline_markers() -> None:
     assert "\x1b[" in prompt
     assert "\001" not in prompt
     assert "\002" not in prompt
+
+
+def test_colored_prompt_toolbar_has_ansi_without_raw_controls() -> None:
+    toolbar = render_prompt_toolbar(
+        status(mode="real", provider="custom", model="unsafe\x1bmodel"),
+        Path("/workspace\nname"),
+        color=True,
+    )
+
+    assert toolbar.startswith("\x1b[")
+    assert "unsafe?model · /workspace?name" in toolbar
 
 
 def test_action_audit_renders_redacted_command_summary() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
@@ -13,10 +14,16 @@ from leonervis_code.agent.tool_events import (
     ToolRequestStarted,
 )
 from leonervis_code.cli.presentation import render_recent_history, render_session_summary
-from leonervis_code.cli.repl import (
+from leonervis_code.cli.prompt_editor import (
+    MAX_PROMPT_BYTES,
+    PromptInputError,
+    PromptRead,
+    StreamPromptEditor,
     complete_command,
+)
+from leonervis_code.cli.repl import (
+    _session_prompt_history,
     parse_history_count,
-    read_prompt,
     run_repl,
 )
 from leonervis_code.core.contracts import (
@@ -52,6 +59,37 @@ class InterruptingInput(io.StringIO):
         raise KeyboardInterrupt
 
 
+class ScriptedPromptEditor:
+    def __init__(self, *outcomes: PromptRead) -> None:
+        self.outcomes = list(outcomes)
+        self.prompts: list[str] = []
+        self.toolbars: list[str | None] = []
+        self.histories: list[tuple[str, ...]] = []
+
+    def read(self, prompt: str, *, bottom_toolbar: str | None = None) -> PromptRead:
+        self.prompts.append(prompt)
+        self.toolbars.append(bottom_toolbar)
+        return self.outcomes.pop(0)
+
+    def set_history(self, entries: tuple[str, ...]) -> None:
+        self.histories.append(entries)
+
+
+class RejectingPromptEditor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def read(self, _prompt: str, *, bottom_toolbar: str | None = None) -> PromptRead:
+        del bottom_toolbar
+        self.calls += 1
+        if self.calls == 1:
+            raise PromptInputError("prompt exceeds test boundary")
+        return PromptRead.exit()
+
+    def set_history(self, _entries: tuple[str, ...]) -> None:
+        pass
+
+
 def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/e", 0) == "/exit"
     assert complete_command("/h", 0) == "/help"
@@ -69,14 +107,15 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 9) == "/model"
     assert complete_command("/", 10) == "/session"
     assert complete_command("/", 11) == "/resume"
-    assert complete_command("/", 12) is None
+    assert complete_command("/", 12) == "/clear"
+    assert complete_command("/", 13) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
-def test_read_prompt_uses_injected_streams_without_readline() -> None:
+def test_stream_prompt_editor_uses_injected_streams_without_tty_editor() -> None:
     output = io.StringIO()
 
-    assert read_prompt(io.StringIO("Hello\n"), output) == "Hello"
+    assert StreamPromptEditor(io.StringIO("Hello\n"), output).read("leonervis> ").text == "Hello"
     assert output.getvalue() == "leonervis> "
 
 
@@ -146,6 +185,178 @@ def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
     assert rendered.count("LEONERVIS CODE v0.1.0") == 1
     assert "reply: Hello\n" in rendered
     assert "reply: World\n" in rendered
+
+
+def test_repl_submits_exact_multiline_buffer_as_one_model_turn(tmp_path) -> None:
+    loop = RecordingLoop()
+    output = io.StringIO()
+    editor = ScriptedPromptEditor(
+        PromptRead.submit("  explain this:\n    value = 1\n"),
+        PromptRead.exit(),
+    )
+
+    status = run_repl(
+        loop,
+        stdin=io.StringIO(),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert status == 0
+    assert loop.prompts == ["  explain this:\n    value = 1\n"]
+    assert editor.prompts == ["› ", "› "]
+    assert editor.toolbars == [f"  {tmp_path}", f"  {tmp_path}"]
+    assert output.getvalue().count("reply:   explain this:") == 1
+
+
+def test_repl_cancelled_draft_and_multiline_slash_prefix_do_not_dispatch_host_command(
+    tmp_path,
+) -> None:
+    loop = RecordingLoop()
+    editor = ScriptedPromptEditor(
+        PromptRead.cancel(),
+        PromptRead.submit("/help\nthis is literal model text"),
+        PromptRead.exit(),
+    )
+
+    run_repl(
+        loop,
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert loop.prompts == ["/help\nthis is literal model text"]
+
+
+def test_repl_input_error_does_not_call_model_and_returns_to_editor(tmp_path) -> None:
+    loop = RecordingLoop()
+    output = io.StringIO()
+
+    status = run_repl(
+        loop,
+        stdin=io.StringIO(),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=RejectingPromptEditor(),
+    )
+
+    assert status == 0
+    assert loop.prompts == []
+    assert "Input error: prompt exceeds test boundary" in output.getvalue()
+
+
+def test_repl_clear_only_clears_the_terminal_and_does_not_call_model(tmp_path) -> None:
+    loop = RecordingLoop()
+    output = io.StringIO()
+    editor = ScriptedPromptEditor(PromptRead.submit("/clear"), PromptRead.exit())
+
+    run_repl(
+        loop,
+        stdin=io.StringIO(),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert loop.prompts == []
+    assert "\x1b[2J\x1b[H" in output.getvalue()
+    assert editor.histories == [(), ()]
+
+
+def test_repl_editor_history_is_derived_from_committed_session_turns(tmp_path) -> None:
+    class HistorySession:
+        def __init__(self) -> None:
+            self.turns = (ConversationTurn(UserMessage("older"), AssistantText("old reply")),)
+
+        def prompt(self, prompt, *, event_sink=None):
+            del event_sink
+            self.turns += (ConversationTurn(UserMessage(prompt), AssistantText("new reply")),)
+            return "new reply"
+
+    session = HistorySession()
+    editor = ScriptedPromptEditor(
+        PromptRead.submit("/help"),
+        PromptRead.submit("new prompt"),
+        PromptRead.exit(),
+    )
+
+    run_repl(
+        session,
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert editor.histories == [
+        ("older",),
+        ("older",),
+        ("older", "new prompt"),
+    ]
+
+
+def test_session_prompt_history_keeps_the_newest_entries_within_both_bounds() -> None:
+    turns = tuple(
+        ConversationTurn(UserMessage(f"prompt-{index}"), AssistantText("reply"))
+        for index in range(1002)
+    )
+
+    history = _session_prompt_history(type("Session", (), {"turns": turns})())
+
+    assert len(history) == 1000
+    assert history[0] == "prompt-2"
+    assert history[-1] == "prompt-1001"
+
+    large_turns = tuple(
+        ConversationTurn(
+            UserMessage(str(index) + "x" * (MAX_PROMPT_BYTES - 2)), AssistantText("reply")
+        )
+        for index in range(17)
+    )
+    large_history = _session_prompt_history(type("Session", (), {"turns": large_turns})())
+    assert len(large_history) == 16
+    assert large_history[0].startswith("1x")
+    assert large_history[-1].startswith("16x")
+
+
+def test_repl_session_new_replaces_editor_history_before_the_next_prompt(tmp_path) -> None:
+    class SwitchingSession:
+        def __init__(self) -> None:
+            self.turns = (
+                ConversationTurn(UserMessage("old session prompt"), AssistantText("reply")),
+            )
+
+        def new_session(self):
+            self.turns = ()
+            return SimpleNamespace(session_id="new-session")
+
+    session = SwitchingSession()
+    editor = ScriptedPromptEditor(PromptRead.submit("/session new"), PromptRead.exit())
+
+    run_repl(
+        session,
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert editor.histories == [("old session prompt",), ()]
 
 
 def test_repl_catches_keyboard_interrupt_during_slash_operation(tmp_path) -> None:
@@ -544,7 +755,7 @@ def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:
     )
 
     assert status == 0
-    assert output.getvalue().endswith("leonervis> \n")
+    assert output.getvalue().endswith("› \n")
 
 
 def test_repl_exits_cleanly_on_keyboard_interrupt(tmp_path) -> None:
@@ -560,4 +771,4 @@ def test_repl_exits_cleanly_on_keyboard_interrupt(tmp_path) -> None:
     )
 
     assert status == 0
-    assert output.getvalue().endswith("leonervis> \n")
+    assert output.getvalue().endswith("› \n")

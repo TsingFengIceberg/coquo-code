@@ -66,7 +66,7 @@ It explicitly does not claim recursive copying/deletion, ignore-aware or indexed
 
 The system prompt is not a `ConversationItem`, so `/history`, `ProjectSession.history`, and append-only Session JSONL contain only real user/assistant/tool causal chains. A new turn after resume uses the current binary's canonical prompt; schema-v2/v3 compact checkpoints store only compact-prompt, summary-framing, and trigger provenance without inserting the normal system prompt into conversation history.
 
-The **model system prompt** and the human-facing `leonervis[session8|runtime]>` **REPL prompt** are different interfaces: the former is a model-visible contract, while the latter is only a terminal status cue.
+The **model system prompt** and the terminal's `›` input marker plus `model · workspace` status line are different interfaces: the former is a model-visible contract, while the latter is only human-facing interaction and status presentation.
 
 See [0012: first canonical model system prompt](./decisions/0012-first-canonical-model-system-prompt.md) for the detailed decision and [references/claw-code-prompts](./references/claw-code-prompts/README.md) for the Claw-Code prompt-structure study map.
 
@@ -549,6 +549,18 @@ Copy, move, and file deletion show the prepared byte count. Directory creation/d
 
 The preview exists only for a REPL `ask`: it is not persisted and does not enter provider history, Session, resume, compaction, or Effective Context. One-shot ask still cancels without reading stdin, and auto approval does not show a preview. Existing precondition refresh, single-use grant consumption, and stale rejection still run after acceptance, so displaying a diff expands neither permission nor hard execution boundaries. This Host-only change retains canonical system prompt v16, adapter contract v19, the 17-tool schema/order, six-call budget, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v3, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations. See [0052: Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md).
 
+## TTY Prompt Editor and Interaction Feedback
+
+The REPL now reads input through an independent `PromptEditor` boundary. A real TTY uses locked prompt-toolkit with a minimal `›` marker, two-space continuation alignment, and a bounded, control-safe `model · workspace` status line below the editor. Enter submits and Alt+Enter inserts LF; if the terminal intercepts Alt, Esc followed by Enter is an equivalent fallback. Bracketed paste keeps multiline text in one buffer. Submitted text is not globally `strip()`-processed, so the model, Session, and resume retain exact indentation, line breaks, and a trailing newline. The REPL still ignores an all-whitespace buffer.
+
+Before every input, the editor rebuilds up to 1000 entries and 4 MiB of committed user-prompt history from the current Session's complete turns. Up/Ctrl-R therefore work after process resume and switch sources after `/resume` or `/session new`; slash commands, cancelled drafts, and failed uncommitted turns cannot remain. Tab completion describes top-level commands and completes `/provider list|current|use` and `/session show|list|new`. `/clear` only emits the terminal clear sequence: it invokes no model, appends no transcript, and changes neither Session nor Effective Context.
+
+Ctrl-C cancels a non-empty draft and resumes the REPL, while an empty buffer exits; Ctrl-D exits only from an empty buffer. Input is bounded to 256 KiB characters and 256 KiB of UTF-8 and rejects NUL. Non-TTY, pipe, redirect, and injected streams retain the deterministic single-line fallback. A multiline slash prefix is ordinary model text; a Host slash command must remain one line.
+
+After real-TTY submission, ephemeral `• Working...` remains until the first visible assistant or tool-lifecycle event clears it. Assistant companion and final output both begin with `•`. One-shot, pipe, redirect, and injected streams gain no such feedback, so their stdout/stderr contracts remain unchanged. Feedback is not persisted; durable Session and Action Audit remain the facts after failure or recovery.
+
+This is a Host-only input and presentation change. The canonical system prompt remains v16, the adapter contract remains v19, and the 17-tool schema/order and six-call budget, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v3, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations remain unchanged. Exact multiline text naturally participates in a particular turn and context identity, but the identity representation does not advance. See [0053: TTY Prompt Editor and Interaction Feedback](./decisions/0053-tty-multiline-prompt-editor.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -767,3 +779,4 @@ This slice establishes capacity facts only. It does not count current request to
 50. [0050: AgentLoop, Runtime, and Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
 51. [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
 52. [0052: Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)
+53. [0053: TTY Prompt Editor and Interaction Feedback](./decisions/0053-tty-multiline-prompt-editor.md)

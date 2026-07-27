@@ -66,7 +66,7 @@ Canonical model system prompt当前为version 16。它允许一个tool response�
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
-这里的 **model system prompt** 与终端中的 `leonervis[session8|runtime]>` **REPL prompt** 是两个不同界面：前者是模型可见契约，后者只是人类终端状态提示。
+这里的 **model system prompt** 与终端中的`›`输入标记和`model · workspace`状态栏是两个不同界面：前者是模型可见契约，后者只是人类终端交互与状态提示。
 
 详细决策见 [0012：第一版 canonical model system prompt](./decisions/0012-first-canonical-model-system-prompt.md)，Claw-Code prompt 结构学习入口见 [references/claw-code-prompts](./references/claw-code-prompts/README.md)。
 
@@ -549,6 +549,18 @@ Copy、move和file delete显示prepared byte count，directory create/delete与c
 
 Preview只存在于REPL `ask`调用，不持久化、不进入provider history、Session、resume、compaction或Effective Context。One-shot ask仍不读取stdin并取消，auto不展示preview。用户接受后原有precondition refresh、single-use grant和stale rejection继续执行，因此展示diff不扩大permission或hard execution边界。该Host-only变化保持canonical system prompt v16、adapter contract v19、17工具schema/order、六次预算、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v3、`context_compacted` v2/v3及`ctx-v1`/`ctx-v2`representation不变。完整决策见[0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)。
 
+## TTY Prompt Editor 与交互反馈
+
+REPL现在通过独立`PromptEditor`边界读取输入。真实TTY使用锁定的prompt-toolkit和简洁的`›`输入标记，续行以两个空格对齐，下方显示bounded、control-safe的`model · workspace`状态栏。Enter提交，Alt+Enter插入LF；若terminal拦截Alt组合，Esc后Enter是等价后备。Bracketed paste把多行粘贴作为一个buffer。提交文本不做整体`strip()`，因此模型、Session与resume保留原始缩进、换行和结尾换行；只有全空白buffer仍由REPL忽略。
+
+每次显示输入框前，editor从当前Session完整turns重建最多1000条、合计最多4 MiB的已提交user prompt历史，因此Up/Ctrl-R支持跨进程resume，并在`/resume`或`/session new`后切换来源；slash command、取消草稿及失败未提交turn不会残留。Tab completion显示顶层命令说明，并补全`/provider list|current|use`和`/session show|list|new`。`/clear`只发出清屏序列，不调用模型、不写transcript、不改变Session或Effective Context。
+
+Ctrl-C取消非空草稿并继续REPL，空buffer时退出；Ctrl-D只在空buffer退出。输入最多256 KiB characters和256 KiB UTF-8 bytes，并拒绝NUL。非TTY、pipe、redirect及注入stream继续使用确定性单行fallback。多行slash前缀是普通模型文本，Host slash command仍必须是单行。
+
+真实TTY提交后显示临时`• Working...`，首个可见assistant或tool lifecycle事件会清除它；assistant companion与final输出都以`•`标记。One-shot、pipe、redirect和注入stream不增加这些反馈，既有stdout/stderr合同不变。反馈事件不持久化，失败清理仍以durable Session和Action Audit为事实源。
+
+这是Host-only输入与presentation变化。Canonical system prompt保持v16，adapter contract保持v19，17工具schema/order与六次预算、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v3、`context_compacted` v2/v3和`ctx-v1`/`ctx-v2`representation均不变。Exact多行文本会自然参与具体turn与context identity，但identity representation不升级。完整决策见[0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -767,3 +779,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 50. [0050：AgentLoop、Runtime 与 Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
 51. [0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
 52. [0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)
+53. [0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)

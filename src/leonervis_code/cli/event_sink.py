@@ -27,6 +27,8 @@ class TerminalEventSink:
         color: bool,
         stream_deltas: bool = True,
         render_markdown: bool = False,
+        show_role_markers: bool = False,
+        show_waiting: bool = False,
     ) -> None:
         self._stream = stream
         self._color = color
@@ -35,16 +37,44 @@ class TerminalEventSink:
         self._visible_response = False
         self._final_text_was_streamed = False
         self._markdown = TerminalMarkdownRenderer(stream, color=color) if render_markdown else None
+        self._show_role_markers = show_role_markers
+        self._show_waiting = show_waiting
+        self._waiting_visible = False
+        self._assistant_output_active = False
 
     @property
     def final_text_was_streamed(self) -> bool:
         return self._final_text_was_streamed
 
+    def start_waiting(self) -> None:
+        """Show one ephemeral pre-event status without changing runtime behavior."""
+        if not self._show_waiting or self._waiting_visible:
+            return
+        try:
+            self._stream.write(render_message("• Working...", "info", color=self._color))
+            self._stream.flush()
+        except Exception:
+            return
+        self._waiting_visible = True
+
+    def begin_final_output(self) -> None:
+        """Resolve waiting and mark a non-streamed final assistant response."""
+        self._begin_assistant_output()
+
     def __call__(self, event: object) -> None:
-        if isinstance(event, AssistantToolTextReceived) and self._markdown is not None:
-            write_markdown_document(self._stream, event.text, color=self._color)
+        if isinstance(event, AssistantToolTextReceived):
+            self._begin_assistant_output()
+            if self._markdown is None:
+                self._stream.write(event.text)
+                if not event.text.endswith("\n"):
+                    self._stream.write("\n")
+                self._stream.flush()
+            else:
+                write_markdown_document(self._stream, event.text, color=self._color)
+            self._assistant_output_active = False
             return
         if isinstance(event, AssistantResponseTextDeltaReceived):
+            self._begin_assistant_output()
             self._response_parts.append(event.text)
             if self._stream_deltas:
                 if self._markdown is None:
@@ -61,6 +91,7 @@ class TerminalEventSink:
             self._resolve_stream(event.text, companion=False)
             self._final_text_was_streamed = True
             return
+        self._clear_waiting()
         message, kind = render_prompt_event(event)
         self._stream.write(render_message(message, kind, color=self._color))
         if not message.endswith("\n"):
@@ -69,6 +100,7 @@ class TerminalEventSink:
 
     def abort_stream(self) -> bool:
         """Discard hidden deltas or terminate a visible partial response line."""
+        self._clear_waiting()
         had_partial = bool(self._response_parts)
         if self._visible_response and self._response_parts:
             if self._markdown is None and not "".join(self._response_parts).endswith("\n"):
@@ -78,6 +110,7 @@ class TerminalEventSink:
             self._markdown.abort()
         self._response_parts.clear()
         self._visible_response = False
+        self._assistant_output_active = False
         return had_partial
 
     def _resolve_stream(self, text: str, *, companion: bool) -> None:
@@ -101,3 +134,20 @@ class TerminalEventSink:
                 self._markdown.flush()
         self._response_parts.clear()
         self._visible_response = False
+        self._assistant_output_active = False
+
+    def _begin_assistant_output(self) -> None:
+        self._clear_waiting()
+        if not self._show_role_markers or self._assistant_output_active:
+            return
+        marker = render_message("•", "success", color=self._color)
+        self._stream.write(f"{marker} ")
+        self._stream.flush()
+        self._assistant_output_active = True
+
+    def _clear_waiting(self) -> None:
+        if not self._waiting_visible:
+            return
+        self._stream.write("\r\x1b[2K")
+        self._stream.flush()
+        self._waiting_visible = False

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+from pathlib import Path
 from typing import Literal, Protocol
 
 from leonervis_code.agent.tool_events import (
@@ -24,20 +24,21 @@ RED = "\x1b[31m"
 GREEN = "\x1b[32m"
 YELLOW = "\x1b[33m"
 BLUE = "\x1b[34m"
-BOLD = "\x1b[1m"
 _READLINE_START = "\001"
 _READLINE_END = "\002"
-_RUNTIME_WIDTH = 24
+_TOOLBAR_MODEL_WIDTH = 36
+_TOOLBAR_WORKSPACE_WIDTH = 64
 DEFAULT_ACTION_AUDIT_COUNT = 20
 MAX_ACTION_AUDIT_COUNT = 100
-_SAFE_PROMPT_CHARACTER = re.compile(r"[A-Za-z0-9._:-]")
-
+CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
     "Commands: /help, /history <count>, /actions [count], /session, /provider, /status, "
     "/context, /compact, "
-    "/model <model>, /resume <latest|id>, /exit, /quit. Ctrl-D or Ctrl-C exits."
+    "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
+    "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
+    "cancels a draft or exits when empty; Ctrl-D exits when empty."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -121,25 +122,25 @@ def render_prompt(
     color: bool,
     readline: bool = False,
 ) -> str:
-    """Render a compact prompt from redacted public runtime snapshots."""
-    session_label = _session_label(session)
-    runtime_label = _runtime_label(status)
-    fields = [field for field in (session_label, runtime_label) if field is not None]
-    if not fields:
-        return "leonervis> "
+    """Render the minimal input marker; runtime identity lives in the toolbar."""
+    del status, session
+    return f"{_ansi('›', GREEN, readline=readline)} " if color else "› "
 
-    if not color:
-        return f"leonervis[{'|'.join(fields)}]> "
 
-    styled_fields = []
-    if session_label is not None:
-        styled_fields.append(_ansi(session_label, BLUE, readline=readline))
+def render_prompt_toolbar(
+    status: RuntimeStatusView | None,
+    cwd: Path,
+    *,
+    color: bool,
+) -> str:
+    """Render a bounded model and workspace status line below the TTY editor."""
+    fields = []
+    runtime_label = _toolbar_runtime_label(status)
     if runtime_label is not None:
-        runtime_color = YELLOW if status is not None and status.mode == "fake" else BLUE
-        styled_fields.append(_ansi(runtime_label, runtime_color, readline=readline))
-    brand = _ansi("leonervis", BOLD, readline=readline)
-    arrow = _ansi(">", GREEN, readline=readline)
-    return f"{brand}[{'|'.join(styled_fields)}]{arrow} "
+        fields.append(runtime_label)
+    fields.append(_toolbar_workspace_label(cwd))
+    text = f"  {' · '.join(fields)}"
+    return _ansi(text, BLUE, readline=False) if color else text
 
 
 def render_message(text: str, kind: MessageKind, *, color: bool) -> str:
@@ -584,35 +585,28 @@ def _count_label(value: int, label: str) -> str:
     return f"{value} {suffix}"
 
 
-def _session_label(info: SessionInfoView | None) -> str | None:
-    if info is None:
-        return None
-    value = str(info.session_id)
-    if len(value) < 8:
-        return "unknown"
-    prefix = value[:8]
-    return prefix if all(character in "0123456789abcdef" for character in prefix) else "unknown"
-
-
-def _runtime_label(status: RuntimeStatusView | None) -> str | None:
+def _toolbar_runtime_label(status: RuntimeStatusView | None) -> str | None:
     if status is None:
         return None
     if status.mode == "fake":
-        return "fake"
-    if status.mode == "real" and status.profile:
-        raw = status.profile
-    elif status.mode == "real":
-        raw = f"direct:{status.provider_id}"
+        raw = "fake"
     else:
-        raw = "unknown"
-    return _truncate(_safe_prompt_text(raw), _RUNTIME_WIDTH)
+        raw = status.selected_model or status.profile or status.provider_id or "unknown"
+    return _truncate(_safe_toolbar_text(raw), _TOOLBAR_MODEL_WIDTH)
 
 
-def _safe_prompt_text(value: object) -> str:
-    projected = "".join(
-        character if character.isascii() and _SAFE_PROMPT_CHARACTER.fullmatch(character) else "?"
-        for character in str(value)
-    )
+def _toolbar_workspace_label(cwd: Path) -> str:
+    try:
+        relative = cwd.relative_to(Path.home())
+    except ValueError:
+        raw = cwd.as_posix()
+    else:
+        raw = "~" if relative == Path(".") else f"~/{relative.as_posix()}"
+    return _truncate(_safe_toolbar_text(raw), _TOOLBAR_WORKSPACE_WIDTH)
+
+
+def _safe_toolbar_text(value: object) -> str:
+    projected = "".join(character if character.isprintable() else "?" for character in str(value))
     return projected or "unknown"
 
 

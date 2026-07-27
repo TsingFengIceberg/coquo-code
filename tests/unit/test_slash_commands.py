@@ -181,6 +181,8 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/actions 0", session).message == "Usage: /actions [1-100]"
     assert dispatch_slash("/actions 101", session).message == "Usage: /actions [1-100]"
     assert dispatch_slash("/actions two", session).message == "Usage: /actions [1-100]"
+    assert dispatch_slash("/clear", session).clear_screen is True
+    assert dispatch_slash("/clear extra", session).message == "Usage: /clear"
     assert session.prompts == []
 
 
