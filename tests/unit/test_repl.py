@@ -5,6 +5,8 @@ from pathlib import Path
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
+    AssistantFinalTextStreamCommitted,
+    AssistantResponseTextDeltaReceived,
     AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
@@ -380,6 +382,72 @@ def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
     rendered = output.getvalue()
     assert "I will search first.\n[tool 1/6] grep include='*.py' query_bytes=6\n" in rendered
     assert "[tool 1/6] succeeded code=ok\nreply: search\n" in rendered
+
+
+def test_repl_streams_final_text_once_and_continues_after_interrupted_partial_text(
+    tmp_path,
+) -> None:
+    class StreamingSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def prompt(self, _prompt, *, event_sink=None):
+            self.calls += 1
+            if self.calls == 1:
+                event_sink(AssistantResponseTextDeltaReceived("partial"))
+                raise KeyboardInterrupt
+            event_sink(AssistantResponseTextDeltaReceived("final"))
+            event_sink(AssistantFinalTextStreamCommitted("final"))
+            return "final"
+
+    output = io.StringIO()
+    session = StreamingSession()
+
+    assert (
+        run_repl(
+            session,
+            stdin=io.StringIO("first\nsecond\n/exit\n"),
+            stdout=output,
+            version="0.1.0",
+            cwd=tmp_path,
+            color=False,
+        )
+        == 0
+    )
+
+    rendered = output.getvalue()
+    assert "partial\nGeneration cancelled; partial assistant text was not committed.\n" in rendered
+    assert rendered.count("final\n") == 1
+    assert session.calls == 2
+
+
+def test_repl_renders_nonstream_final_markdown_when_terminal_rendering_is_enabled(
+    tmp_path,
+) -> None:
+    class MarkdownSession:
+        def prompt(self, _prompt, *, event_sink=None):
+            return "# Result\n\nThis is **bold**."
+
+    output = io.StringIO()
+
+    assert (
+        run_repl(
+            MarkdownSession(),
+            stdin=io.StringIO("inspect\n/exit\n"),
+            stdout=output,
+            version="0.1.0",
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+        )
+        == 0
+    )
+
+    rendered = output.getvalue()
+    assert "Result" in rendered
+    assert "This is bold." in rendered
+    assert "# Result" not in rendered
+    assert "**bold**" not in rendered
 
 
 def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -> None:

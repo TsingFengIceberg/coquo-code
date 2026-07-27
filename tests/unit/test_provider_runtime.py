@@ -37,6 +37,7 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
+from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.session import ProjectSession
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
@@ -167,6 +168,60 @@ def test_turn_runtime_combines_assessment_summary_and_response_under_one_lease(
         with pytest.raises(RuntimeProviderStateError, match="active operation"):
             manager.use_profile("two")
 
+    assert manager.use_profile("two").status.profile == "two"
+
+
+def test_turn_runtime_preflights_and_holds_lease_while_consuming_stream(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    profile = store.get_profile("one")
+    store.replace_profile(
+        profile.profile_id,
+        replace(
+            profile.to_spec(),
+            context_window_tokens=1000,
+            model_max_output_tokens=100,
+            max_output_tokens=20,
+        ),
+        expected_revision=profile.revision,
+    )
+
+    class StreamingProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.counts = 0
+            self.stream_calls = 0
+
+        def count_input_tokens(self, request):
+            self.counts += 1
+            return RequestTokenCount(20, RequestTokenCountMethod.ESTIMATED)
+
+        def respond_stream(self, request, *, event_sink):
+            self.stream_calls += 1
+            self.requests.append(request)
+            with pytest.raises(RuntimeProviderStateError, match="active operation"):
+                manager.use_profile("two")
+            event_sink(ProviderTextDelta("streamed"))
+            return AssistantText("streamed")
+
+    provider = StreamingProvider("one")
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    conversation = ConversationRequest(build_system_prompt(), (UserMessage("hello"),))
+    events = []
+
+    with manager.provider_for_turn() as runtime:
+        assert runtime.streaming_supported is True
+        assert runtime.respond_stream(conversation, event_sink=events.append) == AssistantText(
+            "streamed"
+        )
+
+    assert provider.counts == 1
+    assert provider.stream_calls == 1
+    assert events == [ProviderTextDelta("streamed")]
     assert manager.use_profile("two").status.profile == "two"
 
 
@@ -451,8 +506,16 @@ def test_preflight_rejects_known_overflow_before_provider_send(tmp_path) -> None
     )
 
     class CountingProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.stream_calls = 0
+
         def count_input_tokens(self, request):
             return RequestTokenCount(81, RequestTokenCountMethod.ESTIMATED)
+
+        def respond_stream(self, request, *, event_sink):
+            self.stream_calls += 1
+            return AssistantText("must not run")
 
     provider = CountingProvider("model-one")
     manager = RuntimeProviderManager(
@@ -465,7 +528,10 @@ def test_preflight_rejects_known_overflow_before_provider_send(tmp_path) -> None
         request = ConversationRequest(build_system_prompt(), (UserMessage("too large"),))
         with pytest.raises(ContextPreflightError, match="input=81"):
             runtime.respond(request)
+        with pytest.raises(ContextPreflightError, match="input=81"):
+            runtime.respond_stream(request, event_sink=lambda _event: None)
     assert provider.requests == []
+    assert provider.stream_calls == 0
 
 
 def test_switch_rejects_known_committed_context_overflow_without_changing_state(

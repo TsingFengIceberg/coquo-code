@@ -9,6 +9,9 @@ from leonervis_code.agent.loop import (
     ToolLoopLimitError,
 )
 from leonervis_code.agent.tool_events import (
+    AssistantFinalTextStreamCommitted,
+    AssistantResponseTextDeltaReceived,
+    AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
     ToolDispatchResult,
     ToolEventStatus,
@@ -27,6 +30,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -837,6 +841,118 @@ def test_assistant_tool_text_is_displayed_executed_continued_and_committed(tmp_p
         result,
         AssistantText("The file contains notes."),
     )
+
+
+def test_streaming_loop_orders_complete_tool_text_execution_and_durable_final_commit(
+    tmp_path,
+) -> None:
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+    call = ToolUse(
+        "read-stream",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will read.",
+    )
+
+    class StreamingProvider:
+        def __init__(self) -> None:
+            self.outcomes = [(call, ("I will ", "read.")), (AssistantText("Done."), ("Do", "ne."))]
+            self.requests = []
+
+        def respond(self, _request):
+            raise AssertionError("streaming path expected")
+
+        def respond_stream(self, request, *, event_sink):
+            self.requests.append(request)
+            response, parts = self.outcomes.pop(0)
+            for part in parts:
+                event_sink(ProviderTextDelta(part))
+            return response
+
+    provider = StreamingProvider()
+    committed = []
+    events = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
+    )
+
+    assert loop.run("inspect", event_sink=events.append) == "Done."
+    assert events == [
+        AssistantResponseTextDeltaReceived("I will "),
+        AssistantResponseTextDeltaReceived("read."),
+        AssistantToolTextStreamCompleted("I will read."),
+        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED),
+        AssistantResponseTextDeltaReceived("Do"),
+        AssistantResponseTextDeltaReceived("ne."),
+        AssistantFinalTextStreamCommitted("Done."),
+    ]
+    assert committed[0].items[-1] == AssistantText("Done.")
+    assert provider.requests[1].history[-2:] == (call, ToolResult("read-stream", "notes\n"))
+
+
+def test_streaming_loop_does_not_confirm_or_commit_final_text_when_durability_fails(
+    tmp_path,
+) -> None:
+    class StreamingProvider:
+        def respond(self, _request):
+            raise AssertionError("streaming path expected")
+
+        def respond_stream(self, _request, *, event_sink):
+            event_sink(ProviderTextDelta("not "))
+            event_sink(ProviderTextDelta("durable"))
+            return AssistantText("not durable")
+
+    def fail(_turn) -> None:
+        raise OSError("disk full")
+
+    events = []
+    loop = AgentLoop(
+        StreamingProvider(),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=fail,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        loop.run("persist", event_sink=events.append)
+
+    assert events == [
+        AssistantResponseTextDeltaReceived("not "),
+        AssistantResponseTextDeltaReceived("durable"),
+    ]
+    assert loop.history == ()
+
+
+def test_streaming_event_sink_failure_cannot_change_execution_or_commit(tmp_path) -> None:
+    class StreamingProvider:
+        def respond(self, _request):
+            raise AssertionError("streaming path expected")
+
+        def respond_stream(self, _request, *, event_sink):
+            event_sink(ProviderTextDelta("done"))
+            return AssistantText("done")
+
+    loop = AgentLoop(
+        StreamingProvider(),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert (
+        loop.run("inspect", event_sink=lambda _event: (_ for _ in ()).throw(OSError("closed")))
+        == "done"
+    )
+    assert loop.history == (UserMessage("inspect"), AssistantText("done"))
 
 
 def test_assistant_tool_text_after_limit_result_is_visible_but_cannot_extend_budget(

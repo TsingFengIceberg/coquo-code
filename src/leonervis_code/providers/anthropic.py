@@ -1,8 +1,9 @@
-"""Explicit non-streaming Anthropic Messages adapter for Foundation 3A."""
+"""Explicit Anthropic Messages adapter."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Protocol
 
 import anthropic
@@ -33,6 +34,15 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
     estimate_serialized_input_tokens,
+)
+from leonervis_code.providers.streaming import (
+    MAX_PROVIDER_STREAM_ARGUMENT_BYTES,
+    MAX_PROVIDER_STREAM_EVENTS,
+    MAX_PROVIDER_STREAM_IDENTIFIER_BYTES,
+    MAX_PROVIDER_STREAM_TEXT_BYTES,
+    MAX_PROVIDER_STREAM_TEXT_CHARACTERS,
+    ProviderTextDelta,
+    ProviderTextDeltaSink,
 )
 from leonervis_code.tools.catalog import (
     model_tool_definitions,
@@ -189,6 +199,24 @@ class AnthropicConversationProvider:
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
         return parse_response(response, config=self._config)
+
+    def respond_stream(
+        self,
+        request_snapshot: ConversationRequest,
+        *,
+        event_sink: ProviderTextDeltaSink,
+    ) -> ProviderResponse:
+        """Consume one Anthropic event stream into the same neutral contract."""
+        request = build_request(self._config, request_snapshot)
+        request["stream"] = True
+        stream = None
+        try:
+            stream = self._client.create(**request)
+            return parse_response_stream(stream, config=self._config, event_sink=event_sink)
+        except anthropic.APIError as error:
+            raise normalize_sdk_error(error, config=self._config) from None
+        finally:
+            _close_stream(stream)
 
     def discover_model_context(self) -> ModelContextDiscovery:
         """Discover one official Anthropic model's maximum input context."""
@@ -588,6 +616,248 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
         )
     except ValueError:
         raise _invalid_response(config, "Anthropic assistant tool text was malformed") from None
+
+
+@dataclass
+class _AnthropicStreamBlock:
+    block_type: str
+    text_parts: list[str]
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    initial_input: dict[str, object] | None = None
+    input_parts: list[str] | None = None
+
+
+def parse_response_stream(
+    events: object,
+    *,
+    config: AnthropicProviderConfig,
+    event_sink: ProviderTextDeltaSink,
+) -> ProviderResponse:
+    """Assemble one strict sequential response from Anthropic message events."""
+    try:
+        iterator = iter(events)  # type: ignore[arg-type]
+    except TypeError:
+        raise _invalid_response(config, "Anthropic response stream was not iterable") from None
+
+    blocks: dict[int, _AnthropicStreamBlock] = {}
+    completed_blocks: list[_AnthropicStreamBlock] = []
+    expected_index = 0
+    started = False
+    stopped = False
+    stop_reason: str | None = None
+    argument_bytes = 0
+    text_characters = 0
+    text_bytes = 0
+
+    def emit_text(text: str) -> None:
+        nonlocal text_characters, text_bytes
+        try:
+            encoded_text = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _invalid_response(config, "Anthropic stream text delta was malformed") from None
+        text_characters += len(text)
+        text_bytes += len(encoded_text)
+        if (
+            text_characters > MAX_PROVIDER_STREAM_TEXT_CHARACTERS
+            or text_bytes > MAX_PROVIDER_STREAM_TEXT_BYTES
+        ):
+            raise _invalid_response(config, "Anthropic stream text was too large")
+        try:
+            event = ProviderTextDelta(text)
+        except ValueError:
+            raise _invalid_response(config, "Anthropic stream text delta was malformed") from None
+        event_sink(event)
+
+    for event_index, event in enumerate(iterator, start=1):
+        if event_index > MAX_PROVIDER_STREAM_EVENTS:
+            raise _invalid_response(config, "Anthropic stream contained too many events")
+        if stopped:
+            raise _invalid_response(config, "Anthropic stream continued after message_stop")
+        event_type = getattr(event, "type", None)
+        if event_type == "message_start":
+            if started:
+                raise _invalid_response(config, "Anthropic stream repeated message_start")
+            message = getattr(event, "message", None)
+            if message is None or getattr(message, "role", None) != "assistant":
+                raise _invalid_response(config, "Anthropic stream message_start was malformed")
+            started = True
+            continue
+        if not started:
+            raise _invalid_response(config, "Anthropic stream event preceded message_start")
+        if stop_reason is not None and event_type != "message_stop":
+            raise _invalid_response(config, "Anthropic stream continued after its stop reason")
+        if event_type == "content_block_start":
+            if blocks:
+                raise _invalid_response(config, "Anthropic stream content blocks overlapped")
+            index = getattr(event, "index", None)
+            if type(index) is not int or index != expected_index or index in blocks:
+                raise _invalid_response(config, "Anthropic stream content-block index was invalid")
+            block = getattr(event, "content_block", None)
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                initial_text = getattr(block, "text", "")
+                if not isinstance(initial_text, str):
+                    raise _invalid_response(config, "Anthropic stream text block was malformed")
+                state = _AnthropicStreamBlock("text", [])
+                if initial_text:
+                    state.text_parts.append(initial_text)
+                    emit_text(initial_text)
+            elif block_type == "tool_use":
+                tool_use_id = getattr(block, "id", None)
+                tool_name = getattr(block, "name", None)
+                initial_input = getattr(block, "input", None)
+                if (
+                    not isinstance(tool_use_id, str)
+                    or not tool_use_id
+                    or not isinstance(tool_name, str)
+                    or not tool_name
+                    or not isinstance(initial_input, dict)
+                ):
+                    raise _invalid_response(config, "Anthropic stream tool block was malformed")
+                try:
+                    encoded_tool_id = tool_use_id.encode("utf-8")
+                    encoded_tool_name = tool_name.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        config, "Anthropic stream tool block was malformed"
+                    ) from None
+                if (
+                    len(encoded_tool_id) > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES
+                    or len(encoded_tool_name) > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES
+                ):
+                    raise _invalid_response(config, "Anthropic stream tool block was too large")
+                state = _AnthropicStreamBlock(
+                    "tool_use",
+                    [],
+                    tool_use_id=tool_use_id,
+                    tool_name=tool_name,
+                    initial_input=initial_input,
+                    input_parts=[],
+                )
+            else:
+                raise _invalid_response(config, "Anthropic stream block type was unsupported")
+            blocks[index] = state
+            expected_index += 1
+            continue
+        if event_type == "content_block_delta":
+            index = getattr(event, "index", None)
+            state = blocks.get(index)
+            if state is None:
+                raise _invalid_response(config, "Anthropic stream delta had no active block")
+            delta = getattr(event, "delta", None)
+            delta_type = getattr(delta, "type", None)
+            if delta_type == "text_delta" and state.block_type == "text":
+                text = getattr(delta, "text", None)
+                if not isinstance(text, str):
+                    raise _invalid_response(config, "Anthropic stream text delta was malformed")
+                if text:
+                    state.text_parts.append(text)
+                    emit_text(text)
+            elif delta_type == "input_json_delta" and state.block_type == "tool_use":
+                partial_json = getattr(delta, "partial_json", None)
+                if not isinstance(partial_json, str):
+                    raise _invalid_response(config, "Anthropic stream input delta was malformed")
+                try:
+                    encoded_json = partial_json.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        config, "Anthropic stream input delta was malformed"
+                    ) from None
+                argument_bytes += len(encoded_json)
+                if argument_bytes > MAX_PROVIDER_STREAM_ARGUMENT_BYTES:
+                    raise _invalid_response(config, "Anthropic stream tool input was too large")
+                assert state.input_parts is not None
+                state.input_parts.append(partial_json)
+            else:
+                raise _invalid_response(config, "Anthropic stream delta type was unsupported")
+            continue
+        if event_type == "content_block_stop":
+            index = getattr(event, "index", None)
+            state = blocks.pop(index, None)
+            if state is None:
+                raise _invalid_response(config, "Anthropic stream stopped an unknown block")
+            completed_blocks.append(state)
+            continue
+        if event_type == "message_delta":
+            if blocks:
+                raise _invalid_response(config, "Anthropic stream ended before a block stopped")
+            delta = getattr(event, "delta", None)
+            value = getattr(delta, "stop_reason", None)
+            if not isinstance(value, str) or stop_reason is not None:
+                raise _invalid_response(config, "Anthropic stream stop reason was malformed")
+            stop_reason = value
+            continue
+        if event_type == "message_stop":
+            if blocks or stop_reason is None:
+                raise _invalid_response(config, "Anthropic stream stopped before completion")
+            stopped = True
+            continue
+        raise _invalid_response(config, "Anthropic stream event type was unsupported")
+
+    if not started or not stopped or stop_reason is None:
+        raise _invalid_response(config, "Anthropic stream ended before message_stop")
+    if stop_reason == "max_tokens":
+        raise _invalid_response(config, "Anthropic response reached the output-token limit")
+    if stop_reason == "refusal":
+        raise _adapter_error(
+            config,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="Anthropic refused the request",
+        )
+
+    text = "".join(
+        part
+        for block in completed_blocks
+        if block.block_type == "text"
+        for part in block.text_parts
+    )
+    tools = [block for block in completed_blocks if block.block_type == "tool_use"]
+    if not tools:
+        if stop_reason != "end_turn" or not text:
+            raise _invalid_response(config, "Anthropic text stream did not end correctly")
+        return AssistantText(text)
+    if stop_reason != "tool_use" or len(tools) != 1:
+        raise _invalid_response(config, "Anthropic stream must contain exactly one tool use")
+
+    tool = tools[0]
+    assert tool.tool_use_id is not None and tool.tool_name is not None
+    assert tool.initial_input is not None and tool.input_parts is not None
+    if tool.input_parts:
+        if tool.initial_input:
+            raise _invalid_response(config, "Anthropic stream tool input was ambiguous")
+        try:
+            tool_input = json.loads("".join(tool.input_parts))
+        except json.JSONDecodeError:
+            raise _invalid_response(config, "Anthropic stream tool input was malformed") from None
+    else:
+        tool_input = tool.initial_input
+    if not isinstance(tool_input, dict):
+        raise _invalid_response(config, "Anthropic stream tool input was malformed")
+    try:
+        return tool_use_from_input(
+            tool.tool_use_id,
+            tool.tool_name,
+            tool_input,
+            assistant_text=text or None,
+        )
+    except ValueError:
+        raise _invalid_response(
+            config,
+            f"Anthropic {tool.tool_name} input was malformed",
+        ) from None
+
+
+def _close_stream(stream: object | None) -> None:
+    if stream is None:
+        return
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
 
 
 def normalize_sdk_error(

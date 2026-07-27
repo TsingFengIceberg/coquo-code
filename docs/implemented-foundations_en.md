@@ -34,6 +34,8 @@
 - [`turn_committed` v3 Assistant Tool Text Persistence](#turn_committed-v3-assistant-tool-text-persistence)
 - [Provider Mixed-response History Projection](#provider-mixed-response-history-projection)
 - [AgentLoop and Terminal Assistant Tool Text Integration](#agentloop-and-terminal-assistant-tool-text-integration)
+- [Provider Streaming and Terminal Failure Atomicity](#provider-streaming-and-terminal-failure-atomicity)
+- [TTY Markdown Rendering](#tty-markdown-rendering)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -522,6 +524,22 @@ The live companion event is not persisted and is not proof of execution; durable
 
 The canonical system prompt advances to v16, and the empty full-context golden becomes `ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58`. The adapter contract remains v17; ToolArguments v1, `turn_committed` v3, Action Audit, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations do not advance, and old transcripts are not rewritten. See [0046: AgentLoop and Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md).
 
+## Provider Streaming and Terminal Failure Atomicity
+
+Anthropic Messages and OpenAI-compatible Chat Completions can now stream assistant text during one synchronous provider call. Each adapter strictly assembles its native events or chunks, finish reason, and fragmented tool JSON. AgentLoop can execute only after a complete neutral `ToolUse` passes the known-tool schema; missing stops, bad indexes or order, multiple calls, invalid JSON, refusal, and output truncation fail closed before the tool boundary. Fake and custom providers without streaming retain the existing `respond()` path.
+
+The REPL displays text deltas immediately. Tool activity follows only after companion text is completely parsed, and final text receives a committed confirmation only after the Session turn append and fsync, so it is not printed twice. Provider interruption, Ctrl-C, or commit failure explicitly marks visible partial text as uncommitted. Because one-shot cannot know whether streamed text is a final answer or tool companion until completion, it buffers deltas: companion text and tool activity go to stderr, while stdout receives the final answer exactly once after durable commit. Runtime performs context preflight before the first delta and retains the original turn lease through the complete synchronous stream.
+
+Deltas are not persisted and prove neither tool execution nor turn commit; durable truth remains `turn_committed` v3, Action Audit, and the complete transcript. The adapter contract advances to v19. The canonical system prompt was reviewed and remains v16; tool schema/order, the six-call budget, ToolArguments v1, ActionIdentity v1, Session/compaction schemas, the empty-context golden, and the `ctx-v1`/`ctx-v2` representations are unchanged. See [0047](./decisions/0047-provider-neutral-synchronous-response-streaming.md) through [0050](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md).
+
+## TTY Markdown Rendering
+
+The REPL and TTY one-shot now use the locked Rich renderer for assistant Markdown. Headings, emphasis, lists, tables, and fenced code become terminal layout with optional ANSI syntax styling. Streaming emits complete blocks only at safe boundaries such as blank lines or closed fences, preventing incomplete fragments from misclassifying code. Tool companion text flushes after complete response classification, while the remaining final suffix flushes only after durable turn commit.
+
+Non-TTY stdout/stderr, pipes, and redirects retain raw Markdown; `NO_COLOR` disables ANSI while preserving Markdown layout. Provider ESC, CR, NUL, and other terminal controls become visible escape text in the TTY copy, and Rich markup, emoji expansion, and terminal hyperlinks are disabled. Session, provider continuation, and Effective Context always use the exact original text, so renderer failures or version changes cannot alter resume or context identity.
+
+This Host-only presentation slice adds Rich as a runtime dependency, while canonical system prompt v16, adapter contract v19, `turn_committed` v3, and all tool, permission, audit, compaction, and context contracts remain unchanged. See [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -734,3 +752,8 @@ This slice establishes capacity facts only. It does not count current request to
 44. [0044: `turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)
 45. [0045: Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)
 46. [0046: AgentLoop and Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)
+47. [0047: Provider-neutral Synchronous Response Streaming](./decisions/0047-provider-neutral-synchronous-response-streaming.md)
+48. [0048: OpenAI-compatible Chat Completions Streaming](./decisions/0048-openai-compatible-chat-completions-streaming.md)
+49. [0049: Anthropic Messages Streaming](./decisions/0049-anthropic-messages-streaming.md)
+50. [0050: AgentLoop, Runtime, and Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
+51. [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)

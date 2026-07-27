@@ -40,6 +40,7 @@ from leonervis_code.providers.request_context import (
     rejects_context_transition,
 )
 from leonervis_code.providers.resolver import resolve_profile_route, resolve_runtime_route
+from leonervis_code.providers.streaming import ProviderTextDeltaSink, respond_with_streaming
 
 ProviderFactory = Callable[..., ConversationProvider]
 
@@ -189,6 +190,10 @@ class TurnRuntimeSnapshot:
     capability: ModelContextCapability
     status: RuntimeStatus
 
+    @property
+    def streaming_supported(self) -> bool:
+        return callable(getattr(self.provider, "respond_stream", None))
+
     def assess_context(self, request: ConversationRequest) -> CurrentTargetContextAssessment:
         if self.route is None:
             return CurrentTargetContextAssessment(
@@ -245,6 +250,29 @@ class TurnRuntimeSnapshot:
         )
         raise_for_context_fit(report)
         return self.provider.respond(request)
+
+    def respond_stream(
+        self,
+        request: ConversationRequest,
+        *,
+        event_sink: ProviderTextDeltaSink,
+    ) -> ProviderResponse:
+        """Preflight once, then hold this pinned runtime through stream consumption."""
+        if self.route is not None:
+            report = assess_context_fit(
+                provider=self.provider,
+                route=self.route,
+                capability=self.capability,
+                request=request,
+            )
+            raise_for_context_fit(report)
+        outcome = respond_with_streaming(
+            self.provider,
+            request,
+            event_sink=event_sink,
+            prefer_stream=True,
+        )
+        return outcome.response
 
 
 @dataclass(frozen=True)

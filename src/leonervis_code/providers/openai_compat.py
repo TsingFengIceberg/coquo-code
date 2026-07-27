@@ -1,4 +1,4 @@
-"""Non-streaming OpenAI-compatible chat-completions adapter for Foundation 3B."""
+"""OpenAI-compatible chat-completions adapter."""
 
 from __future__ import annotations
 
@@ -28,6 +28,15 @@ from leonervis_code.providers.errors import (
 from leonervis_code.providers.request_context import (
     RequestTokenCount,
     estimate_serialized_input_tokens,
+)
+from leonervis_code.providers.streaming import (
+    MAX_PROVIDER_STREAM_ARGUMENT_BYTES,
+    MAX_PROVIDER_STREAM_EVENTS,
+    MAX_PROVIDER_STREAM_IDENTIFIER_BYTES,
+    MAX_PROVIDER_STREAM_TEXT_BYTES,
+    MAX_PROVIDER_STREAM_TEXT_CHARACTERS,
+    ProviderTextDelta,
+    ProviderTextDeltaSink,
 )
 from leonervis_code.tools.catalog import (
     model_tool_definitions,
@@ -98,6 +107,24 @@ class OpenAICompatibleConversationProvider:
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
         return parse_response(response, route=self._route)
+
+    def respond_stream(
+        self,
+        request_snapshot: ConversationRequest,
+        *,
+        event_sink: ProviderTextDeltaSink,
+    ) -> ProviderResponse:
+        """Consume one compatible response stream into the same neutral contract."""
+        request = build_request(self._route, request_snapshot)
+        request["stream"] = True
+        stream = None
+        try:
+            stream = self._client.create(**request)
+            return parse_response_stream(stream, route=self._route, event_sink=event_sink)
+        except openai.APIError as error:
+            raise normalize_sdk_error(error, route=self._route) from None
+        finally:
+            _close_stream(stream)
 
 
 def create_openai_compatible_provider(
@@ -523,6 +550,203 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
         )
     except ValueError:
         raise _invalid_response(route, "provider assistant tool text was malformed") from None
+
+
+def parse_response_stream(
+    chunks: object,
+    *,
+    route: RuntimeProviderRoute,
+    event_sink: ProviderTextDeltaSink,
+) -> ProviderResponse:
+    """Assemble one strict sequential response from compatible chat chunks."""
+    try:
+        iterator = iter(chunks)  # type: ignore[arg-type]
+    except TypeError:
+        raise _invalid_response(route, "provider stream was not iterable") from None
+
+    text_parts: list[str] = []
+    tool_use_id: str | None = None
+    tool_name_parts: list[str] = []
+    argument_parts: list[str] = []
+    argument_bytes = 0
+    tool_name_bytes = 0
+    finish_reason: str | None = None
+    saw_chunk = False
+    text_characters = 0
+    text_bytes = 0
+
+    for chunk_index, chunk in enumerate(iterator, start=1):
+        if chunk_index > MAX_PROVIDER_STREAM_EVENTS:
+            raise _invalid_response(route, "provider stream contained too many chunks")
+        if finish_reason is not None:
+            raise _invalid_response(route, "provider stream continued after its finish reason")
+        choices = getattr(chunk, "choices", None)
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise _invalid_response(route, "provider stream chunk must contain one choice")
+        choice = choices[0]
+        choice_index = getattr(choice, "index", None)
+        if type(choice_index) is not int or choice_index != 0:
+            raise _invalid_response(route, "provider stream choice index was invalid")
+        delta = getattr(choice, "delta", None)
+        if delta is None:
+            raise _invalid_response(route, "provider stream choice contained no delta")
+        saw_chunk = True
+
+        refusal = getattr(delta, "refusal", None)
+        if refusal:
+            raise adapter_error(
+                provider_id=route.definition.provider_id,
+                model_id=route.selected_model,
+                kind=ProviderFailureKind.CONTENT_REFUSAL,
+                code="content_refusal",
+                message="provider refused or filtered the request",
+            )
+        content = getattr(delta, "content", None)
+        if content is not None:
+            if not isinstance(content, str):
+                raise _invalid_response(route, "provider stream text delta was malformed")
+            if content:
+                try:
+                    encoded_content = content.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        route, "provider stream text delta was malformed"
+                    ) from None
+                text_characters += len(content)
+                text_bytes += len(encoded_content)
+                if (
+                    text_characters > MAX_PROVIDER_STREAM_TEXT_CHARACTERS
+                    or text_bytes > MAX_PROVIDER_STREAM_TEXT_BYTES
+                ):
+                    raise _invalid_response(route, "provider stream text was too large")
+                try:
+                    event = ProviderTextDelta(content)
+                except ValueError:
+                    raise _invalid_response(
+                        route, "provider stream text delta was malformed"
+                    ) from None
+                text_parts.append(content)
+                event_sink(event)
+
+        tool_calls = getattr(delta, "tool_calls", None) or []
+        if not isinstance(tool_calls, list) or len(tool_calls) > 1:
+            raise _invalid_response(route, "provider stream delta contained multiple tool calls")
+        if tool_calls:
+            call = tool_calls[0]
+            call_index = getattr(call, "index", None)
+            if type(call_index) is not int or call_index != 0:
+                raise _invalid_response(route, "provider stream tool-call index was invalid")
+            call_id = getattr(call, "id", None)
+            if call_id is not None:
+                if not isinstance(call_id, str) or not call_id:
+                    raise _invalid_response(route, "provider stream tool-call ID was malformed")
+                try:
+                    encoded_call_id = call_id.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        route, "provider stream tool-call ID was malformed"
+                    ) from None
+                if len(encoded_call_id) > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES:
+                    raise _invalid_response(route, "provider stream tool-call ID was too large")
+                if tool_use_id is not None and call_id != tool_use_id:
+                    raise _invalid_response(route, "provider stream changed its tool-call ID")
+                tool_use_id = call_id
+            call_type = getattr(call, "type", None)
+            if call_type not in {None, "function"}:
+                raise _invalid_response(route, "provider stream tool-call type was unsupported")
+            function = getattr(call, "function", None)
+            if function is None:
+                raise _invalid_response(route, "provider stream tool function was missing")
+            name = getattr(function, "name", None)
+            if name is not None:
+                if not isinstance(name, str):
+                    raise _invalid_response(route, "provider stream tool name was malformed")
+                try:
+                    encoded_name = name.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        route, "provider stream tool name was malformed"
+                    ) from None
+                tool_name_bytes += len(encoded_name)
+                if tool_name_bytes > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES:
+                    raise _invalid_response(route, "provider stream tool name was too large")
+                tool_name_parts.append(name)
+            arguments = getattr(function, "arguments", None)
+            if arguments is not None:
+                if not isinstance(arguments, str):
+                    raise _invalid_response(route, "provider stream tool arguments were malformed")
+                try:
+                    encoded_arguments = arguments.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise _invalid_response(
+                        route, "provider stream tool arguments were malformed"
+                    ) from None
+                argument_bytes += len(encoded_arguments)
+                if argument_bytes > MAX_PROVIDER_STREAM_ARGUMENT_BYTES:
+                    raise _invalid_response(route, "provider stream tool arguments were too large")
+                argument_parts.append(arguments)
+
+        current_finish = getattr(choice, "finish_reason", None)
+        if current_finish is not None:
+            if not isinstance(current_finish, str):
+                raise _invalid_response(route, "provider stream finish reason was malformed")
+            finish_reason = current_finish
+
+    if not saw_chunk or finish_reason is None:
+        raise _invalid_response(route, "provider stream ended before a finish reason")
+    if finish_reason in {"length", "max_tokens"}:
+        raise _invalid_response(route, "provider response reached the output-token limit")
+    if finish_reason in {"content_filter", "refusal"}:
+        raise adapter_error(
+            provider_id=route.definition.provider_id,
+            model_id=route.selected_model,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="provider refused or filtered the request",
+        )
+
+    text = "".join(text_parts)
+    has_tool_fragments = bool(tool_use_id or tool_name_parts or argument_parts)
+    if finish_reason == "stop":
+        if has_tool_fragments:
+            raise _invalid_response(route, "text stream unexpectedly contained a tool call")
+        if not text:
+            raise _invalid_response(route, "provider text response was empty or malformed")
+        return AssistantText(text)
+    if finish_reason != "tool_calls" or not has_tool_fragments:
+        raise _invalid_response(route, "provider stream used an unsupported finish reason")
+    if tool_use_id is None:
+        raise _invalid_response(route, "provider stream tool-call ID was missing")
+    name = "".join(tool_name_parts)
+    if not name:
+        raise _invalid_response(route, "provider stream tool name was missing")
+    raw_arguments = "".join(argument_parts)
+    try:
+        tool_input = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+    if not isinstance(tool_input, dict):
+        raise _invalid_response(route, f"provider {name} arguments were malformed")
+    try:
+        return tool_use_from_input(
+            tool_use_id,
+            name,
+            tool_input,
+            assistant_text=text or None,
+        )
+    except ValueError:
+        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+
+
+def _close_stream(stream: object | None) -> None:
+    if stream is None:
+        return
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
 
 
 def token_limit_field(model: str) -> str:

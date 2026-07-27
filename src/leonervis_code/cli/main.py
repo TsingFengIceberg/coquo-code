@@ -13,6 +13,7 @@ from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.event_sink import TerminalEventSink
+from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
     MAX_ACTION_AUDIT_COUNT,
@@ -815,16 +816,29 @@ def main(
                 message, _ = render_session_resume(resume_result)
                 print(message, file=errors)
             if arguments.command == "prompt":
-                print(
-                    session.prompt(
-                        arguments.prompt,
-                        event_sink=TerminalEventSink(
-                            errors,
-                            color=color_enabled(errors, env),
-                        ),
-                    ),
-                    file=output,
+                event_sink = TerminalEventSink(
+                    errors,
+                    color=color_enabled(errors, env),
+                    stream_deltas=False,
+                    render_markdown=errors.isatty(),
                 )
+                try:
+                    response = session.prompt(arguments.prompt, event_sink=event_sink)
+                except KeyboardInterrupt:
+                    event_sink.abort_stream()
+                    print("generation cancelled; no turn was committed", file=errors)
+                    return 130
+                except BaseException:
+                    event_sink.abort_stream()
+                    raise
+                if output.isatty():
+                    write_markdown_document(
+                        output,
+                        response,
+                        color=color_enabled(output, env),
+                    )
+                else:
+                    print(response, file=output)
                 return 0
             return run_repl(
                 session,
@@ -833,6 +847,7 @@ def main(
                 version=__version__,
                 cwd=workspace,
                 color=color_enabled(output, env),
+                render_markdown=output.isatty(),
             )
         finally:
             session.close()

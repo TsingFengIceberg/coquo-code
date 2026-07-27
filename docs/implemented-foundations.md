@@ -34,6 +34,8 @@
 - [`turn_committed` v3 Assistant Tool Text Persistence](#turn_committed-v3-assistant-tool-text-persistence)
 - [Provider Mixed-response History Projection](#provider-mixed-response-history-projection)
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](#agentloop-与-terminal-assistant-tool-text-integration)
+- [Provider Streaming 与 Terminal Failure Atomicity](#provider-streaming-与-terminal-failure-atomicity)
+- [TTY Markdown Rendering](#tty-markdown-rendering)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -522,6 +524,22 @@ Live companion event不持久化，也不作为执行证明；durable truth仍�
 
 Canonical system prompt升级为v16，empty full-context golden变为`ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58`；adapter contract保持v17，ToolArguments v1、`turn_committed` v3、Action Audit、`context_compacted` v2/v3和`ctx-v1`/`ctx-v2`representation不升级，旧transcript不重写。完整决策见[0046：AgentLoop 与 Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)。
 
+## Provider Streaming 与 Terminal Failure Atomicity
+
+Anthropic Messages与OpenAI-compatible Chat Completions现在可在同步provider调用中流式返回assistant文字。两个adapter各自严格组装native event/chunk、finish reason和fragmented tool JSON，只有形成完整且通过known-tool schema验证的neutral `ToolUse`后才允许AgentLoop执行；missing stop、wrong index/order、multiple calls、invalid JSON、refusal或output truncation都会在工具边界前fail closed。没有stream能力的fake/custom provider继续使用既有`respond()`。
+
+REPL即时显示文字delta；tool companion完整解析后才接tool activity，final text只有在Session turn append+fsync成功后才得到committed确认，因此不会重复打印。Provider中断、Ctrl-C或commit失败会明确说明visible partial text未提交。One-shot因stream结束前不能知道文字是final还是tool companion而先buffer：companion与tool activity写stderr，stdout仍只在durable commit后输出一次final answer。Runtime在第一个delta前完成context preflight，并在完整同步stream期间保持原turn lease。
+
+Delta不持久化，也不能作为tool execution或turn commit证明；durable truth仍是`turn_committed` v3、Action Audit和完整transcript。Adapter contract最终升级为v19。Canonical system prompt经审阅保持v16，tool schema/order、六次预算、ToolArguments v1、ActionIdentity v1、Session/compaction schemas、empty context golden与`ctx-v1`/`ctx-v2`representation不变。完整设计见[0047](./decisions/0047-provider-neutral-synchronous-response-streaming.md)至[0050](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)。
+
+## TTY Markdown Rendering
+
+REPL与TTY one-shot现在使用锁定的Rich renderer展示assistant Markdown：标题、强调、列表、表格与fenced code转成terminal layout和可选ANSI syntax styling。Streaming按blank line或closed fence等safe boundary输出完整block，避免用incomplete fragment误解析代码围栏；tool companion完整分类后flush，final suffix只在durable turn commit后flush。
+
+非TTY stdout/stderr、pipe和redirect继续输出原始Markdown，`NO_COLOR`只关闭ANSI而保留Markdown布局。Provider返回的ESC、CR、NUL和其他terminal controls在TTY副本中变成visible escape text，Rich markup、emoji和terminal hyperlink均关闭。Session、provider continuation和Effective Context始终使用exact原始文字，因此renderer failure或版本变化不改变恢复和context identity。
+
+该Host-only presentation slice新增Rich runtime dependency，但canonical system prompt保持v16、adapter contract保持v19、`turn_committed`保持v3，其他tool、permission、audit、compaction和context契约均不变。完整决策见[0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -734,3 +752,8 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 44. [0044：`turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)
 45. [0045：Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)
 46. [0046：AgentLoop 与 Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)
+47. [0047：Provider-neutral Synchronous Response Streaming](./decisions/0047-provider-neutral-synchronous-response-streaming.md)
+48. [0048：OpenAI-compatible Chat Completions Streaming](./decisions/0048-openai-compatible-chat-completions-streaming.md)
+49. [0049：Anthropic Messages Streaming](./decisions/0049-anthropic-messages-streaming.md)
+50. [0050：AgentLoop、Runtime 与 Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
+51. [0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)

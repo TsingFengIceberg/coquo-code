@@ -42,6 +42,7 @@ from leonervis_code.providers.anthropic import (
     normalize_sdk_error,
     parse_compact_summary_response,
     parse_response,
+    parse_response_stream,
     read_file_tool_definition,
     read_file_lines_tool_definition,
     run_command_tool_definition,
@@ -51,6 +52,7 @@ from leonervis_code.providers.anthropic import (
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
+from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -96,6 +98,19 @@ class RecordingMessagesClient:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class ClosableStream(list):
+    def __init__(self, values) -> None:
+        super().__init__(values)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def anthropic_event(event_type: str, **fields: object):
+    return SimpleNamespace(type=event_type, **fields)
 
 
 def message(
@@ -534,6 +549,227 @@ def test_adapter_normalizes_native_mixed_response_to_neutral_tool_use() -> None:
         ToolArguments.from_mapping({"path": "README.md"}),
         assistant_text="I will inspect first.",
     )
+
+
+def test_anthropic_stream_parser_emits_text_and_assembles_fragmented_tool_input() -> None:
+    events = []
+    stream = [
+        anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+        anthropic_event(
+            "content_block_start",
+            index=0,
+            content_block=SimpleNamespace(type="text", text=""),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=0,
+            delta=SimpleNamespace(type="text_delta", text="I will inspect "),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=0,
+            delta=SimpleNamespace(type="text_delta", text="first."),
+        ),
+        anthropic_event("content_block_stop", index=0),
+        anthropic_event(
+            "content_block_start",
+            index=1,
+            content_block=SimpleNamespace(
+                type="tool_use", id="tool-stream", name="read_file", input={}
+            ),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="input_json_delta", partial_json='{"path":"'),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="input_json_delta", partial_json='README.md"}'),
+        ),
+        anthropic_event("content_block_stop", index=1),
+        anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="tool_use")),
+        anthropic_event("message_stop"),
+    ]
+
+    response = parse_response_stream(stream, config=config(), event_sink=events.append)
+
+    assert events == [ProviderTextDelta("I will inspect "), ProviderTextDelta("first.")]
+    assert response == ToolUse(
+        "tool-stream",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
+
+
+def test_anthropic_stream_request_sets_stream_and_closes_resource() -> None:
+    stream = ClosableStream(
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text="Hello"),
+            ),
+            anthropic_event("content_block_stop", index=0),
+            anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="end_turn")),
+            anthropic_event("message_stop"),
+        ]
+    )
+    client = RecordingMessagesClient([stream])
+    provider = AnthropicConversationProvider(config(), client)
+    events = []
+
+    assert provider.respond_stream(
+        request(UserMessage("hello")), event_sink=events.append
+    ) == AssistantText("Hello")
+    assert client.requests[0]["stream"] is True
+    assert stream.closed is True
+    assert events == [ProviderTextDelta("Hello")]
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [anthropic_event("message_start", message=SimpleNamespace(role="assistant"))],
+        [
+            anthropic_event("message_start", message=SimpleNamespace()),
+            anthropic_event("message_stop"),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text="first"),
+            ),
+            anthropic_event(
+                "content_block_start",
+                index=1,
+                content_block=SimpleNamespace(type="text", text="overlap"),
+            ),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=1,
+                content_block=SimpleNamespace(type="text", text="bad index"),
+            ),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(
+                    type="tool_use", id="tool-1", name="read_file", input={}
+                ),
+            ),
+            anthropic_event(
+                "content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="input_json_delta", partial_json="{"),
+            ),
+            anthropic_event("content_block_stop", index=0),
+            anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="tool_use")),
+            anthropic_event("message_stop"),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="max_tokens")),
+            anthropic_event("message_stop"),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text="\ud800"),
+            ),
+        ],
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(
+                    type="tool_use", id="tool-1", name="read_file", input={}
+                ),
+            ),
+            anthropic_event(
+                "content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="input_json_delta", partial_json="x" * (64 * 1024 + 1)),
+            ),
+        ],
+    ],
+)
+def test_anthropic_stream_parser_fails_closed_on_incomplete_or_malformed_events(
+    events,
+) -> None:
+    with pytest.raises(ProviderAdapterError):
+        parse_response_stream(events, config=config(), event_sink=lambda _event: None)
+
+
+def test_anthropic_stream_ignores_cleanup_failure_after_success() -> None:
+    class FailingCloseStream(ClosableStream):
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("cleanup failed")
+
+    stream = FailingCloseStream(
+        [
+            anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text="Hello"),
+            ),
+            anthropic_event("content_block_stop", index=0),
+            anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="end_turn")),
+            anthropic_event("message_stop"),
+        ]
+    )
+    provider = AnthropicConversationProvider(config(), RecordingMessagesClient([stream]))
+
+    assert provider.respond_stream(
+        request(UserMessage("hello")), event_sink=lambda _event: None
+    ) == AssistantText("Hello")
+    assert stream.closed is True
+
+
+def test_anthropic_stream_enforces_event_and_identifier_bounds(monkeypatch) -> None:
+    monkeypatch.setattr("leonervis_code.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 1)
+    with pytest.raises(ProviderAdapterError, match="too many events"):
+        parse_response_stream(
+            [
+                anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+                anthropic_event("message_stop"),
+            ],
+            config=config(),
+            event_sink=lambda _event: None,
+        )
+
+    monkeypatch.setattr("leonervis_code.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 100_000)
+    oversized_name = "x" * (4 * 1024 + 1)
+    with pytest.raises(ProviderAdapterError, match="tool block was too large"):
+        parse_response_stream(
+            [
+                anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+                anthropic_event(
+                    "content_block_start",
+                    index=0,
+                    content_block=SimpleNamespace(
+                        type="tool_use", id="tool-1", name=oversized_name, input={}
+                    ),
+                ),
+            ],
+            config=config(),
+            event_sink=lambda _event: None,
+        )
 
 
 @pytest.mark.parametrize(

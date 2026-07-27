@@ -7,6 +7,9 @@ from dataclasses import dataclass, replace
 
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
+    AssistantFinalTextStreamCommitted,
+    AssistantResponseTextDeltaReceived,
+    AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
     ToolDispatchResult,
     ToolEventStatus,
@@ -40,6 +43,7 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
     validate_complete_history,
 )
+from leonervis_code.providers.streaming import ProviderResponseOutcome, respond_with_streaming
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import MAX_TOOL_EXECUTIONS_PER_TURN, TOOL_CATALOG
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
@@ -236,16 +240,28 @@ class AgentLoop:
         tool_calls = 0
 
         while True:
-            response = turn_provider.respond(context.to_conversation_request(pending_items=pending))
+            outcome = self._respond(
+                turn_provider,
+                context.to_conversation_request(pending_items=pending),
+                event_sink,
+            )
+            response = outcome.response
             if isinstance(response, AssistantText):
                 self._commit(pending + (response,), user, response)
+                if outcome.text_was_streamed:
+                    self._emit_prompt_event(
+                        event_sink,
+                        AssistantFinalTextStreamCommitted(response.text),
+                    )
                 return response.text
 
             if response.assistant_text is not None:
-                self._emit_prompt_event(
-                    event_sink,
-                    AssistantToolTextReceived(response.assistant_text),
+                companion_event = (
+                    AssistantToolTextStreamCompleted(response.assistant_text)
+                    if outcome.text_was_streamed
+                    else AssistantToolTextReceived(response.assistant_text)
                 )
+                self._emit_prompt_event(event_sink, companion_event)
             pending += (response,)
             if tool_calls == MAX_TOOL_EXECUTIONS_PER_TURN:
                 self._emit_prompt_event(
@@ -264,17 +280,27 @@ class AgentLoop:
                         is_error=True,
                     ),
                 )
-                final_response = turn_provider.respond(
-                    context.to_conversation_request(pending_items=pending)
+                final_outcome = self._respond(
+                    turn_provider,
+                    context.to_conversation_request(pending_items=pending),
+                    event_sink,
                 )
+                final_response = final_outcome.response
                 if isinstance(final_response, AssistantText):
                     self._commit(pending + (final_response,), user, final_response)
+                    if final_outcome.text_was_streamed:
+                        self._emit_prompt_event(
+                            event_sink,
+                            AssistantFinalTextStreamCommitted(final_response.text),
+                        )
                     return final_response.text
                 if final_response.assistant_text is not None:
-                    self._emit_prompt_event(
-                        event_sink,
-                        AssistantToolTextReceived(final_response.assistant_text),
+                    companion_event = (
+                        AssistantToolTextStreamCompleted(final_response.assistant_text)
+                        if final_outcome.text_was_streamed
+                        else AssistantToolTextReceived(final_response.assistant_text)
                     )
+                    self._emit_prompt_event(event_sink, companion_event)
                 raise ToolLoopLimitError("provider requested a tool after the tool call limit")
 
             tool_calls += 1
@@ -312,6 +338,22 @@ class AgentLoop:
                 ),
             )
             pending += (dispatch.tool_result,)
+
+    def _respond(
+        self,
+        provider: ConversationProvider,
+        request: ConversationRequest,
+        event_sink: AgentEventSink | None,
+    ) -> ProviderResponseOutcome:
+        return respond_with_streaming(
+            provider,
+            request,
+            event_sink=lambda delta: self._emit_prompt_event(
+                event_sink,
+                AssistantResponseTextDeltaReceived(delta.text),
+            ),
+            prefer_stream=event_sink is not None,
+        )
 
     def install_action_dispatcher(self, dispatcher: ActionDispatcher) -> None:
         """Install the ProjectSession-owned permission/audit dispatch seam exactly once."""

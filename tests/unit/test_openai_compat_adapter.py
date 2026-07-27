@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import openai
 import pytest
@@ -48,6 +49,7 @@ from leonervis_code.providers.openai_compat import (
     patch_file_tool_definition,
     parse_compact_summary_response,
     parse_response,
+    parse_response_stream,
     read_file_tool_definition,
     read_file_lines_tool_definition,
     run_command_tool_definition,
@@ -56,6 +58,7 @@ from leonervis_code.providers.openai_compat import (
     stat_path_tool_definition,
 )
 from leonervis_code.providers.request_context import RequestTokenCountMethod
+from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
@@ -75,6 +78,40 @@ class RecordingChatClient:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class ClosableStream(list):
+    def __init__(self, values) -> None:
+        super().__init__(values)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def stream_chunk(*, content=None, tool_calls=None, finish_reason=None, index=0):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                index=index,
+                delta=SimpleNamespace(
+                    content=content,
+                    refusal=None,
+                    tool_calls=tool_calls,
+                ),
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+
+def stream_tool_delta(*, call_id=None, name=None, arguments=None, index=0):
+    return SimpleNamespace(
+        index=index,
+        id=call_id,
+        type="function" if call_id is not None else None,
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
 
 
 def test_compatible_counter_estimates_the_shared_native_input_projection() -> None:
@@ -427,6 +464,135 @@ def test_adapter_normalizes_native_mixed_response_to_neutral_tool_use() -> None:
         ToolArguments.from_mapping({"path": "README.md"}),
         assistant_text="I will inspect first.",
     )
+
+
+def test_stream_parser_emits_exact_text_and_assembles_fragmented_tool_call() -> None:
+    events = []
+    stream = [
+        stream_chunk(content="I will inspect "),
+        stream_chunk(content="first."),
+        stream_chunk(
+            tool_calls=[
+                stream_tool_delta(
+                    call_id="call-stream",
+                    name="read_",
+                    arguments='{"pa',
+                )
+            ]
+        ),
+        stream_chunk(tool_calls=[stream_tool_delta(name="file", arguments='th":"README.md"}')]),
+        stream_chunk(finish_reason="tool_calls"),
+    ]
+
+    response = parse_response_stream(stream, route=route(), event_sink=events.append)
+
+    assert events == [ProviderTextDelta("I will inspect "), ProviderTextDelta("first.")]
+    assert response == ToolUse(
+        "call-stream",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
+
+
+def test_compatible_stream_request_sets_stream_and_closes_resource() -> None:
+    stream = ClosableStream([stream_chunk(content="Hello"), stream_chunk(finish_reason="stop")])
+    client = RecordingChatClient([stream])
+    provider = OpenAICompatibleConversationProvider(route(), client)
+    events = []
+
+    assert provider.respond_stream(
+        request(UserMessage("hello")), event_sink=events.append
+    ) == AssistantText("Hello")
+    assert client.requests[0]["stream"] is True
+    assert stream.closed is True
+    assert events == [ProviderTextDelta("Hello")]
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [stream_chunk(content="unfinished")],
+        [stream_chunk(content="done", finish_reason="stop", index=1)],
+        [stream_chunk(content="done", finish_reason="stop", index=None)],
+        [
+            stream_chunk(
+                tool_calls=[
+                    stream_tool_delta(call_id="one", name="read_file", arguments="{}"),
+                    stream_tool_delta(call_id="two", name="read_file", arguments="{}"),
+                ]
+            )
+        ],
+        [
+            stream_chunk(
+                tool_calls=[stream_tool_delta(call_id="one", name="read_file", arguments="{")]
+            ),
+            stream_chunk(finish_reason="tool_calls"),
+        ],
+        [stream_chunk(content="partial", finish_reason="length")],
+        [stream_chunk(content="\ud800", finish_reason="stop")],
+        [
+            stream_chunk(
+                tool_calls=[
+                    stream_tool_delta(
+                        call_id="one",
+                        name="read_file",
+                        arguments="x" * (64 * 1024 + 1),
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        ],
+    ],
+)
+def test_compatible_stream_parser_fails_closed_on_incomplete_or_malformed_chunks(
+    chunks,
+) -> None:
+    with pytest.raises(ProviderAdapterError):
+        parse_response_stream(chunks, route=route(), event_sink=lambda _event: None)
+
+
+def test_compatible_stream_closes_after_parse_failure_and_ignores_close_failure() -> None:
+    class FailingCloseStream(ClosableStream):
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("cleanup failed")
+
+    stream = FailingCloseStream([stream_chunk(content="unfinished")])
+    provider = OpenAICompatibleConversationProvider(route(), RecordingChatClient([stream]))
+
+    with pytest.raises(ProviderAdapterError, match="finish reason"):
+        provider.respond_stream(request(UserMessage("hello")), event_sink=lambda _event: None)
+    assert stream.closed is True
+
+
+def test_compatible_stream_enforces_chunk_and_identifier_bounds(monkeypatch) -> None:
+    monkeypatch.setattr("leonervis_code.providers.openai_compat.MAX_PROVIDER_STREAM_EVENTS", 1)
+    with pytest.raises(ProviderAdapterError, match="too many chunks"):
+        parse_response_stream(
+            [stream_chunk(content="one"), stream_chunk(content="two", finish_reason="stop")],
+            route=route(),
+            event_sink=lambda _event: None,
+        )
+
+    oversized_id = "x" * (4 * 1024 + 1)
+    with pytest.raises(ProviderAdapterError, match="ID was too large"):
+        parse_response_stream(
+            [
+                stream_chunk(
+                    tool_calls=[
+                        stream_tool_delta(
+                            call_id=oversized_id,
+                            name="read_file",
+                            arguments='{"path":"README.md"}',
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ],
+            route=route(),
+            event_sink=lambda _event: None,
+        )
 
 
 @pytest.mark.parametrize(

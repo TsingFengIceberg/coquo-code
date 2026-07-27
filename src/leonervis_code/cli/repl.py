@@ -9,6 +9,7 @@ from typing import TextIO
 
 from leonervis_code.cli.brand import render_banner
 from leonervis_code.cli.event_sink import TerminalEventSink
+from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.cli.presentation import (
@@ -22,6 +23,7 @@ from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import RuntimeProviderStateError
 from leonervis_code.providers.profile import ProviderProfileError
 from leonervis_code.providers.request_context import ContextPreflightError
+from leonervis_code.session_store import SessionStoreError
 
 PLAIN_PROMPT = "leonervis> "
 
@@ -73,6 +75,7 @@ def run_repl(
     version: str,
     cwd: Path,
     color: bool,
+    render_markdown: bool = False,
 ) -> int:
     """Read input, dispatch local commands, and route ordinary text to the model."""
     configure_tab_completion()
@@ -128,26 +131,53 @@ def run_repl(
 
         try:
             prompt_method = getattr(session, "prompt", None)
+            event_sink = TerminalEventSink(
+                stdout,
+                color=color,
+                render_markdown=render_markdown,
+            )
             if callable(prompt_method):
                 response = prompt_method(
                     prompt,
-                    event_sink=TerminalEventSink(stdout, color=color),
+                    event_sink=event_sink,
                 )
             else:
                 response = getattr(session, "run")(prompt)
-            stdout.write(f"{response}\n")
+            if not event_sink.final_text_was_streamed:
+                if render_markdown:
+                    write_markdown_document(stdout, response, color=color)
+                else:
+                    stdout.write(f"{response}\n")
+        except KeyboardInterrupt:
+            if event_sink.abort_stream():
+                stdout.write(
+                    f"{render_message('Generation cancelled; partial assistant text was not committed.', 'warning', color=color)}\n"
+                )
+            else:
+                stdout.write(
+                    f"{render_message('Generation cancelled; no turn was committed.', 'warning', color=color)}\n"
+                )
+            stdout.flush()
+            continue
         except ContextPreflightError as error:
+            _report_aborted_stream(event_sink, stdout, color=color)
             message = f"Context preflight error: {error}"
             stdout.write(f"{render_message(message, 'error', color=color)}\n")
         except ProviderAdapterError as error:
+            _report_aborted_stream(event_sink, stdout, color=color)
             message = f"Provider error [{error.failure.kind}]: {error.failure.message}"
             stdout.write(f"{render_message(message, 'error', color=color)}\n")
         except (ProviderProfileError, RuntimeProviderStateError) as error:
+            _report_aborted_stream(event_sink, stdout, color=color)
             stdout.write(f"{render_message(f'Runtime error: {error}', 'error', color=color)}\n")
         except (ApprovalGrantError, ActionIdentityChangedError) as error:
+            _report_aborted_stream(event_sink, stdout, color=color)
             stdout.write(
                 f"{render_message(f'Action authorization error: {error}', 'error', color=color)}\n"
             )
+        except SessionStoreError as error:
+            _report_aborted_stream(event_sink, stdout, color=color)
+            stdout.write(f"{render_message(f'Session error: {error}', 'error', color=color)}\n")
         stdout.flush()
 
 
@@ -159,3 +189,15 @@ def _snapshot(session: object, method_name: str):
         return method()
     except Exception:
         return None
+
+
+def _report_aborted_stream(
+    event_sink: TerminalEventSink,
+    stdout: TextIO,
+    *,
+    color: bool,
+) -> None:
+    if event_sink.abort_stream():
+        stdout.write(
+            f"{render_message('Partial assistant text was not committed.', 'warning', color=color)}\n"
+        )

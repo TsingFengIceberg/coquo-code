@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from uuid import UUID
 
@@ -8,6 +9,9 @@ import pytest
 
 from leonervis_code import __version__
 from leonervis_code.agent.tool_events import (
+    AssistantFinalTextStreamCommitted,
+    AssistantResponseTextDeltaReceived,
+    AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
@@ -97,6 +101,153 @@ def test_prompt_command_keeps_final_text_on_stdout_and_tool_events_on_stderr(
         "[tool 1/6] read_file path='README.md'\n"
         "[tool 1/6] succeeded code=ok\n"
     )
+
+
+def test_prompt_command_buffers_streamed_final_but_flushes_companion_text_to_stderr(
+    monkeypatch, tmp_path
+) -> None:
+    class StreamingSession:
+        startup_resume_result = None
+
+        def prompt(self, _text, *, event_sink=None):
+            event_sink(AssistantResponseTextDeltaReceived("I will "))
+            event_sink(AssistantResponseTextDeltaReceived("inspect."))
+            event_sink(AssistantToolTextStreamCompleted("I will inspect."))
+            event_sink(ToolRequestStarted("read_file", 1, 6, "path='README.md'"))
+            event_sink(ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED))
+            event_sink(AssistantResponseTextDeltaReceived("final "))
+            event_sink(AssistantResponseTextDeltaReceived("answer"))
+            event_sink(AssistantFinalTextStreamCommitted("final answer"))
+            return "final answer"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: StreamingSession())
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["prompt", "inspect"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 0
+    )
+    assert output.getvalue() == "final answer\n"
+    assert errors.getvalue() == (
+        "I will inspect.\n[tool 1/6] read_file path='README.md'\n[tool 1/6] succeeded\n"
+    )
+
+
+def test_prompt_command_handles_stream_interrupt_without_leaking_partial_stdout(
+    monkeypatch, tmp_path
+) -> None:
+    class InterruptingSession:
+        startup_resume_result = None
+        closed = False
+
+        def prompt(self, _text, *, event_sink=None):
+            event_sink(AssistantResponseTextDeltaReceived("partial secret"))
+            raise KeyboardInterrupt
+
+        def close(self):
+            self.closed = True
+
+    session = InterruptingSession()
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: session)
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["prompt", "inspect"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 130
+    )
+    assert output.getvalue() == ""
+    assert errors.getvalue() == "generation cancelled; no turn was committed\n"
+    assert session.closed is True
+
+
+def test_prompt_command_renders_markdown_only_for_tty_stdout(monkeypatch, tmp_path) -> None:
+    class MarkdownSession:
+        startup_resume_result = None
+
+        def prompt(self, _text, *, event_sink=None):
+            return "# Result\n\nThis is **bold**."
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: MarkdownSession())
+    terminal_output = InteractiveStream()
+    redirected_output = io.StringIO()
+
+    assert (
+        main(
+            ["prompt", "inspect"],
+            stdout=terminal_output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={"NO_COLOR": "1"},
+        )
+        == 0
+    )
+    assert "Result" in terminal_output.getvalue()
+    assert "bold" in terminal_output.getvalue()
+    assert "# Result" not in terminal_output.getvalue()
+    assert "**bold**" not in terminal_output.getvalue()
+    assert "\x1b" not in terminal_output.getvalue()
+
+    assert (
+        main(
+            ["prompt", "inspect"],
+            stdout=redirected_output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+        )
+        == 0
+    )
+    assert redirected_output.getvalue() == "# Result\n\nThis is **bold**.\n"
+
+
+def test_tty_markdown_rendering_does_not_change_durable_assistant_text(tmp_path) -> None:
+    output = InteractiveStream()
+    prompt = "\n\n# Heading\n\nThis is **bold**."
+
+    assert (
+        main(
+            ["prompt", prompt],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={"NO_COLOR": "1"},
+            user_profile_path=tmp_path / "user.json",
+            project_profile_path=tmp_path / "project.json",
+        )
+        == 0
+    )
+
+    rendered = output.getvalue()
+    assert "Heading" in rendered
+    assert "This is bold." in rendered
+    assert "# Heading" not in rendered
+    transcript = next((tmp_path / ".leonervis-code").rglob("*.jsonl"))
+    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    turn = next(record for record in records if record["record_type"] == "turn_committed")
+    assert turn["items"][-1] == {
+        "item_type": "assistant_text",
+        "text": f"Fake response: {prompt}",
+    }
 
 
 def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_path) -> None:

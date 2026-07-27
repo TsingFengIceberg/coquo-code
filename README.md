@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具：原有读取/写入/命令/目录与文件操作，加上`read_file_lines`、`stat_path`、`list_tree`、`grep_regex`和`patch_file`。新增能力提供按行读取、no-follow metadata、受限递归tree、进程隔离regex搜索和结构化multi-edit patch；全部继续经过共享六次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂未开始；shell source string、interactive PTY、OS sandbox、fuzzy/free-form patch、递归目录复制/删除、非空目录删除与目录移动仍未实现。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具。Anthropic与OpenAI-compatible现已支持完整mixed response和流式文字；REPL与TTY one-shot会渲染Markdown，pipe/redirect仍输出原始Markdown。全部能力继续经过共享六次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂缓。
 
 ## 目录
 
@@ -204,7 +204,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。使用上面�
 /history 5
 ```
 
-Ctrl-D、EOF或等待输入时按Ctrl-C可正常退出。终端颜色只在TTY中启用；可设置`NO_COLOR=1`关闭。Context、compaction、resume、工具预算及只读工具的完整语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+Ctrl-D、EOF或等待输入时按Ctrl-C可正常退出。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。Context、compaction、resume、工具预算及只读工具的完整语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -242,6 +242,13 @@ git diff --check
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
+- [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
+- [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
+- [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
+- [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
+- [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
+- [Provider-neutral Assistant Tool Text Representation](./docs/decisions/0042-provider-neutral-assistant-tool-text-representation.md)：companion text的内部原子表示、边界与context identity。
 - [Live Redacted Tool Activity Events](./docs/decisions/0041-live-redacted-tool-activity-events.md)：typed工具生命周期、终端输出通道、脱敏摘要、sink失败隔离及不改变模型/Session契约的依据。
 - [Bounded One-level Directory Listing](./docs/decisions/0035-foundation-1e-bounded-directory-listing.md)：一层目录观察、entry type、no-follow路径、扫描/输出上限与empty/truncated语义。
 - [Controlled No-overwrite File Move](./docs/decisions/0032-foundation-4e-controlled-no-overwrite-file-move.md)：双路径identity、workspace-move审批、no-overwrite hard-link/unlink、stale检查与truthful partial。
@@ -275,4 +282,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`；17个工具共享每个user turn最多六次顺序调用。第七次请求只得到structured limit result，不进入permission、approval、executor或Action Audit；模型若继续请求工具则candidate turn不提交。四个新增读取/导航工具复用`workspace-read`，`patch_file`复用`workspace-overwrite`，其余action class保持不变。
 
-工具批次A/B/C、六次预算和脱敏live tool activity现已完成，Foundation 5A仍暂缓。Canonical system prompt为v15，provider adapter contract保持v15，empty full-context identity为`ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f`；ToolArguments v1、ActionIdentity v1、`turn_committed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation保持不变。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。工具批次设计见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)，六次预算见[ADR 0040](./docs/decisions/0040-shared-six-call-tool-budget.md)，live activity见[ADR 0041](./docs/decisions/0041-live-redacted-tool-activity-events.md)。
+工具批次A/B/C、六次预算、脱敏live tool activity、mixed response、provider streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v16、provider adapter contract v19、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v3、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation；empty full-context identity为`ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。工具批次设计见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)，六次预算见[ADR 0040](./docs/decisions/0040-shared-six-call-tool-budget.md)，live activity见[ADR 0041](./docs/decisions/0041-live-redacted-tool-activity-events.md)，mixed response见[ADR 0042](./docs/decisions/0042-provider-neutral-assistant-tool-text-representation.md)至[ADR 0046](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)，streaming见[ADR 0047](./docs/decisions/0047-provider-neutral-synchronous-response-streaming.md)至[ADR 0050](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)，Markdown rendering见[ADR 0051](./docs/decisions/0051-tty-markdown-rendering.md)。
