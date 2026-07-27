@@ -343,7 +343,10 @@ def test_workspace_write_auto_creates_then_overwrites_using_host_observed_state(
 def test_accepted_approval_becomes_stale_if_target_changes_while_waiting(tmp_path: Path) -> None:
     provider = ToolProvider([write_call(), AssistantText("must not be reached")])
 
-    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+    def mutate_then_accept(request: HumanApprovalRequest) -> ApprovalResolution:
+        assert request.preview is not None
+        assert request.preview.action_digest == request.identity.digest
+        assert "+hello" in request.preview.body
         (tmp_path / "note.txt").write_text("external\n", encoding="utf-8")
         return ApprovalResolution.ACCEPT
 
@@ -2182,7 +2185,10 @@ def test_accepted_patch_becomes_stale_before_execution(tmp_path: Path) -> None:
     target.write_text("alpha beta gamma\n", encoding="utf-8")
     provider = ToolProvider([patch_call(), AssistantText("must not be reached")])
 
-    def mutate_then_accept(_request: HumanApprovalRequest) -> ApprovalResolution:
+    def mutate_then_accept(request: HumanApprovalRequest) -> ApprovalResolution:
+        assert request.preview is not None
+        assert "-alpha beta gamma" in request.preview.body
+        assert "+A beta G" in request.preview.body
         target.write_text("external\n", encoding="utf-8")
         return ApprovalResolution.ACCEPT
 

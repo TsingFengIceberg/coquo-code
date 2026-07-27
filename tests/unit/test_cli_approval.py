@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import io
 from pathlib import Path
 
@@ -8,6 +9,11 @@ import pytest
 from leonervis_code.cli.main import main, terminal_approval_handler
 from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
+from leonervis_code.core.approval_preview import (
+    ApprovalPreviewKind,
+    build_file_change_preview,
+    build_metadata_preview,
+)
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
 from leonervis_code.core.permissions import (
@@ -205,7 +211,7 @@ def test_one_shot_auto_requires_explicit_write_capability_and_executes(tmp_path:
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"
 
 
-def test_repl_ask_uses_terminal_confirmation_and_does_not_echo_content(tmp_path: Path) -> None:
+def test_repl_ask_shows_candidate_diff_but_live_activity_stays_redacted(tmp_path: Path) -> None:
     provider = ToolProvider()
     stdin = TtyStringIO("write it\ny\n/exit\n")
     stdout = TtyStringIO()
@@ -239,7 +245,12 @@ def test_repl_ask_uses_terminal_confirmation_and_does_not_echo_content(tmp_path:
     assert "Approval required: workspace-create write_file path='note.txt' bytes=21" in rendered
     assert "[tool 1/6] write_file path='note.txt' content_bytes=21" in rendered
     assert "[tool 1/6] succeeded code=created" in rendered
-    assert "secret model content" not in rendered
+    assert "Prepared candidate (21 bytes):" in rendered
+    assert "--- /dev/null" in rendered
+    assert "+++ b/note.txt" in rendered
+    assert "+secret model content" in rendered
+    assert rendered.count("secret model content") == 1
+    assert "Approve this exact action? [y/N/c]:" in rendered
     assert "finished" in rendered
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"
 
@@ -284,6 +295,10 @@ def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_DANGEROUS,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.COMMAND,
+        ),
     )
     stdout = io.StringIO()
 
@@ -295,6 +310,7 @@ def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
     assert "argv=('uv', 'run', 'pytest', 'tests/unit')" in rendered
     assert "cwd='.'" in rendered
     assert "timeout=60s" in rendered
+    assert "no shell parsing, OS/filesystem/network sandbox, or rollback" in rendered
     assert "PWD" not in rendered
 
 
@@ -320,6 +336,10 @@ def test_terminal_mkdir_approval_shows_only_relative_path() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.DIRECTORY_CREATE,
+        ),
     )
     stdout = io.StringIO()
 
@@ -329,6 +349,7 @@ def test_terminal_mkdir_approval_shows_only_relative_path() -> None:
     rendered = stdout.getvalue()
     assert "Approval required: workspace-create mkdir path='src/pkg'" in rendered
     assert "bytes=" not in rendered
+    assert "target absent" in rendered
     assert "/root/" not in rendered
 
 
@@ -354,6 +375,11 @@ def test_terminal_move_approval_shows_only_two_relative_paths() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_MOVE,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.FILE_MOVE,
+            byte_count=123,
+        ),
     )
     stdout = io.StringIO()
 
@@ -367,6 +393,7 @@ def test_terminal_move_approval_shows_only_two_relative_paths() -> None:
     )
     assert "/root/" not in rendered
     assert "333333" not in rendered
+    assert "Prepared move: 123 bytes" in rendered
 
 
 def test_terminal_copy_approval_shows_only_two_relative_paths() -> None:
@@ -391,6 +418,11 @@ def test_terminal_copy_approval_shows_only_two_relative_paths() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.FILE_COPY,
+            byte_count=456,
+        ),
     )
     stdout = io.StringIO()
 
@@ -404,6 +436,7 @@ def test_terminal_copy_approval_shows_only_two_relative_paths() -> None:
     )
     assert "/root/" not in rendered
     assert "333333" not in rendered
+    assert "Prepared copy: 456 bytes" in rendered
 
 
 def test_terminal_delete_approval_shows_only_relative_path() -> None:
@@ -428,6 +461,11 @@ def test_terminal_delete_approval_shows_only_relative_path() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_DELETE,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.FILE_DELETE,
+            byte_count=789,
+        ),
     )
     stdout = io.StringIO()
 
@@ -438,6 +476,7 @@ def test_terminal_delete_approval_shows_only_relative_path() -> None:
     assert "Approval required: workspace-delete delete_file path='obsolete.txt'" in rendered
     assert "/root/" not in rendered
     assert "333333" not in rendered
+    assert "Permanent deletion: 789 bytes" in rendered
 
 
 def test_terminal_delete_directory_approval_shows_only_relative_path() -> None:
@@ -462,6 +501,10 @@ def test_terminal_delete_directory_approval_shows_only_relative_path() -> None:
             PermissionDecision.ASK,
             PermissionReason.APPROVAL_REQUIRED_WORKSPACE_DELETE,
         ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.DIRECTORY_DELETE,
+        ),
     )
     stdout = io.StringIO()
 
@@ -472,6 +515,7 @@ def test_terminal_delete_directory_approval_shows_only_relative_path() -> None:
     assert "Approval required: workspace-delete delete_directory path='build/empty'" in rendered
     assert "/root/" not in rendered
     assert "333333" not in rendered
+    assert "Permanent empty-directory deletion" in rendered
 
 
 def test_terminal_patch_approval_shows_path_without_edit_content() -> None:
@@ -511,3 +555,31 @@ def test_terminal_patch_approval_shows_path_without_edit_content() -> None:
     assert "Approval required: workspace-overwrite patch_file path='src/app.py'" in rendered
     assert "secret-before" not in rendered
     assert "secret-after" not in rendered
+
+
+def test_terminal_approval_renders_bound_diff_and_escapes_terminal_controls() -> None:
+    request = approval_request()
+    after = "after\x1b[31m\u202eevil\n"
+    identity = replace(
+        request.identity,
+        arguments=ToolArguments.from_mapping({"path": "note.txt", "content": after}),
+    )
+    preview = build_file_change_preview(
+        action_digest=identity.digest,
+        path="note.txt",
+        before=b"before\n",
+        after=after.encode(),
+    )
+    request = HumanApprovalRequest(identity, request.permission_result, preview)
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout, color=True)(request)
+        == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert "-before" in rendered
+    assert "+after\\x1b[31m\\u202eevil" in rendered
+    assert "\x1b[31mafter" not in rendered
+    assert "\u202e" not in rendered
+    assert "Approve this exact action?" in rendered

@@ -11,6 +11,7 @@ from typing import TextIO
 
 from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
+from leonervis_code.cli.approval import noninteractive_approval, terminal_approval_handler
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
@@ -23,11 +24,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
 )
 from leonervis_code.cli.repl import run_repl
-from leonervis_code.core.action_coordinator import (
-    ActionIdentityChangedError,
-    ApprovalResolution,
-    HumanApprovalRequest,
-)
+from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
@@ -584,61 +581,6 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
-def noninteractive_approval(_request: HumanApprovalRequest) -> ApprovalResolution:
-    """Cancel policy asks in one-shot/automation mode instead of reading stdin."""
-    return ApprovalResolution.CANCEL
-
-
-def terminal_approval_handler(stdin: TextIO, stdout: TextIO):
-    """Build the bounded REPL-only human confirmation boundary."""
-
-    def handle(request: HumanApprovalRequest) -> ApprovalResolution:
-        arguments = request.identity.arguments.as_mapping()
-        if request.identity.tool_name == "run_command":
-            argv = arguments.get("argv")
-            cwd = arguments.get("cwd")
-            timeout = arguments.get("timeout_seconds")
-            rendered_argv = repr(tuple(argv)) if isinstance(argv, list) else "<unknown>"
-            detail = f" argv={rendered_argv} cwd={cwd!r} timeout={timeout!r}s"
-        elif request.identity.tool_name in {"move_file", "copy_file"}:
-            source = arguments.get("source", "<unknown>")
-            destination = arguments.get("destination", "<unknown>")
-            detail = f" source={source!r} destination={destination!r}"
-        else:
-            path = arguments.get("path", "<unknown>")
-            content = arguments.get("content")
-            byte_count = len(content.encode("utf-8")) if isinstance(content, str) else None
-            detail = f" path={path!r}"
-            if byte_count is not None:
-                detail += f" bytes={byte_count}"
-        prompt = (
-            f"Approval required: {request.identity.action.value} "
-            f"{request.identity.tool_name}{detail} [y/N/c]: "
-        )
-        for _ in range(3):
-            try:
-                stdout.write(prompt)
-                stdout.flush()
-                line = stdin.readline()
-            except KeyboardInterrupt:
-                stdout.write("\n")
-                stdout.flush()
-                return ApprovalResolution.CANCEL
-            if line == "":
-                return ApprovalResolution.CANCEL
-            answer = line.strip().lower()
-            if answer in {"y", "yes"}:
-                return ApprovalResolution.ACCEPT
-            if answer in {"", "n", "no"}:
-                return ApprovalResolution.REJECT
-            if answer in {"c", "cancel"}:
-                return ApprovalResolution.CANCEL
-            stdout.write("Please answer y, n, or c.\n")
-        return ApprovalResolution.CANCEL
-
-    return handle
-
-
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -778,7 +720,11 @@ def main(
                 return 2
         input_stream = stdin or sys.stdin
         approval_handler = (
-            terminal_approval_handler(input_stream, output)
+            terminal_approval_handler(
+                input_stream,
+                output,
+                color=color_enabled(output, env),
+            )
             if arguments.command is None
             else noninteractive_approval
         )

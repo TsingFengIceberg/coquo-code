@@ -11,6 +11,7 @@ from leonervis_code.core.action_coordinator import (
     ActionIdentityChangedError,
     ApprovalResolution,
 )
+from leonervis_code.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
 from leonervis_code.core.actions import (
     ActionIdentity,
     ActionLease,
@@ -138,6 +139,49 @@ def test_policy_allow_durably_starts_before_executor_and_finishes_afterward() ->
         ("action_execution_started", ActionAuthorization.POLICY_ALLOW, None),
         ("action_execution_finished", ActionExecutionOutcome.SUCCEEDED, "ok"),
     ]
+
+
+def test_mismatched_approval_preview_is_rejected_before_audit() -> None:
+    writer = RecordingWriter()
+    preview = ApprovalPreview(
+        action_digest=f"act-v1-{'9' * 64}",
+        kind=ApprovalPreviewKind.DIRECTORY_CREATE,
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        coordinator(writer).run(
+            identity=identity(),
+            binding=BindingSnapshot.fake(),
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+            approval_mode=ApprovalMode.ASK,
+            revalidate=lambda current: current,
+            execute=lambda current: execution(current),
+            approval_preview=preview,
+        )
+
+    assert writer.calls == []
+
+
+def test_wrong_preview_kind_is_rejected_before_audit() -> None:
+    writer = RecordingWriter()
+    exact = identity()
+    preview = ApprovalPreview(
+        action_digest=exact.digest,
+        kind=ApprovalPreviewKind.COMMAND,
+    )
+
+    with pytest.raises(ValueError, match="kind does not match"):
+        coordinator(writer).run(
+            identity=exact,
+            binding=BindingSnapshot.fake(),
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+            approval_mode=ApprovalMode.ASK,
+            revalidate=lambda current: current,
+            execute=lambda current: execution(current),
+            approval_preview=preview,
+        )
+
+    assert writer.calls == []
 
 
 def test_policy_deny_never_prompts_revalidates_or_executes() -> None:

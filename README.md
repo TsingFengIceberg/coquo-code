@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具。Anthropic与OpenAI-compatible现已支持完整mixed response和流式文字；REPL与TTY one-shot会渲染Markdown，pipe/redirect仍输出原始Markdown。全部能力继续经过共享六次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具。Anthropic与OpenAI-compatible现已支持完整mixed response和流式文字；REPL与TTY one-shot会渲染Markdown，REPL逐次审批会展示与exact action绑定的有界diff或风险摘要，pipe/redirect仍输出原始Markdown。全部能力继续经过共享六次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂缓。
 
 ## 目录
 
@@ -92,7 +92,7 @@ uv run leonervis-code --permission-mode danger-full-access --approval ask
 uv run leonervis-code --permission-mode workspace-write --approval auto prompt "修改并验证项目"
 ```
 
-One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。17个工具的参数、权限、workspace/symlink、timeout、stale-state和durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
+REPL的`ask`审批会在`write_file`、`edit_file`和`patch_file`前显示有界candidate diff，并为copy、move、delete、mkdir和command显示必要风险事实；批准后workspace状态变化仍会stale reject。One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。17个工具的参数、权限、workspace/symlink、timeout、stale-state和durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
 
 ### 配置 Provider
 
@@ -245,6 +245,7 @@ git diff --check
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
+- [Exact Bounded Informed Approval Previews](./docs/decisions/0052-exact-bounded-informed-approval-previews.md)：prepared candidate diff、exact action绑定、风险摘要、terminal安全与stale revalidation。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

@@ -36,6 +36,7 @@
 - [AgentLoop and Terminal Assistant Tool Text Integration](#agentloop-and-terminal-assistant-tool-text-integration)
 - [Provider Streaming and Terminal Failure Atomicity](#provider-streaming-and-terminal-failure-atomicity)
 - [TTY Markdown Rendering](#tty-markdown-rendering)
+- [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -540,6 +541,14 @@ Non-TTY stdout/stderr, pipes, and redirects retain raw Markdown; `NO_COLOR` disa
 
 This Host-only presentation slice adds Rich as a runtime dependency, while canonical system prompt v16, adapter contract v19, `turn_committed` v3, and all tool, permission, audit, compaction, and context contracts remain unchanged. See [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md).
 
+## Exact Bounded Informed Approval
+
+Per-action REPL `ask` now presents prepared-action facts before reading the user's answer. `write_file`, `edit_file`, and `patch_file` generate a unified diff from the original UTF-8 snapshot and complete candidate frozen during preparation; the CLI does not reread the workspace for presentation. Creates, overwrites, empty files, same-content overwrites that still execute, missing final newlines, and truncated previews are explicit. A diff is bounded to 160 lines and 24 KiB, with at most 4096 bytes per displayed line; truncation affects presentation only, while approval remains bound to the complete candidate.
+
+Copy, move, and file deletion show the prepared byte count. Directory creation/deletion and commands show essential facts about destination absence, permanent deletion, lack of automatic rollback, and the command boundary's lack of an OS/filesystem/network sandbox. Each preview carries the exact ActionIdentity digest and a closed tool kind; a mismatch fails closed before any Action Audit write. The terminal copy escapes C0/C1, Unicode format, and line/paragraph-separator controls and may apply safe colors, while ordinary live tool lines and `/actions` remain redacted.
+
+The preview exists only for a REPL `ask`: it is not persisted and does not enter provider history, Session, resume, compaction, or Effective Context. One-shot ask still cancels without reading stdin, and auto approval does not show a preview. Existing precondition refresh, single-use grant consumption, and stale rejection still run after acceptance, so displaying a diff expands neither permission nor hard execution boundaries. This Host-only change retains canonical system prompt v16, adapter contract v19, the 17-tool schema/order, six-call budget, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v3, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations. See [0052: Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -757,3 +766,4 @@ This slice establishes capacity facts only. It does not count current request to
 49. [0049: Anthropic Messages Streaming](./decisions/0049-anthropic-messages-streaming.md)
 50. [0050: AgentLoop, Runtime, and Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
 51. [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
+52. [0052: Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)

@@ -33,6 +33,7 @@ class PreparedEditFile:
 
     request: ToolUse
     relative_path: str
+    original_content: bytes
     content: bytes
     action: PermissionAction
     precondition: ActionPrecondition
@@ -120,6 +121,7 @@ class EditFileTool:
         return PreparedEditFile(
             request=request,
             relative_path=relative_path,
+            original_content=observed.content,
             content=encoded,
             action=PermissionAction.WORKSPACE_OVERWRITE,
             precondition=ActionPrecondition.expected_state(observed.digest),

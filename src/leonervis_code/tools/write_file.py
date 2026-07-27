@@ -27,6 +27,7 @@ class PreparedWriteFile:
 
     request: ToolUse
     relative_path: str
+    original_content: bytes | None
     content: bytes
     action: PermissionAction
     precondition: ActionPrecondition
@@ -100,7 +101,14 @@ class WriteFileTool:
         else:
             action = PermissionAction.WORKSPACE_OVERWRITE
             precondition = ActionPrecondition.expected_state(observed.digest)
-        return PreparedWriteFile(request, relative_path, encoded, action, precondition)
+        return PreparedWriteFile(
+            request=request,
+            relative_path=relative_path,
+            original_content=None if observed is None else observed.content,
+            content=encoded,
+            action=action,
+            precondition=precondition,
+        )
 
     def refresh_precondition(self, prepared: PreparedWriteFile) -> ActionPrecondition:
         """Re-observe target state for stale approval and lost-update checks."""

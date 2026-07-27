@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded sequential tools are implemented. Anthropic and OpenAI-compatible providers now support complete mixed responses and streamed text; the REPL and TTY one-shot render Markdown, while pipes and redirects retain raw Markdown. All capabilities retain the shared six-call budget, PermissionGate, Action Audit, Session, and Effective Context boundaries. Foundation 5A remains deferred.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded sequential tools are implemented. Anthropic and OpenAI-compatible providers now support complete mixed responses and streamed text; the REPL and TTY one-shot render Markdown, REPL asks show bounded diffs or risk summaries bound to the exact action, and pipes and redirects retain raw Markdown. All capabilities retain the shared six-call budget, PermissionGate, Action Audit, Session, and Effective Context boundaries. Foundation 5A remains deferred.
 
 ## Contents
 
@@ -92,7 +92,7 @@ uv run leonervis-code --permission-mode danger-full-access --approval ask
 uv run leonervis-code --permission-mode workspace-write --approval auto prompt "Modify and verify the project"
 ```
 
-One-shot tool status goes to stderr while the final answer goes to stdout; use `/actions` in the REPL for durable Action Audit. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/) for all 17 tools, permissions, workspace/symlink rules, timeouts, stale-state checks, and durability boundaries.
+REPL `ask` approval shows a bounded candidate diff before `write_file`, `edit_file`, and `patch_file`, and essential risk facts for copy, move, delete, mkdir, and command actions; workspace changes after approval still cause stale rejection. One-shot tool status goes to stderr while the final answer goes to stdout; use `/actions` in the REPL for durable Action Audit. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/) for all 17 tools, permissions, workspace/symlink rules, timeouts, stale-state checks, and durability boundaries.
 
 ### Configure providers
 
@@ -245,6 +245,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [AgentLoop and Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md): mixed-response execution order, live presentation, failure atomicity, and Session recovery.
 - [AgentLoop, Runtime, and Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md): stream preflight, complete tool assembly, live REPL display, and durable final confirmation.
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md): safe-block streaming, TTY layout, raw redirects, and terminal-control boundaries.
+- [Exact Bounded Informed Approval Previews](./docs/decisions/0052-exact-bounded-informed-approval-previews.md): prepared candidate diffs, exact-action binding, risk summaries, terminal safety, and stale revalidation.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.

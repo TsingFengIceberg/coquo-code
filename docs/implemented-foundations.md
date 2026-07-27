@@ -36,6 +36,7 @@
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](#agentloop-与-terminal-assistant-tool-text-integration)
 - [Provider Streaming 与 Terminal Failure Atomicity](#provider-streaming-与-terminal-failure-atomicity)
 - [TTY Markdown Rendering](#tty-markdown-rendering)
+- [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -540,6 +541,14 @@ REPL与TTY one-shot现在使用锁定的Rich renderer展示assistant Markdown：
 
 该Host-only presentation slice新增Rich runtime dependency，但canonical system prompt保持v16、adapter contract保持v19、`turn_committed`保持v3，其他tool、permission、audit、compaction和context契约均不变。完整决策见[0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)。
 
+## Exact Bounded Informed Approval
+
+REPL的逐次`ask`现在会在用户回答前展示prepared action事实。`write_file`、`edit_file`和`patch_file`使用准备阶段冻结的原始UTF-8 snapshot与完整candidate生成unified diff；CLI不会为了展示再读取一次workspace。Create、overwrite、empty file、内容相同但仍执行的overwrite、missing final newline以及truncated preview都有明确标识。Diff最多160行、24 KiB，单行最多4096 bytes；截断只影响展示，approval仍绑定完整candidate。
+
+Copy、move和file delete显示prepared byte count，directory create/delete与command显示destination absence、永久删除、不可自动回滚以及command无OS/filesystem/network sandbox等关键事实。Preview携带exact ActionIdentity digest和closed tool-kind，mismatch在任何Action Audit写入前fail closed。Terminal副本转义C0/C1、Unicode format和line/paragraph separator controls，并可安全着色；普通live tool line与`/actions`继续脱敏。
+
+Preview只存在于REPL `ask`调用，不持久化、不进入provider history、Session、resume、compaction或Effective Context。One-shot ask仍不读取stdin并取消，auto不展示preview。用户接受后原有precondition refresh、single-use grant和stale rejection继续执行，因此展示diff不扩大permission或hard execution边界。该Host-only变化保持canonical system prompt v16、adapter contract v19、17工具schema/order、六次预算、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v3、`context_compacted` v2/v3及`ctx-v1`/`ctx-v2`representation不变。完整决策见[0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -757,3 +766,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 49. [0049：Anthropic Messages Streaming](./decisions/0049-anthropic-messages-streaming.md)
 50. [0050：AgentLoop、Runtime 与 Terminal Streaming Integration](./decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)
 51. [0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
+52. [0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)

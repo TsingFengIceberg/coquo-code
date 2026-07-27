@@ -22,6 +22,12 @@ from leonervis_code.core.action_coordinator import (
     ApprovalHandler,
     ApprovalResolution,
 )
+from leonervis_code.core.approval_preview import (
+    ApprovalPreview,
+    ApprovalPreviewKind,
+    build_file_change_preview,
+    build_metadata_preview,
+)
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.compaction import (
     AUTO_COMPACT_HIGH_WATER_PERCENT,
@@ -1270,6 +1276,61 @@ class ProjectSession:
             lease=lease,
             precondition=precondition,
         )
+        approval_preview: ApprovalPreview | None = None
+        if prepared_write is not None:
+            approval_preview = build_file_change_preview(
+                action_digest=identity.digest,
+                path=prepared_write.relative_path,
+                before=prepared_write.original_content,
+                after=prepared_write.content,
+            )
+        elif prepared_edit is not None:
+            approval_preview = build_file_change_preview(
+                action_digest=identity.digest,
+                path=prepared_edit.relative_path,
+                before=prepared_edit.original_content,
+                after=prepared_edit.content,
+            )
+        elif prepared_patch is not None:
+            approval_preview = build_file_change_preview(
+                action_digest=identity.digest,
+                path=prepared_patch.relative_path,
+                before=prepared_patch.original_content,
+                after=prepared_patch.content,
+            )
+        elif prepared_command is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.COMMAND,
+            )
+        elif prepared_mkdir is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.DIRECTORY_CREATE,
+            )
+        elif prepared_move is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.FILE_MOVE,
+                byte_count=prepared_move.source_state.size,
+            )
+        elif prepared_delete is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.FILE_DELETE,
+                byte_count=prepared_delete.target_state.size,
+            )
+        elif prepared_delete_directory is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.DIRECTORY_DELETE,
+            )
+        elif prepared_copy is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.FILE_COPY,
+                byte_count=len(prepared_copy.content),
+            )
         coordinator = ActionCoordinator(
             writer=self._writer,
             approval_handler=self._approval_handler,
@@ -1467,6 +1528,7 @@ class ProjectSession:
             approval_mode=self._approval_mode,
             revalidate=revalidate,
             execute=execute,
+            approval_preview=approval_preview,
         )
         if not coordinated.executed:
             if coordinated.permission_result.decision.value == "deny":

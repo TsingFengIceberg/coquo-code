@@ -33,6 +33,7 @@ class PreparedPatchFile:
 
     request: ToolUse
     relative_path: str
+    original_content: bytes
     content: bytes
     replacements: int
     action: PermissionAction
@@ -164,6 +165,7 @@ class PatchFileTool:
         return PreparedPatchFile(
             request=request,
             relative_path=relative_path,
+            original_content=observed.content,
             content=encoded,
             replacements=len(edits),
             action=PermissionAction.WORKSPACE_OVERWRITE,

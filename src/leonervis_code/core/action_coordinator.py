@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from leonervis_code.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
 from leonervis_code.core.actions import ActionIdentity
 from leonervis_code.core.approvals import ApprovalGrant
 from leonervis_code.core.contracts import ToolResult
@@ -37,6 +38,15 @@ class ApprovalResolution(StrEnum):
 class HumanApprovalRequest:
     identity: ActionIdentity
     permission_result: PermissionResult
+    preview: ApprovalPreview | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.identity) is not ActionIdentity:
+            raise ValueError("approval request identity is invalid")
+        if type(self.permission_result) is not PermissionResult:
+            raise ValueError("approval request permission result is invalid")
+        if self.preview is not None:
+            _validate_approval_preview(self.identity, self.preview)
 
 
 @dataclass(frozen=True)
@@ -111,7 +121,10 @@ class ActionCoordinator:
         approval_mode: ApprovalMode,
         revalidate: ActionRevalidator,
         execute: ActionExecutor,
+        approval_preview: ApprovalPreview | None = None,
     ) -> ActionCoordinatorResult:
+        if approval_preview is not None:
+            _validate_approval_preview(identity, approval_preview)
         request = PermissionRequest(permission_mode, approval_mode, identity.action)
         self._writer.action_requested(
             identity=identity,
@@ -139,7 +152,9 @@ class ActionCoordinator:
         authorization = ActionAuthorization.POLICY_ALLOW
         grant_id = None
         if permission.decision == PermissionDecision.ASK:
-            resolution = self._approval_handler(HumanApprovalRequest(identity, permission))
+            resolution = self._approval_handler(
+                HumanApprovalRequest(identity, permission, approval_preview)
+            )
             if type(resolution) is not ApprovalResolution:
                 raise ValueError("approval handler returned an invalid resolution")
             if resolution == ApprovalResolution.REJECT:
@@ -220,6 +235,26 @@ class ActionCoordinator:
             execution.outcome,
             execution.result_code,
         )
+
+
+_TOOL_PREVIEW_KINDS = {
+    "write_file": ApprovalPreviewKind.FILE_CHANGE,
+    "edit_file": ApprovalPreviewKind.FILE_CHANGE,
+    "patch_file": ApprovalPreviewKind.FILE_CHANGE,
+    "copy_file": ApprovalPreviewKind.FILE_COPY,
+    "move_file": ApprovalPreviewKind.FILE_MOVE,
+    "delete_file": ApprovalPreviewKind.FILE_DELETE,
+    "mkdir": ApprovalPreviewKind.DIRECTORY_CREATE,
+    "delete_directory": ApprovalPreviewKind.DIRECTORY_DELETE,
+    "run_command": ApprovalPreviewKind.COMMAND,
+}
+
+
+def _validate_approval_preview(identity: ActionIdentity, preview: ApprovalPreview) -> None:
+    if type(preview) is not ApprovalPreview or preview.action_digest != identity.digest:
+        raise ValueError("approval preview does not match action identity")
+    if _TOOL_PREVIEW_KINDS.get(identity.tool_name) != preview.kind:
+        raise ValueError("approval preview kind does not match action tool")
 
 
 def _uuid4_text(value: UUID | str, label: str) -> str:
