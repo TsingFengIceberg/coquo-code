@@ -495,6 +495,34 @@ def test_stream_parser_emits_exact_text_and_assembles_fragmented_tool_call() -> 
     )
 
 
+def test_stream_parser_classifies_nonzero_tool_index_as_multiple_calls() -> None:
+    stream = [
+        stream_chunk(
+            tool_calls=[
+                stream_tool_delta(
+                    call_id="call-one",
+                    name="mkdir",
+                    arguments='{"path":"src"}',
+                )
+            ]
+        ),
+        stream_chunk(
+            tool_calls=[
+                stream_tool_delta(
+                    call_id="call-two",
+                    name="mkdir",
+                    arguments='{"path":"tests"}',
+                    index=1,
+                )
+            ]
+        ),
+        stream_chunk(finish_reason="tool_calls"),
+    ]
+
+    with pytest.raises(ProviderAdapterError, match="contained multiple tool calls"):
+        parse_response_stream(stream, route=route(), event_sink=lambda _event: None)
+
+
 def test_compatible_stream_request_sets_stream_and_closes_resource() -> None:
     stream = ClosableStream([stream_chunk(content="Hello"), stream_chunk(finish_reason="stop")])
     client = RecordingChatClient([stream])

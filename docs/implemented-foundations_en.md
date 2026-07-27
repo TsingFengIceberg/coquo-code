@@ -37,6 +37,7 @@
 - [Provider Streaming and Terminal Failure Atomicity](#provider-streaming-and-terminal-failure-atomicity)
 - [TTY Markdown Rendering](#tty-markdown-rendering)
 - [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
+- [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -60,7 +61,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 16. It permits brief companion text in a tool response while stating that this text is not a final answer, Tool result, permission, approval, or proof of execution. The ordinary Agent still cannot initiate compaction, and the Host-summary trust boundary is unchanged. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a six-call sequential budget.
+The canonical model system prompt is now version 17. It permits brief companion text in a tool response while stating that this text is not a final answer, Tool result, permission, approval, or proof of execution. It also requires work beyond the remaining tool budget to be staged with an explicit report of what remains and never packed as multiple calls in one response. The ordinary Agent still cannot initiate compaction, and the Host-summary trust boundary is unchanged. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a six-call sequential budget.
 
 It explicitly does not claim recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, non-empty directory deletion, directory movement, recursive mkdir, shell source strings, interactive PTYs, OS/network sandboxing, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, exact-state conflict, timeout/process cleanup, causality, audit, and durability constraints.
 
@@ -561,6 +562,14 @@ After real-TTY submission, ephemeral `• Working...` remains until the first vi
 
 This is a Host-only input and presentation change. The canonical system prompt remains v16, the adapter contract remains v19, and the 17-tool schema/order and six-call budget, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v3, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations remain unchanged. Exact multiline text naturally participates in a particular turn and context identity, but the identity representation does not advance. See [0053: TTY Prompt Editor and Interaction Feedback](./decisions/0053-tty-multiline-prompt-editor.md).
 
+## Sequential Tool-call Budget Hardening
+
+A real DeepSeek-compatible observation asked an empty workspace to create three directories and eight files, requiring at least 11 mutation calls and therefore not fitting the six-call turn budget. After a successful read-only `list_directory`, the provider sent a nonzero stream tool-call index in the next response, indicating another call in the same assistant response. The old adapter failed closed before executing any call from that response, but reported only an invalid index; Action Audit confirms that no mkdir or write occurred.
+
+The OpenAI-compatible parser now classifies a positive tool-call index as unsupported multiple calls while continuing to reject malformed indexes, multiple delta entries, changed IDs, and other incomplete shapes. It neither selects only the first call, queues later calls, nor retries automatically. System prompt v17 requires work that cannot fit to use only the remaining sequential allowance, report completed and remaining work, and wait for a later user turn instead of packing a batch.
+
+The Host still enforces six calls per turn. The 17-tool schema/order, `parallel_tool_calls=false` projection, permission/approval, Action Audit, Session schemas, and causality are unchanged. Because the accepted provider shape is unchanged, adapter contract v19 remains current. The new prompt fingerprint is `v17-1c66b2e9cf6b622477408f99106294b2cdab14a9983a7fb6b4d628218307b851`, the empty full-context identity is `ctx-v1-4bcd666498bd96b3af1aa59a1d6793b31cdcdcff1dc274db80c6f051f1e8b6da`, and the representations remain `ctx-v1`/`ctx-v2`. See [0054: Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -780,3 +789,4 @@ This slice establishes capacity facts only. It does not count current request to
 51. [0051: TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
 52. [0052: Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)
 53. [0053: TTY Prompt Editor and Interaction Feedback](./decisions/0053-tty-multiline-prompt-editor.md)
+54. [0054: Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)

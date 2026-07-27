@@ -37,6 +37,7 @@
 - [Provider Streaming 与 Terminal Failure Atomicity](#provider-streaming-与-terminal-failure-atomicity)
 - [TTY Markdown Rendering](#tty-markdown-rendering)
 - [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
+- [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -60,7 +61,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 16。它允许一个tool response携带brief companion text，同时明确该文字不是final answer、Tool result、permission、approval或execution proof；普通Agent仍不能主动compact，Host summary信任边界保持不变。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
+Canonical model system prompt当前为version 17。它允许一个tool response携带brief companion text，同时明确该文字不是final answer、Tool result、permission、approval或execution proof；它还要求超出remaining tool budget的工作分批完成并报告剩余内容，绝不能在一个response中打包多个calls。普通Agent仍不能主动compact，Host summary信任边界保持不变。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -561,6 +562,14 @@ Ctrl-C取消非空草稿并继续REPL，空buffer时退出；Ctrl-D只在空buff
 
 这是Host-only输入与presentation变化。Canonical system prompt保持v16，adapter contract保持v19，17工具schema/order与六次预算、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v3、`context_compacted` v2/v3和`ctx-v1`/`ctx-v2`representation均不变。Exact多行文本会自然参与具体turn与context identity，但identity representation不升级。完整决策见[0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)。
 
+## Sequential Tool-call Budget Hardening
+
+一次DeepSeek-compatible真实观察要求empty workspace创建三个目录和八个文件，仅mutation就至少需要11次工具调用，无法装入六次turn预算。成功执行只读`list_directory`后，provider在下一response发送nonzero stream tool-call index，表示同一assistant response里还包含后续call。旧adapter在任何该response工具执行前fail closed，但错误只显示invalid index；Action Audit确认没有发生mkdir或write。
+
+OpenAI-compatible parser现在把positive tool-call index准确分类为unsupported multiple calls，同时继续拒绝malformed index、multiple delta entries、变化ID和其他不完整shape。它不会只取第一个call、缓存后续call或自动retry。System prompt v17明确要求预算不足时只使用剩余顺序额度，随后报告已完成与待完成工作并等待later user turn，绝不能为了完成batch而把calls打包。
+
+Host仍强制每turn六次调用，17工具schema/order、`parallel_tool_calls=false` projection、permission/approval、Action Audit、Session schema和causality不变。Accepted provider shape不变，因此adapter contract保持v19；new prompt fingerprint为`v17-1c66b2e9cf6b622477408f99106294b2cdab14a9983a7fb6b4d628218307b851`，empty full-context identity为`ctx-v1-4bcd666498bd96b3af1aa59a1d6793b31cdcdcff1dc274db80c6f051f1e8b6da`，representation仍为`ctx-v1`/`ctx-v2`。完整决策见[0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -780,3 +789,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 51. [0051：TTY Markdown Rendering](./decisions/0051-tty-markdown-rendering.md)
 52. [0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)
 53. [0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)
+54. [0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)

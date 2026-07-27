@@ -634,8 +634,13 @@ def parse_response_stream(
         if tool_calls:
             call = tool_calls[0]
             call_index = getattr(call, "index", None)
-            if type(call_index) is not int or call_index != 0:
+            if type(call_index) is not int or call_index < 0:
                 raise _invalid_response(route, "provider stream tool-call index was invalid")
+            if call_index != 0:
+                raise _invalid_response(
+                    route,
+                    "provider stream contained multiple tool calls; only one sequential tool call is supported",
+                )
             call_id = getattr(call, "id", None)
             if call_id is not None:
                 if not isinstance(call_id, str) or not call_id:
