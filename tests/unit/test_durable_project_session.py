@@ -6,6 +6,12 @@ from uuid import UUID
 
 import pytest
 
+from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestStarted,
+)
 from leonervis_code.core.contracts import (
     ToolArguments,
     AssistantText,
@@ -153,6 +159,74 @@ def test_project_session_persists_and_resumes_grep_causality(tmp_path: Path) -> 
     )
     assert second.prompt("continue") == "resumed"
     second.close()
+
+
+def test_project_session_executes_displays_persists_and_resumes_mixed_tool_response(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "README.md").write_text("workspace notes\n", encoding="utf-8")
+    arguments = ToolArguments.from_mapping({"path": "README.md"})
+    call = ToolUse(
+        "read-1",
+        "read_file",
+        arguments,
+        assistant_text="I will inspect the file first.\n",
+    )
+
+    class MixedProvider:
+        def __init__(self, responses) -> None:
+            self.responses = iter(responses)
+            self.requests = []
+
+        def count_input_tokens(self, _request):
+            return RequestTokenCount(100, RequestTokenCountMethod.ESTIMATED)
+
+        def respond(self, request):
+            self.requests.append(request)
+            return next(self.responses)
+
+    first_provider = MixedProvider([call, AssistantText("The file contains workspace notes.")])
+    first = ProjectSession.open(
+        tmp_path,
+        model="custom/model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: first_provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    events = []
+    assert first.prompt("inspect", event_sink=events.append) == "The file contains workspace notes."
+    result = ToolResult("read-1", "workspace notes\n")
+    assert events == [
+        AssistantToolTextReceived("I will inspect the file first.\n"),
+        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok"),
+    ]
+    assert first_provider.requests[1].history[-2:] == (call, result)
+    assert first.history == (
+        UserMessage("inspect"),
+        call,
+        result,
+        AssistantText("The file contains workspace notes."),
+    )
+    first.close()
+
+    resumed_provider = MixedProvider([AssistantText("resumed")])
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        model="custom/model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: resumed_provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+    assert resumed.history[:4] == first.history
+    assert resumed.prompt("continue") == "resumed"
+    assert resumed_provider.requests[0].history[:4] == first.history
+    resumed.close()
 
 
 def test_target_aware_resume_rejects_known_overflow_without_mutation(tmp_path: Path) -> None:

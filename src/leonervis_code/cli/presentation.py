@@ -6,6 +6,7 @@ import re
 from typing import Literal, Protocol
 
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -429,6 +430,8 @@ def render_resume_rejection(report: ContextFitReport, *, startup: bool = False) 
 
 def render_prompt_event(event: object) -> tuple[str, MessageKind]:
     """Render one safe ephemeral prompt lifecycle event."""
+    if isinstance(event, AssistantToolTextReceived):
+        return event.text, "plain"
     if isinstance(event, ToolRequestStarted):
         detail = f" {event.safe_summary}" if event.safe_summary else ""
         return (

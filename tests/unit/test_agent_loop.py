@@ -4,8 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from leonervis_code.agent.loop import AgentLoop, ToolLoopLimitError
+from leonervis_code.agent.loop import (
+    AgentLoop,
+    ToolLoopLimitError,
+)
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -414,7 +418,14 @@ def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
 
 
 def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None:
-    provider = ScriptedFakeProvider([AssistantText(text="not durable")])
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+    call = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
+    provider = ScriptedFakeProvider([call, AssistantText(text="not durable")])
 
     def fail(_: CommittedTurn) -> None:
         raise OSError("disk full")
@@ -434,6 +445,10 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
     assert loop.history == ()
     assert loop.effective_history == ()
     assert loop.turns == ()
+    assert provider.received_requests[1].history[-2:] == (
+        call,
+        ToolResult("read-1", "notes\n"),
+    )
 
 
 def test_loop_restores_validated_history_and_rejects_broken_causality(tmp_path) -> None:
@@ -788,3 +803,72 @@ def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -
         ToolRequestFinished("read_file", 1, 6, ToolEventStatus.OUTCOME_UNKNOWN),
     ]
     assert loop.history == ()
+
+
+def test_assistant_tool_text_is_displayed_executed_continued_and_committed(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+    call = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will read the file.",
+    )
+    provider = ScriptedFakeProvider([call, AssistantText("The file contains notes.")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    events = []
+
+    assert loop.run("inspect", event_sink=events.append) == "The file contains notes."
+    result = ToolResult("read-1", "notes\n")
+    assert events == [
+        AssistantToolTextReceived("I will read the file."),
+        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED),
+    ]
+    assert provider.received_requests[1].history[-2:] == (call, result)
+    assert loop.history == (
+        UserMessage("inspect"),
+        call,
+        result,
+        AssistantText("The file contains notes."),
+    )
+
+
+def test_assistant_tool_text_after_limit_result_is_visible_but_cannot_extend_budget(
+    tmp_path,
+) -> None:
+    calls = [
+        ToolUse(
+            f"read-{index}",
+            "read_file",
+            ToolArguments.from_mapping({"path": "missing.txt"}),
+        )
+        for index in range(1, 8)
+    ]
+    calls[-1] = replace(calls[-1], assistant_text="One more check.")
+    calls.append(replace(calls[-1], tool_use_id="mixed-8", assistant_text="I will retry."))
+    provider = ScriptedFakeProvider(calls)
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    events = []
+    with pytest.raises(ToolLoopLimitError, match="after the tool call limit"):
+        loop.run("inspect", event_sink=events.append)
+
+    assert loop.history == ()
+    assert [event for event in events if isinstance(event, AssistantToolTextReceived)] == [
+        AssistantToolTextReceived("One more check."),
+        AssistantToolTextReceived("I will retry."),
+    ]
+    assert isinstance(events[-2], ToolRequestLimited)
+    assert events[-2].call_index == 7

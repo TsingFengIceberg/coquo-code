@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 _SYSTEM_PROMPT_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
 TOOL_ARGUMENTS_VERSION = 1
 MAX_TOOL_ARGUMENTS_BYTES = 16 * 1024
+MAX_ASSISTANT_TOOL_TEXT_CHARACTERS = 32 * 1024
+MAX_ASSISTANT_TOOL_TEXT_BYTES = 32 * 1024
 
 
 def system_prompt_fingerprint(version: int, text: str) -> str:
@@ -114,11 +116,30 @@ class ToolArguments:
 
 @dataclass(frozen=True)
 class ToolUse:
-    """One provider-requested tool with immutable provider-neutral arguments."""
+    """One provider-requested tool and optional atomic assistant companion text."""
 
     tool_use_id: str
     name: str
     arguments: ToolArguments
+    assistant_text: str | None = None
+
+    def __post_init__(self) -> None:
+        text = self.assistant_text
+        if text is None:
+            return
+        if not isinstance(text, str) or not text:
+            raise ValueError("assistant tool text must be non-empty text or null")
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("assistant tool text must be valid UTF-8") from None
+        if "\x00" in text:
+            raise ValueError("assistant tool text must not contain NUL")
+        if (
+            len(text) > MAX_ASSISTANT_TOOL_TEXT_CHARACTERS
+            or len(encoded) > MAX_ASSISTANT_TOOL_TEXT_BYTES
+        ):
+            raise ValueError("assistant tool text exceeds the supported size")
 
 
 @dataclass(frozen=True)

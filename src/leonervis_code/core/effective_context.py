@@ -283,6 +283,16 @@ def _validate_item(item: object) -> None:
             item.arguments.as_mapping()
         except (AttributeError, ValueError):
             raise ValueError("tool use arguments are invalid") from None
+        if item.assistant_text is not None:
+            try:
+                ToolUse(
+                    item.tool_use_id,
+                    item.name,
+                    item.arguments,
+                    assistant_text=item.assistant_text,
+                )
+            except ValueError:
+                raise ValueError("assistant tool text is invalid") from None
         return
     if isinstance(item, ToolResult):
         if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
@@ -302,13 +312,16 @@ def _item_identity(item: ConversationItem) -> dict[str, object]:
     if isinstance(item, AssistantText):
         return {"item_type": "assistant_text", "text": item.text}
     if isinstance(item, ToolUse):
-        return {
+        identity = {
             "item_type": "tool_use",
             "tool_use_id": item.tool_use_id,
             "name": item.name,
             "arguments_version": item.arguments.version,
             "arguments": item.arguments.as_mapping(),
         }
+        if item.assistant_text is not None:
+            identity["assistant_text"] = item.assistant_text
+        return identity
     assert isinstance(item, ToolResult)
     return {
         "item_type": "tool_result",

@@ -410,19 +410,27 @@ def serialize_history(
                 ) from None
             if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
                 raise _invalid_history(config, "tool use ID must not be blank")
-            messages.append(
+            content: list[dict[str, object]] = []
+            if item.assistant_text is not None:
+                try:
+                    ToolUse(
+                        item.tool_use_id,
+                        item.name,
+                        item.arguments,
+                        assistant_text=item.assistant_text,
+                    )
+                except ValueError:
+                    raise _invalid_history(config, "assistant tool text is malformed") from None
+                content.append({"type": "text", "text": item.assistant_text})
+            content.append(
                 {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": item.tool_use_id,
-                            "name": item.name,
-                            "input": tool_input,
-                        }
-                    ],
+                    "type": "tool_use",
+                    "id": item.tool_use_id,
+                    "name": item.name,
+                    "input": tool_input,
                 }
             )
+            messages.append({"role": "assistant", "content": content})
             pending_tool_use_id = item.tool_use_id
             expected = "tool_result"
             continue
@@ -546,9 +554,7 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
         else:
             raise _invalid_response(config, "Anthropic response contained an unsupported block")
 
-    if text_parts and tool_blocks:
-        raise _invalid_response(config, "mixed text and tool-use responses are not supported")
-    if text_parts:
+    if not tool_blocks:
         if stop_reason != "end_turn":
             raise _invalid_response(config, "text response did not end with end_turn")
         return AssistantText(text="".join(text_parts))
@@ -568,9 +574,20 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
     if not isinstance(tool_input, dict):
         raise _invalid_response(config, f"Anthropic {name} input was malformed")
     try:
-        return tool_use_from_input(tool_use_id, name, tool_input)
+        request = tool_use_from_input(tool_use_id, name, tool_input)
     except ValueError:
         raise _invalid_response(config, f"Anthropic {name} input was malformed") from None
+    if not text_parts:
+        return request
+    try:
+        return ToolUse(
+            request.tool_use_id,
+            request.name,
+            request.arguments,
+            assistant_text="".join(text_parts),
+        )
+    except ValueError:
+        raise _invalid_response(config, "Anthropic assistant tool text was malformed") from None
 
 
 def normalize_sdk_error(

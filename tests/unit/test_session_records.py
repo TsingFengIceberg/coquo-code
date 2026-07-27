@@ -27,6 +27,7 @@ from leonervis_code.session_records import (
     SessionHeader,
     SessionRecordError,
     SessionResumed,
+    TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     TurnCommitted,
@@ -88,7 +89,7 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.next_sequence == 3
 
 
-def test_turn_schema_v2_round_trips_structured_read_glob_and_grep_arguments() -> None:
+def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
@@ -116,6 +117,109 @@ def test_turn_schema_v2_round_trips_structured_read_glob_and_grep_arguments() ->
     assert f'"schema_version":{TURN_COMMITTED_SCHEMA_VERSION}'.encode() in encoded
     assert b'"arguments":{"pattern":"src/**/*.py"},"arguments_version":1' in encoded
     assert b'"arguments":{"include":"src/**/*.py","query":"ToolUse("}' in encoded
+    assert encoded.count(b'"assistant_text":null') == 3
+
+
+def test_turn_schema_v3_round_trips_assistant_tool_text_without_normalizing_it() -> None:
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("read"),
+            ToolUse(
+                "read-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+                assistant_text="  I will read it.\n",
+            ),
+            ToolResult("read-1", "notes"),
+            AssistantText("done"),
+        ),
+    )
+
+    encoded = encode_record(turn)
+    decoded = decode_record(encoded)
+
+    assert decoded == turn
+    assert b'"assistant_text":"  I will read it.\\n"' in encoded
+
+
+def test_turn_schema_v2_remains_readable_and_cannot_claim_assistant_tool_text() -> None:
+    pure = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("read"),
+            ToolUse(
+                "read-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+            ),
+            ToolResult("read-1", "notes"),
+            AssistantText("done"),
+        ),
+        schema_version=TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+    )
+
+    encoded = encode_record(pure)
+
+    assert decode_record(encoded) == pure
+    assert b'"schema_version":2' in encoded
+    assert b'"arguments":{"path":"README.md"}' in encoded
+    assert b'"assistant_text":' not in encoded
+
+    value = json.loads(encoded)
+    value["items"][1]["assistant_text"] = None
+    with pytest.raises(SessionRecordError, match="unknown field"):
+        decode_record(json.dumps(value).encode())
+
+    mixed = replace(
+        pure,
+        items=(
+            pure.items[0],
+            replace(pure.items[1], assistant_text="I will read it."),
+            *pure.items[2:],
+        ),
+    )
+    with pytest.raises(SessionRecordError, match="newer turn_committed schema"):
+        encode_record(mixed)
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda item: item.pop("assistant_text"), "missing required field"),
+        (lambda item: item.update(assistant_text=1), "text or null"),
+        (lambda item: item.update(assistant_text=""), "non-empty text or null"),
+        (lambda item: item.update(assistant_text="\ud800"), "valid UTF-8"),
+        (lambda item: item.update(assistant_text="contains\x00nul"), "must not contain NUL"),
+        (lambda item: item.update(assistant_text="x" * (32 * 1024 + 1)), "supported size"),
+    ],
+)
+def test_turn_schema_v3_rejects_malformed_assistant_tool_text(mutate, match: str) -> None:
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("read"),
+            ToolUse(
+                "read-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+                assistant_text="I will read it.",
+            ),
+            ToolResult("read-1", "notes"),
+            AssistantText("done"),
+        ),
+    )
+    value = json.loads(encode_record(turn))
+    mutate(value["items"][1])
+
+    with pytest.raises(SessionRecordError, match=match):
+        decode_record(json.dumps(value).encode())
 
 
 def test_turn_schema_v1_decodes_to_generic_arguments_without_rewriting_shape() -> None:
@@ -352,7 +456,7 @@ def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) 
             replay_records([header, turn])
 
 
-def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
+def test_turn_v3_and_checkpoint_v2_replay_preserve_mixed_retained_history(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path.resolve()
@@ -372,8 +476,26 @@ def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
             binding=binding,
             items=(UserMessage(f"u{index}"), AssistantText(f"a{index}")),
         )
-        for index in range(1, 5)
+        for index in range(1, 4)
     ]
+    turns.append(
+        TurnCommitted(
+            sequence=4,
+            committed_at=NOW,
+            binding=binding,
+            items=(
+                UserMessage("u4"),
+                ToolUse(
+                    "mixed-4",
+                    "read_file",
+                    ToolArguments.from_mapping({"path": "README.md"}),
+                    assistant_text="I will inspect first.",
+                ),
+                ToolResult("mixed-4", "notes"),
+                AssistantText("a4"),
+            ),
+        )
+    )
     prompt = build_compact_prompt()
     summary = EffectiveContextSummary("u1 and u2 were resolved")
     checkpoint = ContextCompacted(
@@ -395,13 +517,13 @@ def test_mixed_v1_v2_checkpoint_replay_preserves_full_and_replaces_effective(
         schema_version=2,
     )
 
-    encoded_v1_prefix = b"".join(encode_record(record) for record in [header, *turns])
+    encoded_prefix = b"".join(encode_record(record) for record in [header, *turns])
     decoded = [decode_record(encode_record(record)) for record in [header, *turns, checkpoint]]
     state = replay_records(decoded)
 
-    assert b"".join(encode_record(record) for record in decoded[:5]) == encoded_v1_prefix
+    assert b"".join(encode_record(record) for record in decoded[:5]) == encoded_prefix
     assert len(state.turns) == 4
-    assert len(state.history) == 8
+    assert state.history == tuple(item for turn in turns for item in turn.items)
     assert state.effective_history == turns[2].items + turns[3].items
     assert state.effective_summary == summary
     assert state.latest_checkpoint == checkpoint

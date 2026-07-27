@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
 from leonervis_code.agent.tool_events import (
+    AgentPromptEvent,
     ToolDispatchResult,
     ToolEventStatus,
-    ToolPromptEvent,
 )
 from leonervis_code.core.action_coordinator import (
     ActionCoordinator,
@@ -247,7 +247,7 @@ class AutoCompactionNotApplied:
 
 
 PromptEvent = (
-    AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied | ToolPromptEvent
+    AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied | AgentPromptEvent
 )
 PromptEventSink = Callable[[PromptEvent], None]
 

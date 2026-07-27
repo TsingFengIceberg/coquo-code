@@ -29,6 +29,11 @@
 - [Tool Batch C: Structured Exact Multi-edit Patch](#tool-batch-c-structured-exact-multi-edit-patch)
 - [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
 - [Live Redacted Tool Activity](#live-redacted-tool-activity)
+- [Provider-neutral Assistant Tool Text Representation](#provider-neutral-assistant-tool-text-representation)
+- [Provider Mixed-response Inbound Normalization](#provider-mixed-response-inbound-normalization)
+- [`turn_committed` v3 Assistant Tool Text Persistence](#turn_committed-v3-assistant-tool-text-persistence)
+- [Provider Mixed-response History Projection](#provider-mixed-response-history-projection)
+- [AgentLoop and Terminal Assistant Tool Text Integration](#agentloop-and-terminal-assistant-tool-text-integration)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -52,7 +57,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 15. It still says the ordinary Agent cannot initiate compaction and preserves the Host-summary trust boundary. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a six-call sequential budget.
+The canonical model system prompt is now version 16. It permits brief companion text in a tool response while stating that this text is not a final answer, Tool result, permission, approval, or proof of execution. The ordinary Agent still cannot initiate compaction, and the Host-summary trust boundary is unchanged. Existing Foundations provide literal search, one-level listing, controlled write/edit/command, directory creation, file movement, file/empty-directory deletion, and binary copying. Tool batches A/B/C add `read_file_lines`, `stat_path`, `list_tree`, process-isolated `grep_regex`, and structured exact `patch_file`. All 17 model-visible tools share a six-call sequential budget.
 
 It explicitly does not claim recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, non-empty directory deletion, directory movement, recursive mkdir, shell source strings, interactive PTYs, OS/network sandboxing, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, exact-state conflict, timeout/process cleanup, causality, audit, and durability constraints.
 
@@ -479,13 +484,51 @@ Summaries are minimized per tool: workspace-relative paths, includes, byte/edit/
 
 Live events are not written to the append-only transcript, do not participate in resume or compaction, never enter model history, and cannot replace durable Action Audit. This Host-only slice leaves tool schemas/order, system prompt v15, provider adapter v15, the empty Effective Context identity, and all Session/Action Audit/context representation versions unchanged. See [0041: Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md).
 
+## Provider-neutral Assistant Tool Text Representation
+
+Leonervis can now accurately represent "assistant text plus one tool call" internally. The existing immutable `ToolUse` has an optional `assistant_text` that atomically binds exact text to the same tool ID, name, and arguments. `None` remains the existing pure tool call; non-empty text is bounded to 32 KiB characters and 32 KiB of UTF-8 and is neither trimmed nor normalized. Effective Context identity and compact source preserve the text, while the tool-use/result causal pair remains indivisible.
+
+This slice originally defined only the internal representation without enabling real providers to use it. Anthropic and OpenAI-compatible parsers, history serializers, AgentLoop, and `turn_committed` schema v2 all failed closed so text could not be silently lost during execution, audit, or persistence. ADRs 0043–0046 have since completed inbound normalization, Session v3, history projection, and runtime/terminal integration in sequence.
+
+Existing pure tool-call identity payloads are unchanged, so system prompt v15, provider adapter contract v15, tool schemas/order, ToolArguments v1, Session/Action Audit schemas, and the `ctx-v1`/`ctx-v2` representation versions remain unchanged. See [0042: Provider-neutral Assistant Tool Text Representation](./decisions/0042-provider-neutral-assistant-tool-text-representation.md).
+
+## Provider Mixed-response Inbound Normalization
+
+Anthropic Messages and OpenAI-compatible Chat Completions now normalize their mixed native responses into `ToolUse.assistant_text`. Anthropic requires a `tool_use` stop reason and exactly one valid tool block, then concatenates all text blocks in wire order. OpenAI-compatible requires a `tool_calls` finish reason and exactly one valid function call, then preserves non-empty `message.content` exactly. Responses without companion text still produce the existing pure `ToolUse`, and text-only responses are unchanged.
+
+Both parsers continue to reject multiple tools, wrong stop/finish reasons, unknown tools, malformed arguments, unsupported content, and empty, invalid, or oversized companion text. This slice originally stopped at the inbound boundary; ADRs 0044–0046 have since completed Session persistence, history projection, and runtime execution/presentation.
+
+The provider response contract advances the adapter contract to v16 and naturally changes route fingerprints. The system prompt remains v15 and still asks the model to return only the tool call; tool schemas/order, the Effective Context golden, ToolArguments v1, and Session/context representations remain unchanged. See [0043: Provider Mixed-response Inbound Normalization](./decisions/0043-provider-mixed-response-inbound-normalization.md).
+
+## `turn_committed` v3 Assistant Tool Text Persistence
+
+New Session turns now use record-local schema v3. It retains v2's generic `arguments_version + arguments` and requires each `tool_use` to store nullable `assistant_text`: a mixed response stores exact text, while a pure tool call stores `null`. Companion text remains subject to non-empty, valid UTF-8, 32 KiB character/byte, no-NUL, and total Session-record bounds; malformed or unknown fields fail closed before append or replay.
+
+The reader remains compatible with v1 single-path and v2 generic-arguments turns, interpreting both as having no companion text in memory. Old transcripts are neither migrated nor rewritten; resume only appends `session_resumed` and v3 turns after the original prefix. V3 replay restores text into the original `ToolUse` and preserves atomic tool-use/result causality. Full history remains complete, and a retained mixed pair is restored exactly after compact-checkpoint replay.
+
+At this slice boundary, provider history serializers and AgentLoop still rejected mixed runtime; ADRs 0045–0046 have since connected the ordinary CLI. Its record-local compatibility conclusion remains unchanged: ToolArguments v1, Action Audit, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations did not change because Session advanced to v3. See [0044: `turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md).
+
+## Provider Mixed-response History Projection
+
+Both real adapters now project provider-neutral mixed history back to their wire protocols without loss. Anthropic sends one assistant message ordered as `text block -> tool_use block`; OpenAI-compatible sends one assistant message containing both exact `content` and the single `tool_calls` entry. The matching `ToolResult` still follows immediately. Pure tool calls retain their existing wire shape, and companion text is neither split into a final answer, copied into the result, nor assigned a new tool ID.
+
+Serializers continue to reuse closed tool schemas and complete causal validation, so malformed text, unknown tools, multiple calls, and broken pairing fail closed. Ordinary count/create share the same projection, while compact summaries still expose no tools. This change advances the adapter contract to v17; tool catalog/order, the six-call budget, ToolArguments v1, `turn_committed` v3, Action Audit, compaction, and context representations remain unchanged. See [0045: Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md).
+
+## AgentLoop and Terminal Assistant Tool Text Integration
+
+The ordinary runtime now handles mixed responses end to end. AgentLoop emits the exact companion-text event before tool started/finished events and normal execution. The `ToolUse -> ToolResult` pair immediately enters provider continuation history, and only a later plain assistant text ends and durably commits the turn. One-shot writes companion text and tool events to stderr while stdout remains final-answer-only; the REPL writes them in the same order to its own output stream. Existing trailing newlines are not duplicated, and terminal-sink failure cannot alter execution, Action Audit, or commit.
+
+The live companion event is not persisted and is not proof of execution; durable truth remains `turn_committed` v3, the complete transcript, and Action Audit. Provider-continuation or turn-commit failure does not commit candidate history, though completed tool side effects and audit cannot be rolled back. A mixed seventh request can only receive the limit result, and an eighth tool request stops without commit, so text cannot bypass the shared six-call budget. A deterministic ProjectSession scenario proves mixed execution, display, close/resume, and exact history projection after recovery.
+
+The canonical system prompt advances to v16, and the empty full-context golden becomes `ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58`. The adapter contract remains v17; ToolArguments v1, `turn_committed` v3, Action Audit, `context_compacted` v2/v3, and the `ctx-v1`/`ctx-v2` representations do not advance, and old transcripts are not rewritten. See [0046: AgentLoop and Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
 
 Grep has explicit hard bounds: at most 1,000 candidates, 1 MiB per file, 16 MiB aggregate reads, 200 matching lines, and 32 KiB model-visible output, in addition to the selector's entry, directory, and depth limits. An unreadable, oversized, NUL-bearing, or invalid-UTF-8 selected file is a safe whole-call error. Only match/output caps return a stable prefix of complete JSON records followed by a `{"truncated":true}` sentinel. Empty success means the bounded candidate set was searched completely. Reads recheck regular/non-symlink descriptor identity while retaining the documented local single-user TOCTOU boundary.
 
-To represent grep's two fields, in-memory `ToolUse` now carries immutable canonical-JSON `ToolArguments` v1. New `turn_committed` records use record-local schema v2 with `arguments_version + arguments`; legacy schema-v1 read/glob items convert to the same generic in-memory representation during replay without rewriting old JSONL, and resume only appends v2. Other Session records remain v1, `context_compacted` remains compatible with v2/v3, and Effective Context remains ctx-v1/v2.
+To represent grep's two fields, in-memory `ToolUse` gained immutable canonical-JSON `ToolArguments` v1. At Foundation 1D, new `turn_committed` records used record-local schema v2 with `arguments_version + arguments`; legacy schema-v1 read/glob items converted to the same generic in-memory representation during replay without rewriting old JSONL, and resume appended only v2 at that stage. Assistant-tool-text persistence has since advanced the current writer to v3 while retaining v1/v2 readers. Other Session records remain v1, `context_compacted` remains compatible with v2/v3, and Effective Context remains ctx-v1/v2.
 
 All three tools continue to share three sequential executions per user turn, while AgentLoop and ProjectSession retain explicit composition and dispatch rather than a dynamic registry. Anthropic and OpenAI-compatible ordinary count/create requests project the same exact three-schema catalog, compact summaries remain no-tools, and parallel calls remain disabled. The adapter contract advances to v5; canonical model system prompt v4 declares literal grep, correct empty/truncated interpretation, and still-unavailable write/Bash/regex capabilities. Generic arguments, prompt, and catalog intentionally change current-binary context IDs without rewriting historical checkpoints.
 
@@ -686,3 +729,8 @@ This slice establishes capacity facts only. It does not count current request to
 39. [0039: Tool Batch C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
 40. [0040: Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)
 41. [0041: Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)
+42. [0042: Provider-neutral Assistant Tool Text Representation](./decisions/0042-provider-neutral-assistant-tool-text-representation.md)
+43. [0043: Provider Mixed-response Inbound Normalization](./decisions/0043-provider-mixed-response-inbound-normalization.md)
+44. [0044: `turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)
+45. [0045: Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)
+46. [0046: AgentLoop and Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)

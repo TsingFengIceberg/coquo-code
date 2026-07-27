@@ -18,7 +18,9 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.session_records import (
+    TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
     TurnCommitted,
     encode_record,
@@ -44,10 +46,15 @@ def store(workspace: Path, session_id: str = SESSION_ONE) -> SessionStore:
     )
 
 
-def committed_items(tool_id: str = "tool-1"):
+def committed_items(tool_id: str = "tool-1", *, assistant_text: str | None = None):
     return (
         UserMessage("read"),
-        ToolUse(tool_id, "read_file", ToolArguments.from_mapping({"path": "README.md"})),
+        ToolUse(
+            tool_id,
+            "read_file",
+            ToolArguments.from_mapping({"path": "README.md"}),
+            assistant_text=assistant_text,
+        ),
         ToolResult(tool_id, "content"),
         AssistantText("done"),
     )
@@ -65,8 +72,9 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     writer.append_turn(committed_items(), binding=binding)
     persisted_turn = writer.path.read_text(encoding="utf-8").splitlines()[-1]
     assert '"record_type":"turn_committed"' in persisted_turn
-    assert '"schema_version":2' in persisted_turn
+    assert f'"schema_version":{TURN_COMMITTED_SCHEMA_VERSION}' in persisted_turn
     assert '"arguments":{"path":"README.md"}' in persisted_turn
+    assert '"assistant_text":null' in persisted_turn
     writer.turn_failed(binding=binding, failure_kind="cancelled", message="user cancelled")
     assert len(writer.state.history) == 4
     assert len(writer.state.turns) == 1
@@ -89,7 +97,13 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     resumed_after_clean_close.release()
 
 
-def test_resume_appends_v2_turn_without_rewriting_legacy_v1_prefix(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "legacy_schema",
+    [TURN_COMMITTED_LEGACY_SCHEMA_VERSION, TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION],
+)
+def test_resume_appends_v3_turn_without_rewriting_legacy_prefix(
+    tmp_path: Path, legacy_schema: int
+) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
     legacy = TurnCommitted(
@@ -97,7 +111,7 @@ def test_resume_appends_v2_turn_without_rewriting_legacy_v1_prefix(tmp_path: Pat
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=committed_items("legacy-tool"),
-        schema_version=TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+        schema_version=legacy_schema,
     )
     writer.path.write_bytes(writer.path.read_bytes() + encode_record(legacy))
     writer.release()
@@ -113,8 +127,25 @@ def test_resume_appends_v2_turn_without_rewriting_legacy_v1_prefix(tmp_path: Pat
     appended = after[len(prefix) :]
     assert b'"record_type":"session_resumed"' in appended
     assert b'"record_type":"turn_committed"' in appended
-    assert b'"schema_version":2' in appended
+    assert b'"schema_version":3' in appended
     assert b'"arguments":{"path":"README.md"}' in appended
+    assert b'"assistant_text":null' in appended
+
+
+def test_store_reopens_v3_assistant_tool_text_exactly(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    mixed = committed_items(assistant_text="  I will read it.\n")
+
+    writer.append_turn(mixed, binding=BindingSnapshot.fake())
+    transcript = writer.path.read_bytes()
+    writer.release()
+
+    reopened = session_store.open(SESSION_ONE)
+
+    assert reopened.state.history == mixed
+    assert b'"assistant_text":"  I will read it.\\n"' in transcript
+    reopened.release()
 
 
 def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Path) -> None:

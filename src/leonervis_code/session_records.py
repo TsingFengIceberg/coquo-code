@@ -56,7 +56,8 @@ from leonervis_code.core.effective_context import (
 
 SCHEMA_VERSION = 1
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
-TURN_COMMITTED_SCHEMA_VERSION = 2
+TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
+TURN_COMMITTED_SCHEMA_VERSION = 3
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_SCHEMA_VERSION = 3
 WORKSPACE_FINGERPRINT_VERSION = "v1"
@@ -996,6 +997,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
     elif record_type == "turn_committed":
         allowed_versions = {
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+            TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     else:
@@ -1382,6 +1384,7 @@ def _item_to_dict(
 ) -> dict[str, object]:
     if schema_version not in {
         TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+        TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -1394,6 +1397,10 @@ def _item_to_dict(
     if isinstance(item, ToolUse):
         _required_text(item.tool_use_id, "tool_use ID")
         _required_text(item.name, "tool_use name")
+        if item.assistant_text is not None and schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+            raise SessionRecordError(
+                "assistant tool text requires a newer turn_committed schema version"
+            )
         if not isinstance(item.arguments, ToolArguments):
             raise SessionRecordError("tool_use arguments are invalid")
         arguments = item.arguments.as_mapping()
@@ -1413,13 +1420,27 @@ def _item_to_dict(
                 "name": item.name,
                 "path": path,
             }
-        return {
+        payload = {
             "item_type": "tool_use",
             "tool_use_id": item.tool_use_id,
             "name": item.name,
             "arguments_version": item.arguments.version,
             "arguments": arguments,
         }
+        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            if item.assistant_text is not None:
+                try:
+                    ToolUse(
+                        item.tool_use_id,
+                        item.name,
+                        item.arguments,
+                        assistant_text=item.assistant_text,
+                    )
+                except ValueError as error:
+                    raise SessionRecordError(str(error)) from None
+                _text_payload(item.assistant_text, "assistant tool text")
+            payload["assistant_text"] = item.assistant_text
+        return payload
     if isinstance(item, ToolResult):
         _required_text(item.tool_use_id, "tool_result ID")
         _text_payload(item.content, "tool_result content")
@@ -1457,17 +1478,16 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
                 name=name,
                 arguments=ToolArguments.from_mapping(arguments),
             )
-        _closed_fields(
-            value,
-            {
-                "item_type",
-                "tool_use_id",
-                "name",
-                "arguments_version",
-                "arguments",
-            },
-            item_type,
-        )
+        fields = {
+            "item_type",
+            "tool_use_id",
+            "name",
+            "arguments_version",
+            "arguments",
+        }
+        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            fields.add("assistant_text")
+        _closed_fields(value, fields, item_type)
         arguments_version = value.get("arguments_version")
         if type(arguments_version) is not int:
             raise SessionRecordError("tool_use arguments_version must be an integer")
@@ -1481,11 +1501,27 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             )
         except ValueError as error:
             raise SessionRecordError(str(error)) from None
-        return ToolUse(
-            tool_use_id=_required_field_text(value, "tool_use_id", item_type),
-            name=_required_field_text(value, "name", item_type),
-            arguments=arguments,
-        )
+        assistant_text = None
+        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            raw_assistant_text = value.get("assistant_text")
+            if raw_assistant_text is not None:
+                if not isinstance(raw_assistant_text, str):
+                    raise SessionRecordError("tool_use assistant_text must be text or null")
+                assistant_text = raw_assistant_text
+        tool_use_id = _required_field_text(value, "tool_use_id", item_type)
+        name = _required_field_text(value, "name", item_type)
+        try:
+            request = ToolUse(
+                tool_use_id=tool_use_id,
+                name=name,
+                arguments=arguments,
+                assistant_text=assistant_text,
+            )
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        if assistant_text is not None:
+            _text_payload(assistant_text, "tool_use assistant_text")
+        return request
     if item_type == "tool_result":
         _closed_fields(
             value,
@@ -1538,6 +1574,7 @@ def _validate_record_version(record: SessionRecord) -> None:
     if isinstance(record, TurnCommitted):
         if record.schema_version not in {
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+            TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")

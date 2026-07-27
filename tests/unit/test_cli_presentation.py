@@ -7,6 +7,7 @@ import pytest
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -558,6 +559,10 @@ def test_semantic_colors_are_traditional_and_optional() -> None:
 
 
 def test_tool_prompt_events_render_stable_safe_lines_and_semantic_kinds() -> None:
+    assert render_prompt_event(AssistantToolTextReceived("I will inspect.\n")) == (
+        "I will inspect.\n",
+        "plain",
+    )
     assert render_prompt_event(
         ToolRequestStarted("grep_regex", 1, 6, "include='src/**/*.py' pattern_bytes=14")
     ) == (

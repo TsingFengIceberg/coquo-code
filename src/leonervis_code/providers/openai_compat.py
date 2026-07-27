@@ -327,10 +327,20 @@ def serialize_history(
                 raise _invalid_history(route, f"unsupported tool in history: {item.name}") from None
             if not item.tool_use_id:
                 raise _invalid_history(route, "tool use ID must not be blank")
+            if item.assistant_text is not None:
+                try:
+                    ToolUse(
+                        item.tool_use_id,
+                        item.name,
+                        item.arguments,
+                        assistant_text=item.assistant_text,
+                    )
+                except ValueError:
+                    raise _invalid_history(route, "assistant tool text is malformed") from None
             messages.append(
                 {
                     "role": "assistant",
-                    "content": None,
+                    "content": item.assistant_text,
                     "tool_calls": [
                         {
                             "id": item.tool_use_id,
@@ -466,16 +476,20 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
             message="provider refused the request",
         )
     tool_calls = getattr(message, "tool_calls", None) or []
-    if content not in {None, ""} and tool_calls:
-        raise _invalid_response(route, "mixed text and tool-call responses are not supported")
     if finish_reason == "stop":
         if not isinstance(content, str) or not content:
             raise _invalid_response(route, "provider text response was empty or malformed")
         if tool_calls:
             raise _invalid_response(route, "text response unexpectedly contained tool calls")
         return AssistantText(text=content)
-    if content not in {None, ""} or len(tool_calls) != 1:
+    if len(tool_calls) != 1:
         raise _invalid_response(route, "tool response must contain exactly one tool call")
+    if content is None or content == "":
+        assistant_text = None
+    elif isinstance(content, str):
+        assistant_text = content
+    else:
+        raise _invalid_response(route, "provider assistant tool text was malformed")
 
     call = tool_calls[0]
     tool_use_id = getattr(call, "id", None)
@@ -495,9 +509,20 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
     if not isinstance(tool_input, dict):
         raise _invalid_response(route, f"provider {name} arguments were malformed")
     try:
-        return tool_use_from_input(tool_use_id, name, tool_input)
+        request = tool_use_from_input(tool_use_id, name, tool_input)
     except ValueError:
         raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+    if assistant_text is None:
+        return request
+    try:
+        return ToolUse(
+            request.tool_use_id,
+            request.name,
+            request.arguments,
+            assistant_text=assistant_text,
+        )
+    except ValueError:
+        raise _invalid_response(route, "provider assistant tool text was malformed") from None
 
 
 def token_limit_field(model: str) -> str:

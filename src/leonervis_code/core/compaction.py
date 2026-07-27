@@ -231,13 +231,16 @@ def _compact_item(item: ConversationItem) -> dict[str, object]:
     if isinstance(item, AssistantText):
         return {"item_type": "assistant_text", "text": item.text}
     if isinstance(item, ToolUse):
-        return {
+        payload = {
             "arguments": item.arguments.as_mapping(),
             "arguments_version": item.arguments.version,
             "item_type": "tool_use",
             "name": item.name,
             "tool_use_id": item.tool_use_id,
         }
+        if item.assistant_text is not None:
+            payload["assistant_text"] = item.assistant_text
+        return payload
     assert isinstance(item, ToolResult)
     return {
         "content": item.content,

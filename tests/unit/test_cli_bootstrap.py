@@ -8,6 +8,7 @@ import pytest
 
 from leonervis_code import __version__
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -68,6 +69,7 @@ def test_prompt_command_keeps_final_text_on_stdout_and_tool_events_on_stderr(
 
         def prompt(self, text, *, event_sink=None):
             assert text == "inspect"
+            event_sink(AssistantToolTextReceived("I will inspect first."))
             event_sink(ToolRequestStarted("read_file", 1, 6, "path='README.md'"))
             event_sink(ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
             return "final answer"
@@ -91,7 +93,9 @@ def test_prompt_command_keeps_final_text_on_stdout_and_tool_events_on_stderr(
     )
     assert output.getvalue() == "final answer\n"
     assert errors.getvalue() == (
-        "[tool 1/6] read_file path='README.md'\n[tool 1/6] succeeded code=ok\n"
+        "I will inspect first.\n"
+        "[tool 1/6] read_file path='README.md'\n"
+        "[tool 1/6] succeeded code=ok\n"
     )
 
 

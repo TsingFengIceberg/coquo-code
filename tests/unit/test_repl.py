@@ -5,6 +5,7 @@ from pathlib import Path
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -360,6 +361,7 @@ def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
 def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
     class EventSession:
         def prompt(self, prompt, *, event_sink=None):
+            event_sink(AssistantToolTextReceived("I will search first."))
             event_sink(ToolRequestStarted("grep", 1, 6, "include='*.py' query_bytes=6"))
             event_sink(ToolRequestFinished("grep", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
             return f"reply: {prompt}"
@@ -376,7 +378,7 @@ def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
     )
 
     rendered = output.getvalue()
-    assert "[tool 1/6] grep include='*.py' query_bytes=6\n" in rendered
+    assert "I will search first.\n[tool 1/6] grep include='*.py' query_bytes=6\n" in rendered
     assert "[tool 1/6] succeeded code=ok\nreply: search\n" in rendered
 
 

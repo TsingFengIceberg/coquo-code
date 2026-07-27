@@ -29,6 +29,11 @@
 - [工具批次 C：Structured Exact Multi-edit Patch](#工具批次-cstructured-exact-multi-edit-patch)
 - [Shared Six-call Tool Budget](#shared-six-call-tool-budget)
 - [Live Redacted Tool Activity](#live-redacted-tool-activity)
+- [Provider-neutral Assistant Tool Text Representation](#provider-neutral-assistant-tool-text-representation)
+- [Provider Mixed-response Inbound Normalization](#provider-mixed-response-inbound-normalization)
+- [`turn_committed` v3 Assistant Tool Text Persistence](#turn_committed-v3-assistant-tool-text-persistence)
+- [Provider Mixed-response History Projection](#provider-mixed-response-history-projection)
+- [AgentLoop 与 Terminal Assistant Tool Text Integration](#agentloop-与-terminal-assistant-tool-text-integration)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -52,7 +57,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 15。它继续声明普通Agent不能主动compact，并保留Host summary信任边界。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
+Canonical model system prompt当前为version 16。它允许一个tool response携带brief companion text，同时明确该文字不是final answer、Tool result、permission、approval或execution proof；普通Agent仍不能主动compact，Host summary信任边界保持不变。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -479,13 +484,51 @@ AgentLoop现在为每次正常工具dispatch发出typed started/finished事件�
 
 Live events不写append-only transcript、不参与resume/compaction、不进入model history，也不能替代durable Action Audit。该Host-only slice不改变工具schema/order、system prompt v15、provider adapter v15、empty Effective Context identity或任何Session/Action Audit/context representation version。完整决策见[0041：Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)。
 
+## Provider-neutral Assistant Tool Text Representation
+
+Leonervis现在能在内部准确表达“assistant文字与一个tool call同时出现”：既有immutable `ToolUse`新增可选`assistant_text`，把原始文字与同一tool ID、name和arguments原子绑定。`None`仍是既有纯工具调用；非空文字最多32 KiB characters和32 KiB UTF-8 bytes，不做trim或normalization。Effective Context identity与compact source会保留该文字，tool-use/result因果对仍不可拆分。
+
+这一步当时只定义内部表示，尚未让真实provider使用。Anthropic与OpenAI-compatible parser、history serializer、AgentLoop和`turn_committed` schema v2都明确fail closed，确保文字不会在执行、审计或持久化过程中被静默丢弃。后续ADR 0043–0046现已依次完成入站normalization、Session v3、history projection及runtime/terminal接入。
+
+既有纯工具调用的identity payload不变，因此system prompt v15、provider adapter contract v15、tool schema/order、ToolArguments v1、Session/Action Audit schema和`ctx-v1`/`ctx-v2`representation均不升级。完整决策见[0042：Provider-neutral Assistant Tool Text Representation](./decisions/0042-provider-neutral-assistant-tool-text-representation.md)。
+
+## Provider Mixed-response Inbound Normalization
+
+Anthropic Messages与OpenAI-compatible Chat Completions现在会把各自的mixed native response统一解码为`ToolUse.assistant_text`。Anthropic要求`tool_use` stop reason和恰好一个合法tool block，并按wire顺序拼接所有text blocks；OpenAI-compatible要求`tool_calls` finish reason和恰好一个合法function call，并原样保留非空`message.content`。没有companion text时仍产生既有pure `ToolUse`，纯文字response也保持不变。
+
+两个parser继续拒绝多工具、错误stop/finish reason、unknown tool、malformed arguments、unsupported content以及empty、invalid或超限companion text。该slice当时只接到入站边界；后续ADR 0044–0046现已完成Session持久化、history projection与runtime执行展示。
+
+Provider response contract升级使adapter contract变为v16并自然改变route fingerprint。System prompt保持v15且仍要求模型只返回tool call；tool schema/order、Effective Context golden、ToolArguments v1及Session/context representation均不变。完整决策见[0043：Provider Mixed-response Inbound Normalization](./decisions/0043-provider-mixed-response-inbound-normalization.md)。
+
+## `turn_committed` v3 Assistant Tool Text Persistence
+
+新Session turn现在使用record-local schema v3。它沿用v2的generic `arguments_version + arguments`，并要求每个`tool_use`保存nullable `assistant_text`：mixed response保存exact text，pure tool call保存`null`。Companion text继续受non-empty、valid UTF-8、32 KiB character/byte、no-NUL及Session record总大小限制，malformed或unknown字段在append/replay前fail closed。
+
+Reader继续兼容v1 single-path与v2 generic-arguments turn；二者在内存中解释为没有companion text。旧transcript不迁移、不重写，resume只在原prefix之后追加`session_resumed`和v3 turn。V3 replay会把文字恢复到原`ToolUse`，保持tool-use/result原子因果；full history完整保留，compact checkpoint后的retained suffix也能精确恢复mixed pair。
+
+该slice当时仍让provider history serializer与AgentLoop拒绝mixed runtime；后续ADR 0045–0046现已接通普通CLI。其record-local兼容结论保持不变：ToolArguments v1、Action Audit、`context_compacted` v2/v3与`ctx-v1`/`ctx-v2`representation未因Session v3升级。完整决策见[0044：`turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)。
+
+## Provider Mixed-response History Projection
+
+两个真实adapter现在能把provider-neutral mixed history无损投影回各自wire protocol。Anthropic在同一个assistant message中按`text block -> tool_use block`顺序发送，OpenAI-compatible在同一个assistant message中同时设置exact `content`与唯一`tool_calls`；匹配`ToolResult`仍紧随其后。Pure tool call保持原有wire shape，companion text不会被拆成final answer、复制到result或获得新的tool ID。
+
+Serializer继续复用closed tool schema与完整因果校验，malformed text、unknown tool、multiple calls和broken pairing都fail closed。Ordinary count/create共享同一projection，compact summary仍无tools。该变化把adapter contract升级到v17；tool catalog/order、六次预算、ToolArguments v1、`turn_committed` v3、Action Audit、compaction与context representation均不变。完整决策见[0045：Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)。
+
+## AgentLoop 与 Terminal Assistant Tool Text Integration
+
+普通runtime现已完整接通mixed response。AgentLoop先发出exact companion-text事件，再发tool started/finished并照常执行；`ToolUse -> ToolResult`立即进入provider continuation，只有后续纯assistant text才结束并durably commit整个turn。One-shot把companion text和tool events写到stderr、stdout只保留final answer；REPL按相同顺序写到自身输出流。已有结尾换行不会被重复追加，terminal sink失败不会改变执行、Action Audit或commit。
+
+Live companion event不持久化，也不作为执行证明；durable truth仍是`turn_committed` v3、完整transcript和Action Audit。Provider continuation或turn commit失败不会提交candidate history，但已发生的工具副作用与audit不能回滚。第七次mixed请求只能得到limit result，第八次仍请求工具会停止且不提交，因此文字不能绕过六次共享预算。ProjectSession确定性场景证明mixed turn可执行、显示、close/resume并在恢复后的provider请求中原样回传。
+
+Canonical system prompt升级为v16，empty full-context golden变为`ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58`；adapter contract保持v17，ToolArguments v1、`turn_committed` v3、Action Audit、`context_compacted` v2/v3和`ctx-v1`/`ctx-v2`representation不升级，旧transcript不重写。完整决策见[0046：AgentLoop 与 Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
 
 Grep具有明确hard bounds：最多1,000个candidates、每file 1 MiB、aggregate 16 MiB、200个matching lines和32 KiB model-visible output，并继续受selector的entry/directory/depth bounds约束。Unreadable、oversized、NUL或invalid-UTF-8 selected file均为whole-call safe error；只有match/output cap返回complete JSON records的stable prefix与`{"truncated":true}` sentinel。No-match仅在bounded candidate set被完整搜索时为空成功。读取时再次执行regular/non-symlink与descriptor identity检查，同时保留local single-user TOCTOU边界。
 
-为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume后只append v2。其他Session records仍v1，`context_compacted`仍兼容v2/v3，Effective Context representation仍为ctx-v1/v2。
+为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text持久化已让current writer升级到v3，但v1/v2 reader继续兼容。其他Session records仍v1，`context_compacted`仍兼容v2/v3，Effective Context representation仍为ctx-v1/v2。
 
 三个工具继续共享每user turn三次顺序execution预算，AgentLoop和ProjectSession仍显式composition/dispatch而非dynamic registry。Anthropic与OpenAI-compatible ordinary count/create按相同catalog投影exact three schemas，compact summary仍no-tools，parallel calls仍关闭。Adapter contract升级为v5；canonical model system prompt升级为v4并声明literal grep、no-match/truncation解释及仍不可用的write/Bash/regex能力。Generic arguments、prompt与catalog会按设计改变current-binary context IDs，但不重写历史checkpoint。
 
@@ -686,3 +729,8 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 39. [0039：工具批次 C Structured Exact Multi-edit Patch](./decisions/0039-batch-c-structured-exact-multi-edit-patch.md)
 40. [0040：Shared Six-call Tool Budget](./decisions/0040-shared-six-call-tool-budget.md)
 41. [0041：Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)
+42. [0042：Provider-neutral Assistant Tool Text Representation](./decisions/0042-provider-neutral-assistant-tool-text-representation.md)
+43. [0043：Provider Mixed-response Inbound Normalization](./decisions/0043-provider-mixed-response-inbound-normalization.md)
+44. [0044：`turn_committed` v3 Assistant Tool Text Persistence](./decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)
+45. [0045：Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)
+46. [0046：AgentLoop 与 Terminal Assistant Tool Text Integration](./decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)

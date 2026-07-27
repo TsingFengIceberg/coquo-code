@@ -1,4 +1,4 @@
-"""Typed, redacted lifecycle events for sequential model-requested tools."""
+"""Typed assistant/tool events for one sequential model-requested action loop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 
-from leonervis_code.core.contracts import ToolResult, ToolUse
+from leonervis_code.core.contracts import (
+    MAX_ASSISTANT_TOOL_TEXT_BYTES,
+    MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
+    ToolResult,
+    ToolUse,
+)
 
 MAX_TOOL_EVENT_SUMMARY_CHARACTERS = 512
 MAX_TOOL_EVENT_VALUE_CHARACTERS = 160
@@ -23,6 +28,28 @@ class ToolEventStatus(StrEnum):
     FAILED = "failed"
     PARTIAL = "partial"
     OUTCOME_UNKNOWN = "outcome-unknown"
+
+
+@dataclass(frozen=True)
+class AssistantToolTextReceived:
+    """Exact bounded assistant text atomically accompanying one tool request."""
+
+    text: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text:
+            raise ValueError("assistant tool text event must contain non-empty text")
+        try:
+            encoded = self.text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("assistant tool text event must be valid UTF-8") from None
+        if "\x00" in self.text:
+            raise ValueError("assistant tool text event must not contain NUL")
+        if (
+            len(self.text) > MAX_ASSISTANT_TOOL_TEXT_CHARACTERS
+            or len(encoded) > MAX_ASSISTANT_TOOL_TEXT_BYTES
+        ):
+            raise ValueError("assistant tool text event exceeds the supported size")
 
 
 @dataclass(frozen=True)
@@ -71,6 +98,7 @@ class ToolRequestLimited:
 
 
 ToolPromptEvent = ToolRequestStarted | ToolRequestFinished | ToolRequestLimited
+AgentPromptEvent = AssistantToolTextReceived | ToolPromptEvent
 
 
 @dataclass(frozen=True)

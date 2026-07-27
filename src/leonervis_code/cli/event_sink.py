@@ -16,5 +16,7 @@ class TerminalEventSink:
 
     def __call__(self, event: object) -> None:
         message, kind = render_prompt_event(event)
-        self._stream.write(f"{render_message(message, kind, color=self._color)}\n")
+        self._stream.write(render_message(message, kind, color=self._color))
+        if not message.endswith("\n"):
+            self._stream.write("\n")
         self._stream.flush()

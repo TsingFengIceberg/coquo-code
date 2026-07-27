@@ -6,8 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from leonervis_code.agent.tool_events import (
+    AgentPromptEvent,
+    AssistantToolTextReceived,
     ToolDispatchResult,
-    ToolPromptEvent,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -52,7 +53,7 @@ from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
-ToolEventSink = Callable[[ToolPromptEvent], None]
+AgentEventSink = Callable[[AgentPromptEvent], None]
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -211,7 +212,7 @@ class AgentLoop:
         prompt: str,
         *,
         provider: ConversationProvider | None = None,
-        event_sink: ToolEventSink | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
@@ -223,7 +224,7 @@ class AgentLoop:
         prepared: PreparedAgentTurn,
         *,
         provider: ConversationProvider | None = None,
-        event_sink: ToolEventSink | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         turn_provider = provider or self._provider
@@ -240,9 +241,14 @@ class AgentLoop:
                 self._commit(pending + (response,), user, response)
                 return response.text
 
+            if response.assistant_text is not None:
+                self._emit_prompt_event(
+                    event_sink,
+                    AssistantToolTextReceived(response.assistant_text),
+                )
             pending += (response,)
             if tool_calls == MAX_TOOL_EXECUTIONS_PER_TURN:
-                self._emit_tool_event(
+                self._emit_prompt_event(
                     event_sink,
                     ToolRequestLimited(
                         response.name,
@@ -264,10 +270,15 @@ class AgentLoop:
                 if isinstance(final_response, AssistantText):
                     self._commit(pending + (final_response,), user, final_response)
                     return final_response.text
+                if final_response.assistant_text is not None:
+                    self._emit_prompt_event(
+                        event_sink,
+                        AssistantToolTextReceived(final_response.assistant_text),
+                    )
                 raise ToolLoopLimitError("provider requested a tool after the tool call limit")
 
             tool_calls += 1
-            self._emit_tool_event(
+            self._emit_prompt_event(
                 event_sink,
                 ToolRequestStarted(
                     response.name,
@@ -279,7 +290,7 @@ class AgentLoop:
             try:
                 dispatch = self._execute(response, prepared.action_lease)
             except Exception:
-                self._emit_tool_event(
+                self._emit_prompt_event(
                     event_sink,
                     ToolRequestFinished(
                         response.name,
@@ -289,7 +300,7 @@ class AgentLoop:
                     ),
                 )
                 raise
-            self._emit_tool_event(
+            self._emit_prompt_event(
                 event_sink,
                 ToolRequestFinished(
                     response.name,
@@ -378,7 +389,7 @@ class AgentLoop:
         return infer_tool_dispatch_result(result)
 
     @staticmethod
-    def _emit_tool_event(sink: ToolEventSink | None, event: ToolPromptEvent) -> None:
+    def _emit_prompt_event(sink: AgentEventSink | None, event: AgentPromptEvent) -> None:
         if sink is None:
             return
         try:

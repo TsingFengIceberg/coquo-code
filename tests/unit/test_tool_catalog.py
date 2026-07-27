@@ -47,6 +47,23 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
     }
 
 
+def test_catalog_factory_preserves_optional_assistant_text_without_changing_arguments() -> None:
+    request = tool_use_from_input(
+        "read-1",
+        "read_file",
+        {"path": "README.md"},
+        assistant_text="I will read the file.",
+    )
+
+    assert request == ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will read the file.",
+    )
+    assert tool_input_from_use(request) == {"path": "README.md"}
+
+
 @pytest.mark.parametrize(
     "tool_input",
     [

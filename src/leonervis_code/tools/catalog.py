@@ -88,6 +88,8 @@ def tool_use_from_input(
     tool_use_id: str,
     name: str,
     tool_input: dict[str, object],
+    *,
+    assistant_text: str | None = None,
 ) -> ToolUse:
     """Validate one exact known-tool input and freeze its neutral arguments."""
     expected = _expected_keys(name)
@@ -98,6 +100,7 @@ def tool_use_from_input(
         tool_use_id=tool_use_id,
         name=name,
         arguments=ToolArguments.from_mapping(tool_input),
+        assistant_text=assistant_text,
     )
 
 

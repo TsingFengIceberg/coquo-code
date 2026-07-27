@@ -109,6 +109,21 @@ def test_compact_source_serializes_complete_tool_turns_and_previous_summary() ->
     )
     assert '"name":"grep"' in grep_source
     assert '"arguments":{"include":"src/**/*.py","query":"ToolUse("}' in grep_source
+    mixed_source = build_compact_source_text(
+        previous_summary=None,
+        summarized_history=(
+            UserMessage("read"),
+            ToolUse(
+                "mixed-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+                assistant_text="I will inspect it first.",
+            ),
+            ToolResult("mixed-1", "notes"),
+            AssistantText("done"),
+        ),
+    )
+    assert '"assistant_text":"I will inspect it first."' in mixed_source
     with pytest.raises(ValueError, match="unmatched tool use"):
         build_compact_source_text(
             previous_summary=None,

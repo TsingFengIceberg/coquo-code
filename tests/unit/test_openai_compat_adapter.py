@@ -209,6 +209,34 @@ def test_serializer_preserves_glob_pattern_as_native_arguments() -> None:
     }
 
 
+def test_serializer_projects_assistant_text_with_its_atomic_tool_call() -> None:
+    serialized = serialize_history(
+        (
+            UserMessage("Read"),
+            ToolUse(
+                "call-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+                assistant_text="I will read it.",
+            ),
+            ToolResult("call-1", "notes"),
+        ),
+        route=route(),
+    )
+
+    assert serialized[1] == {
+        "role": "assistant",
+        "content": "I will read it.",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+            }
+        ],
+    }
+
+
 def test_tool_schema_is_exact_and_closed() -> None:
     assert read_file_tool_definition() == {
         "type": "function",
@@ -365,6 +393,40 @@ def test_parser_decodes_complete_text_and_one_read_file_call() -> None:
         name="read_file",
         arguments=ToolArguments.from_mapping({"path": "README.md"}),
     )
+    assert parse_response(
+        completion(
+            content="I will inspect the file.\n",
+            finish_reason="tool_calls",
+            tool_calls=[tool_call(call_id="call_mixed")],
+        ),
+        route=route(),
+    ) == ToolUse(
+        tool_use_id="call_mixed",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect the file.\n",
+    )
+
+
+def test_adapter_normalizes_native_mixed_response_to_neutral_tool_use() -> None:
+    client = RecordingChatClient(
+        [
+            completion(
+                content="I will inspect first.",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call(call_id="call_mixed")],
+            )
+        ]
+    )
+
+    assert OpenAICompatibleConversationProvider(route(), client).respond(
+        request(UserMessage("Inspect"))
+    ) == ToolUse(
+        "call_mixed",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
 
 
 @pytest.mark.parametrize(
@@ -372,7 +434,12 @@ def test_parser_decodes_complete_text_and_one_read_file_call() -> None:
     [
         ChatCompletion(id="x", choices=[], created=0, model="m", object="chat.completion"),
         completion(content="partial", finish_reason="length"),
-        completion(content="preface", finish_reason="tool_calls", tool_calls=[tool_call()]),
+        completion(content="preface", finish_reason="stop", tool_calls=[tool_call()]),
+        completion(
+            content="x" * (32 * 1024 + 1),
+            finish_reason="tool_calls",
+            tool_calls=[tool_call()],
+        ),
         completion(
             finish_reason="tool_calls", tool_calls=[tool_call(), tool_call(call_id="call_2")]
         ),
@@ -499,7 +566,11 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
     (tmp_path / "README.md").write_text("workspace notes\n", encoding="utf-8")
     client = RecordingChatClient(
         [
-            completion(finish_reason="tool_calls", tool_calls=[tool_call(call_id="call_read")]),
+            completion(
+                content="I will read it first.",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call(call_id="call_read")],
+            ),
             completion(content="I read it."),
         ]
     )
@@ -517,6 +588,17 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
         "content": build_system_prompt().text,
     }
     assert sum(message["role"] == "system" for message in client.requests[1]["messages"]) == 1
+    assert client.requests[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": "I will read it first.",
+        "tool_calls": [
+            {
+                "id": "call_read",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+            }
+        ],
+    }
     assert client.requests[1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_read",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from leonervis_code.agent.tool_events import (
+    AssistantToolTextReceived,
     MAX_TOOL_EVENT_SUMMARY_CHARACTERS,
     ToolDispatchResult,
     ToolEventStatus,
@@ -130,6 +131,18 @@ def test_event_models_reject_invalid_identity_status_and_controls() -> None:
         ToolRequestLimited("read_file", 6, 6, "path='a.txt'")
     with pytest.raises(ValueError, match="status"):
         ToolRequestFinished("read_file", 1, 6, "succeeded")  # type: ignore[arg-type]
+
+
+def test_assistant_tool_text_event_preserves_exact_bounded_text() -> None:
+    assert AssistantToolTextReceived("I will inspect.\n").text == "I will inspect.\n"
+    with pytest.raises(ValueError, match="non-empty"):
+        AssistantToolTextReceived("")
+    with pytest.raises(ValueError, match="NUL"):
+        AssistantToolTextReceived("bad\x00text")
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        AssistantToolTextReceived("\ud800")
+    with pytest.raises(ValueError, match="supported size"):
+        AssistantToolTextReceived("a" * (32 * 1024 + 1))
 
 
 def test_dispatch_result_requires_status_to_match_model_visible_error_flag() -> None:

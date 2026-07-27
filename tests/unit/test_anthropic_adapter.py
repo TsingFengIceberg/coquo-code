@@ -287,6 +287,35 @@ def test_serializer_rejects_unknown_tools_and_broken_causality() -> None:
         )
 
 
+def test_serializer_projects_assistant_text_before_its_atomic_tool_use() -> None:
+    serialized = serialize_history(
+        (
+            UserMessage("Read"),
+            ToolUse(
+                "toolu_1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+                assistant_text="I will read it.",
+            ),
+            ToolResult("toolu_1", "notes"),
+        ),
+        config=config(),
+    )
+
+    assert serialized[1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "I will read it."},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        ],
+    }
+
+
 def test_read_file_schema_is_exact_and_closed() -> None:
     assert read_file_tool_definition() == {
         "name": "read_file",
@@ -462,6 +491,49 @@ def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
         name="read_file",
         arguments=ToolArguments.from_mapping({"path": "README.md"}),
     )
+    assert parse_response(
+        message(
+            TextBlock(text="I will inspect", type="text"),
+            ToolUseBlock(
+                id="toolu_mixed",
+                name="read_file",
+                input={"path": "README.md"},
+                type="tool_use",
+            ),
+            TextBlock(text=" first.\n", type="text"),
+        ),
+        config=config(),
+    ) == ToolUse(
+        tool_use_id="toolu_mixed",
+        name="read_file",
+        arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.\n",
+    )
+
+
+def test_adapter_normalizes_native_mixed_response_to_neutral_tool_use() -> None:
+    client = RecordingMessagesClient(
+        [
+            message(
+                TextBlock(text="I will inspect first.", type="text"),
+                ToolUseBlock(
+                    id="toolu_mixed",
+                    name="read_file",
+                    input={"path": "README.md"},
+                    type="tool_use",
+                ),
+            )
+        ]
+    )
+
+    assert AnthropicConversationProvider(config(), client).respond(
+        request(UserMessage("Inspect"))
+    ) == ToolUse(
+        "toolu_mixed",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
 
 
 @pytest.mark.parametrize(
@@ -469,7 +541,20 @@ def test_parser_concatenates_text_and_preserves_valid_tool_use() -> None:
     [
         message(),
         message(
+            TextBlock(text="", type="text"),
+            ToolUseBlock(
+                id="toolu_1", name="read_file", input={"path": "README.md"}, type="tool_use"
+            ),
+        ),
+        message(
             TextBlock(text="preface", type="text"),
+            ToolUseBlock(
+                id="toolu_1", name="read_file", input={"path": "README.md"}, type="tool_use"
+            ),
+            stop_reason="end_turn",
+        ),
+        message(
+            TextBlock(text="x" * (32 * 1024 + 1), type="text"),
             ToolUseBlock(
                 id="toolu_1", name="read_file", input={"path": "README.md"}, type="tool_use"
             ),
@@ -747,12 +832,13 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
     client = RecordingMessagesClient(
         [
             message(
+                TextBlock(text="I will read it first.", type="text"),
                 ToolUseBlock(
                     id="toolu_read",
                     name="read_file",
                     input={"path": "README.md"},
                     type="tool_use",
-                )
+                ),
             ),
             failure,
         ]
@@ -770,6 +856,18 @@ def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> 
 
     assert loop.history == ()
     assert loop.turns == ()
+    assert client.requests[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "I will read it first."},
+            {
+                "type": "tool_use",
+                "id": "toolu_read",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        ],
+    }
     assert client.requests[1]["messages"][-1] == {
         "role": "user",
         "content": [

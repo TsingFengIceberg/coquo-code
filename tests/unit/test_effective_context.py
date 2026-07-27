@@ -46,7 +46,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-ea0e03265910b48b3cd97e3ace999507379a5e5cf168c6898390870266df051f"
+        == "ctx-v1-bc29d5392990da88d9a0641d78cfc051d0d9e92b9f3452e90b1259ae16df2b58"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -79,6 +79,28 @@ def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
         history[3],
     )
     assert context.context_id != changed_arguments.context_id
+
+
+def test_assistant_text_and_tool_use_are_one_atomic_history_item_and_identity_input() -> None:
+    call = ToolUse(
+        "call-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect the file.",
+    )
+    history = (
+        UserMessage("read"),
+        call,
+        ToolResult("call-1", "notes"),
+        AssistantText("done"),
+    )
+
+    validated = validate_complete_history(history)
+    mixed = snapshot(*history)
+    pure = snapshot(*history[:1], replace(call, assistant_text=None), *history[2:])
+
+    assert validated.complete_turns[0].items[1] is call
+    assert mixed.context_id != pure.context_id
 
 
 @pytest.mark.parametrize(
