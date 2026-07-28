@@ -206,6 +206,7 @@ def test_one_shot_auto_requires_explicit_write_capability_and_executes(tmp_path:
     assert stderr.getvalue() == (
         "[tool 1/32] write_file path='note.txt' content_bytes=21\n"
         "[tool 1/32] succeeded code=created\n"
+        "Tool summary: requested=1 admitted=1 dispatched=1 succeeded=1\n"
     )
     assert "secret model content" not in stderr.getvalue()
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"

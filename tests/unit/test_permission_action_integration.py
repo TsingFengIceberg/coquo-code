@@ -5,7 +5,11 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.agent.tool_events import ToolEventStatus, ToolRequestFinished
+from leonervis_code.agent.tool_events import (
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolTurnSummaryCommitted,
+)
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
 from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
 from leonervis_code.core.contracts import (
@@ -124,13 +128,14 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         audit = session.action_audits()[-1]
         assert audit.status == ActionAuditStatus.DENIED
         assert audit.execution_outcome is None
-        assert events[-1] == ToolRequestFinished(
+        assert events[-2] == ToolRequestFinished(
             "write_file",
             1,
             MAX_TOOL_REQUESTS_PER_TURN,
             ToolEventStatus.DENIED,
             "denied_read_only_mode",
         )
+        assert isinstance(events[-1], ToolTurnSummaryCommitted)
     finally:
         session.close()
 
@@ -201,13 +206,14 @@ def test_hard_rejected_write_returns_tool_error_without_action_audit(
         )
         assert session._writer.state.action_audits == ()
         assert not (tmp_path / "nested").exists()
-        assert events[-1] == ToolRequestFinished(
+        assert events[-2] == ToolRequestFinished(
             "write_file",
             1,
             MAX_TOOL_REQUESTS_PER_TURN,
             ToolEventStatus.ERROR,
             "invalid_request",
         )
+        assert isinstance(events[-1], ToolTurnSummaryCommitted)
     finally:
         session.close()
 
@@ -247,13 +253,14 @@ def test_workspace_write_ask_accept_creates_and_commits_exact_causality(tmp_path
         assert audit.status == ActionAuditStatus.SUCCEEDED
         assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
         assert audit.result_code == "created"
-        assert events[-1] == ToolRequestFinished(
+        assert events[-2] == ToolRequestFinished(
             "write_file",
             1,
             MAX_TOOL_REQUESTS_PER_TURN,
             ToolEventStatus.SUCCEEDED,
             "created",
         )
+        assert isinstance(events[-1], ToolTurnSummaryCommitted)
     finally:
         session.close()
 
@@ -292,7 +299,7 @@ def test_workspace_write_ask_reject_or_cancel_returns_tool_error_and_commits(
             if resolution == ApprovalResolution.REJECT
             else ToolEventStatus.CANCELLED
         )
-        assert events[-1] == ToolRequestFinished(
+        assert events[-2] == ToolRequestFinished(
             "write_file",
             1,
             MAX_TOOL_REQUESTS_PER_TURN,
@@ -301,6 +308,7 @@ def test_workspace_write_ask_reject_or_cancel_returns_tool_error_and_commits(
             if resolution == ApprovalResolution.REJECT
             else "approval_cancelled",
         )
+        assert isinstance(events[-1], ToolTurnSummaryCommitted)
     finally:
         session.close()
 
@@ -2096,11 +2104,13 @@ def test_new_tools_share_total_tool_request_budget(tmp_path: Path) -> None:
         assert session.prompt("inspect repeatedly") == "stopped"
 
         assert len(session.action_audits()) == MAX_TOOL_REQUESTS_PER_TURN
-        assert provider.requests[-1].history[-1] == ToolResult(
-            f"stat-{MAX_TOOL_REQUESTS_PER_TURN + 1}",
-            "tool batch was not executed because it exceeds the remaining tool-request budget",
-            is_error=True,
-        )
+        final_result = provider.requests[-1].history[-1]
+        assert isinstance(final_result, ToolResult)
+        assert final_result.tool_use_id == f"stat-{MAX_TOOL_REQUESTS_PER_TURN + 1}"
+        assert final_result.is_error is True
+        assert "requested=33 admitted=32 dispatched=32" in final_result.content
+        assert "rejected_over_budget=1 unused_admission_slots=0" in final_result.content
+        assert "tool_requests_closed=true" in final_result.content
     finally:
         session.close()
 

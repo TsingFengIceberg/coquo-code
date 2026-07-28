@@ -11,6 +11,7 @@ from leonervis_code.agent.tool_events import (
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
+    ToolTurnSummaryCommitted,
 )
 from leonervis_code.core.contracts import (
     ToolArguments,
@@ -226,11 +227,13 @@ def test_project_session_executes_displays_persists_and_resumes_mixed_tool_respo
     events = []
     assert first.prompt("inspect", event_sink=events.append) == "The file contains workspace notes."
     result = ToolResult("read-1", "workspace notes\n")
-    assert events == [
+    assert events[:-1] == [
         AssistantToolTextReceived("I will inspect the file first.\n"),
         ToolRequestStarted("read_file", 1, 32, "path='README.md'"),
         ToolRequestFinished("read_file", 1, 32, ToolEventStatus.SUCCEEDED, "ok"),
     ]
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
+    assert events[-1].ledger.requested == 1
     assert first_provider.requests[1].history[-2:] == (call, result)
     assert first.history == (
         UserMessage("inspect"),

@@ -39,6 +39,7 @@
 - [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
 - [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
 - [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
+- [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -62,7 +63,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 18。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。普通Agent仍不能主动compact，Host summary信任边界保持不变。既有17个model-visible tools、PermissionGate、approval、Action Audit及各工具hard bounds均不变，多call response也不获得并行执行许可。
+Canonical model system prompt当前为version 19。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。既有17个model-visible tools、PermissionGate、approval、Action Audit及各工具hard bounds均不变，多call response也不获得并行执行许可。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -579,13 +580,21 @@ Host仍不并行。可接纳batch按provider顺序逐项进入PermissionGate、a
 
 OpenAI-compatible history投影一个assistant `tool_calls[]`后接ordered tool messages；Anthropic投影一个assistant tool block sequence后接一个包含ordered results的user message。Count/create共享projection，text-only invocation不暴露tools。Canonical system prompt升级为v18，adapter contract升级为v20，`turn_committed` current schema升级为v4，Effective Context current full/compacted representation升级为`ctx-v3`/`ctx-v4`。ToolArguments v1、ActionIdentity/Action Audit、ordinary Session records及`context_compacted` record schema不变；Session v1/v2/v3与旧`ctx-v1`/`ctx-v2`checkpoint继续replay且不重写。Fingerprint为`v18-6ddfaa8302427bbe25c1ee28cee6b1e5975949da111a96876baa8e834cd86f8c`，empty full-context identity为`ctx-v3-9007cd576ff595afb6a103a199437d28580836f2a3a5b551819f0f8574d4cf80`。完整决策见[0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)。
 
+## Structured Tool Outcome Ledger
+
+AgentLoop现在为每个provider tool request建立Host-owned typed entry，记录连续request index、exact tool-use ID、工具名、outcome与安全result code。`requested`、`admitted`、`dispatched`及各status count全部从entries推导，不解析ToolResult或assistant文案。真实40请求回归场景可准确区分32项admitted中的24次成功、1次错误、7次同批跳过，以及8次over-budget拒绝。
+
+预算耗尽或provider invocation上限强制text-only收尾前，Host把bounded canonical账本摘要附到最后一个真实ToolResult，让模型获得权威计数而不伪造user/system message。摘要分别报告`unused_admission_slots`和`tool_requests_closed=true`，避免整批因装不进剩余额度被拒绝后，模型把零散空位误解为仍可调用。Durable turn commit成功后，终端另显示`Tool summary:`；commit失败不显示，event sink失败仍不影响执行、Action Audit或提交。普通主动结束的turn不会为账本额外调用provider。
+
+新的`turn_committed` schema v5在conversation items之外保存top-level typed ledger，并严格校验每个entry与tool request/result的identity、顺序和error flag。v1/v2/v3/v4继续replay为空legacy ledger，resume只append v5且不重写旧prefix。Top-level ledger不进入provider history、compaction或context identity；model-visible annotation仍是既有ToolResult content，所以Effective Context representation保持`ctx-v3`/`ctx-v4`。System prompt升级为v19，fingerprint为`v19-accfbb73aa611061c8a8cb6be5bb54012ce5809fbbe91050439383e3d35318b7`，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Provider wire shape和projection未变，因此adapter contract保持v20。完整决策见[0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
 
 Grep具有明确hard bounds：最多1,000个candidates、每file 1 MiB、aggregate 16 MiB、200个matching lines和32 KiB model-visible output，并继续受selector的entry/directory/depth bounds约束。Unreadable、oversized、NUL或invalid-UTF-8 selected file均为whole-call safe error；只有match/output cap返回complete JSON records的stable prefix与`{"truncated":true}` sentinel。No-match仅在bounded candidate set被完整搜索时为空成功。读取时再次执行regular/non-symlink与descriptor identity检查，同时保留local single-user TOCTOU边界。
 
-为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text曾把writer升级到v3，当前multi-tool batch再升级到v4，同时保留v1/v2/v3 reader。其他Session records仍v1，`context_compacted`仍兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
+为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text与multi-tool batch曾依次把writer升级到v3/v4，当前tool outcome ledger再升级到v5，同时保留v1/v2/v3/v4 reader。其他Session records仍v1，`context_compacted`仍兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
 
 三个工具继续共享每user turn三次顺序execution预算，AgentLoop和ProjectSession仍显式composition/dispatch而非dynamic registry。Anthropic与OpenAI-compatible ordinary count/create按相同catalog投影exact three schemas，compact summary仍no-tools，parallel calls仍关闭。Adapter contract升级为v5；canonical model system prompt升级为v4并声明literal grep、no-match/truncation解释及仍不可用的write/Bash/regex能力。Generic arguments、prompt与catalog会按设计改变current-binary context IDs，但不重写历史checkpoint。
 
@@ -800,3 +809,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 53. [0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)
 54. [0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)
 55. [0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)
+56. [0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)

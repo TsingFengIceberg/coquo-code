@@ -12,7 +12,9 @@ from leonervis_code.agent.tool_events import (
     ToolRequestLimited,
     ToolRequestSkipped,
     ToolRequestStarted,
+    ToolTurnSummaryCommitted,
 )
+from leonervis_code.core.contracts import ToolRequestOutcome
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
 from leonervis_code.session import (
     AutoCompactionCommitted,
@@ -472,6 +474,30 @@ def render_prompt_event(event: object) -> tuple[str, MessageKind]:
             f"{event.reason_code}",
             "warning",
         )
+    if isinstance(event, ToolTurnSummaryCommitted):
+        ledger = event.ledger
+        fields = [
+            f"requested={ledger.requested}",
+            f"admitted={ledger.admitted}",
+            f"dispatched={ledger.dispatched}",
+            f"succeeded={ledger.count(ToolRequestOutcome.SUCCEEDED)}",
+        ]
+        labels = (
+            (ToolRequestOutcome.ERROR, "error"),
+            (ToolRequestOutcome.DENIED, "denied"),
+            (ToolRequestOutcome.REJECTED, "rejected"),
+            (ToolRequestOutcome.CANCELLED, "cancelled"),
+            (ToolRequestOutcome.FAILED, "failed"),
+            (ToolRequestOutcome.PARTIAL, "partial"),
+            (ToolRequestOutcome.OUTCOME_UNKNOWN, "unknown"),
+            (ToolRequestOutcome.SKIPPED_AFTER_FAILURE, "skipped"),
+            (ToolRequestOutcome.REJECTED_OVER_BUDGET, "over-budget"),
+        )
+        for outcome, label in labels:
+            count = ledger.count(outcome)
+            if count:
+                fields.append(f"{label}={count}")
+        return f"Tool summary: {' '.join(fields)}", "info"
 
     if not isinstance(
         event,

@@ -18,6 +18,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestSkipped,
     ToolRequestStarted,
+    ToolTurnSummaryCommitted,
 )
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
@@ -26,6 +27,7 @@ from leonervis_code.core.contracts import (
     AssistantText,
     CommittedTurn,
     ConversationTurn,
+    ToolRequestOutcome,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -166,13 +168,15 @@ def test_loop_executes_one_tool_batch_sequentially_and_returns_all_results(tmp_p
         AssistantText("done"),
     )
     assert provider.received_requests[1].history[-3:] == loop.history[1:4]
-    assert events == [
+    assert events[:-1] == [
         AssistantToolTextReceived("Inspecting both."),
         ToolRequestStarted("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, "pattern='*.py'"),
         ToolRequestFinished("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
         ToolRequestStarted("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, "path='a.py'"),
         ToolRequestFinished("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
     ]
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
+    assert events[-1].ledger.requested == events[-1].ledger.dispatched == 2
 
 
 def test_loop_skips_remaining_batch_calls_after_first_non_success(tmp_path) -> None:
@@ -254,6 +258,10 @@ def test_twenty_fourth_provider_invocation_is_text_only(tmp_path) -> None:
     assert len(provider.received_requests) == MAX_PROVIDER_INVOCATIONS_PER_TURN
     assert all(request.allow_tools for request in provider.received_requests[:-1])
     assert provider.received_requests[-1].allow_tools is False
+    final_result = provider.received_requests[-1].history[-1]
+    assert isinstance(final_result, ToolResult)
+    assert "Host tool ledger: requested=23 admitted=23 dispatched=23" in final_result.content
+    assert "error=23" in final_result.content
 
 
 def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
@@ -444,11 +452,11 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
     assert loop.run("Read repeatedly") == "Finished after the limit."
     results = [item for item in loop.history if isinstance(item, ToolResult)]
     assert len(results) == MAX_TOOL_REQUESTS_PER_TURN + 1
-    assert results[-1] == ToolResult(
-        tool_use_id=f"read-{MAX_TOOL_REQUESTS_PER_TURN + 1}",
-        content="tool batch was not executed because it exceeds the remaining tool-request budget",
-        is_error=True,
-    )
+    assert results[-1].tool_use_id == f"read-{MAX_TOOL_REQUESTS_PER_TURN + 1}"
+    assert results[-1].is_error is True
+    assert "Host tool ledger: requested=33 admitted=32 dispatched=32" in results[-1].content
+    assert "rejected_over_budget=1 unused_admission_slots=0" in results[-1].content
+    assert "tool_requests_closed=true" in results[-1].content
     assert provider.received_requests[-1].allow_tools is False
 
 
@@ -563,13 +571,15 @@ def test_loop_does_not_commit_memory_when_durable_commit_fails(tmp_path) -> None
         ListDirectoryTool(tmp_path),
         commit_turn=fail,
     )
+    events = []
 
     with pytest.raises(OSError, match="disk full"):
-        loop.run("persist")
+        loop.run("persist", event_sink=events.append)
 
     assert loop.history == ()
     assert loop.effective_history == ()
     assert loop.turns == ()
+    assert not any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
     assert provider.received_requests[1].history[-2:] == (
         call,
         ToolResult("read-1", "notes\n"),
@@ -822,14 +832,152 @@ def test_over_budget_batch_gets_results_without_entering_action_dispatch(tmp_pat
         == "stopped"
     )
     assert dispatched == [f"read-{index}" for index in range(1, 33)]
-    assert provider.received_requests[-1].history[-1] == ToolResult(
-        "read-33",
-        "tool batch was not executed because it exceeds the remaining tool-request budget",
-        is_error=True,
+    final_result = provider.received_requests[-1].history[-1]
+    assert isinstance(final_result, ToolResult)
+    assert final_result.tool_use_id == "read-33"
+    assert "rejected_over_budget=1 unused_admission_slots=0" in final_result.content
+    assert "tool_requests_closed=true" in final_result.content
+    skipped = next(event for event in events if isinstance(event, ToolRequestSkipped))
+    assert skipped.call_index == 33
+    assert skipped.call_limit == MAX_TOOL_REQUESTS_PER_TURN
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
+    assert events[-1].ledger.count(ToolRequestOutcome.REJECTED_OVER_BUDGET) == 1
+
+
+def test_host_ledger_accounts_for_failed_batch_skips_successes_and_over_budget_calls(
+    tmp_path,
+) -> None:
+    calls = [
+        ToolUse(
+            f"call-{index}",
+            "write_file" if index != 1 else "mkdir",
+            ToolArguments.from_mapping(
+                {"path": f"file-{index:02}.txt", "content": f"{index:02}\n"}
+                if index != 1
+                else {"path": "budget-33"}
+            ),
+        )
+        for index in range(1, 41)
+    ]
+    batches = [AssistantToolBatch(tuple(calls[start : start + 8])) for start in range(0, 40, 8)]
+    provider = ScriptedFakeProvider([*batches, AssistantText("reported arithmetic")])
+    committed = []
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
     )
-    assert isinstance(events[-1], ToolRequestSkipped)
-    assert events[-1].call_index == 33
-    assert events[-1].call_limit == MAX_TOOL_REQUESTS_PER_TURN
+    prepared = loop.prepare_turn("create many")
+    lease = _action_lease_for(prepared)
+
+    def dispatch(request, _lease):
+        if request.tool_use_id == "call-1":
+            return ToolDispatchResult(
+                ToolResult(request.tool_use_id, "already exists", is_error=True),
+                ToolEventStatus.ERROR,
+                "invalid_request",
+            )
+        return ToolDispatchResult(
+            ToolResult(request.tool_use_id, "created"),
+            ToolEventStatus.SUCCEEDED,
+            "created",
+        )
+
+    loop.install_action_dispatcher(dispatch)
+    events = []
+
+    assert (
+        loop.run_prepared(
+            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+        )
+        == "reported arithmetic"
+    )
+    ledger = committed[0].tool_ledger
+    assert (ledger.requested, ledger.admitted, ledger.dispatched) == (40, 32, 25)
+    assert ledger.count(ToolRequestOutcome.SUCCEEDED) == 24
+    assert ledger.count(ToolRequestOutcome.ERROR) == 1
+    assert ledger.count(ToolRequestOutcome.SKIPPED_AFTER_FAILURE) == 7
+    assert ledger.count(ToolRequestOutcome.REJECTED_OVER_BUDGET) == 8
+    assert [entry.request_index for entry in ledger.entries] == list(range(1, 41))
+    final_result = provider.received_requests[-1].history[-1]
+    assert isinstance(final_result, ToolResult)
+    assert "requested=40 admitted=32 dispatched=25 succeeded=24 error=1" in final_result.content
+    assert "skipped_after_failure=7 rejected_over_budget=8 unused_admission_slots=0" in (
+        final_result.content
+    )
+    assert "tool_requests_closed=true" in final_result.content
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
+    assert events[-1].ledger == ledger
+
+
+def test_forced_finalization_closes_tools_despite_one_unused_admission_slot(tmp_path) -> None:
+    calls = [
+        ToolUse(
+            f"call-{index}",
+            "write_file" if index != 1 else "mkdir",
+            ToolArguments.from_mapping(
+                {"path": f"file-{index:02}.txt", "content": f"{index:02}\n"}
+                if index != 1
+                else {"path": "already-exists"}
+            ),
+        )
+        for index in range(1, 40)
+    ]
+    batches = (
+        AssistantToolBatch(tuple(calls[0:8])),
+        AssistantToolBatch(tuple(calls[8:15])),
+        AssistantToolBatch(tuple(calls[15:23])),
+        AssistantToolBatch(tuple(calls[23:31])),
+        AssistantToolBatch(tuple(calls[31:39])),
+    )
+    provider = ScriptedFakeProvider([*batches, AssistantText("reported closed tools")])
+    committed = []
+    loop = AgentLoop(
+        None,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
+    )
+    prepared = loop.prepare_turn("create many")
+    lease = _action_lease_for(prepared)
+
+    def dispatch(request, _lease):
+        if request.tool_use_id == "call-1":
+            return ToolDispatchResult(
+                ToolResult(request.tool_use_id, "already exists", is_error=True),
+                ToolEventStatus.ERROR,
+                "invalid_request",
+            )
+        return ToolDispatchResult(
+            ToolResult(request.tool_use_id, "created"),
+            ToolEventStatus.SUCCEEDED,
+            "created",
+        )
+
+    loop.install_action_dispatcher(dispatch)
+
+    assert loop.run_prepared(prepared.with_action_lease(lease), provider=provider) == (
+        "reported closed tools"
+    )
+    ledger = committed[0].tool_ledger
+    assert (ledger.requested, ledger.admitted, ledger.dispatched) == (39, 31, 24)
+    assert ledger.count(ToolRequestOutcome.SUCCEEDED) == 23
+    assert ledger.count(ToolRequestOutcome.ERROR) == 1
+    assert ledger.count(ToolRequestOutcome.SKIPPED_AFTER_FAILURE) == 7
+    assert ledger.count(ToolRequestOutcome.REJECTED_OVER_BUDGET) == 8
+    final_request = provider.received_requests[-1]
+    assert final_request.allow_tools is False
+    final_result = final_request.history[-1]
+    assert isinstance(final_result, ToolResult)
+    assert "requested=39 admitted=31 dispatched=24 succeeded=23 error=1" in (final_result.content)
+    assert "skipped_after_failure=7 rejected_over_budget=8" in final_result.content
+    assert "unused_admission_slots=1 tool_requests_closed=true" in final_result.content
+    assert "remaining_budget" not in final_result.content
 
 
 def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_path) -> None:
@@ -872,7 +1020,7 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
         )
         == "done"
     )
-    assert events == [
+    assert events[:-1] == [
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='a.txt'"),
         ToolRequestFinished(
             "read_file",
@@ -891,6 +1039,9 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
             "denied_read_only_mode",
         ),
     ]
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
+    assert events[-1].ledger.count(ToolRequestOutcome.SUCCEEDED) == 1
+    assert events[-1].ledger.count(ToolRequestOutcome.DENIED) == 1
     assert "secret query" not in repr(events)
 
 
@@ -968,11 +1119,12 @@ def test_assistant_tool_text_is_displayed_executed_continued_and_committed(tmp_p
 
     assert loop.run("inspect", event_sink=events.append) == "The file contains notes."
     result = ToolResult("read-1", "notes\n")
-    assert events == [
+    assert events[:-1] == [
         AssistantToolTextReceived("I will read the file."),
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='README.md'"),
         ToolRequestFinished("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
     ]
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
     assert provider.received_requests[1].history[-2:] == (call, result)
     assert loop.history == (
         UserMessage("inspect"),
@@ -1021,7 +1173,7 @@ def test_streaming_loop_orders_complete_tool_text_execution_and_durable_final_co
     )
 
     assert loop.run("inspect", event_sink=events.append) == "Done."
-    assert events == [
+    assert events[:-1] == [
         AssistantResponseTextDeltaReceived("I will "),
         AssistantResponseTextDeltaReceived("read."),
         AssistantToolTextStreamCompleted("I will read."),
@@ -1031,7 +1183,9 @@ def test_streaming_loop_orders_complete_tool_text_execution_and_durable_final_co
         AssistantResponseTextDeltaReceived("ne."),
         AssistantFinalTextStreamCommitted("Done."),
     ]
+    assert isinstance(events[-1], ToolTurnSummaryCommitted)
     assert committed[0].items[-1] == AssistantText("Done.")
+    assert committed[0].tool_ledger == events[-1].ledger
     assert provider.requests[1].history[-2:] == (call, ToolResult("read-stream", "notes\n"))
 
 

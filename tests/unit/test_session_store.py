@@ -13,13 +13,17 @@ import pytest
 from leonervis_code.core.contracts import (
     ToolArguments,
     AssistantText,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
     UserMessage,
 )
 from leonervis_code.session_records import (
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+    TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
@@ -61,6 +65,19 @@ def committed_items(tool_id: str = "tool-1", *, assistant_text: str | None = Non
     )
 
 
+def committed_ledger(tool_id: str = "tool-1") -> ToolTurnLedger:
+    return ToolTurnLedger(
+        (
+            ToolOutcomeEntry(
+                tool_id,
+                "read_file",
+                1,
+                ToolRequestOutcome.SUCCEEDED,
+            ),
+        )
+    )
+
+
 def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     binding = BindingSnapshot.fake()
@@ -70,7 +87,7 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert writer.path.parent == (
         tmp_path / ".leonervis-code" / "sessions" / session_store.workspace_fingerprint
     )
-    writer.append_turn(committed_items(), binding=binding)
+    writer.append_turn(committed_items(), binding=binding, tool_ledger=committed_ledger())
     persisted_turn = writer.path.read_text(encoding="utf-8").splitlines()[-1]
     assert '"record_type":"turn_committed"' in persisted_turn
     assert f'"schema_version":{TURN_COMMITTED_SCHEMA_VERSION}' in persisted_turn
@@ -104,9 +121,10 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
         TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
         TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
         TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+        TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     ],
 )
-def test_resume_appends_v4_turn_without_rewriting_legacy_prefix(
+def test_resume_appends_v5_turn_without_rewriting_legacy_prefix(
     tmp_path: Path, legacy_schema: int
 ) -> None:
     session_store = store(tmp_path)
@@ -124,7 +142,11 @@ def test_resume_appends_v4_turn_without_rewriting_legacy_prefix(
 
     resumed = session_store.open(SESSION_ONE)
     assert resumed.state.history == committed_items("legacy-tool")
-    resumed.append_turn(committed_items("current-tool"), binding=BindingSnapshot.fake())
+    resumed.append_turn(
+        committed_items("current-tool"),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=committed_ledger("current-tool"),
+    )
     after = resumed.path.read_bytes()
     resumed.release()
 
@@ -132,7 +154,8 @@ def test_resume_appends_v4_turn_without_rewriting_legacy_prefix(
     appended = after[len(prefix) :]
     assert b'"record_type":"session_resumed"' in appended
     assert b'"record_type":"turn_committed"' in appended
-    assert b'"schema_version":4' in appended
+    assert b'"schema_version":5' in appended
+    assert b'"tool_ledger":{"entries":[' in appended
     assert b'"arguments":{"path":"README.md"}' in appended
     assert b'"assistant_text":null' in appended
 
@@ -163,7 +186,9 @@ def test_store_reopens_v3_assistant_tool_text_exactly(tmp_path: Path) -> None:
 def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
-    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.append_turn(
+        committed_items(), binding=BindingSnapshot.fake(), tool_ledger=committed_ledger()
+    )
     writer.release()
     transcript_before = writer.path.read_bytes()
     latest = session_store.root / "latest.json"
@@ -185,7 +210,9 @@ def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Pa
 def test_prepare_resume_defers_tail_recovery_until_commit(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
-    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.append_turn(
+        committed_items(), binding=BindingSnapshot.fake(), tool_ledger=committed_ledger()
+    )
     writer.release()
     partial = b'{"record_type":"turn_comm'
     writer.path.write_bytes(writer.path.read_bytes() + partial)
@@ -330,7 +357,9 @@ def test_selectors_reject_noncanonical_ids_and_paths_outside_root(tmp_path: Path
 def test_open_repairs_only_incomplete_final_tail_and_appends_recovery(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
-    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.append_turn(
+        committed_items(), binding=BindingSnapshot.fake(), tool_ledger=committed_ledger()
+    )
     writer.release()
     original = writer.path.read_bytes()
     writer.path.write_bytes(original + b'{"record_type":"turn_comm')
@@ -402,7 +431,9 @@ def test_newline_terminated_corruption_fails_closed_without_repair(
 def test_middle_corruption_is_never_repaired(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
-    writer.append_turn(committed_items(), binding=BindingSnapshot.fake())
+    writer.append_turn(
+        committed_items(), binding=BindingSnapshot.fake(), tool_ledger=committed_ledger()
+    )
     writer.release()
     lines = writer.path.read_bytes().splitlines(keepends=True)
     writer.path.write_bytes(lines[0] + b"broken\n" + lines[1] + b"partial")
@@ -500,7 +531,11 @@ def test_lifetime_lock_is_nonblocking_in_threads_and_other_sessions_can_open(
     assert not thread.is_alive()
     assert len(errors) == 1
     assert isinstance(errors[0], SessionLockedError)
-    second.append_turn(committed_items("tool-2"), binding=BindingSnapshot.fake())
+    second.append_turn(
+        committed_items("tool-2"),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=committed_ledger("tool-2"),
+    )
     first.release()
     second.release()
 

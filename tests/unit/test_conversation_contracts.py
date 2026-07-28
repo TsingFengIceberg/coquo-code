@@ -7,7 +7,11 @@ import pytest
 from leonervis_code.core.contracts import (
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
     MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
+    MAX_TOOL_OUTCOME_ENTRIES,
     ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolTurnLedger,
     ToolUse,
 )
 
@@ -58,3 +62,61 @@ def test_tool_use_rejects_non_utf8_assistant_text() -> None:
 def test_tool_use_rejects_nul_in_assistant_text() -> None:
     with pytest.raises(ValueError, match="NUL"):
         tool_use(assistant_text="before\x00after")
+
+
+def test_tool_turn_ledger_derives_authoritative_counts_from_ordered_entries() -> None:
+    ledger = ToolTurnLedger(
+        (
+            ToolOutcomeEntry("one", "mkdir", 1, ToolRequestOutcome.ERROR, "invalid_request"),
+            ToolOutcomeEntry(
+                "two",
+                "write_file",
+                2,
+                ToolRequestOutcome.SKIPPED_AFTER_FAILURE,
+                "prior_batch_action_not_succeeded",
+            ),
+            ToolOutcomeEntry(
+                "three",
+                "write_file",
+                3,
+                ToolRequestOutcome.REJECTED_OVER_BUDGET,
+                "batch_exceeds_remaining_budget",
+            ),
+        )
+    )
+
+    assert ledger.requested == 3
+    assert ledger.admitted == 2
+    assert ledger.dispatched == 1
+    assert ledger.count(ToolRequestOutcome.ERROR) == 1
+    assert ledger.count(ToolRequestOutcome.SKIPPED_AFTER_FAILURE) == 1
+    assert ledger.count(ToolRequestOutcome.REJECTED_OVER_BUDGET) == 1
+
+
+def test_tool_turn_ledger_rejects_gaps_duplicates_and_unbound_synthetic_codes() -> None:
+    with pytest.raises(ValueError, match="continuous"):
+        ToolTurnLedger((ToolOutcomeEntry("one", "read_file", 2, ToolRequestOutcome.SUCCEEDED),))
+    duplicate = ToolOutcomeEntry("one", "read_file", 1, ToolRequestOutcome.SUCCEEDED)
+    with pytest.raises(ValueError, match="duplicate"):
+        ToolTurnLedger(
+            (duplicate, ToolOutcomeEntry("one", "read_file", 2, ToolRequestOutcome.ERROR))
+        )
+    with pytest.raises(ValueError, match="canonical result code"):
+        ToolOutcomeEntry(
+            "one",
+            "read_file",
+            1,
+            ToolRequestOutcome.REJECTED_OVER_BUDGET,
+            "wrong",
+        )
+    oversized = tuple(
+        ToolOutcomeEntry(
+            f"tool-{index}",
+            "read_file",
+            index,
+            ToolRequestOutcome.SUCCEEDED,
+        )
+        for index in range(1, MAX_TOOL_OUTCOME_ENTRIES + 2)
+    )
+    with pytest.raises(ValueError, match="entry limit"):
+        ToolTurnLedger(oversized)

@@ -35,7 +35,10 @@ from leonervis_code.core.contracts import (
     ConversationItem,
     ConversationTurn,
     ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
     UserMessage,
 )
@@ -59,7 +62,8 @@ SCHEMA_VERSION = 1
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
 TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
 TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION = 3
-TURN_COMMITTED_SCHEMA_VERSION = 4
+TURN_COMMITTED_BATCH_SCHEMA_VERSION = 4
+TURN_COMMITTED_SCHEMA_VERSION = 5
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_SCHEMA_VERSION = 3
 WORKSPACE_FINGERPRINT_VERSION = "v1"
@@ -192,6 +196,7 @@ class TurnCommitted:
     committed_at: str
     binding: BindingSnapshot
     items: tuple[ConversationItem, ...]
+    tool_ledger: ToolTurnLedger = ToolTurnLedger()
     record_type: str = "turn_committed"
     schema_version: int = TURN_COMMITTED_SCHEMA_VERSION
 
@@ -551,6 +556,7 @@ def replay_records(
             _require_no_live_action(live_action_request_id, "turn_committed")
             _validate_timestamp(record.committed_at, "turn committed_at")
             _validate_turn(record.items, seen_tool_ids)
+            _validate_turn_ledger(record)
             history.extend(record.items)
             effective_history.extend(record.items)
             turns.append(ConversationTurn(user=record.items[0], assistant=record.items[-1]))  # type: ignore[arg-type]
@@ -877,6 +883,7 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
     elif isinstance(record, TurnCommitted):
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
+        _validate_turn_ledger(record)
         common.update(
             committed_at=record.committed_at,
             binding=_binding_to_dict(record.binding),
@@ -884,6 +891,8 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
                 _item_to_dict(item, schema_version=record.schema_version) for item in record.items
             ],
         )
+        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            common["tool_ledger"] = _tool_ledger_to_dict(record.tool_ledger)
     elif isinstance(record, RuntimeChanged):
         _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
         _required_text(record.reason, "runtime_changed reason", allow_empty=True)
@@ -1001,6 +1010,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     else:
@@ -1037,16 +1047,19 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         _validate_header(record)
         return record
     if record_type == "turn_committed":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "committed_at",
+            "binding",
+            "items",
+        }
+        if version == TURN_COMMITTED_SCHEMA_VERSION:
+            fields.add("tool_ledger")
         _closed_fields(
             value,
-            {
-                "record_type",
-                "schema_version",
-                "sequence",
-                "committed_at",
-                "binding",
-                "items",
-            },
+            fields,
             record_type,
         )
         raw_items = value.get("items")
@@ -1058,10 +1071,16 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             committed_at=_required_field_text(value, "committed_at", record_type),
             binding=_binding_from_value(value.get("binding")),
             items=items,
+            tool_ledger=(
+                _tool_ledger_from_value(value.get("tool_ledger"))
+                if version == TURN_COMMITTED_SCHEMA_VERSION
+                else ToolTurnLedger()
+            ),
             schema_version=version,
         )
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
+        _validate_turn_ledger(record)
         return record
     if record_type == "runtime_changed":
         fields = {
@@ -1389,6 +1408,7 @@ def _item_to_dict(
         TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
         TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
         TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+        TURN_COMMITTED_BATCH_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -1403,6 +1423,7 @@ def _item_to_dict(
         _required_text(item.name, "tool_use name")
         supports_assistant_text = schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
         if item.assistant_text is not None and not supports_assistant_text:
@@ -1450,7 +1471,10 @@ def _item_to_dict(
             payload["assistant_text"] = item.assistant_text
         return payload
     if isinstance(item, AssistantToolBatch):
-        if schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version not in {
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }:
             raise SessionRecordError(
                 "assistant tool batch requires a newer turn_committed schema version"
             )
@@ -1517,6 +1541,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         }
         if schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             fields.add("assistant_text")
@@ -1537,6 +1562,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         assistant_text = None
         if schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raw_assistant_text = value.get("assistant_text")
@@ -1559,7 +1585,10 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             _text_payload(assistant_text, "tool_use assistant_text")
         return request
     if item_type == "assistant_tool_batch":
-        if schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version not in {
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }:
             raise SessionRecordError(
                 "assistant tool batch requires a newer turn_committed schema version"
             )
@@ -1625,6 +1654,100 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
     raise SessionRecordError(f"unknown turn item type: {item_type}")
 
 
+def _tool_ledger_to_dict(ledger: ToolTurnLedger) -> dict[str, object]:
+    if type(ledger) is not ToolTurnLedger:
+        raise SessionRecordError("turn_committed tool ledger is invalid")
+    try:
+        ledger.__post_init__()
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+    return {
+        "entries": [
+            {
+                "tool_use_id": entry.tool_use_id,
+                "tool_name": entry.tool_name,
+                "request_index": entry.request_index,
+                "outcome": entry.outcome.value,
+                "result_code": entry.result_code,
+            }
+            for entry in ledger.entries
+        ]
+    }
+
+
+def _tool_ledger_from_value(value: object) -> ToolTurnLedger:
+    if not isinstance(value, dict):
+        raise SessionRecordError("turn_committed tool_ledger must be an object")
+    _closed_fields(value, {"entries"}, "turn_committed tool_ledger")
+    raw_entries = value.get("entries")
+    if not isinstance(raw_entries, list):
+        raise SessionRecordError("turn_committed tool ledger entries must be an array")
+    entries: list[ToolOutcomeEntry] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise SessionRecordError("tool ledger entry must be an object")
+        _closed_fields(
+            raw_entry,
+            {"tool_use_id", "tool_name", "request_index", "outcome", "result_code"},
+            "tool ledger entry",
+        )
+        request_index = raw_entry.get("request_index")
+        if type(request_index) is not int:
+            raise SessionRecordError("tool ledger request_index must be an integer")
+        try:
+            entries.append(
+                ToolOutcomeEntry(
+                    tool_use_id=_required_field_text(raw_entry, "tool_use_id", "tool ledger entry"),
+                    tool_name=_required_field_text(raw_entry, "tool_name", "tool ledger entry"),
+                    request_index=request_index,
+                    outcome=_enum_field(
+                        raw_entry,
+                        "outcome",
+                        "tool ledger entry",
+                        ToolRequestOutcome,
+                    ),
+                    result_code=_nullable_field_text(raw_entry, "result_code", "tool ledger entry"),
+                )
+            )
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+    try:
+        return ToolTurnLedger(tuple(entries))
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+
+
+def _validate_turn_ledger(record: TurnCommitted) -> None:
+    if record.schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+        if record.tool_ledger.entries:
+            raise SessionRecordError("legacy turn_committed cannot contain a tool ledger")
+        return
+    if type(record.tool_ledger) is not ToolTurnLedger:
+        raise SessionRecordError("turn_committed tool ledger is invalid")
+    try:
+        record.tool_ledger.__post_init__()
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+
+    requests: list[ToolUse] = []
+    results: dict[str, ToolResult] = {}
+    for item in record.items:
+        if isinstance(item, ToolUse):
+            requests.append(item)
+        elif isinstance(item, AssistantToolBatch):
+            requests.extend(item.tool_uses)
+        elif isinstance(item, ToolResult):
+            results[item.tool_use_id] = item
+    if len(requests) != len(record.tool_ledger.entries):
+        raise SessionRecordError("turn_committed tool ledger does not cover every request")
+    for request, entry in zip(requests, record.tool_ledger.entries, strict=True):
+        if (entry.tool_use_id, entry.tool_name) != (request.tool_use_id, request.name):
+            raise SessionRecordError("turn_committed tool ledger identity does not match history")
+        result = results[request.tool_use_id]
+        if (entry.outcome == ToolRequestOutcome.SUCCEEDED) == result.is_error:
+            raise SessionRecordError("turn_committed tool ledger outcome contradicts tool result")
+
+
 def _validate_header(header: SessionHeader) -> None:
     if header.sequence != 0:
         raise SessionRecordError("session_header sequence must be zero")
@@ -1659,6 +1782,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")

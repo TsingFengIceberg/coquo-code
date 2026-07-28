@@ -559,6 +559,7 @@ class ProjectSession:
                     commit_turn=lambda turn: writer_holder["writer"].append_turn(
                         turn.items,
                         binding=binding_from_status(manager.status()),
+                        tool_ledger=turn.tool_ledger,
                     ),
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -1565,7 +1566,11 @@ class ProjectSession:
     def _commit_turn(self, writer: SessionWriter, turn: CommittedTurn) -> None:
         if writer is not self._writer:
             raise SessionStoreError("conversation session changed before turn commit")
-        writer.append_turn(turn.items, binding=binding_from_status(self._manager.status()))
+        writer.append_turn(
+            turn.items,
+            binding=binding_from_status(self._manager.status()),
+            tool_ledger=turn.tool_ledger,
+        )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
         try:

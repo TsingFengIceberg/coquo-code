@@ -10,6 +10,7 @@ from leonervis_code.core.contracts import (
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
     MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
 )
 from leonervis_code.providers.streaming import ProviderTextDelta
@@ -142,7 +143,24 @@ class ToolRequestSkipped:
         _validate_safe_text(self.reason_code, "tool skip reason")
 
 
-ToolPromptEvent = ToolRequestStarted | ToolRequestFinished | ToolRequestLimited | ToolRequestSkipped
+@dataclass(frozen=True)
+class ToolTurnSummaryCommitted:
+    """Expose Host accounting only after the containing turn is durable."""
+
+    ledger: ToolTurnLedger
+
+    def __post_init__(self) -> None:
+        if type(self.ledger) is not ToolTurnLedger or not self.ledger.entries:
+            raise ValueError("tool turn summary requires a non-empty ledger")
+
+
+ToolPromptEvent = (
+    ToolRequestStarted
+    | ToolRequestFinished
+    | ToolRequestLimited
+    | ToolRequestSkipped
+    | ToolTurnSummaryCommitted
+)
 AssistantStreamEvent = (
     AssistantResponseTextDeltaReceived
     | AssistantToolTextStreamCompleted

@@ -23,7 +23,7 @@ else:
     import fcntl
 
 from leonervis_code.core.actions import ActionIdentity
-from leonervis_code.core.contracts import ConversationItem
+from leonervis_code.core.contracts import ConversationItem, ToolTurnLedger
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionMode,
@@ -806,6 +806,7 @@ class SessionWriter:
         items: Iterable[ConversationItem],
         *,
         binding: BindingSnapshot,
+        tool_ledger: ToolTurnLedger,
         committed_at: str | None = None,
     ) -> TurnCommitted:
         """Durably commit one complete turn as exactly one JSONL record."""
@@ -815,6 +816,7 @@ class SessionWriter:
             committed_at=committed_at or self._store._clock(),
             binding=binding,
             items=tuple(items),
+            tool_ledger=tool_ledger,
         )
         self._append(record)
         return record

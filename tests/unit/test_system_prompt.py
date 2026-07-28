@@ -9,19 +9,22 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v18-6ddfaa8302427bbe25c1ee28cee6b1e5975949da111a96876baa8e834cd86f8c"
+EXPECTED_FINGERPRINT = "v19-accfbb73aa611061c8a8cb6be5bb54012ce5809fbbe91050439383e3d35318b7"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 18
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 19
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
     assert "at most 24 provider invocations including a final text-only opportunity" in prompt.text
     assert "processes it sequentially in provider order" in prompt.text
     assert "later actions in that batch are skipped" in prompt.text
+    assert "`Host tool ledger:` line with authoritative per-turn counts" in prompt.text
+    assert "when `tool_requests_closed=true`" in prompt.text
+    assert "do not emit tool-call syntax as text" in prompt.text
     assert build_system_prompt() == prompt
 
 

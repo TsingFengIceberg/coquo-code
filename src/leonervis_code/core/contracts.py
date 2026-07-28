@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import json
 from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
@@ -15,6 +16,7 @@ TOOL_ARGUMENTS_VERSION = 1
 MAX_TOOL_ARGUMENTS_BYTES = 16 * 1024
 MAX_ASSISTANT_TOOL_TEXT_CHARACTERS = 32 * 1024
 MAX_ASSISTANT_TOOL_TEXT_BYTES = 32 * 1024
+MAX_TOOL_OUTCOME_ENTRIES = 40
 
 
 def system_prompt_fingerprint(version: int, text: str) -> str:
@@ -163,6 +165,99 @@ class ToolResult:
     truncated: bool = False
 
 
+class ToolRequestOutcome(StrEnum):
+    """Host-observed terminal accounting state for one provider request."""
+
+    SUCCEEDED = "succeeded"
+    ERROR = "error"
+    DENIED = "denied"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    OUTCOME_UNKNOWN = "outcome-unknown"
+    SKIPPED_AFTER_FAILURE = "skipped-after-failure"
+    REJECTED_OVER_BUDGET = "rejected-over-budget"
+
+
+@dataclass(frozen=True)
+class ToolOutcomeEntry:
+    """One immutable Host outcome tied to an exact provider tool-use ID."""
+
+    tool_use_id: str
+    tool_name: str
+    request_index: int
+    outcome: ToolRequestOutcome
+    result_code: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_ledger_text(self.tool_use_id, "tool outcome ID")
+        _validate_ledger_text(
+            self.tool_name,
+            "tool outcome name",
+            ascii_only=True,
+            control_free=True,
+        )
+        if type(self.request_index) is not int or self.request_index <= 0:
+            raise ValueError("tool outcome request index must be positive")
+        if type(self.outcome) is not ToolRequestOutcome:
+            raise ValueError("tool outcome status is invalid")
+        if self.result_code is not None:
+            _validate_ledger_text(
+                self.result_code,
+                "tool outcome result code",
+                ascii_only=True,
+                control_free=True,
+                max_characters=160,
+            )
+        required_code = {
+            ToolRequestOutcome.SKIPPED_AFTER_FAILURE: "prior_batch_action_not_succeeded",
+            ToolRequestOutcome.REJECTED_OVER_BUDGET: "batch_exceeds_remaining_budget",
+        }.get(self.outcome)
+        if required_code is not None and self.result_code != required_code:
+            raise ValueError("synthetic tool outcome requires its canonical result code")
+
+
+@dataclass(frozen=True)
+class ToolTurnLedger:
+    """Ordered per-request Host truth for one committed user turn."""
+
+    entries: tuple[ToolOutcomeEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entries, tuple):
+            raise ValueError("tool turn ledger entries must be a tuple")
+        if len(self.entries) > MAX_TOOL_OUTCOME_ENTRIES:
+            raise ValueError("tool turn ledger exceeds its entry limit")
+        seen_ids: set[str] = set()
+        for expected_index, entry in enumerate(self.entries, start=1):
+            if type(entry) is not ToolOutcomeEntry:
+                raise ValueError("tool turn ledger contains an invalid entry")
+            if entry.request_index != expected_index:
+                raise ValueError("tool turn ledger request indexes must be continuous")
+            if entry.tool_use_id in seen_ids:
+                raise ValueError("tool turn ledger contains a duplicate tool-use ID")
+            seen_ids.add(entry.tool_use_id)
+
+    @property
+    def requested(self) -> int:
+        return len(self.entries)
+
+    @property
+    def admitted(self) -> int:
+        return self.requested - self.count(ToolRequestOutcome.REJECTED_OVER_BUDGET)
+
+    @property
+    def dispatched(self) -> int:
+        return self.admitted - self.count(ToolRequestOutcome.SKIPPED_AFTER_FAILURE)
+
+    def count(self, outcome: ToolRequestOutcome) -> int:
+        """Derive one status count without maintaining mutable aggregate state."""
+        if type(outcome) is not ToolRequestOutcome:
+            raise ValueError("tool outcome status is invalid")
+        return sum(entry.outcome == outcome for entry in self.entries)
+
+
 @dataclass(frozen=True)
 class ConversationTurn:
     """One completed user/final-assistant pair for REPL history display."""
@@ -178,6 +273,7 @@ class CommittedTurn:
     items: tuple[ConversationItem, ...]
     user: UserMessage
     assistant: AssistantText
+    tool_ledger: ToolTurnLedger = ToolTurnLedger()
 
 
 ConversationItem: TypeAlias = (
@@ -201,6 +297,27 @@ def _validate_assistant_tool_text(text: str) -> None:
         or len(encoded) > MAX_ASSISTANT_TOOL_TEXT_BYTES
     ):
         raise ValueError("assistant tool text exceeds the supported size")
+
+
+def _validate_ledger_text(
+    value: str,
+    label: str,
+    *,
+    ascii_only: bool = False,
+    control_free: bool = False,
+    max_characters: int = 4096,
+) -> None:
+    if not isinstance(value, str) or not value or len(value) > max_characters:
+        raise ValueError(f"{label} is invalid")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{label} must be valid UTF-8") from None
+    if ascii_only and not value.isascii():
+        raise ValueError(f"{label} must be ASCII")
+    controls = ("\x00", "\r", "\n", "\x1b") if control_free else ("\x00",)
+    if any(character in value for character in controls):
+        raise ValueError(f"{label} contains control characters")
 
 
 @dataclass(frozen=True)

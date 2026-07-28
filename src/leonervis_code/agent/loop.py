@@ -16,6 +16,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestSkipped,
     ToolRequestStarted,
+    ToolTurnSummaryCommitted,
     infer_tool_dispatch_result,
     safe_result_code,
     safe_tool_request_summary,
@@ -31,7 +32,10 @@ from leonervis_code.core.contracts import (
     ConversationRequest,
     ConversationTurn,
     SystemPromptSnapshot,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
     TurnCommitter,
     UserMessage,
@@ -246,6 +250,8 @@ class AgentLoop:
         tool_requests = 0
         provider_invocations = 0
         force_final = False
+        ledger_entries: list[ToolOutcomeEntry] = []
+        ledger_summary_attached = False
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
 
         while True:
@@ -254,6 +260,10 @@ class AgentLoop:
             allow_tools = (
                 not force_final and provider_invocations < MAX_PROVIDER_INVOCATIONS_PER_TURN - 1
             )
+            if not allow_tools and ledger_entries and not ledger_summary_attached:
+                ledger = ToolTurnLedger(tuple(ledger_entries))
+                pending = _attach_tool_ledger_summary(pending, ledger)
+                ledger_summary_attached = True
             outcome = self._respond(
                 turn_provider,
                 context.to_conversation_request(
@@ -265,12 +275,15 @@ class AgentLoop:
             provider_invocations += 1
             response = outcome.response
             if isinstance(response, AssistantText):
-                self._commit(pending + (response,), user, response)
+                ledger = ToolTurnLedger(tuple(ledger_entries))
+                self._commit(pending + (response,), user, response, ledger)
                 if outcome.text_was_streamed:
                     self._emit_prompt_event(
                         event_sink,
                         AssistantFinalTextStreamCommitted(response.text),
                     )
+                if ledger.entries:
+                    self._emit_prompt_event(event_sink, ToolTurnSummaryCommitted(ledger))
                 return response.text
 
             if not allow_tools:
@@ -296,11 +309,12 @@ class AgentLoop:
             pending += (response,)
             if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
                 for offset, request in enumerate(requests, start=1):
+                    request_index = len(ledger_entries) + 1
                     self._emit_prompt_event(
                         event_sink,
                         ToolRequestSkipped(
                             request.name,
-                            tool_requests + offset,
+                            request_index,
                             MAX_TOOL_REQUESTS_PER_TURN,
                             "batch_exceeds_remaining_budget",
                         ),
@@ -311,6 +325,15 @@ class AgentLoop:
                             "tool batch was not executed because it exceeds the remaining tool-request budget",
                             is_error=True,
                         ),
+                    )
+                    ledger_entries.append(
+                        ToolOutcomeEntry(
+                            request.tool_use_id,
+                            request.name,
+                            request_index,
+                            ToolRequestOutcome.REJECTED_OVER_BUDGET,
+                            "batch_exceeds_remaining_budget",
+                        )
                     )
                 force_final = True
                 continue
@@ -336,6 +359,15 @@ class AgentLoop:
                             "tool was not executed because an earlier action in the same batch did not succeed",
                             is_error=True,
                         ),
+                    )
+                    ledger_entries.append(
+                        ToolOutcomeEntry(
+                            request.tool_use_id,
+                            request.name,
+                            call_index,
+                            ToolRequestOutcome.SKIPPED_AFTER_FAILURE,
+                            "prior_batch_action_not_succeeded",
+                        )
                     )
                     continue
                 self._emit_prompt_event(
@@ -372,6 +404,15 @@ class AgentLoop:
                     ),
                 )
                 pending += (dispatch.tool_result,)
+                ledger_entries.append(
+                    ToolOutcomeEntry(
+                        request.tool_use_id,
+                        request.name,
+                        call_index,
+                        ToolRequestOutcome(dispatch.status.value),
+                        safe_result_code(dispatch.result_code),
+                    )
+                )
                 if len(requests) > 1 and dispatch.status != ToolEventStatus.SUCCEEDED:
                     stop_remaining = True
 
@@ -413,12 +454,14 @@ class AgentLoop:
         items: tuple[ConversationItem, ...],
         user: UserMessage,
         assistant: AssistantText,
+        tool_ledger: ToolTurnLedger,
     ) -> None:
         """Persist one complete turn before exposing it through in-memory state."""
         turn = CommittedTurn(
             items=items,
             user=user,
             assistant=assistant,
+            tool_ledger=tool_ledger,
         )
         full_validated = validate_complete_history(self._full_history)
         validate_complete_history(
@@ -474,6 +517,45 @@ class AgentLoop:
             sink(event)
         except Exception:
             pass
+
+
+def render_tool_ledger_for_model(ledger: ToolTurnLedger) -> str:
+    """Return one bounded canonical Host accounting line for finalization."""
+    unused_admission_slots = max(0, MAX_TOOL_REQUESTS_PER_TURN - ledger.admitted)
+    counts = " ".join(
+        (
+            f"requested={ledger.requested}",
+            f"admitted={ledger.admitted}",
+            f"dispatched={ledger.dispatched}",
+            f"succeeded={ledger.count(ToolRequestOutcome.SUCCEEDED)}",
+            f"error={ledger.count(ToolRequestOutcome.ERROR)}",
+            f"denied={ledger.count(ToolRequestOutcome.DENIED)}",
+            f"rejected={ledger.count(ToolRequestOutcome.REJECTED)}",
+            f"cancelled={ledger.count(ToolRequestOutcome.CANCELLED)}",
+            f"failed={ledger.count(ToolRequestOutcome.FAILED)}",
+            f"partial={ledger.count(ToolRequestOutcome.PARTIAL)}",
+            f"outcome_unknown={ledger.count(ToolRequestOutcome.OUTCOME_UNKNOWN)}",
+            f"skipped_after_failure={ledger.count(ToolRequestOutcome.SKIPPED_AFTER_FAILURE)}",
+            f"rejected_over_budget={ledger.count(ToolRequestOutcome.REJECTED_OVER_BUDGET)}",
+            f"unused_admission_slots={unused_admission_slots}",
+            "tool_requests_closed=true",
+        )
+    )
+    return f"Host tool ledger: {counts}. Treat these counts as authoritative."
+
+
+def _attach_tool_ledger_summary(
+    items: tuple[ConversationItem, ...], ledger: ToolTurnLedger
+) -> tuple[ConversationItem, ...]:
+    for index in range(len(items) - 1, -1, -1):
+        item = items[index]
+        if isinstance(item, ToolResult):
+            annotated = replace(
+                item,
+                content=f"{item.content}\n\n{render_tool_ledger_for_model(ledger)}",
+            )
+            return items[:index] + (annotated,) + items[index + 1 :]
+    raise RuntimeError("tool ledger finalization requires a preceding tool result")
 
 
 def restore_history(

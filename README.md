@@ -173,7 +173,7 @@ uv run leonervis-code --resume latest prompt "继续上一轮"
 uv run leonervis-code --resume <session-uuid>
 ```
 
-Session绑定workspace，并以append-only JSONL保存成功turn。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保存Host逐请求工具账本，记录实际成功、错误、跳过和预算拒绝，不依赖模型自报。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ### REPL 命令
 
@@ -207,7 +207,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。使用上面�
 /history 5
 ```
 
-真实TTY使用`›`输入标记和`model · workspace`状态栏。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。Tab会补全slash命令并显示简短说明，也支持`/provider`和`/session`二级命令。Up/Ctrl-R读取当前Session已提交的user prompts，`/resume`或`/session new`后自动切换；slash、取消和失败输入不会进入。提交后先显示`• Working...`，首个可见事件会替换它，assistant内容以`•`开头。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+真实TTY使用`›`输入标记和`model · workspace`状态栏。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。Tab会补全slash命令并显示简短说明，也支持`/provider`和`/session`二级命令。Up/Ctrl-R读取当前Session已提交的user prompts，`/resume`或`/session new`后自动切换；slash、取消和失败输入不会进入。提交后先显示`• Working...`，首个可见事件会替换它，assistant内容以`•`开头。成功提交过工具的turn还会显示Host生成的`Tool summary:`，即使模型最终计数错误也能看到实际结果。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -252,6 +252,7 @@ git diff --check
 - [TTY Prompt Editor 与交互反馈](./docs/decisions/0053-tty-multiline-prompt-editor.md)：exact多行输入、Session派生历史、slash补全、清屏与临时assistant状态。
 - [Sequential Tool-call Budget Hardening](./docs/decisions/0054-sequential-tool-call-budget-hardening.md)：超预算任务分批、multiple-call精确诊断与不变的顺序执行边界。
 - [Bounded Multi-tool Response Batches](./docs/decisions/0055-bounded-multi-tool-response-batches.md)：provider batch抽取、Host顺序执行、8/32/24预算、Session/context兼容与failure atomicity。
+- [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md)：逐请求Host计账、强制text-only权威摘要、Session v5与提交后终端汇总。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -289,4 +290,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有真实动作仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、脱敏live activity、mixed response、streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v18、provider adapter contract v20、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v4、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-9007cd576ff595afb6a103a199437d28580836f2a3a5b551819f0f8574d4cf80`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前batch设计见[ADR 0055](./docs/decisions/0055-bounded-multi-tool-response-batches.md)。
+Provider batch、结构化tool outcome ledger、脱敏live activity、mixed response、streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v19、provider adapter contract v20、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v5、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3/v4与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前计账设计见[ADR 0056](./docs/decisions/0056-structured-tool-outcome-ledger.md)。

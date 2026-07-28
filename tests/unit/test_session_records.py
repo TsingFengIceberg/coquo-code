@@ -15,7 +15,10 @@ from leonervis_code.core.contracts import (
     AssistantToolBatch,
     AssistantText,
     ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
     UserMessage,
 )
@@ -29,6 +32,7 @@ from leonervis_code.session_records import (
     SessionRecordError,
     SessionResumed,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+    TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     TurnCommitted,
@@ -40,6 +44,20 @@ from leonervis_code.session_records import (
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-17T12:00:00.000000Z"
+
+
+def successful_ledger(*requests: ToolUse) -> ToolTurnLedger:
+    return ToolTurnLedger(
+        tuple(
+            ToolOutcomeEntry(
+                request.tool_use_id,
+                request.name,
+                index,
+                ToolRequestOutcome.SUCCEEDED,
+            )
+            for index, request in enumerate(requests, start=1)
+        )
+    )
 
 
 def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> None:
@@ -71,6 +89,13 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
                 ToolResult("tool-1", "contents"),
                 AssistantText("done"),
             ),
+            tool_ledger=successful_ledger(
+                ToolUse(
+                    "tool-1",
+                    "read_file",
+                    ToolArguments.from_mapping({"path": "README.md"}),
+                )
+            ),
         ),
     ]
 
@@ -91,24 +116,28 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
 
 
 def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:
+    glob = ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"}))
+    grep = ToolUse(
+        "grep-1",
+        "grep",
+        ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
+    )
+    read = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"}))
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage("find and read"),
-            ToolUse("glob-1", "glob", ToolArguments.from_mapping({"pattern": "src/**/*.py"})),
+            glob,
             ToolResult("glob-1", "src/app.py\n", truncated=True),
-            ToolUse(
-                "grep-1",
-                "grep",
-                ToolArguments.from_mapping({"query": "ToolUse(", "include": "src/**/*.py"}),
-            ),
+            grep,
             ToolResult("grep-1", '{"path":"src/app.py","line":1,"text":"ToolUse("}\n'),
-            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "src/app.py"})),
+            read,
             ToolResult("read-1", "contents"),
             AssistantText("done"),
         ),
+        tool_ledger=successful_ledger(glob, grep, read),
     )
 
     encoded = encode_record(turn)
@@ -122,21 +151,23 @@ def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_tex
 
 
 def test_turn_schema_v3_round_trips_assistant_tool_text_without_normalizing_it() -> None:
+    request = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="  I will read it.\n",
+    )
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage("read"),
-            ToolUse(
-                "read-1",
-                "read_file",
-                ToolArguments.from_mapping({"path": "README.md"}),
-                assistant_text="  I will read it.\n",
-            ),
+            request,
             ToolResult("read-1", "notes"),
             AssistantText("done"),
         ),
+        tool_ledger=successful_ledger(request),
     )
 
     encoded = encode_record(turn)
@@ -146,7 +177,7 @@ def test_turn_schema_v3_round_trips_assistant_tool_text_without_normalizing_it()
     assert b'"assistant_text":"  I will read it.\\n"' in encoded
 
 
-def test_turn_schema_v4_round_trips_one_atomic_tool_batch() -> None:
+def test_turn_schema_v5_round_trips_one_atomic_tool_batch_and_ledger() -> None:
     batch = AssistantToolBatch(
         (
             ToolUse("mkdir-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
@@ -165,13 +196,64 @@ def test_turn_schema_v4_round_trips_one_atomic_tool_batch() -> None:
             ToolResult("mkdir-tests", "directory_created"),
             AssistantText("done"),
         ),
+        tool_ledger=successful_ledger(*batch.tool_uses),
     )
 
     encoded = encode_record(turn)
 
     assert decode_record(encoded) == turn
     assert b'"item_type":"assistant_tool_batch"' in encoded
-    assert encoded.count(b'"tool_use_id"') == 4
+    assert encoded.count(b'"tool_use_id"') == 6
+    assert b'"tool_ledger":{"entries":[' in encoded
+
+    legacy_v4 = replace(
+        turn,
+        schema_version=TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+        tool_ledger=ToolTurnLedger(),
+    )
+    legacy_encoded = encode_record(legacy_v4)
+    assert decode_record(legacy_encoded) == legacy_v4
+    assert b'"schema_version":4' in legacy_encoded
+    assert b'"tool_ledger"' not in legacy_encoded
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda value: value.pop("tool_ledger"), "missing required field"),
+        (
+            lambda value: value["tool_ledger"]["entries"][0].update(request_index=2),
+            "continuous",
+        ),
+        (
+            lambda value: value["tool_ledger"]["entries"][0].update(tool_name="read_file"),
+            "identity",
+        ),
+        (
+            lambda value: value["tool_ledger"]["entries"][0].update(outcome="failed"),
+            "contradicts",
+        ),
+    ],
+)
+def test_turn_schema_v5_rejects_missing_or_inconsistent_tool_ledger(mutate, match: str) -> None:
+    request = ToolUse("mkdir-1", "mkdir", ToolArguments.from_mapping({"path": "src"}))
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("create"),
+            request,
+            ToolResult("mkdir-1", "directory_created"),
+            AssistantText("done"),
+        ),
+        tool_ledger=successful_ledger(request),
+    )
+    value = json.loads(encode_record(turn))
+    mutate(value)
+
+    with pytest.raises(SessionRecordError, match=match):
+        decode_record(json.dumps(value).encode())
 
 
 def test_turn_schema_v2_remains_readable_and_cannot_claim_assistant_tool_text() -> None:
@@ -228,21 +310,23 @@ def test_turn_schema_v2_remains_readable_and_cannot_claim_assistant_tool_text() 
     ],
 )
 def test_turn_schema_v3_rejects_malformed_assistant_tool_text(mutate, match: str) -> None:
+    request = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will read it.",
+    )
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage("read"),
-            ToolUse(
-                "read-1",
-                "read_file",
-                ToolArguments.from_mapping({"path": "README.md"}),
-                assistant_text="I will read it.",
-            ),
+            request,
             ToolResult("read-1", "notes"),
             AssistantText("done"),
         ),
+        tool_ledger=successful_ledger(request),
     )
     value = json.loads(encode_record(turn))
     mutate(value["items"][1])
@@ -293,16 +377,18 @@ def test_codec_restores_conversation_payloads_larger_than_metadata_limit() -> No
     long_user = "用" * 5000
     long_assistant = "答" * 6000
     long_result = "结果" * 3000
+    request = ToolUse("tool-long", "read_file", ToolArguments.from_mapping({"path": "README.md"}))
     turn = TurnCommitted(
         sequence=1,
         committed_at=NOW,
         binding=BindingSnapshot.fake(),
         items=(
             UserMessage(long_user),
-            ToolUse("tool-long", "read_file", ToolArguments.from_mapping({"path": "README.md"})),
+            request,
             ToolResult("tool-long", long_result),
             AssistantText(long_assistant),
         ),
+        tool_ledger=successful_ledger(request),
     )
 
     decoded = decode_record(encode_record(turn))
@@ -507,6 +593,12 @@ def test_turn_v3_and_checkpoint_v2_replay_preserve_mixed_retained_history(
         )
         for index in range(1, 4)
     ]
+    mixed_request = ToolUse(
+        "mixed-4",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text="I will inspect first.",
+    )
     turns.append(
         TurnCommitted(
             sequence=4,
@@ -514,15 +606,11 @@ def test_turn_v3_and_checkpoint_v2_replay_preserve_mixed_retained_history(
             binding=binding,
             items=(
                 UserMessage("u4"),
-                ToolUse(
-                    "mixed-4",
-                    "read_file",
-                    ToolArguments.from_mapping({"path": "README.md"}),
-                    assistant_text="I will inspect first.",
-                ),
+                mixed_request,
                 ToolResult("mixed-4", "notes"),
                 AssistantText("a4"),
             ),
+            tool_ledger=successful_ledger(mixed_request),
         )
     )
     prompt = build_compact_prompt()

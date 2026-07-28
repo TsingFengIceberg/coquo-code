@@ -14,6 +14,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestLimited,
     ToolRequestSkipped,
     ToolRequestStarted,
+    ToolTurnSummaryCommitted,
 )
 from leonervis_code.cli.presentation import (
     BLUE,
@@ -41,7 +42,14 @@ from leonervis_code.providers.request_context import (
     RequestTokenCountMethod,
 )
 from leonervis_code.core.compaction import CompactionTrigger
-from leonervis_code.core.contracts import AssistantText, ToolArguments, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolTurnLedger,
+    UserMessage,
+)
 from leonervis_code.core.permissions import (
     PermissionAction,
     PermissionDecision,
@@ -596,6 +604,22 @@ def test_tool_prompt_events_render_stable_safe_lines_and_semantic_kinds() -> Non
     ) == (
         "[tool 2/32] mkdir skipped: prior_batch_action_not_succeeded",
         "warning",
+    )
+    ledger = ToolTurnLedger(
+        (
+            ToolOutcomeEntry("write-1", "write_file", 1, ToolRequestOutcome.SUCCEEDED),
+            ToolOutcomeEntry(
+                "write-2",
+                "write_file",
+                2,
+                ToolRequestOutcome.SKIPPED_AFTER_FAILURE,
+                "prior_batch_action_not_succeeded",
+            ),
+        )
+    )
+    assert render_prompt_event(ToolTurnSummaryCommitted(ledger)) == (
+        "Tool summary: requested=2 admitted=2 dispatched=1 succeeded=1 skipped=1",
+        "info",
     )
 
     expected_kinds = {
