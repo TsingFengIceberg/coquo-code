@@ -14,6 +14,12 @@ from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_s
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, grep_regex_tool_snapshot
+from leonervis_code.tools.git_diff import (
+    GIT_DIFF_TOOL_NAME,
+    GitDiffScope,
+    git_diff_tool_snapshot,
+)
+from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, git_status_tool_snapshot
 from leonervis_code.tools.list_directory import (
     LIST_DIRECTORY_TOOL_NAME,
     list_directory_tool_snapshot,
@@ -80,6 +86,8 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     list_tree_tool_snapshot(),
     grep_regex_tool_snapshot(),
     patch_file_tool_snapshot(),
+    git_status_tool_snapshot(),
+    git_diff_tool_snapshot(),
 )
 
 
@@ -155,6 +163,10 @@ def _expected_keys(name: str) -> set[str]:
         return {"pattern", "include"}
     if name == PATCH_FILE_TOOL_NAME:
         return {"path", "edits"}
+    if name == GIT_STATUS_TOOL_NAME:
+        return set()
+    if name == GIT_DIFF_TOOL_NAME:
+        return {"scope", "path"}
     raise ValueError(f"unsupported tool: {name}")
 
 
@@ -244,6 +256,16 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
             allow_whitespace=True,
         )
         _validate_input_string(tool_input["include"], label="grep_regex include")
+        return
+
+    if name == GIT_DIFF_TOOL_NAME:
+        scope = tool_input["scope"]
+        if not isinstance(scope, str) or scope not in {
+            GitDiffScope.UNSTAGED.value,
+            GitDiffScope.STAGED.value,
+        }:
+            raise ValueError("git_diff scope is invalid")
+        _validate_input_string(tool_input["path"], label="git_diff path")
         return
 
     for key in expected:

@@ -105,20 +105,21 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 1) == "/history"
     assert complete_command("/", 2) == "/actions"
     assert complete_command("/", 3) == "/tools"
-    assert complete_command("/", 4) == "/exit"
-    assert complete_command("/", 5) == "/quit"
-    assert complete_command("/", 6) == "/status"
-    assert complete_command("/", 7) == "/context"
-    assert complete_command("/", 8) == "/usage"
-    assert complete_command("/", 9) == "/output"
-    assert complete_command("/", 10) == "/compact"
-    assert complete_command("/", 11) == "/compactions"
-    assert complete_command("/", 12) == "/provider"
-    assert complete_command("/", 13) == "/model"
-    assert complete_command("/", 14) == "/session"
-    assert complete_command("/", 15) == "/resume"
-    assert complete_command("/", 16) == "/clear"
-    assert complete_command("/", 17) is None
+    assert complete_command("/", 4) == "/changes"
+    assert complete_command("/", 5) == "/exit"
+    assert complete_command("/", 6) == "/quit"
+    assert complete_command("/", 7) == "/status"
+    assert complete_command("/", 8) == "/context"
+    assert complete_command("/", 9) == "/usage"
+    assert complete_command("/", 10) == "/output"
+    assert complete_command("/", 11) == "/compact"
+    assert complete_command("/", 12) == "/compactions"
+    assert complete_command("/", 13) == "/provider"
+    assert complete_command("/", 14) == "/model"
+    assert complete_command("/", 15) == "/session"
+    assert complete_command("/", 16) == "/resume"
+    assert complete_command("/", 17) == "/clear"
+    assert complete_command("/", 18) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -487,7 +488,8 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
     rendered = output.getvalue()
     assert loop.prompts == []
     assert (
-        "Commands: /help, /history <count>, /actions [count], /tools [count], /session" in rendered
+        "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, /session"
+        in rendered
     )
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 

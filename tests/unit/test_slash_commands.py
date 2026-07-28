@@ -145,6 +145,38 @@ class Session:
         assert 1 <= limit <= 20
         return ToolLedgerQueryResult(0, ())
 
+    def git_status(self):
+        return type(
+            "GitStatus",
+            (),
+            {
+                "entries": (
+                    type(
+                        "Entry",
+                        (),
+                        {
+                            "path": "note.txt",
+                            "index": "clean",
+                            "worktree": "modified",
+                            "original_path": None,
+                        },
+                    )(),
+                ),
+                "truncated": False,
+            },
+        )()
+
+    def git_diff(self, scope):
+        return type(
+            "GitDiff",
+            (),
+            {
+                "scope": type("Scope", (), {"value": scope})(),
+                "content": "+change\n",
+                "truncated": False,
+            },
+        )()
+
     def usage(self):
         return RuntimeUsageTracker().snapshot()
 
@@ -221,6 +253,12 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
         "No committed or failed turn usage is available in this Session."
     )
     assert dispatch_slash("/usage extra", session).message == "Usage: /usage [session|turns]"
+    assert "path=note.txt" in dispatch_slash("/changes", session).message
+    assert dispatch_slash("/changes unstaged", session).message == (
+        "Git diff (unstaged):\n+change\n"
+    )
+    assert dispatch_slash("/changes staged", session).message == ("Git diff (staged):\n+change\n")
+    assert dispatch_slash("/changes both", session).message == ("Usage: /changes [unstaged|staged]")
     assert "real provider runtime" in dispatch_slash("/output", session).message
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"

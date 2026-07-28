@@ -21,6 +21,8 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_compact_preview,
     render_compaction_history,
+    render_git_diff,
+    render_git_status,
     render_provider_adapter_error,
     render_output_budget,
     render_output_budget_rejection,
@@ -49,12 +51,14 @@ from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS
 from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
+from leonervis_code.tools.git_repository import GitObservationError
 
 TOP_LEVEL_COMMANDS = (
     "/help",
     "/history",
     "/actions",
     "/tools",
+    "/changes",
     "/exit",
     "/quit",
     "/status",
@@ -85,6 +89,9 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/history", "Show recent Session turns", True),
     SlashCompletionSpec("/actions", "Show recent Action Audit", True),
     SlashCompletionSpec("/tools", "Show durable tool ledgers", True),
+    SlashCompletionSpec("/changes", "Show Git working changes", True),
+    SlashCompletionSpec("/changes unstaged", "Show unstaged tracked patch"),
+    SlashCompletionSpec("/changes staged", "Show staged tracked patch"),
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
@@ -117,6 +124,10 @@ class ReplSession(Protocol):
     def action_audits(self): ...
 
     def tool_ledgers(self, limit: int): ...
+
+    def git_status(self): ...
+
+    def git_diff(self, scope: str): ...
 
     def status(self): ...
 
@@ -217,6 +228,13 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         )
     if command.startswith("/usage "):
         return _usage("Usage: /usage [session|turns]")
+    if command == "/changes":
+        return _call(lambda: render_git_status(session.git_status()), kind="info")
+    if command in {"/changes unstaged", "/changes staged"}:
+        scope = command.split()[1]
+        return _call(lambda: render_git_diff(session.git_diff(scope)), kind="plain")
+    if command.startswith("/changes "):
+        return _usage("Usage: /changes [unstaged|staged]")
     if command == "/output" or command.startswith("/output "):
         return _output(command, session)
     if command == "/compact preview":
@@ -541,6 +559,7 @@ def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
         error,
         (
             CompactionError,
+            GitObservationError,
             ProviderProfileError,
             RuntimeProviderStateError,
             RuntimeRouteError,

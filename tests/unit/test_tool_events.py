@@ -83,6 +83,12 @@ def request(name: str, arguments: dict[str, object]) -> ToolUse:
             },
             "path='app.py' edits=2",
         ),
+        ("git_status", {}, "repository=."),
+        (
+            "git_diff",
+            {"scope": "staged", "path": "src/app.py"},
+            "scope='staged' path='src/app.py'",
+        ),
     ],
 )
 def test_safe_summaries_cover_the_complete_tool_surface_without_content(

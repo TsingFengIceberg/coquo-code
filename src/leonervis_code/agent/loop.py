@@ -62,6 +62,8 @@ from leonervis_code.tools.catalog import (
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
 from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
+from leonervis_code.tools.git_diff import GIT_DIFF_TOOL_NAME, GitDiffTool
+from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, GitStatusTool
 from leonervis_code.tools.list_directory import LIST_DIRECTORY_TOOL_NAME, ListDirectoryTool
 from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
@@ -123,6 +125,8 @@ class AgentLoop:
         list_tree: ListTreeTool | None = None,
         grep_regex: GrepRegexTool | None = None,
         *,
+        git_status: GitStatusTool | None = None,
+        git_diff: GitDiffTool | None = None,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
         initial_effective_summary: EffectiveContextSummary | None = None,
@@ -141,6 +145,8 @@ class AgentLoop:
         self._stat_path = stat_path
         self._list_tree = list_tree
         self._grep_regex = grep_regex
+        self._git_status = git_status
+        self._git_diff = git_diff
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -537,6 +543,10 @@ class AgentLoop:
             result = self._list_tree.execute(request)
         elif request.name == GREP_REGEX_TOOL_NAME and self._grep_regex is not None:
             result = self._grep_regex.execute(request)
+        elif request.name == GIT_STATUS_TOOL_NAME and self._git_status is not None:
+            result = self._git_status.execute(request)
+        elif request.name == GIT_DIFF_TOOL_NAME and self._git_diff is not None:
+            result = self._git_diff.execute(request)
         else:
             result = ToolResult(
                 tool_use_id=request.tool_use_id,

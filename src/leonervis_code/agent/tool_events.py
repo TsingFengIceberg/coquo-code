@@ -306,6 +306,13 @@ def safe_tool_request_summary(request: ToolUse) -> str:
         edits = arguments.get("edits")
         edit_count = len(edits) if isinstance(edits, list) else "<invalid>"
         summary = f"path={_safe_path(arguments.get('path'))} edits={edit_count}"
+    elif name == "git_status":
+        summary = "repository=."
+    elif name == "git_diff":
+        summary = (
+            f"scope={_safe_argument(arguments.get('scope'))} "
+            f"path={_safe_path(arguments.get('path'))}"
+        )
     else:
         summary = "arguments=<redacted>"
     return summary[:MAX_TOOL_EVENT_SUMMARY_CHARACTERS]

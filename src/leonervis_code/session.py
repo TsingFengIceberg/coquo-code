@@ -139,6 +139,17 @@ from leonervis_code.tools.edit_file import (
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
+from leonervis_code.tools.git_diff import (
+    GIT_DIFF_TOOL_NAME,
+    GitDiffScope,
+    GitDiffSnapshot,
+    GitDiffTool,
+)
+from leonervis_code.tools.git_status import (
+    GIT_STATUS_TOOL_NAME,
+    GitStatusSnapshot,
+    GitStatusTool,
+)
 from leonervis_code.tools.list_directory import (
     LIST_DIRECTORY_TOOL_NAME,
     ListDirectoryTool,
@@ -474,6 +485,8 @@ class ProjectSession:
         list_tree: ListTreeTool | None = None,
         grep_regex: GrepRegexTool | None = None,
         patch_file: PatchFileTool | None = None,
+        git_status: GitStatusTool | None = None,
+        git_diff: GitDiffTool | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -503,6 +516,8 @@ class ProjectSession:
         self._list_tree = list_tree or ListTreeTool(workspace)
         self._grep_regex = grep_regex or GrepRegexTool(workspace)
         self._patch_file = patch_file or PatchFileTool(workspace)
+        self._git_status = git_status or GitStatusTool(workspace)
+        self._git_diff = git_diff or GitDiffTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -556,6 +571,8 @@ class ProjectSession:
         list_tree_factory: Callable[[Path], ListTreeTool] = ListTreeTool,
         grep_regex_factory: Callable[[Path], GrepRegexTool] = GrepRegexTool,
         patch_file_factory: Callable[[Path], PatchFileTool] = PatchFileTool,
+        git_status_factory: Callable[[Path], GitStatusTool] = GitStatusTool,
+        git_diff_factory: Callable[[Path], GitDiffTool] = GitDiffTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -607,6 +624,8 @@ class ProjectSession:
             list_tree = list_tree_factory(resolved_workspace)
             grep_regex = grep_regex_factory(resolved_workspace)
             patch_file = patch_file_factory(resolved_workspace)
+            git_status = git_status_factory(resolved_workspace)
+            git_diff = git_diff_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -634,6 +653,8 @@ class ProjectSession:
                     list_tree=list_tree,
                     grep_regex=grep_regex,
                     patch_file=patch_file,
+                    git_status=git_status,
+                    git_diff=git_diff,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -653,6 +674,8 @@ class ProjectSession:
                     stat_path,
                     list_tree,
                     grep_regex,
+                    git_status,
+                    git_diff,
                     commit_turn=lambda turn: session_holder["session"]._commit_turn(
                         writer_holder["writer"], turn
                     ),
@@ -697,6 +720,8 @@ class ProjectSession:
                     list_tree=list_tree,
                     grep_regex=grep_regex,
                     patch_file=patch_file,
+                    git_status=git_status,
+                    git_diff=git_diff,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -753,6 +778,18 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._writer.state.action_audits
+
+    def git_status(self) -> GitStatusSnapshot:
+        """Observe current repository status without model invocation or Session mutation."""
+        with self._lock:
+            self._ensure_open()
+            return self._git_status.observe()
+
+    def git_diff(self, scope: GitDiffScope | str) -> GitDiffSnapshot:
+        """Observe one root-scoped repository patch without changing durable state."""
+        with self._lock:
+            self._ensure_open()
+            return self._git_diff.observe(scope, ".")
 
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""
@@ -814,6 +851,8 @@ class ProjectSession:
                     self._stat_path,
                     self._list_tree,
                     self._grep_regex,
+                    self._git_status,
+                    self._git_diff,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
@@ -1421,6 +1460,8 @@ class ProjectSession:
         stat_path,
         list_tree,
         grep_regex,
+        git_status,
+        git_diff,
         *,
         commit_turn,
     ) -> AgentLoop:
@@ -1434,6 +1475,8 @@ class ProjectSession:
             stat_path,
             list_tree,
             grep_regex,
+            git_status=git_status,
+            git_diff=git_diff,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -1452,6 +1495,8 @@ class ProjectSession:
             self._stat_path,
             self._list_tree,
             self._grep_regex,
+            self._git_status,
+            self._git_diff,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
         loop.install_action_dispatcher(self._dispatch_action)
@@ -1482,6 +1527,8 @@ class ProjectSession:
             STAT_PATH_TOOL_NAME,
             LIST_TREE_TOOL_NAME,
             GREP_REGEX_TOOL_NAME,
+            GIT_STATUS_TOOL_NAME,
+            GIT_DIFF_TOOL_NAME,
         }:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1672,6 +1719,10 @@ class ProjectSession:
                 result = self._list_tree.execute(request)
             elif request.name == GREP_REGEX_TOOL_NAME:
                 result = self._grep_regex.execute(request)
+            elif request.name == GIT_STATUS_TOOL_NAME:
+                result = self._git_status.execute(request)
+            elif request.name == GIT_DIFF_TOOL_NAME:
+                result = self._git_diff.execute(request)
             elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
                 write_result = self._write_file.execute_detailed(prepared_write)
                 outcome = {

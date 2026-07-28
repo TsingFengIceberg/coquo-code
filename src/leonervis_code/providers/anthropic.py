@@ -453,6 +453,14 @@ def patch_file_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[16]
 
 
+def git_status_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[17]
+
+
+def git_diff_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[18]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

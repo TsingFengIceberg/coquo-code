@@ -50,7 +50,7 @@ CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
+    "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, /session, "
     "/provider, /status, "
     "/context, /usage [session|turns], /output [tokens|reset], /compact, "
     "/compactions [count], "
@@ -169,6 +169,24 @@ class TurnToolLedgerView(Protocol):
     ledger: object | None
 
 
+class GitStatusEntryView(Protocol):
+    path: str
+    index: str
+    worktree: str
+    original_path: str | None
+
+
+class GitStatusSnapshotView(Protocol):
+    entries: tuple[GitStatusEntryView, ...]
+    truncated: bool
+
+
+class GitDiffSnapshotView(Protocol):
+    scope: object
+    content: str
+    truncated: bool
+
+
 class ToolLedgerQueryResultView(Protocol):
     total_turns: int
     turns: tuple[TurnToolLedgerView, ...]
@@ -243,6 +261,32 @@ def render_recent_history(turns: tuple[ConversationTurnView, ...], count: int) -
     return "\n\n".join(
         f"User: {turn.user.text}\nAssistant: {turn.assistant.text}" for turn in recent_turns
     )
+
+
+def render_git_status(snapshot: GitStatusSnapshotView) -> str:
+    """Render bounded repository states without exposing file contents."""
+    if not snapshot.entries:
+        return "Git status: clean."
+    qualifier = " (truncated)" if snapshot.truncated else ""
+    lines = [f"Git status: {len(snapshot.entries)} visible changes{qualifier}."]
+    for entry in snapshot.entries:
+        path = _safe_inline(entry.path)
+        origin = ""
+        if entry.original_path is not None:
+            origin = f" <- {_safe_inline(entry.original_path)}"
+        lines.append(f"  index={entry.index} worktree={entry.worktree} path={path}{origin}")
+    if snapshot.truncated:
+        lines.append("More changed paths were omitted by the bounded status view.")
+    return "\n".join(lines)
+
+
+def render_git_diff(snapshot: GitDiffSnapshotView) -> str:
+    """Render one bounded patch while neutralizing terminal control characters."""
+    scope = getattr(snapshot.scope, "value", str(snapshot.scope))
+    if not snapshot.content:
+        return f"Git diff ({scope}): no tracked changes."
+    suffix = " · truncated" if snapshot.truncated else ""
+    return f"Git diff ({scope}{suffix}):\n{_escape_terminal_text(snapshot.content)}"
 
 
 def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str:
@@ -1021,6 +1065,17 @@ def _safe_inline(value: str) -> str:
     """Escape control characters before rendering persisted text in a terminal."""
     rendered = repr(value)
     return rendered[1:-1]
+
+
+def _escape_terminal_text(value: str) -> str:
+    rendered: list[str] = []
+    for character in value:
+        code = ord(character)
+        if character in {"\n", "\t"} or (code >= 0x20 and code != 0x7F):
+            rendered.append(character)
+        else:
+            rendered.append(f"\\x{code:02x}")
+    return "".join(rendered)
 
 
 def _tool_ledger_fields(ledger: object) -> list[str]:

@@ -45,6 +45,8 @@
 - [Context and Compaction Observability](#context-and-compaction-observability)
 - [Provider Output-limit and Compaction Failure Diagnostics](#provider-output-limit-and-compaction-failure-diagnostics)
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
+- [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
+- [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -68,7 +70,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-The canonical model system prompt is now version 19. It permits brief companion text for a whole response batch and states that the Host completely validates up to eight ordered calls before sequential execution. One user turn admits at most 32 tool requests and 24 provider invocations, with the last invocation restricted to text. During forced text-only finalization, the model must use the `Host tool ledger:` counts in the last real Tool result: `unused_admission_slots` is only unused capacity, while `tool_requests_closed=true` means no further call is possible even when a slot remains. The ordinary Agent still cannot initiate compaction. The existing 17 model-visible tools, PermissionGate, approval, Action Audit, and per-tool hard bounds remain intact; a multi-call response never grants parallel execution.
+The canonical model system prompt is now version 20. It permits brief companion text for a whole response batch and states that the Host completely validates up to eight ordered calls before sequential execution. One user turn admits at most 32 tool requests and 24 provider invocations, with the last invocation restricted to text. During forced text-only finalization, the model must use the `Host tool ledger:` counts in the last real Tool result: `unused_admission_slots` is only unused capacity, while `tool_requests_closed=true` means no further call is possible even when a slot remains. The ordinary Agent still cannot initiate compaction. The current 19 model-visible tools include bounded `git_status` and `git_diff`; PermissionGate, approval, Action Audit, and every per-tool hard bound remain Host-enforced, and a multi-call response never grants parallel execution.
 
 It explicitly does not claim recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, non-empty directory deletion, directory movement, recursive mkdir, shell source strings, interactive PTYs, OS/network sandboxing, compaction initiation, project-instruction loading, or multi-agent capabilities. Prompt instructions also do not replace the Host's hard workspace, symlink, encoding, size, exact-state conflict, timeout/process cleanup, causality, audit, and durability constraints.
 
@@ -651,6 +653,14 @@ Successful usage commits atomically with its turn or checkpoint; failed usage co
 
 This slice leaves canonical system prompt v19, provider adapter contract v22, the 17 tools and order, ToolArguments v1, ActionIdentity v1, Action Audit v1, and Effective Context `ctx-v3`/`ctx-v4` unchanged. New records use `turn_committed` v6, `turn_failed` v2, and `context_compacted` v4; old prefixes are not rewritten. See [0062: Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md).
 
+## Bounded Read-only Git Change Observation
+
+The model-visible surface now appends `git_status` and `git_diff` after the existing 17 tools. `git_status({})` parses staged, unstaged, and untracked path states from the workspace-root repository into stable JSONL without reading untracked file content. Complete raw status is limited to 1 MiB and 10,000 entries, while model output is limited to 200 records or 32 KiB with an explicit truncation sentinel. `git_diff(scope, path)` accepts only `staged | unstaged` plus `.` or one literal workspace-relative path, returns only tracked patches, and disables rename detection, external diff, text conversion, and submodule recursion. Its output is limited to 64 KiB with explicit truncation.
+
+The dedicated runner uses fixed argv, `shell=False`, closed stdin, a five-second timeout, bounded pipe capture, and TERM-to-KILL process-group cleanup. It disables optional locks, pager, prompts, fsmonitor, untracked cache, hooks, external config/attributes, external diff, and submodule recursion. V1 requires the workspace itself to be the Git top level with an internal non-symlink `.git` directory. Linked-worktree pointers, `commondir`, object alternates, external config includes, configured external filters, unsafe metadata, and non-repository workspaces fail safely. This is a bounded Git-process boundary rather than an OS sandbox, and it accepts neither arbitrary Git argv/revisions nor writes.
+
+The model tools remain `workspace-read` actions passing through PermissionGate, Action Audit, and the shared 8/32/24 budget. The REPL adds `/changes`, `/changes unstaged`, and `/changes staged` to render status or terminal-control-escaped root patches without provider invocation, tool-budget consumption, Session mutation, or Action Audit. Canonical system prompt advances to v20, provider adapter contract advances to v23, and the 19-tool catalog changes the empty full-context identity to `ctx-v3-cb7ce2ad36fc600b23c66362f02e4e139beee17e721a06eb490b82a7ae302a9e`. ToolArguments v1, ActionIdentity v1, Session/Action Audit schemas, and `ctx-v3`/`ctx-v4` representations do not advance, and old Sessions are not rewritten. See [0063: Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -878,3 +888,5 @@ This slice establishes capacity facts only. It does not count current request to
 59. [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
 60. [0060: Provider Output-limit and Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)
 61. [0061: Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)
+62. [0062: Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)
+63. [0063: Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)

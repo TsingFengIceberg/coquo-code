@@ -29,6 +29,8 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "list_tree",
         "grep_regex",
         "patch_file",
+        "git_status",
+        "git_diff",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -259,6 +261,10 @@ def test_catalog_validates_new_navigation_regex_and_patch_inputs() -> None:
     }
     tool_use_from_input("stat-1", "stat_path", {"path": "."})
     tool_use_from_input("regex-1", "grep_regex", {"pattern": r"test_\d+", "include": "**/*.py"})
+    assert tool_input_from_use(tool_use_from_input("status-1", "git_status", {})) == {}
+    assert tool_input_from_use(
+        tool_use_from_input("diff-1", "git_diff", {"scope": "staged", "path": "src/app.py"})
+    ) == {"scope": "staged", "path": "src/app.py"}
 
 
 @pytest.mark.parametrize(
@@ -270,6 +276,9 @@ def test_catalog_validates_new_navigation_regex_and_patch_inputs() -> None:
         ("grep_regex", {"pattern": "x", "include": 1}),
         ("patch_file", {"path": "a", "edits": []}),
         ("patch_file", {"path": "a", "edits": [{"old_text": "x"}]}),
+        ("git_status", {"extra": "x"}),
+        ("git_diff", {"scope": "both", "path": "."}),
+        ("git_diff", {"scope": "staged"}),
     ],
 )
 def test_catalog_rejects_malformed_new_tool_inputs(

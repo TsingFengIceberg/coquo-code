@@ -45,6 +45,8 @@
 - [Context 与 Compaction Observability](#context-与-compaction-observability)
 - [Provider Output-limit 与 Compaction Failure Diagnostics](#provider-output-limit-与-compaction-failure-diagnostics)
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
+- [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
+- [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -68,7 +70,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 19。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。既有17个model-visible tools、PermissionGate、approval、Action Audit及各工具hard bounds均不变，多call response也不获得并行执行许可。
+Canonical model system prompt当前为version 20。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。当前19个model-visible tools包含有界`git_status`与`git_diff`；PermissionGate、approval、Action Audit及各工具hard bounds继续由Host强制，多call response不获得并行执行许可。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -651,6 +653,14 @@ Provider实际Token用量现在不仅保留在进程内tracker，也附着到严
 
 该slice保持canonical system prompt v19、provider adapter contract v22、17工具及顺序、ToolArguments v1、ActionIdentity v1、Action Audit v1和Effective Context `ctx-v3`/`ctx-v4`不变。新记录使用`turn_committed` v6、`turn_failed` v2和`context_compacted` v4；旧prefix不重写。完整决策见[0062：Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)。
 
+## Bounded Read-only Git Change Observation
+
+模型可见工具面现在在原17个工具之后追加`git_status`和`git_diff`。`git_status({})`把workspace顶层仓库的staged、unstaged和untracked路径状态解析为稳定排序的JSONL，不读取untracked文件内容；完整raw status最多1 MiB和10,000条，模型结果最多200条或32 KiB，截断时有明确sentinel。`git_diff(scope, path)`只接受`staged | unstaged`与`.`或literal workspace-relative path，只返回tracked patch，不执行rename detection、external diff、textconv或submodule recursion；结果最多64 KiB并显式标记截断。
+
+专用runner使用固定argv、`shell=False`、closed stdin、5秒timeout、有界pipe capture与TERM到KILL process-group cleanup，并关闭optional locks、pager、prompt、fsmonitor、untracked cache、hooks、外部config/attributes、external diff和submodule recursion。V1要求workspace本身就是Git顶层且使用内部non-symlink `.git`目录；linked-worktree pointer、`commondir`、object alternates、external config include、configured external filter、unsafe metadata和非Git workspace都会安全失败。它是有界Git进程边界而非OS sandbox，也不接受任意Git argv、revision或写操作。
+
+模型工具继续按`workspace-read`经过PermissionGate、Action Audit与共享8/32/24预算。REPL新增`/changes`、`/changes unstaged`和`/changes staged`，直接显示status或经过terminal-control转义的root patch，不调用provider、不消耗tool budget、不写Session或Action Audit。Canonical system prompt升级为v20，provider adapter contract升级为v23，19-tool catalog使empty full-context identity变为`ctx-v3-cb7ce2ad36fc600b23c66362f02e4e139beee17e721a06eb490b82a7ae302a9e`；ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas与`ctx-v3`/`ctx-v4`representation不升级，旧Session不重写。完整决策见[0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -878,3 +888,5 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 59. [0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
 60. [0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)
 61. [0061：Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)
+62. [0062：Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)
+63. [0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)

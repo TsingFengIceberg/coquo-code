@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from uuid import UUID
 
 import pytest
@@ -176,6 +177,48 @@ def test_list_directory_is_workspace_read_audited_and_committed_without_approval
         assert audit.result_code == "ok"
         assert audit.identity.action.value == "workspace-read"
         assert audit.identity.tool_name == "list_directory"
+    finally:
+        session.close()
+
+
+def test_git_observation_tools_are_read_only_audited_and_committed_without_approval(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Leonervis Tests"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("after\n", encoding="utf-8")
+    status_call = ToolUse("status-1", "git_status", ToolArguments.from_mapping({}))
+    diff_call = ToolUse(
+        "diff-1",
+        "git_diff",
+        ToolArguments.from_mapping({"scope": "unstaged", "path": "tracked.txt"}),
+    )
+    provider = ToolProvider(
+        [AssistantToolBatch((status_call, diff_call)), AssistantText("observed")]
+    )
+    approvals = []
+    session = open_session(
+        tmp_path,
+        provider,
+        approval_handler=lambda approval: approvals.append(approval),
+    )
+    try:
+        assert session.prompt("inspect Git changes") == "observed"
+        continuation = provider.requests[1].history
+        assert '"path":"tracked.txt"' in continuation[-2].content
+        assert "-before" in continuation[-1].content
+        assert "+after" in continuation[-1].content
+        assert approvals == []
+        audits = session.action_audits()
+        assert [audit.identity.tool_name for audit in audits] == ["git_status", "git_diff"]
+        assert all(audit.identity.action.value == "workspace-read" for audit in audits)
+        assert all(audit.status == ActionAuditStatus.SUCCEEDED for audit in audits)
     finally:
         session.close()
 

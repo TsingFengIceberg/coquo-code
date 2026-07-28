@@ -29,6 +29,8 @@ from leonervis_code.cli.presentation import (
     render_compaction_history,
     render_context_inspection,
     render_context_meter,
+    render_git_diff,
+    render_git_status,
     render_action_audits,
     render_message,
     render_output_budget,
@@ -111,6 +113,35 @@ from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.git_diff import GitDiffScope, GitDiffSnapshot
+from leonervis_code.tools.git_status import GitStatusEntry, GitStatusSnapshot
+
+
+def test_render_git_changes_is_bounded_clear_and_terminal_safe() -> None:
+    status = GitStatusSnapshot(
+        (
+            GitStatusEntry("new\nname.txt", "added", "clean"),
+            GitStatusEntry("renamed.txt", "renamed", "clean", "old.txt"),
+        ),
+        True,
+        "unused",
+    )
+    rendered_status = render_git_status(status)
+    assert "2 visible changes (truncated)" in rendered_status
+    assert "new\\nname.txt" in rendered_status
+    assert "renamed.txt <- old.txt" in rendered_status
+    assert "omitted" in rendered_status
+
+    diff = GitDiffSnapshot(
+        GitDiffScope.UNSTAGED,
+        ".",
+        "diff --git a/a b/a\n+unsafe\x1b[2J\r\n",
+        False,
+    )
+    rendered_diff = render_git_diff(diff)
+    assert "Git diff (unstaged):" in rendered_diff
+    assert "\\x1b[2J\\x0d" in rendered_diff
+    assert "\x1b" not in rendered_diff
 
 
 @dataclass
