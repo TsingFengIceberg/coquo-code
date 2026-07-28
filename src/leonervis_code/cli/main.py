@@ -17,11 +17,14 @@ from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
+    DEFAULT_TOOL_LEDGER_COUNT,
     MAX_ACTION_AUDIT_COUNT,
+    MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
     render_resume_rejection,
     render_session_resume,
     render_session_summary,
+    render_tool_ledgers,
 )
 from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
@@ -100,6 +103,18 @@ def action_audit_count(value: str) -> int:
     if not 1 <= count <= MAX_ACTION_AUDIT_COUNT:
         raise argparse.ArgumentTypeError(
             f"action audit limit must be between 1 and {MAX_ACTION_AUDIT_COUNT}"
+        )
+    return count
+
+
+def tool_ledger_count(value: str) -> int:
+    """Accept one bounded ASCII count for durable tool-ledger rendering."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("tool ledger limit must be an integer")
+    count = int(value)
+    if not 1 <= count <= MAX_TOOL_LEDGER_COUNT:
+        raise argparse.ArgumentTypeError(
+            f"tool ledger limit must be between 1 and {MAX_TOOL_LEDGER_COUNT}"
         )
     return count
 
@@ -246,6 +261,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=action_audit_count,
         default=DEFAULT_ACTION_AUDIT_COUNT,
         help=f"number of recent actions to show (default: {DEFAULT_ACTION_AUDIT_COUNT})",
+    )
+    session_tools = session_commands.add_parser(
+        "tools", help="show recent durable per-turn tool ledgers"
+    )
+    session_tools.add_argument("selector", nargs="?", default="latest")
+    session_tools.add_argument(
+        "--limit",
+        type=tool_ledger_count,
+        default=DEFAULT_TOOL_LEDGER_COUNT,
+        help=f"number of recent committed turns to show (default: {DEFAULT_TOOL_LEDGER_COUNT})",
+    )
+    session_tools.add_argument(
+        "--details",
+        action="store_true",
+        help="show bounded per-request tool names, outcomes, and safe result codes",
     )
     return parser
 
@@ -569,6 +599,11 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     if arguments.session_command == "actions":
         stdout.write(
             f"{render_action_audits(store.action_audits(arguments.selector), arguments.limit)}\n"
+        )
+        return 0
+    if arguments.session_command == "tools":
+        stdout.write(
+            f"{render_tool_ledgers(store.tool_ledgers(arguments.selector, arguments.limit), details=arguments.details)}\n"
         )
         return 0
     sessions = store.list()

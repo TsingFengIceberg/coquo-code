@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger可通过CLI或REPL安全查看。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
 
 ## 目录
 
@@ -169,6 +169,8 @@ uv run leonervis-code prompt "第一轮"
 uv run leonervis-code session list
 uv run leonervis-code session show latest
 uv run leonervis-code session actions latest
+uv run leonervis-code session tools latest
+uv run leonervis-code session tools latest --limit 5 --details
 uv run leonervis-code --resume latest prompt "继续上一轮"
 uv run leonervis-code --resume <session-uuid>
 ```
@@ -182,6 +184,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/help` | 查看控制命令 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions [count]` | 显示当前 Session 最近的脱敏 Action Audit，默认20条、最多100条 |
+| `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
+| `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/status` | 显示脱敏 runtime、model 和 context-window 状态 |
 | `/context` | 只读检查当前 Effective Context、内容 ID、计数与 target fit |
 | `/compact` | 使用当前真实 provider 手动总结较早完整回合并持久化 effective-context checkpoint |
@@ -202,6 +206,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /status
 /context
 /actions
+/tools details 3
 /compact
 /resume latest
 /history 5
@@ -253,6 +258,7 @@ git diff --check
 - [Sequential Tool-call Budget Hardening](./docs/decisions/0054-sequential-tool-call-budget-hardening.md)：超预算任务分批、multiple-call精确诊断与不变的顺序执行边界。
 - [Bounded Multi-tool Response Batches](./docs/decisions/0055-bounded-multi-tool-response-batches.md)：provider batch抽取、Host顺序执行、8/32/24预算、Session/context兼容与failure atomicity。
 - [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md)：逐请求Host计账、强制text-only权威摘要、Session v5与提交后终端汇总。
+- [Durable Tool Ledger Inspection](./docs/decisions/0057-durable-tool-ledger-inspection.md)：严格replay后的有界账本查询、`session tools`、`/tools`与旧Session可用性标记。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -290,4 +296,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有真实动作仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、结构化tool outcome ledger、脱敏live activity、mixed response、streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v19、provider adapter contract v20、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v5、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3/v4与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前计账设计见[ADR 0056](./docs/decisions/0056-structured-tool-outcome-ledger.md)。
+Provider batch、结构化tool outcome ledger及持久查看、脱敏live activity、mixed response、streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v19、provider adapter contract v20、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v5、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3/v4与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前查看设计见[ADR 0057](./docs/decisions/0057-durable-tool-ledger-inspection.md)。

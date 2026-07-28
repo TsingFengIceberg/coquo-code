@@ -90,6 +90,10 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
         session_store_factory=session_store_factory(SESSION_ONE),
     )
     assert first.prompt("hello") == "Fake response: hello"
+    first_ledgers = first.tool_ledgers(5)
+    assert first_ledgers.total_turns == 1
+    assert first_ledgers.turns[0].ledger is not None
+    assert first_ledgers.turns[0].ledger.requested == 0
     transcript = first.transcript_path
     first.close()
 
@@ -104,6 +108,9 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
 
     assert second.history == (UserMessage("hello"), AssistantText("Fake response: hello"))
     assert second.prompt("again") == "Fake response: again"
+    resumed_ledgers = second.tool_ledgers(1)
+    assert resumed_ledgers.total_turns == 2
+    assert resumed_ledgers.turns[0].turn_number == 2
     assert second.transcript_path == transcript
     second.close()
 

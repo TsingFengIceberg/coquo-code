@@ -38,7 +38,7 @@ from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionInfo
+from leonervis_code.session_store import SessionInfo, ToolLedgerQueryResult
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -98,17 +98,18 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 0) == "/help"
     assert complete_command("/", 1) == "/history"
     assert complete_command("/", 2) == "/actions"
-    assert complete_command("/", 3) == "/exit"
-    assert complete_command("/", 4) == "/quit"
-    assert complete_command("/", 5) == "/status"
-    assert complete_command("/", 6) == "/context"
-    assert complete_command("/", 7) == "/compact"
-    assert complete_command("/", 8) == "/provider"
-    assert complete_command("/", 9) == "/model"
-    assert complete_command("/", 10) == "/session"
-    assert complete_command("/", 11) == "/resume"
-    assert complete_command("/", 12) == "/clear"
-    assert complete_command("/", 13) is None
+    assert complete_command("/", 3) == "/tools"
+    assert complete_command("/", 4) == "/exit"
+    assert complete_command("/", 5) == "/quit"
+    assert complete_command("/", 6) == "/status"
+    assert complete_command("/", 7) == "/context"
+    assert complete_command("/", 8) == "/compact"
+    assert complete_command("/", 9) == "/provider"
+    assert complete_command("/", 10) == "/model"
+    assert complete_command("/", 11) == "/session"
+    assert complete_command("/", 12) == "/resume"
+    assert complete_command("/", 13) == "/clear"
+    assert complete_command("/", 14) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -476,7 +477,9 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert "Commands: /help, /history <count>, /actions [count], /session, /provider" in rendered
+    assert (
+        "Commands: /help, /history <count>, /actions [count], /tools [count], /session" in rendered
+    )
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 
@@ -677,6 +680,9 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
         def action_audits(self):
             return ()
 
+        def tool_ledgers(self, limit):
+            return ToolLedgerQueryResult(0, ())
+
         def latest_session_info(self):
             return self._info(self.latest)
 
@@ -721,7 +727,7 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     run_repl(
         session,
         stdin=io.StringIO(
-            "/session show\n/session list\n/actions\n/session new\n/session show\n"
+            "/session show\n/session list\n/actions\n/tools details\n/session new\n/session show\n"
             "/resume 22345678-1234-4234-9234-123456789abc\nHello\n/exit\n"
         ),
         stdout=output,
@@ -738,6 +744,7 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     assert "Started new session 32345678-1234-4234-9234-123456789abc" in rendered
     assert "runtime provider unchanged" in rendered
     assert "No action audits yet." in rendered
+    assert "No committed turns yet." in rendered
     assert "12345678-1234-4234-9234-123456789abc [current]" in rendered
     assert "22345678-1234-4234-9234-123456789abc [latest]" in rendered
 

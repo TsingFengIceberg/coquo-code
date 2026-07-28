@@ -19,7 +19,16 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.cli.main import main
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
-from leonervis_code.core.contracts import AssistantText, ToolArguments
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolResult,
+    ToolTurnLedger,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionAction,
@@ -382,12 +391,86 @@ def test_session_actions_replays_recent_redacted_action_audits(tmp_path) -> None
     assert str(tmp_path) not in rendered
 
 
+def test_session_tools_renders_durable_summary_and_safe_details(tmp_path) -> None:
+    binding = BindingSnapshot.fake()
+    writer = SessionStore(tmp_path).create(binding)
+    tool_use = ToolUse(
+        "private-tool-id",
+        "read_file",
+        ToolArguments.from_mapping({"path": "private-name.txt"}),
+    )
+    writer.append_turn(
+        (
+            UserMessage("private prompt"),
+            tool_use,
+            ToolResult(tool_use.tool_use_id, "private result"),
+            AssistantText("private answer"),
+        ),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(
+            (
+                ToolOutcomeEntry(
+                    tool_use.tool_use_id,
+                    tool_use.name,
+                    1,
+                    ToolRequestOutcome.SUCCEEDED,
+                    "ok",
+                ),
+            )
+        ),
+    )
+    writer.close()
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    status = main(
+        ["session", "tools", "latest", "--limit", "1", "--details"],
+        cwd=tmp_path,
+        stdout=output,
+        stderr=errors,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+    )
+
+    assert status == 0
+    assert errors.getvalue() == ""
+    rendered = output.getvalue()
+    assert "requested=1 admitted=1 dispatched=1 succeeded=1" in rendered
+    assert "#1 read_file: succeeded (ok)" in rendered
+    assert "private-tool-id" not in rendered
+    assert "private-name.txt" not in rendered
+    assert "private prompt" not in rendered
+    assert "private result" not in rendered
+    assert "private answer" not in rendered
+
+
 def test_session_actions_is_read_only_when_no_session_root_exists(tmp_path) -> None:
     output = io.StringIO()
     errors = io.StringIO()
 
     status = main(
         ["session", "actions", "latest"],
+        cwd=tmp_path,
+        stdout=output,
+        stderr=errors,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+    )
+
+    assert status == 2
+    assert output.getvalue() == ""
+    assert "session directory does not exist or is inaccessible" in errors.getvalue()
+    assert not (tmp_path / ".leonervis-code").exists()
+
+
+def test_session_tools_is_read_only_when_no_session_root_exists(tmp_path) -> None:
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    status = main(
+        ["session", "tools", "latest"],
         cwd=tmp_path,
         stdout=output,
         stderr=errors,
@@ -1027,6 +1110,10 @@ def test_profile_identity_cli_supports_rename_replace_ids_and_migrate(tmp_path) 
         ["session", "actions", "--limit", "101"],
         ["session", "actions", "--limit", "two"],
         ["session", "actions", "--limit", "１０"],
+        ["session", "tools", "--limit", "0"],
+        ["session", "tools", "--limit", "21"],
+        ["session", "tools", "--limit", "two"],
+        ["session", "tools", "--limit", "１０"],
     ],
 )
 def test_invalid_cli_input_exits_with_usage_error(arguments, capsys) -> None:

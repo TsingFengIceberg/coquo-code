@@ -40,6 +40,7 @@
 - [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
 - [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
+- [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -588,6 +589,14 @@ Before budget or provider-invocation exhaustion forces text-only finalization, t
 
 New `turn_committed` schema v5 stores the typed ledger at top level outside conversation items and strictly validates each entry against tool request/result identity, order, and error flags. v1/v2/v3/v4 replay as empty legacy ledgers; resume appends only v5 without rewriting an old prefix. The top-level ledger does not enter provider history, compaction, or context identity. The model-visible annotation remains ordinary ToolResult content, so Effective Context representations stay `ctx-v3`/`ctx-v4`. System prompt v19 has fingerprint `v19-accfbb73aa611061c8a8cb6be5bb54012ce5809fbbe91050439383e3d35318b7`, and the empty full-context identity is `ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`. Provider wire shapes and projections are unchanged, so adapter contract v20 remains current. See [0056: Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md).
 
+## Durable Tool Ledger Inspection
+
+Persisted ledgers are now directly inspectable from the terminal. The offline `session tools [selector] --limit N` command and current-REPL `/tools [count]` both read only strictly replayed Session state. They return the five most recent committed turns by default and at most 20, preserving each original turn number, record sequence, and commit timestamp. Summary mode shows derived per-turn counts; `--details` or `/tools details [count]` additionally expands continuous request indexes, tool names, typed outcomes, and safe result codes.
+
+Presentation excludes tool-use IDs, tool arguments, paths, prompts, assistant text, ToolResult prose, absolute workspaces, approval grants, and Action identities. Detailed output is bounded to 32 KiB, truncates only between complete lines, and carries a sentinel. An empty schema-v5 ledger accurately means that the turn requested no tools; v1/v2/v3/v4 explicitly report unavailable because those schemas persisted no ledger instead of pretending they had zero requests. Strict replay failure still rejects the whole query. Inspection neither creates a Session root nor acquires a writer lease, invokes a provider or tool, or modifies latest, transcripts, runtime, Effective Context, or Action Audit.
+
+This is a Host-only inspection slice. Canonical system prompt v19 and its fingerprint, provider adapter contract v20, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit and `context_compacted` schemas, and `ctx-v3`/`ctx-v4` representations all remain unchanged. See [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -810,3 +819,4 @@ This slice establishes capacity facts only. It does not count current request to
 54. [0054: Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)
 55. [0055: Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)
 56. [0056: Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
+57. [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)

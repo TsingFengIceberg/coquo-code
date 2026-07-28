@@ -22,6 +22,7 @@ from leonervis_code.cli.presentation import (
     RED,
     RESET,
     YELLOW,
+    MAX_TOOL_LEDGER_RENDER_BYTES,
     render_context_inspection,
     render_action_audits,
     render_message,
@@ -33,6 +34,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_switch,
     render_session_resume,
     render_switch_rejection,
+    render_tool_ledgers,
 )
 from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
 from leonervis_code.providers.request_context import (
@@ -70,7 +72,12 @@ from leonervis_code.session_records import (
     ApprovalAuditOutcome,
     BindingSnapshot,
 )
-from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
+from leonervis_code.session_store import (
+    LatestUpdateStatus,
+    SessionInfo,
+    ToolLedgerQueryResult,
+    TurnToolLedger,
+)
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -156,6 +163,90 @@ def test_action_audits_are_recent_bounded_and_redacted() -> None:
     assert "first.txt" not in rendered
     assert "secret-content" not in rendered
     assert render_action_audits((), 20) == "No action audits yet."
+
+
+def test_tool_ledgers_render_summary_details_and_legacy_availability() -> None:
+    ledger = ToolTurnLedger(
+        (
+            ToolOutcomeEntry(
+                "internal-tool-id",
+                "mkdir",
+                1,
+                ToolRequestOutcome.ERROR,
+                "invalid_request",
+            ),
+            ToolOutcomeEntry(
+                "another-internal-id",
+                "write_file",
+                2,
+                ToolRequestOutcome.SKIPPED_AFTER_FAILURE,
+                "prior_batch_action_not_succeeded",
+            ),
+        )
+    )
+    result = ToolLedgerQueryResult(
+        total_turns=3,
+        turns=(
+            TurnToolLedger(2, 4, "2026-07-28T00:00:00.000000Z", 4, None),
+            TurnToolLedger(3, 7, "2026-07-28T00:01:00.000000Z", 5, ledger),
+        ),
+    )
+
+    summary = render_tool_ledgers(result, details=False)
+    detailed = render_tool_ledgers(result, details=True)
+
+    assert "Showing 2 most recent of 3 committed turns." in summary
+    assert "Turn #2 (record #4" in summary
+    assert "tool ledger unavailable (legacy turn_committed v4)" in summary
+    assert "requested=2 admitted=2 dispatched=1 succeeded=0 error=1 skipped=1" in summary
+    assert "Details:" not in summary
+    assert "Turn #3 requests:" in detailed
+    assert "#1 mkdir: error (invalid_request)" in detailed
+    assert "#2 write_file: skipped-after-failure" in detailed
+    assert "internal-tool-id" not in detailed
+    assert render_tool_ledgers(ToolLedgerQueryResult(0, ()), details=False) == (
+        "No committed turns yet."
+    )
+    empty = ToolLedgerQueryResult(
+        1,
+        (TurnToolLedger(1, 1, "2026-07-28T00:00:00.000000Z", 5, ToolTurnLedger()),),
+    )
+    assert render_tool_ledgers(empty, details=True).endswith(
+        "No persisted tool request details in selected turns."
+    )
+
+
+def test_tool_ledger_details_have_a_complete_line_output_bound() -> None:
+    turns = []
+    for turn_number in range(1, 21):
+        entries = tuple(
+            ToolOutcomeEntry(
+                f"turn-{turn_number}-tool-{request_index}",
+                "write_file",
+                request_index,
+                ToolRequestOutcome.ERROR,
+                "x" * 160,
+            )
+            for request_index in range(1, 41)
+        )
+        turns.append(
+            TurnToolLedger(
+                turn_number,
+                turn_number,
+                "2026-07-28T00:00:00.000000Z",
+                5,
+                ToolTurnLedger(entries),
+            )
+        )
+
+    rendered = render_tool_ledgers(
+        ToolLedgerQueryResult(20, tuple(turns)),
+        details=True,
+    )
+
+    assert len(rendered.encode("utf-8")) <= MAX_TOOL_LEDGER_RENDER_BYTES
+    assert "[truncated: additional ledger entries omitted]" in rendered
+    assert not rendered.endswith("\n")
 
 
 def test_action_audits_explain_nonexecuted_and_interrupted_lifecycles() -> None:

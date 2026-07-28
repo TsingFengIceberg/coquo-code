@@ -53,6 +53,7 @@ from leonervis_code.session_records import (
     SessionRecordError,
     SessionResumed,
     TurnCommitted,
+    TURN_COMMITTED_SCHEMA_VERSION,
     TurnFailed,
     canonical_session_id,
     decode_record,
@@ -62,6 +63,7 @@ from leonervis_code.session_records import (
 )
 
 MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+MAX_TOOL_LEDGER_QUERY_TURNS = 20
 LATEST_SCHEMA_VERSION = 1
 _DIRECTORY_LOCK_NAME = ".directory.lock"
 _LATEST_NAME = "latest.json"
@@ -69,6 +71,53 @@ _LATEST_NAME = "latest.json"
 
 class SessionStoreError(RuntimeError):
     """Raised when session persistence cannot proceed safely."""
+
+
+@dataclass(frozen=True)
+class TurnToolLedger:
+    """One committed turn's replay-validated tool-ledger availability and data."""
+
+    turn_number: int
+    record_sequence: int
+    committed_at: str
+    schema_version: int
+    ledger: ToolTurnLedger | None
+
+
+@dataclass(frozen=True)
+class ToolLedgerQueryResult:
+    """One bounded recent-turn projection from a strictly replayed Session."""
+
+    total_turns: int
+    turns: tuple[TurnToolLedger, ...]
+
+
+def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
+    """Project the most recent committed turns without exposing conversation content."""
+    if type(state) is not ReplayState:
+        raise SessionStoreError("tool ledger query requires replayed Session state")
+    if type(limit) is not int or not 1 <= limit <= MAX_TOOL_LEDGER_QUERY_TURNS:
+        raise SessionStoreError(
+            f"tool ledger limit must be between 1 and {MAX_TOOL_LEDGER_QUERY_TURNS}"
+        )
+    committed = tuple(record for record in state.records if isinstance(record, TurnCommitted))
+    first_turn_number = max(1, len(committed) - limit + 1)
+    selected = committed[-limit:]
+    turns = tuple(
+        TurnToolLedger(
+            turn_number=first_turn_number + offset,
+            record_sequence=record.sequence,
+            committed_at=record.committed_at,
+            schema_version=record.schema_version,
+            ledger=(
+                record.tool_ledger
+                if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION
+                else None
+            ),
+        )
+        for offset, record in enumerate(selected)
+    )
+    return ToolLedgerQueryResult(len(committed), turns)
 
 
 class SessionLockedError(SessionStoreError):
@@ -354,6 +403,12 @@ class SessionStore:
         _validate_existing_session_root(self.root, self.workspace)
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         return self._load_state(path, allow_repair=False).action_audits
+
+    def tool_ledgers(self, selector: str | Path, limit: int) -> ToolLedgerQueryResult:
+        """Strictly replay and return bounded recent per-turn tool ledgers."""
+        _validate_existing_session_root(self.root, self.workspace)
+        path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+        return query_tool_ledgers(self._load_state(path, allow_repair=False), limit)
 
     def list(self) -> tuple[SessionInfo, ...]:
         """Return all strictly validated transcripts, newest first."""

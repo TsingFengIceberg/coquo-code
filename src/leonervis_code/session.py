@@ -88,6 +88,8 @@ from leonervis_code.session_store import (
     SessionInfo,
     SessionResumeStaleError,
     SessionStore,
+    ToolLedgerQueryResult,
+    query_tool_ledgers,
     SessionStoreError,
     SessionWriter,
 )
@@ -656,6 +658,12 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._writer.state.action_audits
+
+    def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
+        """Return bounded recent tool ledgers from the current replayed Session."""
+        with self._lock:
+            self._ensure_open()
+            return query_tool_ledgers(self._writer.state, limit)
 
     def list_sessions(self) -> tuple[SessionInfo, ...]:
         self._ensure_open()

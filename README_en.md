@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded tools are implemented. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation. Foundation 5A remains deferred.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded tools are implemented. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers are safely inspectable from the CLI or REPL. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation. Foundation 5A remains deferred.
 
 ## Contents
 
@@ -169,6 +169,8 @@ uv run leonervis-code prompt "First turn"
 uv run leonervis-code session list
 uv run leonervis-code session show latest
 uv run leonervis-code session actions latest
+uv run leonervis-code session tools latest
+uv run leonervis-code session tools latest --limit 5 --details
 uv run leonervis-code --resume latest prompt "Continue the previous turn"
 uv run leonervis-code --resume <session-uuid>
 ```
@@ -182,6 +184,8 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | `/help` | Show control commands |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions [count]` | Show recent redacted Action Audits for the current Session, default 20 and maximum 100 |
+| `/tools [count]` | Show durable tool-ledger summaries for recent turns, default 5 and maximum 20 |
+| `/tools details [count]` | Expand per-request tool names, outcomes, and safe result codes with a 32 KiB total output bound |
 | `/status` | Show redacted runtime, model, and context-window status |
 | `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
 | `/compact` | Use the current real provider to summarize older complete turns and persist an effective-context checkpoint |
@@ -202,6 +206,7 @@ Common REPL operations:
 /status
 /context
 /actions
+/tools details 3
 /compact
 /resume latest
 /history 5
@@ -253,6 +258,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [Sequential Tool-call Budget Hardening](./docs/decisions/0054-sequential-tool-call-budget-hardening.md): staged over-budget work, precise multiple-call diagnostics, and unchanged sequential execution boundaries.
 - [Bounded Multi-tool Response Batches](./docs/decisions/0055-bounded-multi-tool-response-batches.md): provider batch extraction, sequential Host execution, the 8/32/24 budget, Session/context compatibility, and failure atomicity.
 - [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md): per-request Host accounting, authoritative forced text-only summaries, Session v5, and post-commit terminal summaries.
+- [Durable Tool Ledger Inspection](./docs/decisions/0057-durable-tool-ledger-inspection.md): bounded post-replay ledger queries, `session tools`, `/tools`, and explicit legacy availability.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.
@@ -290,4 +296,4 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 
 The fixed model-visible order is `read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`. One provider response may contain up to eight ordered tool calls; one user turn admits at most 32 tool requests and 24 provider invocations, with the final invocation restricted to text. The Host parses and budget-checks the complete batch before sequential execution. A non-successful action explicitly skips later calls in that batch, and a batch that cannot fit the remaining budget gets zero execution. Every real action still passes separately through permission, approval, execution, and Action Audit.
 
-Provider batching, the structured tool outcome ledger, redacted live activity, mixed responses, streaming, and TTY Markdown rendering are complete; Foundation 5A remains deferred. Current versions are canonical system prompt v19, provider adapter contract v20, ToolArguments v1, ActionIdentity v1, `turn_committed` schema v5, Action Audit schema v1, `context_compacted` v2/v3 replay, and current `ctx-v3`/`ctx-v4` representations. Legacy Session v1/v2/v3/v4 and `ctx-v1`/`ctx-v2` checkpoints remain compatible; the empty full-context identity is `ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`. Recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, directory movement, non-empty deletion, recursive mkdir, shell source strings, interactive PTYs, network tools, automatic retry/fallback, parallel tools, multiple agents, and remote services remain unavailable. See [ADR 0056](./docs/decisions/0056-structured-tool-outcome-ledger.md) for the current accounting design.
+Provider batching, the structured tool outcome ledger and durable inspection, redacted live activity, mixed responses, streaming, and TTY Markdown rendering are complete; Foundation 5A remains deferred. Current versions are canonical system prompt v19, provider adapter contract v20, ToolArguments v1, ActionIdentity v1, `turn_committed` schema v5, Action Audit schema v1, `context_compacted` v2/v3 replay, and current `ctx-v3`/`ctx-v4` representations. Legacy Session v1/v2/v3/v4 and `ctx-v1`/`ctx-v2` checkpoints remain compatible; the empty full-context identity is `ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`. Recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, directory movement, non-empty deletion, recursive mkdir, shell source strings, interactive PTYs, network tools, automatic retry/fallback, parallel tools, multiple agents, and remote services remain unavailable. See [ADR 0057](./docs/decisions/0057-durable-tool-ledger-inspection.md) for the current inspection design.

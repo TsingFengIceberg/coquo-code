@@ -7,8 +7,10 @@ from typing import Protocol
 
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
+    DEFAULT_TOOL_LEDGER_COUNT,
     HELP_TEXT,
     MAX_ACTION_AUDIT_COUNT,
+    MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
     MessageKind,
@@ -23,6 +25,7 @@ from leonervis_code.cli.presentation import (
     render_session_resume,
     render_session_summary,
     render_switch_rejection,
+    render_tool_ledgers,
 )
 from leonervis_code.core.compaction import CompactionError
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -40,6 +43,7 @@ TOP_LEVEL_COMMANDS = (
     "/help",
     "/history",
     "/actions",
+    "/tools",
     "/exit",
     "/quit",
     "/status",
@@ -66,6 +70,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help", "Show Host commands", True),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
     SlashCompletionSpec("/actions", "Show recent Action Audit", True),
+    SlashCompletionSpec("/tools", "Show durable tool ledgers", True),
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
@@ -82,6 +87,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session show", "Show the current Session"),
     SlashCompletionSpec("/session list", "List workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
+    SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
 )
 
 
@@ -89,6 +95,8 @@ class ReplSession(Protocol):
     turns: tuple
 
     def action_audits(self): ...
+
+    def tool_ledgers(self, limit: int): ...
 
     def status(self): ...
 
@@ -181,6 +189,8 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _history(command, session)
     if command == "/actions" or command.startswith("/actions "):
         return _actions(command, session)
+    if command == "/tools" or command.startswith("/tools "):
+        return _tools(command, session)
     if command == "/session show" or command.startswith("/session show "):
         if command != "/session show":
             return _usage("Usage: /session show")
@@ -239,6 +249,40 @@ def _actions(command: str, session: ReplSession) -> SlashResult:
     else:
         return _usage(f"Usage: /actions [1-{MAX_ACTION_AUDIT_COUNT}]")
     return _call(lambda: render_action_audits(session.action_audits(), count), kind="info")
+
+
+def _tools(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    details = False
+    if len(parts) == 1:
+        count = DEFAULT_TOOL_LEDGER_COUNT
+    elif len(parts) == 2 and parts[1] == "details":
+        count = DEFAULT_TOOL_LEDGER_COUNT
+        details = True
+    elif (
+        len(parts) == 2
+        and parts[1].isascii()
+        and parts[1].isdigit()
+        and 1 <= int(parts[1]) <= MAX_TOOL_LEDGER_COUNT
+    ):
+        count = int(parts[1])
+    elif (
+        len(parts) == 3
+        and parts[1] == "details"
+        and parts[2].isascii()
+        and parts[2].isdigit()
+        and 1 <= int(parts[2]) <= MAX_TOOL_LEDGER_COUNT
+    ):
+        count = int(parts[2])
+        details = True
+    else:
+        return _usage(
+            f"Usage: /tools [1-{MAX_TOOL_LEDGER_COUNT}] | /tools details [1-{MAX_TOOL_LEDGER_COUNT}]"
+        )
+    return _call(
+        lambda: render_tool_ledgers(session.tool_ledgers(count), details=details),
+        kind="info",
+    )
 
 
 def _session_list(session: ReplSession) -> SlashResult:

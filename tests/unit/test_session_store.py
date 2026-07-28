@@ -27,8 +27,11 @@ from leonervis_code.session_records import (
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
+    SessionHeader,
     TurnCommitted,
     encode_record,
+    replay_records,
+    workspace_fingerprint,
 )
 from leonervis_code.session_store import (
     AtomicJsonWriteError,
@@ -36,6 +39,7 @@ from leonervis_code.session_store import (
     SessionResumeStaleError,
     SessionStore,
     SessionStoreError,
+    query_tool_ledgers,
 )
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
@@ -113,6 +117,63 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert resumed_after_clean_close.state.closed is False
     assert resumed_after_clean_close.state.history == committed_items()
     resumed_after_clean_close.release()
+
+
+def test_tool_ledger_query_is_recent_bounded_and_distinguishes_empty_v5(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    writer.append_turn(committed_items("tool-1"), binding=binding, tool_ledger=committed_ledger())
+    writer.append_turn(
+        (UserMessage("plain"), AssistantText("done")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    writer.release()
+
+    result = session_store.tool_ledgers("latest", 1)
+
+    assert result.total_turns == 2
+    assert len(result.turns) == 1
+    assert result.turns[0].turn_number == 2
+    assert result.turns[0].schema_version == TURN_COMMITTED_SCHEMA_VERSION
+    assert result.turns[0].ledger == ToolTurnLedger()
+
+
+def test_tool_ledger_query_marks_legacy_turn_as_unavailable(tmp_path: Path) -> None:
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ONE,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=binding,
+    )
+    legacy = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=committed_items(),
+        schema_version=TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+    )
+    state = replay_records((header, legacy), expected_workspace=str(tmp_path.resolve()))
+
+    result = query_tool_ledgers(state, 20)
+
+    assert result.total_turns == 1
+    assert result.turns[0].schema_version == TURN_COMMITTED_BATCH_SCHEMA_VERSION
+    assert result.turns[0].ledger is None
+
+
+@pytest.mark.parametrize("limit", [0, 21, True, "1"])
+def test_tool_ledger_query_rejects_invalid_limits(tmp_path: Path, limit) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.release()
+
+    with pytest.raises(SessionStoreError, match="tool ledger limit must be between 1 and 20"):
+        session_store.tool_ledgers("latest", limit)
 
 
 @pytest.mark.parametrize(

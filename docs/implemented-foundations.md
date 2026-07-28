@@ -40,6 +40,7 @@
 - [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
 - [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
+- [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -588,6 +589,14 @@ AgentLoop现在为每个provider tool request建立Host-owned typed entry，记�
 
 新的`turn_committed` schema v5在conversation items之外保存top-level typed ledger，并严格校验每个entry与tool request/result的identity、顺序和error flag。v1/v2/v3/v4继续replay为空legacy ledger，resume只append v5且不重写旧prefix。Top-level ledger不进入provider history、compaction或context identity；model-visible annotation仍是既有ToolResult content，所以Effective Context representation保持`ctx-v3`/`ctx-v4`。System prompt升级为v19，fingerprint为`v19-accfbb73aa611061c8a8cb6be5bb54012ce5809fbbe91050439383e3d35318b7`，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Provider wire shape和projection未变，因此adapter contract保持v20。完整决策见[0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)。
 
+## Durable Tool Ledger Inspection
+
+持久化账本现在可以直接从终端查看。离线命令`session tools [selector] --limit N`与当前REPL的`/tools [count]`都只读取严格replay后的Session state；默认返回最近5个committed turns，最多20个，并保留原turn number、record sequence和commit timestamp。默认模式显示每turn派生汇总，`--details`或`/tools details [count]`才展开连续request index、tool name、typed outcome和safe result code。
+
+展示不包含tool-use ID、tool arguments、path、prompt、assistant text、ToolResult prose、absolute workspace、approval grant或Action identity。详情输出最多32 KiB，只在完整行边界截断并显示sentinel。Schema-v5的空ledger准确表示该turn没有工具请求；v1/v2/v3/v4由于当时没有持久账本，会明确显示unavailable而不是伪装成零请求。Strict replay失败仍让整个查询安全失败，命令不创建Session root、不获取writer lease、不调用provider或tool，也不修改latest、transcript、runtime、Effective Context或Action Audit。
+
+这是Host-only inspection slice：canonical system prompt保持v19及原fingerprint，provider adapter contract保持v20，ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit与`context_compacted` schema以及`ctx-v3`/`ctx-v4`representation均不升级。完整决策见[0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -810,3 +819,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 54. [0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)
 55. [0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)
 56. [0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
+57. [0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)

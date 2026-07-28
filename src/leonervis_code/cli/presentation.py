@@ -21,6 +21,7 @@ from leonervis_code.session import (
     AutoCompactionNotApplied,
     AutoCompactionStarted,
 )
+from leonervis_code.session_store import MAX_TOOL_LEDGER_QUERY_TURNS
 
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
@@ -33,11 +34,15 @@ _TOOLBAR_MODEL_WIDTH = 36
 _TOOLBAR_WORKSPACE_WIDTH = 64
 DEFAULT_ACTION_AUDIT_COUNT = 20
 MAX_ACTION_AUDIT_COUNT = 100
+DEFAULT_TOOL_LEDGER_COUNT = 5
+MAX_TOOL_LEDGER_COUNT = MAX_TOOL_LEDGER_QUERY_TURNS
+MAX_TOOL_LEDGER_RENDER_BYTES = 32 * 1024
 CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /actions [count], /session, /provider, /status, "
+    "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
+    "/provider, /status, "
     "/context, /compact, "
     "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
     "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
@@ -116,6 +121,19 @@ class ActionAuditView(Protocol):
     status: object
     result_code: str | None
     requested_sequence: int
+
+
+class TurnToolLedgerView(Protocol):
+    turn_number: int
+    record_sequence: int
+    committed_at: str
+    schema_version: int
+    ledger: object | None
+
+
+class ToolLedgerQueryResultView(Protocol):
+    total_turns: int
+    turns: tuple[TurnToolLedgerView, ...]
 
 
 def render_prompt(
@@ -233,6 +251,65 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
     if len(recent) < len(audits):
         prefix = f"Showing {len(recent)} most recent of {len(audits)} action audits.\n\n"
     return prefix + "\n\n".join(entries)
+
+
+def render_tool_ledgers(result: ToolLedgerQueryResultView, *, details: bool) -> str:
+    """Render bounded replayed ledger facts without IDs, arguments, or result prose."""
+    if not result.turns:
+        return "No committed turns yet."
+
+    summaries = []
+    for turn in result.turns:
+        header = (
+            f"Turn #{turn.turn_number} (record #{turn.record_sequence}, "
+            f"committed {turn.committed_at})"
+        )
+        ledger = turn.ledger
+        if ledger is None:
+            summaries.append(
+                f"{header}: tool ledger unavailable (legacy turn_committed v{turn.schema_version})"
+            )
+            continue
+        summaries.append(f"{header}: {' '.join(_tool_ledger_fields(ledger))}")
+
+    prefix = ""
+    if len(result.turns) < result.total_turns:
+        prefix = (
+            f"Showing {len(result.turns)} most recent of {result.total_turns} committed turns.\n"
+        )
+    rendered = prefix + "\n".join(summaries)
+    if not details:
+        return rendered
+
+    detailed_turns = tuple(
+        turn
+        for turn in result.turns
+        if turn.ledger is not None and getattr(turn.ledger, "entries", ())
+    )
+    if not detailed_turns:
+        return f"{rendered}\n\nNo persisted tool request details in selected turns."
+
+    lines = [rendered, "", "Details:"]
+    for turn in detailed_turns:
+        ledger = turn.ledger
+        entries = getattr(ledger, "entries", ())
+        lines.append(f"Turn #{turn.turn_number} requests:")
+        for entry in entries:
+            code = f" ({_safe_inline(entry.result_code)})" if entry.result_code is not None else ""
+            line = (
+                f"  #{entry.request_index} {_safe_inline(entry.tool_name)}: "
+                f"{entry.outcome.value}{code}"
+            )
+            candidate = "\n".join((*lines, line))
+            sentinel = "  [truncated: additional ledger entries omitted]"
+            if len(candidate.encode("utf-8")) > MAX_TOOL_LEDGER_RENDER_BYTES:
+                if len("\n".join((*lines, sentinel)).encode("utf-8")) <= (
+                    MAX_TOOL_LEDGER_RENDER_BYTES
+                ):
+                    lines.append(sentinel)
+                return "\n".join(lines)
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def render_session_summary(
@@ -611,6 +688,32 @@ def _safe_inline(value: str) -> str:
     """Escape control characters before rendering persisted text in a terminal."""
     rendered = repr(value)
     return rendered[1:-1]
+
+
+def _tool_ledger_fields(ledger: object) -> list[str]:
+    """Render the same derived aggregate fields for live and durable views."""
+    fields = [
+        f"requested={ledger.requested}",
+        f"admitted={ledger.admitted}",
+        f"dispatched={ledger.dispatched}",
+        f"succeeded={ledger.count(ToolRequestOutcome.SUCCEEDED)}",
+    ]
+    labels = (
+        (ToolRequestOutcome.ERROR, "error"),
+        (ToolRequestOutcome.DENIED, "denied"),
+        (ToolRequestOutcome.REJECTED, "rejected"),
+        (ToolRequestOutcome.CANCELLED, "cancelled"),
+        (ToolRequestOutcome.FAILED, "failed"),
+        (ToolRequestOutcome.PARTIAL, "partial"),
+        (ToolRequestOutcome.OUTCOME_UNKNOWN, "unknown"),
+        (ToolRequestOutcome.SKIPPED_AFTER_FAILURE, "skipped"),
+        (ToolRequestOutcome.REJECTED_OVER_BUDGET, "over-budget"),
+    )
+    for outcome, label in labels:
+        count = ledger.count(outcome)
+        if count:
+            fields.append(f"{label}={count}")
+    return fields
 
 
 def _count_label(value: int, label: str) -> str:

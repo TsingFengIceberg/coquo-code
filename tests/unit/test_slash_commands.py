@@ -17,7 +17,7 @@ from leonervis_code.session import (
     SessionResumeResult,
 )
 from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import LatestUpdateStatus, SessionInfo
+from leonervis_code.session_store import LatestUpdateStatus, SessionInfo, ToolLedgerQueryResult
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -114,6 +114,10 @@ class Session:
     def action_audits(self):
         return ()
 
+    def tool_ledgers(self, limit):
+        assert 1 <= limit <= 20
+        return ToolLedgerQueryResult(0, ())
+
     def latest_session_info(self):
         return self._info(self.latest)
 
@@ -181,6 +185,16 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/actions 0", session).message == "Usage: /actions [1-100]"
     assert dispatch_slash("/actions 101", session).message == "Usage: /actions [1-100]"
     assert dispatch_slash("/actions two", session).message == "Usage: /actions [1-100]"
+    assert dispatch_slash("/tools", session).message == "No committed turns yet."
+    assert dispatch_slash("/tools 10", session).message == "No committed turns yet."
+    assert dispatch_slash("/tools details", session).message == "No committed turns yet."
+    assert dispatch_slash("/tools details 10", session).message == "No committed turns yet."
+    assert dispatch_slash("/tools 0", session).message == (
+        "Usage: /tools [1-20] | /tools details [1-20]"
+    )
+    assert dispatch_slash("/tools details 21", session).message == (
+        "Usage: /tools [1-20] | /tools details [1-20]"
+    )
     assert dispatch_slash("/clear", session).clear_screen is True
     assert dispatch_slash("/clear extra", session).message == "Usage: /clear"
     assert session.prompts == []
