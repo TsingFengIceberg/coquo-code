@@ -35,7 +35,11 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.errors import output_limit_error
-from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
+from leonervis_code.providers.manager import (
+    OutputBudgetUpdateResult,
+    RuntimeStatus,
+    RuntimeSwitchResult,
+)
 from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
@@ -106,14 +110,15 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 6) == "/status"
     assert complete_command("/", 7) == "/context"
     assert complete_command("/", 8) == "/usage"
-    assert complete_command("/", 9) == "/compact"
-    assert complete_command("/", 10) == "/compactions"
-    assert complete_command("/", 11) == "/provider"
-    assert complete_command("/", 12) == "/model"
-    assert complete_command("/", 13) == "/session"
-    assert complete_command("/", 14) == "/resume"
-    assert complete_command("/", 15) == "/clear"
-    assert complete_command("/", 16) is None
+    assert complete_command("/", 9) == "/output"
+    assert complete_command("/", 10) == "/compact"
+    assert complete_command("/", 11) == "/compactions"
+    assert complete_command("/", 12) == "/provider"
+    assert complete_command("/", 13) == "/model"
+    assert complete_command("/", 14) == "/session"
+    assert complete_command("/", 15) == "/resume"
+    assert complete_command("/", 16) == "/clear"
+    assert complete_command("/", 17) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
@@ -494,6 +499,8 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
             self.turns = ()
             self.used = []
             self.models = []
+            self.output_tokens = 1024
+            self.output_updates = []
 
         def status(self):
             return RuntimeStatus(
@@ -508,6 +515,10 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
                 base_url_source="profile",
                 credential_required=False,
                 credential_present=False,
+                max_output_tokens=self.output_tokens,
+                default_max_output_tokens=1024,
+                max_output_tokens_source=("profile" if self.output_tokens == 1024 else "runtime"),
+                model_max_output_tokens=8192,
             )
 
         def list_profiles(self):
@@ -531,6 +542,14 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
             switched = RuntimeStatus(**{**status.__dict__, "selected_model": model})
             return RuntimeSwitchResult(switched, None)
 
+        def set_output_budget(self, value):
+            previous = self.output_tokens
+            self.output_tokens = 1024 if value is None else value
+            self.output_updates.append(value)
+            return OutputBudgetUpdateResult(
+                self.status(), None, previous, previous != self.output_tokens
+            )
+
         def prompt(self, prompt, *, event_sink=None):
             self.prompts.append(prompt)
             return f"reply: {prompt}"
@@ -540,7 +559,8 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
     run_repl(
         session,
         stdin=io.StringIO(
-            "/status\n/provider list\n/provider current\n/provider use one\n/model model-two\nHello\n/exit\n"
+            "/status\n/provider list\n/provider current\n/provider use one\n/model model-two\n"
+            "/output\n/output 2048\n/output reset\nHello\n/exit\n"
         ),
         stdout=output,
         version="0.1.0",
@@ -551,10 +571,13 @@ def test_repl_provider_commands_switch_without_entering_model_history(tmp_path) 
     rendered = output.getvalue()
     assert session.used == [("one", "project")]
     assert session.models == ["model-two"]
+    assert session.output_updates == [2048, None]
     assert session.prompts == ["Hello"]
     assert "Credential: not required" in rendered
     assert "one: custom/model-one" in rendered
     assert "profile was not modified" in rendered
+    assert "Effective output budget: 1024 tokens (profile)" in rendered
+    assert "Output budget changed: 1024 -> 2048 tokens (runtime)" in rendered
     assert "reply: Hello" in rendered
 
 

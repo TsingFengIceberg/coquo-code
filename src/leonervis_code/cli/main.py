@@ -46,6 +46,7 @@ from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
 from leonervis_code.providers.model_context import ModelContextCapabilityResolver
 from leonervis_code.providers.profile import (
+    MAX_MODEL_OUTPUT_TOKENS,
     NamedProviderProfile,
     ProviderProfileError,
     ProviderProfileSpec,
@@ -95,6 +96,18 @@ def nonblank_model(value: str) -> str:
     if not value.strip():
         raise argparse.ArgumentTypeError("model must not be blank")
     return value
+
+
+def output_token_budget(value: str) -> int:
+    """Accept one bounded positive ASCII token budget."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("max output tokens must be an integer")
+    tokens = int(value)
+    if not 1 <= tokens <= MAX_MODEL_OUTPUT_TOKENS:
+        raise argparse.ArgumentTypeError(
+            f"max output tokens must be between 1 and {MAX_MODEL_OUTPUT_TOKENS}"
+        )
+    return tokens
 
 
 def action_audit_count(value: str) -> int:
@@ -152,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="invocation_model",
         type=nonblank_model,
         help="direct provider/model selector, or model override with --profile",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        dest="invocation_max_output_tokens",
+        type=output_token_budget,
+        help="process-local output budget override for prompt or interactive mode",
     )
     parser.add_argument(
         "--provider-protocol",
@@ -656,6 +675,13 @@ def main(
     try:
         if arguments.resume is not None and arguments.command not in {None, "prompt"}:
             raise ProviderProfileError("--resume is only valid with prompt or interactive mode")
+        if arguments.invocation_max_output_tokens is not None and arguments.command not in {
+            None,
+            "prompt",
+        }:
+            raise ProviderProfileError(
+                "--max-output-tokens is only valid with prompt or interactive mode"
+            )
         if arguments.invocation_profile_id is not None:
             arguments.profile = (
                 _store(workspace, env, user_profile_path, project_profile_path)
@@ -777,6 +803,7 @@ def main(
             custom_protocol=arguments.invocation_provider_protocol,
             custom_base_url=arguments.invocation_base_url,
             custom_api_key_env=arguments.invocation_api_key_env,
+            max_output_tokens=arguments.invocation_max_output_tokens,
             environment=env,
             user_profile_path=user_profile_path,
             project_profile_path=project_profile_path,

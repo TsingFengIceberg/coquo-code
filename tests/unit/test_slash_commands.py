@@ -7,6 +7,7 @@ from leonervis_code.cli.slash import dispatch_slash
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.manager import (
     CurrentTargetContextAssessment,
+    OutputBudgetUpdateResult,
     RuntimeStatus,
     RuntimeSwitchResult,
 )
@@ -208,6 +209,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
         "No provider generation usage recorded for the current runtime."
     )
     assert dispatch_slash("/usage extra", session).message == "Usage: /usage"
+    assert "real provider runtime" in dispatch_slash("/output", session).message
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"
     assert "Full transcript and /history were preserved" in compact.message
@@ -312,6 +314,63 @@ def test_prefixes_remain_unknown_top_level_or_group_commands(tmp_path) -> None:
     group = dispatch_slash("/provider usex one", session)
     assert "Unknown provider command: usex" in group.message
     assert session.prompts == []
+
+
+def test_output_command_inspects_sets_resets_and_validates_budget(tmp_path) -> None:
+    class OutputSession(Session):
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            self.output_tokens = 1024
+            self.source = "profile"
+            self.updates = []
+
+        def status(self):
+            return RuntimeStatus(
+                mode="real",
+                profile="one",
+                selection_source="project",
+                provider_id="custom",
+                protocol="openai_chat_completions",
+                selected_model="model-one",
+                wire_model="model-one",
+                base_url="http://127.0.0.1:11434/v1",
+                base_url_source="profile",
+                credential_required=False,
+                credential_present=False,
+                max_output_tokens=self.output_tokens,
+                default_max_output_tokens=1024,
+                max_output_tokens_source=self.source,
+                model_max_output_tokens=8192,
+            )
+
+        def set_output_budget(self, value):
+            previous = self.output_tokens
+            self.output_tokens = 1024 if value is None else value
+            self.source = "profile" if value is None else "runtime"
+            self.updates.append(value)
+            return OutputBudgetUpdateResult(
+                self.status(), None, previous, previous != self.output_tokens
+            )
+
+    session = OutputSession(tmp_path)
+
+    inspected = dispatch_slash("/output", session)
+    assert inspected.kind == "info"
+    assert "Effective output budget: 1024 tokens (profile)" in inspected.message
+    assert "Configured default: 1024 tokens" in inspected.message
+
+    changed = dispatch_slash("/output 4096", session)
+    assert changed.kind == "success"
+    assert "1024 -> 4096 tokens (runtime)" in changed.message
+    assert session.updates == [4096]
+
+    reset = dispatch_slash("/output reset", session)
+    assert reset.kind == "success"
+    assert "4096 -> 1024 tokens (profile)" in reset.message
+    assert session.updates == [4096, None]
+
+    for invalid in ("/output 0", "/output -1", "/output 100000001", "/output 1 2"):
+        assert dispatch_slash(invalid, session).message == "Usage: /output [1-100000000|reset]"
 
 
 def test_non_slash_text_is_not_handled(tmp_path) -> None:

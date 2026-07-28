@@ -44,6 +44,7 @@
 - [Runtime Context Meter 与 Provider Token Usage](#runtime-context-meter-与-provider-token-usage)
 - [Context 与 Compaction Observability](#context-与-compaction-observability)
 - [Provider Output-limit 与 Compaction Failure Diagnostics](#provider-output-limit-与-compaction-failure-diagnostics)
+- [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -630,6 +631,16 @@ Runtime在output-limit异常路径也会记录已知actual usage，因此后续`
 
 Provider adapter contract因失败transport与异常usage计量升级为v22。Native request、成功response、tool/history projection不变；canonical system prompt保持v19，17工具及顺序、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit v1、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不升级。完整决策见[0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)。
 
+## Process-local Runtime Output Budget Control
+
+普通prompt与REPL启动现在接受全局`--max-output-tokens`，REPL新增`/output`、`/output <tokens>`与`/output reset`。有效预算限制为1至100,000,000；查看命令同时显示当前有效值、profile或direct route默认值、来源和known model maximum。Fake runtime明确拒绝覆盖，profile文件和Session选择均不因临时控制而修改。
+
+Runtime把预算调整作为新的provider route candidate：先重建provider及model capability，再用当前committed Effective Context执行与provider/model切换相同的target-aware筛查。Known model-output或context overflow保持旧provider、旧route、旧generation及旧预算不变；unknown count以warning应用但下一次真实调用仍执行完整preflight。成功后才原子替换provider并提升generation，保证prepared action lease不能跨越route变化。
+
+预算更新不清空“进入当前profile以来”的process-local usage，但会丢弃基于旧reserve的latest context meter。`/model`保留临时预算并针对新model重新筛查，`/provider use`或active selection变化清除覆盖并恢复新profile默认值。`/output reset`也处理临时值恰好等于默认值的情况。后续成功或失败turn的BindingSnapshot自然记录实际`max_output_tokens`与route fingerprint，但resume不会从历史binding恢复临时覆盖；调整命令本身不追加`runtime_changed`。
+
+该slice不自动retry或续写截断回答，不修改compaction的4096-token Host cap、profile schema或provider成功response。Canonical system prompt保持v19，provider adapter contract保持v22，17工具及顺序、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit v1、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0061：Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -856,3 +867,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 58. [0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
 59. [0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
 60. [0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)
+61. [0061：Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)

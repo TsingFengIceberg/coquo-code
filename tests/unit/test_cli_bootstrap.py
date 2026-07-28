@@ -723,6 +723,74 @@ def test_real_prompt_uses_injected_provider_and_workspace(monkeypatch, tmp_path)
     assert constructed[0][1]["ANTHROPIC_API_KEY"] == "secret-not-rendered"
 
 
+def test_prompt_command_applies_process_local_output_budget_override(tmp_path) -> None:
+    constructed = []
+
+    class TextProvider:
+        def respond(self, request):
+            return AssistantText("budget applied")
+
+    def factory(route, *, environment):
+        constructed.append(route)
+        return TextProvider()
+
+    output = io.StringIO()
+    assert (
+        main(
+            [
+                "--model",
+                "local/model-one",
+                "--max-output-tokens",
+                "8192",
+                "prompt",
+                "Hello",
+            ],
+            stdout=output,
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            environment={},
+            provider_factory=factory,
+        )
+        == 0
+    )
+
+    assert output.getvalue() == "budget applied\n"
+    assert constructed[0].max_output_tokens == 8192
+
+
+def test_output_budget_cli_rejects_invalid_scope_and_fake_runtime(capsys, tmp_path) -> None:
+    with pytest.raises(SystemExit) as invalid:
+        main(["--max-output-tokens", "0", "prompt", "Hello"])
+    assert invalid.value.code == 2
+    assert "max output tokens must be between 1 and 100000000" in capsys.readouterr().err
+
+    errors = io.StringIO()
+    assert (
+        main(
+            ["--max-output-tokens", "20", "prompt", "Hello"],
+            stdout=io.StringIO(),
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 2
+    )
+    assert "output budget override requires a real provider runtime" in errors.getvalue()
+
+    errors = io.StringIO()
+    assert (
+        main(
+            ["--max-output-tokens", "20", "session", "show"],
+            stdout=io.StringIO(),
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 2
+    )
+    assert "only valid with prompt or interactive mode" in errors.getvalue()
+
+
 def test_demo_read_visibly_executes_the_structured_tool_loop(tmp_path) -> None:
     (tmp_path / "README.md").write_text("workspace proof\n", encoding="utf-8")
     output = io.StringIO()

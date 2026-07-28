@@ -31,6 +31,9 @@ from leonervis_code.cli.presentation import (
     render_context_meter,
     render_action_audits,
     render_message,
+    render_output_budget,
+    render_output_budget_rejection,
+    render_output_budget_update,
     render_prompt,
     render_prompt_toolbar,
     render_prompt_event,
@@ -43,7 +46,11 @@ from leonervis_code.cli.presentation import (
     render_tool_ledgers,
     render_usage_summary,
 )
-from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
+from leonervis_code.providers.manager import (
+    CurrentTargetContextAssessment,
+    OutputBudgetUpdateResult,
+    RuntimeStatus,
+)
 from leonervis_code.providers.errors import output_limit_error
 from leonervis_code.providers.request_context import (
     ContextFitDecision,
@@ -145,6 +152,62 @@ def test_prompt_is_minimal_and_toolbar_shows_model_and_workspace() -> None:
     assert render_prompt(status(), Info(), color=False) == "› "
     assert render_prompt_toolbar(status(), Path("/workspace"), color=False) == (
         "  fake · /workspace"
+    )
+
+
+def test_output_budget_presentation_distinguishes_effective_default_and_rejection() -> None:
+    current = RuntimeStatus(
+        mode="real",
+        profile="work",
+        selection_source="project",
+        provider_id="custom",
+        protocol="openai_chat_completions",
+        selected_model="model",
+        wire_model="model",
+        base_url="http://127.0.0.1:11434/v1",
+        base_url_source="profile",
+        credential_required=False,
+        credential_present=False,
+        max_output_tokens=8192,
+        default_max_output_tokens=4096,
+        max_output_tokens_source="runtime",
+        model_max_output_tokens=16_000,
+    )
+    message, kind = render_output_budget(current)
+    assert kind == "info"
+    assert message.splitlines() == [
+        "Effective output budget: 8192 tokens (runtime)",
+        "Configured default: 4096 tokens",
+        "Model maximum: 16000 tokens",
+        "Scope: current process only; provider profile and resumed Session selection are unchanged.",
+    ]
+
+    fit = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(1000, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=8192,
+        context_window_limit=32_000,
+        model_output_limit=16_000,
+        decision=ContextFitDecision.FITS,
+    )
+    updated, update_kind = render_output_budget_update(
+        OutputBudgetUpdateResult(current, fit, 4096, True)
+    )
+    assert update_kind == "success"
+    assert "Output budget changed: 4096 -> 8192 tokens (runtime)." in updated
+    assert "Committed context fits: input=1000 (estimated)" in updated
+
+    overflow = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount.unknown("not counted"),
+        requested_output_tokens=20_000,
+        context_window_limit=32_000,
+        model_output_limit=16_000,
+        decision=ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
+    )
+    assert render_output_budget_rejection(overflow) == (
+        "Output budget change rejected: reserve=20000 > model max output=16000. "
+        "Current output budget is unchanged."
     )
 
 

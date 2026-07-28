@@ -51,7 +51,7 @@ MessageKind = Literal["plain", "info", "success", "warning", "error"]
 HELP_TEXT = (
     "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
     "/provider, /status, "
-    "/context, /usage, /compact, /compactions [count], "
+    "/context, /usage, /output [tokens|reset], /compact, /compactions [count], "
     "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
     "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
     "cancels a draft or exits when empty; Ctrl-D exits when empty."
@@ -69,6 +69,7 @@ PROVIDER_HELP = (
     "  /provider current\n"
     "  /provider use <name>\n"
     "  /status\n"
+    "  /output [tokens|reset]\n"
     "  /model <model>"
 )
 
@@ -116,6 +117,8 @@ class RuntimeStatusView(Protocol):
     model_max_output_source: str
     model_max_output_diagnostic: str | None
     max_output_tokens: int | None
+    default_max_output_tokens: int | None
+    max_output_tokens_source: str
 
 
 class EffectiveContextInspectionView(Protocol):
@@ -422,8 +425,79 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         f"Credential: {credential}\n"
         f"Context window: {context}{diagnostic}\n"
         f"Model max output: {model_output}{output_diagnostic}\n"
-        f"Requested output reserve: {output_reserve}"
+        f"Requested output reserve: {output_reserve} ({status.max_output_tokens_source})"
     )
+
+
+def render_output_budget(status: RuntimeStatusView) -> tuple[str, MessageKind]:
+    """Render effective and configured output limits without mutating runtime state."""
+    if status.mode != "real" or status.max_output_tokens is None:
+        return "Output budget is unavailable without a real provider runtime.", "warning"
+    configured = (
+        f"{status.default_max_output_tokens} tokens"
+        if status.default_max_output_tokens is not None
+        else "unknown"
+    )
+    model_limit = (
+        f"{status.model_max_output_tokens} tokens"
+        if status.model_max_output_tokens is not None
+        else "unknown"
+    )
+    return (
+        f"Effective output budget: {status.max_output_tokens} tokens "
+        f"({status.max_output_tokens_source})\n"
+        f"Configured default: {configured}\n"
+        f"Model maximum: {model_limit}\n"
+        "Scope: current process only; provider profile and resumed Session selection are unchanged.",
+        "info",
+    )
+
+
+def render_output_budget_update(result) -> tuple[str, MessageKind]:
+    """Render one applied process-local budget update with fit evidence."""
+    status = result.status
+    current = status.max_output_tokens
+    if not result.changed:
+        return f"Output budget unchanged at {current} tokens.", "info"
+    if result.previous_output_tokens == current and status.max_output_tokens_source == "profile":
+        first_line = f"Output budget reset to configured default: {current} tokens (profile)."
+    else:
+        first_line = (
+            f"Output budget changed: {result.previous_output_tokens} -> {current} tokens "
+            f"({status.max_output_tokens_source})."
+        )
+    lines = [first_line, "Provider profile and Session history were not modified."]
+    report = result.fit_report
+    if report is None:
+        return "\n".join(lines), "success"
+    if report.decision == ContextFitDecision.FITS:
+        lines.append(
+            f"Committed context fits: input={report.input_count.input_tokens} "
+            f"({report.input_count.method.value}) + reserve={report.requested_output_tokens} "
+            f"<= window={report.context_window_limit}."
+        )
+        return "\n".join(lines), "success"
+    diagnostic = report.input_count.diagnostic or "required context facts are unknown"
+    lines.append(
+        f"Compatibility is not confirmed: {diagnostic}. The next provider invocation "
+        "will run full preflight."
+    )
+    return "\n".join(lines), "warning"
+
+
+def render_output_budget_rejection(report: ContextFitReport) -> str:
+    """Render a known unsafe budget update without implying any state change."""
+    if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        detail = (
+            f"reserve={report.requested_output_tokens} > model max output="
+            f"{report.model_output_limit}"
+        )
+    else:
+        detail = (
+            f"input={report.input_count.input_tokens} ({report.input_count.method.value}) + "
+            f"reserve={report.requested_output_tokens} > window={report.context_window_limit}"
+        )
+    return f"Output budget change rejected: {detail}. Current output budget is unchanged."
 
 
 def render_context_inspection(

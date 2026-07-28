@@ -30,7 +30,7 @@ from leonervis_code.providers.model_context_cache import (
     ModelContextCapabilityCache,
     default_model_context_cache_path,
 )
-from leonervis_code.providers.profile import NamedProviderProfile
+from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS, NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_context import (
     ContextFitDecision,
@@ -75,6 +75,16 @@ class RuntimeSwitchResult:
     fit_report: ContextFitReport | None
 
 
+@dataclass(frozen=True)
+class OutputBudgetUpdateResult:
+    """One process-local output-budget update and its fit evidence."""
+
+    status: RuntimeStatus
+    fit_report: ContextFitReport | None
+    previous_output_tokens: int
+    changed: bool
+
+
 class RuntimeSwitchAuditError(RuntimeError):
     """Raised when an applied switch cannot be persisted to the Session audit."""
 
@@ -100,6 +110,8 @@ class RuntimeStatus:
     credential_present: bool
     credential_env: str | None = None
     max_output_tokens: int | None = None
+    default_max_output_tokens: int | None = None
+    max_output_tokens_source: str = "unavailable"
     temperature: float | None = None
     profile_id: str | None = None
     profile_revision: int | None = None
@@ -476,6 +488,7 @@ class RuntimeProviderManager:
         custom_protocol: str | None = None,
         custom_base_url: str | None = None,
         custom_api_key_env: str | None = None,
+        max_output_tokens: int | None = None,
         provider_factory: ProviderFactory = create_provider,
         fake_factory: Callable[[], ConversationProvider] = ScriptedFakeProvider,
         context_resolver: ModelContextCapabilityResolver | None = None,
@@ -498,49 +511,69 @@ class RuntimeProviderManager:
         self._loaded_profile: NamedProviderProfile | None = None
         self._model_override: str | None = None
         self._direct_route: RuntimeProviderRoute | None = None
+        self._default_max_output_tokens: int | None = None
+        self._output_override: int | None = None
+        self._output_override_source: str | None = None
         self._selection_source = "default"
         self._route: RuntimeProviderRoute | None = None
         self._capability = ModelContextCapability.unknown(None)
         self._usage_tracker = RuntimeUsageTracker(self._generation)
+        _validate_output_budget(max_output_tokens)
 
         if profile is not None:
             selected_profile = store.get_profile(profile)
-            route = resolve_profile_route(
+            base_route = resolve_profile_route(
                 selected_profile, environment=environment, model_override=model
             )
+            route = _route_with_output_budget(base_route, max_output_tokens)
             candidate = self._prepare_candidate(
                 route,
                 *_profile_overrides(selected_profile, model_override=model),
             )
             self._load_profile(selected_profile)
+            self._default_max_output_tokens = base_route.max_output_tokens
+            self._output_override = max_output_tokens
+            self._output_override_source = "cli" if max_output_tokens is not None else None
             self._model_override = model
             self._selection_source = "cli"
             self._activate(candidate)
         elif model is not None:
-            route = resolve_runtime_route(
+            base_route = resolve_runtime_route(
                 model,
                 environment=environment,
                 custom_protocol=custom_protocol,
                 custom_base_url=custom_base_url,
                 custom_api_key_env=custom_api_key_env,
             )
+            route = _route_with_output_budget(base_route, max_output_tokens)
             candidate = self._prepare_candidate(route, None)
-            self._direct_route = route
+            self._direct_route = base_route
+            self._default_max_output_tokens = base_route.max_output_tokens
+            self._output_override = max_output_tokens
+            self._output_override_source = "cli" if max_output_tokens is not None else None
             self._selection_source = "cli"
             self._activate(candidate)
         else:
+            if max_output_tokens is not None and store.active_selection() is None:
+                raise RuntimeProviderStateError(
+                    "output budget override requires a real provider runtime"
+                )
             active = store.active_selection()
             if active is None:
                 self._provider = fake_factory()
             else:
                 selected_profile = store.get_profile_by_id(active.profile_id)
-                route = resolve_profile_route(selected_profile, environment=environment)
+                base_route = resolve_profile_route(selected_profile, environment=environment)
+                route = _route_with_output_budget(base_route, max_output_tokens)
                 candidate = self._prepare_candidate(
                     route,
                     selected_profile.context_window_tokens,
                     selected_profile.model_max_output_tokens,
                 )
                 self._load_profile(selected_profile)
+                self._default_max_output_tokens = base_route.max_output_tokens
+                self._output_override = max_output_tokens
+                self._output_override_source = "cli" if max_output_tokens is not None else None
                 self._selection_source = active.source
                 self._activate(candidate)
 
@@ -693,6 +726,8 @@ class RuntimeProviderManager:
                     model_override=self._model_override,
                     capability=capability,
                     generation=self._generation,
+                    default_max_output_tokens=self._default_max_output_tokens,
+                    max_output_tokens_source=self._max_output_tokens_source(),
                 )
             )
             snapshot = ContextTransitionRuntimeSnapshot(
@@ -729,6 +764,8 @@ class RuntimeProviderManager:
                 model_override=self._model_override,
                 capability=capability,
                 generation=self._generation,
+                default_max_output_tokens=self._default_max_output_tokens,
+                max_output_tokens_source=self._max_output_tokens_source(),
             )
             snapshot = CompactionRuntimeSnapshot(
                 self._provider,
@@ -764,6 +801,8 @@ class RuntimeProviderManager:
                     model_override=self._model_override,
                     capability=capability,
                     generation=self._generation,
+                    default_max_output_tokens=self._default_max_output_tokens,
+                    max_output_tokens_source=self._max_output_tokens_source(),
                 )
             )
             snapshot = TurnRuntimeSnapshot(
@@ -824,6 +863,9 @@ class RuntimeProviderManager:
                 self._load_profile(loaded)
                 self._model_override = None
                 self._direct_route = None
+                self._default_max_output_tokens = route.max_output_tokens
+                self._output_override = None
+                self._output_override_source = None
                 self._selection_source = selection.source
                 self._generation += 1
                 self._usage_tracker.reset(self._generation)
@@ -889,10 +931,15 @@ class RuntimeProviderManager:
                 if loaded is None:
                     self._profile_id = None
                     self._loaded_profile = None
+                    self._default_max_output_tokens = None
                 else:
                     self._load_profile(loaded)
+                    assert candidate is not None
+                    self._default_max_output_tokens = candidate.route.max_output_tokens
                 self._model_override = None
                 self._direct_route = None
+                self._output_override = None
+                self._output_override_source = None
                 self._selection_source = source
                 self._generation += 1
                 self._usage_tracker.reset(self._generation)
@@ -914,16 +961,18 @@ class RuntimeProviderManager:
             generation = self._generation
             profile_id = self._profile_id
             direct_route = self._direct_route
+            output_override = self._output_override
         if profile_id is not None:
             loaded = self._store.get_profile_by_id(profile_id)
-            route = resolve_profile_route(
+            base_route = resolve_profile_route(
                 loaded, environment=self._environment, model_override=model
             )
         elif direct_route is not None:
             loaded = None
-            route = _route_with_model(direct_route, model)
+            base_route = _route_with_model(direct_route, model)
         else:
             raise RuntimeProviderStateError("model override requires a real provider runtime")
+        route = _route_with_output_budget(base_route, output_override)
         candidate = self._prepare_candidate(route, None)
         try:
             fit_report = self._screen_candidate(candidate, committed_context)
@@ -952,6 +1001,65 @@ class RuntimeProviderManager:
         _close_provider(old)
         return RuntimeSwitchResult(self.status(), fit_report)
 
+    def set_output_budget(
+        self,
+        max_output_tokens: int | None,
+        *,
+        committed_context: EffectiveContextSnapshot | ConversationRequest | None = None,
+    ) -> OutputBudgetUpdateResult:
+        """Set or reset one process-local output budget after target-aware screening."""
+        _validate_output_budget(max_output_tokens)
+        with self._lock:
+            self._ensure_switchable()
+            route = self._route
+            if route is None or self._default_max_output_tokens is None:
+                raise RuntimeProviderStateError(
+                    "output budget override requires a real provider runtime"
+                )
+            generation = self._generation
+            previous = route.max_output_tokens
+            desired = (
+                self._default_max_output_tokens if max_output_tokens is None else max_output_tokens
+            )
+            loaded = self._loaded_profile
+            model_override = self._model_override
+            if desired == previous and (
+                max_output_tokens is not None or self._output_override is None
+            ):
+                return OutputBudgetUpdateResult(self.status(), None, previous, False)
+            candidate_route = replace(route, max_output_tokens=desired)
+        profile_overrides = (
+            _profile_overrides(loaded, model_override=model_override)
+            if loaded is not None
+            else (None, None)
+        )
+        candidate = self._prepare_candidate(candidate_route, *profile_overrides)
+        try:
+            fit_report = self._screen_candidate(candidate, committed_context)
+            with self._lock:
+                self._ensure_switchable()
+                if self._generation != generation:
+                    raise RuntimeProviderStateError(
+                        "provider runtime changed during output budget preparation"
+                    )
+                if loaded is not None:
+                    current = self._store.get_profile_by_id(loaded.profile_id)
+                    if current.revision != loaded.revision:
+                        raise RuntimeProviderStateError(
+                            "provider profile changed during output budget preparation"
+                        )
+                old = self._provider
+                self._activate(candidate)
+                self._output_override = max_output_tokens
+                self._output_override_source = "runtime" if max_output_tokens is not None else None
+                self._generation += 1
+                self._usage_tracker.retarget(self._generation)
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(old)
+        return OutputBudgetUpdateResult(self.status(), fit_report, previous, True)
+
     def assess_current_context(
         self,
         request: ConversationRequest,
@@ -977,6 +1085,8 @@ class RuntimeProviderManager:
                 model_override=self._model_override,
                 capability=self._capability,
                 generation=self._generation,
+                default_max_output_tokens=self._default_max_output_tokens,
+                max_output_tokens_source=self._max_output_tokens_source(),
             )
             report = assess_context_fit(
                 provider=self._provider,
@@ -1002,6 +1112,8 @@ class RuntimeProviderManager:
                 model_override=self._model_override,
                 capability=self._capability,
                 generation=self._generation,
+                default_max_output_tokens=self._default_max_output_tokens,
+                max_output_tokens_source=self._max_output_tokens_source(),
             )
 
     def begin_turn_usage(self) -> int:
@@ -1074,6 +1186,11 @@ class RuntimeProviderManager:
         self._profile_id = profile.profile_id
         self._loaded_profile = profile
 
+    def _max_output_tokens_source(self) -> str:
+        if self._output_override_source is not None:
+            return self._output_override_source
+        return "profile" if self._loaded_profile is not None else "route"
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeProviderStateError("provider runtime is closed")
@@ -1127,6 +1244,22 @@ def _route_with_model(route: RuntimeProviderRoute, model: str) -> RuntimeProvide
     return replace(route, selected_model=model, wire_model=wire_model)
 
 
+def _validate_output_budget(value: int | None) -> None:
+    if value is not None and (type(value) is not int or not 1 <= value <= MAX_MODEL_OUTPUT_TOKENS):
+        raise RuntimeProviderStateError(
+            f"output budget must be a positive integer not exceeding {MAX_MODEL_OUTPUT_TOKENS}"
+        )
+
+
+def _route_with_output_budget(
+    route: RuntimeProviderRoute,
+    max_output_tokens: int | None,
+) -> RuntimeProviderRoute:
+    if max_output_tokens is None:
+        return route
+    return replace(route, max_output_tokens=max_output_tokens)
+
+
 def _fake_status(*, source: str = "default", generation: int = 0) -> RuntimeStatus:
     return RuntimeStatus(
         mode="fake",
@@ -1153,6 +1286,8 @@ def _status_for_route(
     model_override: str | None,
     capability: ModelContextCapability,
     generation: int = 0,
+    default_max_output_tokens: int | None = None,
+    max_output_tokens_source: str | None = None,
 ) -> RuntimeStatus:
     definition = route.definition
     present = bool(
@@ -1172,6 +1307,14 @@ def _status_for_route(
         credential_present=present,
         credential_env=definition.credential_env,
         max_output_tokens=route.max_output_tokens,
+        default_max_output_tokens=(
+            route.max_output_tokens
+            if default_max_output_tokens is None
+            else default_max_output_tokens
+        ),
+        max_output_tokens_source=(
+            max_output_tokens_source or ("profile" if profile is not None else "route")
+        ),
         temperature=route.temperature,
         profile_id=profile.profile_id if profile is not None else None,
         profile_revision=profile.revision if profile is not None else None,

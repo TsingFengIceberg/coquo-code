@@ -62,6 +62,7 @@ from leonervis_code.core.effective_context import (
 from leonervis_code.providers.manager import (
     CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
+    OutputBudgetUpdateResult,
     RuntimeProviderManager,
     RuntimeStatus,
     RuntimeSwitchAuditError,
@@ -493,6 +494,7 @@ class ProjectSession:
         custom_protocol: str | None = None,
         custom_base_url: str | None = None,
         custom_api_key_env: str | None = None,
+        max_output_tokens: int | None = None,
         environment: Mapping[str, str] | None = None,
         user_profile_path: Path | None = None,
         project_profile_path: Path | None = None,
@@ -541,6 +543,7 @@ class ProjectSession:
             "custom_protocol": custom_protocol,
             "custom_base_url": custom_base_url,
             "custom_api_key_env": custom_api_key_env,
+            "max_output_tokens": max_output_tokens,
         }
         if provider_factory is not None:
             manager_arguments["provider_factory"] = provider_factory
@@ -907,6 +910,16 @@ class ProjectSession:
             )
             self._record_runtime_switch(result, "model_override")
             return result
+
+    def set_output_budget(self, max_output_tokens: int | None) -> OutputBudgetUpdateResult:
+        """Set or reset a process-local budget without persisting a runtime selection."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._manager.set_output_budget(
+                max_output_tokens,
+                committed_context=self._loop.effective_context_snapshot(),
+            )
 
     def compact_context(self) -> CompactContextResult:
         """Run the shared controlled-compaction transaction manually."""

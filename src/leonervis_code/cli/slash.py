@@ -22,6 +22,9 @@ from leonervis_code.cli.presentation import (
     render_compact_preview,
     render_compaction_history,
     render_provider_adapter_error,
+    render_output_budget,
+    render_output_budget_rejection,
+    render_output_budget_update,
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
@@ -41,6 +44,7 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchContextError,
 )
 from leonervis_code.providers.profile import ProviderProfileError
+from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS
 from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
@@ -55,6 +59,7 @@ TOP_LEVEL_COMMANDS = (
     "/status",
     "/context",
     "/usage",
+    "/output",
     "/compact",
     "/compactions",
     "/provider",
@@ -82,6 +87,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
+    SlashCompletionSpec("/output", "Inspect or change output budget", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
     SlashCompletionSpec("/compactions", "Show durable compaction history", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
@@ -114,6 +120,8 @@ class ReplSession(Protocol):
     def inspect_context(self): ...
 
     def usage(self): ...
+
+    def set_output_budget(self, max_output_tokens: int | None): ...
 
     def compact_context(self): ...
 
@@ -189,6 +197,8 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _call(lambda: render_usage_summary(session.usage()), kind="info")
     if command.startswith("/usage "):
         return _usage("Usage: /usage")
+    if command == "/output" or command.startswith("/output "):
+        return _output(command, session)
     if command == "/compact preview":
         try:
             message, kind = render_compact_preview(session.preview_compaction())
@@ -331,6 +341,34 @@ def _compactions(command: str, session: ReplSession) -> SlashResult:
         lambda: render_compaction_history(session.compaction_history(count)),
         kind="info",
     )
+
+
+def _output(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 1:
+        message, kind = render_output_budget(session.status())
+        return SlashResult(handled=True, message=message, kind=kind)
+    if len(parts) != 2:
+        return _usage("Usage: /output [1-100000000|reset]")
+    if parts[1] == "reset":
+        value = None
+    elif (
+        parts[1].isascii() and parts[1].isdigit() and 1 <= int(parts[1]) <= MAX_MODEL_OUTPUT_TOKENS
+    ):
+        value = int(parts[1])
+    else:
+        return _usage("Usage: /output [1-100000000|reset]")
+    try:
+        message, kind = render_output_budget_update(session.set_output_budget(value))
+        return SlashResult(handled=True, message=message, kind=kind)
+    except RuntimeSwitchContextError as error:
+        return SlashResult(
+            handled=True,
+            message=render_output_budget_rejection(error.report),
+            kind="error",
+        )
+    except Exception as error:
+        return _command_error(error, failure_prefix="Output budget change failed")
 
 
 def _session_list(session: ReplSession) -> SlashResult:

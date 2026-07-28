@@ -44,6 +44,7 @@
 - [Runtime Context Meter and Provider Token Usage](#runtime-context-meter-and-provider-token-usage)
 - [Context and Compaction Observability](#context-and-compaction-observability)
 - [Provider Output-limit and Compaction Failure Diagnostics](#provider-output-limit-and-compaction-failure-diagnostics)
+- [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -630,6 +631,16 @@ A non-reducing compaction now retains comparable source/candidate input counts a
 
 Provider adapter contract advances to v22 for failure transport and exception-path usage accounting. Native requests, successful responses, and tool/history projection are unchanged. Canonical system prompt remains v19, while the 17 tools and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit v1, `context_compacted` v2/v3, and Effective Context `ctx-v3`/`ctx-v4` do not advance. See [0060: Provider Output-limit and Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md).
 
+## Process-local Runtime Output Budget Control
+
+Ordinary prompt and REPL startup now accept global `--max-output-tokens`, and the REPL adds `/output`, `/output <tokens>`, and `/output reset`. Effective budgets are bounded from 1 through 100,000,000. Inspection shows the effective value, profile or direct-route default, source, and known model maximum. Fake runtime explicitly rejects an override, while profile files and Session selection remain unchanged.
+
+Runtime treats a budget update as a new provider-route candidate: it reconstructs the provider and model capability, then screens the current committed Effective Context through the same target-aware boundary used by provider/model switches. Known model-output or context overflow preserves the old provider, route, generation, and budget. Unknown counts apply with a warning, while the next real invocation still performs full preflight. Only a successful screen atomically replaces the provider and advances generation, so a prepared action lease cannot cross the route change.
+
+A budget update preserves process-local usage accumulated since the current profile was selected, but discards the latest context meter derived from the old reserve. `/model` retains and re-screens the temporary budget for the new model, while `/provider use` or active-selection changes clear it and restore the new profile default. `/output reset` also handles a temporary value numerically equal to the default. BindingSnapshot on later successful or failed turns naturally records the effective `max_output_tokens` and route fingerprint, but resume never restores the temporary override from historical bindings; the adjustment command itself appends no `runtime_changed` record.
+
+This slice adds no automatic retry or continuation for truncated answers and does not change the Host's 4096-token compaction cap, profile schema, or successful provider response. Canonical system prompt remains v19, provider adapter contract remains v22, and the 17 tools and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit v1, `context_compacted` v2/v3, and Effective Context `ctx-v3`/`ctx-v4` remain unchanged. See [0061: Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -856,3 +867,4 @@ This slice establishes capacity facts only. It does not count current request to
 58. [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
 59. [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
 60. [0060: Provider Output-limit and Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)
+61. [0061: Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)

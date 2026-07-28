@@ -445,6 +445,167 @@ def test_manager_failed_switch_preserves_client_and_persistence(tmp_path) -> Non
     assert first.closed is False
 
 
+def test_output_budget_update_is_process_local_atomic_and_preserves_usage(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    store.replace_profile(
+        original.profile_id,
+        replace(
+            original.to_spec(),
+            context_window_tokens=1000,
+            model_max_output_tokens=100,
+            max_output_tokens=20,
+        ),
+        expected_revision=original.revision,
+    )
+    providers = []
+    routes = []
+
+    class CountingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+    def factory(route, *, environment):
+        routes.append(route)
+        provider = CountingProvider(route.wire_model)
+        providers.append(provider)
+        return provider
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=factory,
+    )
+    request = ConversationRequest(build_system_prompt(), (UserMessage("hello"),))
+    cursor = manager.begin_turn_usage()
+    with manager.provider_for_turn() as runtime:
+        runtime.respond(request)
+        with pytest.raises(RuntimeProviderStateError, match="active operation"):
+            manager.set_output_budget(40)
+    before_usage = manager.finish_turn_usage(cursor)
+
+    result = manager.set_output_budget(40, committed_context=request)
+
+    assert result.changed is True
+    assert result.previous_output_tokens == 20
+    assert result.fit_report is not None
+    assert result.fit_report.decision == ContextFitDecision.FITS
+    assert result.status.max_output_tokens == 40
+    assert result.status.default_max_output_tokens == 20
+    assert result.status.max_output_tokens_source == "runtime"
+    assert result.status.generation == 1
+    assert routes[-1].max_output_tokens == 40
+    assert providers[0].closed is True
+    assert store.get_profile("one").max_output_tokens == 20
+    after_usage = manager.usage_snapshot()
+    assert after_usage.runtime_generation == 1
+    assert after_usage.profile_turn_totals == before_usage.profile_turn_totals
+    assert after_usage.latest_context is None
+
+    reset = manager.set_output_budget(None, committed_context=request)
+
+    assert reset.status.max_output_tokens == 20
+    assert reset.status.default_max_output_tokens == 20
+    assert reset.status.max_output_tokens_source == "profile"
+    assert reset.status.generation == 2
+    assert manager.usage_snapshot().profile_turn_totals == before_usage.profile_turn_totals
+
+
+def test_output_budget_rejects_known_model_limit_without_changing_runtime(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    original = store.get_profile("one")
+    store.replace_profile(
+        original.profile_id,
+        replace(
+            original.to_spec(),
+            context_window_tokens=1000,
+            model_max_output_tokens=30,
+            max_output_tokens=20,
+        ),
+        expected_revision=original.revision,
+    )
+    providers = []
+
+    def factory(route, *, environment):
+        provider = RecordingProvider(route.wire_model)
+        providers.append(provider)
+        return provider
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=factory,
+    )
+    before = manager.status()
+
+    with pytest.raises(RuntimeSwitchContextError) as caught:
+        manager.set_output_budget(
+            40,
+            committed_context=ConversationRequest(build_system_prompt(), ()),
+        )
+
+    assert caught.value.report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
+    assert manager.status() == before
+    assert providers[0].closed is False
+    assert providers[1].closed is True
+
+
+def test_model_switch_preserves_output_override_and_profile_switch_clears_it(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    routes = []
+
+    def factory(route, *, environment):
+        routes.append(route)
+        return RecordingProvider(route.wire_model)
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        max_output_tokens=2048,
+        provider_factory=factory,
+    )
+
+    assert manager.status().max_output_tokens_source == "cli"
+    assert manager.set_model("model-override").status.max_output_tokens == 2048
+    assert routes[-1].max_output_tokens == 2048
+
+    switched = manager.use_profile("two").status
+
+    assert switched.max_output_tokens == 1024
+    assert switched.default_max_output_tokens == 1024
+    assert switched.max_output_tokens_source == "profile"
+
+
+def test_fake_runtime_rejects_output_budget_override(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    with pytest.raises(RuntimeProviderStateError, match="real provider runtime"):
+        RuntimeProviderManager(store, environment={}, max_output_tokens=20)
+
+    manager = RuntimeProviderManager(store, environment={})
+    with pytest.raises(RuntimeProviderStateError, match="real provider runtime"):
+        manager.set_output_budget(20)
+
+
+def test_reset_clears_equal_cli_override_source(tmp_path) -> None:
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        max_output_tokens=1024,
+        provider_factory=lambda route, *, environment: RecordingProvider(route.wire_model),
+    )
+    assert manager.status().max_output_tokens_source == "cli"
+
+    result = manager.set_output_budget(None)
+
+    assert result.changed is True
+    assert result.previous_output_tokens == result.status.max_output_tokens == 1024
+    assert result.status.max_output_tokens_source == "profile"
+
+
 def test_project_session_preserves_neutral_history_across_provider_switch(tmp_path) -> None:
     store = configured_store(tmp_path)
     providers = {}

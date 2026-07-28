@@ -101,6 +101,12 @@ class RuntimeUsageTracker:
             self._latest_turn = ()
             self._latest_context = None
 
+    def retarget(self, runtime_generation: int) -> None:
+        """Advance route generation without discarding current-profile usage totals."""
+        with self._lock:
+            self._generation = runtime_generation
+            self._latest_context = None
+
     def record_context(self, report: ContextFitReport) -> None:
         if type(report) is not ContextFitReport:
             raise ValueError("provider context report is invalid")

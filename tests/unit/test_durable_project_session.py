@@ -490,6 +490,54 @@ def test_runtime_switch_records_real_generation_and_reports_audit_failure(tmp_pa
     session._manager.close()
 
 
+def test_output_budget_update_does_not_append_runtime_audit_and_turn_records_effective_route(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="one",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="model-one",
+            base_url="http://127.0.0.1:11434/v1",
+            max_output_tokens=20,
+            context_window_tokens=10_000,
+            model_max_output_tokens=100,
+        )
+    )
+    routes = []
+
+    def factory(route, *, environment):
+        routes.append(route)
+        return RecordingProvider(route.wire_model)
+
+    session = ProjectSession.open(
+        tmp_path,
+        profile="one",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=factory,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    record_count = len(session._writer.state.records)
+
+    result = session.set_output_budget(40)
+
+    assert result.status.max_output_tokens == 40
+    assert result.status.max_output_tokens_source == "runtime"
+    assert len(session._writer.state.records) == record_count
+    assert store.get_profile("one").max_output_tokens == 20
+    assert routes[-1].max_output_tokens == 40
+
+    assert session.prompt("uses override") == "model-one: uses override"
+    committed = session._writer.state.records[-1]
+    assert committed.binding.max_output_tokens == 40
+    assert committed.binding.route_fingerprint == result.status.route_fingerprint
+    session.close()
+
+
 def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoint(
     tmp_path: Path,
 ) -> None:
