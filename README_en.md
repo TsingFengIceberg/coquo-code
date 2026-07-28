@@ -188,6 +188,7 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | `/tools details [count]` | Expand per-request tool names, outcomes, and safe result codes with a 32 KiB total output bound |
 | `/status` | Show redacted runtime, model, and context-window status |
 | `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
+| `/usage` | Show actual provider-token usage for the latest invocation, latest turn, and current process-local profile |
 | `/compact` | Use the current real provider to summarize older complete turns and persist an effective-context checkpoint |
 | `/provider list` | List named profiles |
 | `/provider current` | Show the current profile/provider/model |
@@ -205,6 +206,7 @@ Common REPL operations:
 ```text
 /status
 /context
+/usage
 /actions
 /tools details 3
 /compact
@@ -212,7 +214,7 @@ Common REPL operations:
 /history 5
 ```
 
-A real TTY uses a `›` input marker and `model · workspace` status line. Enter submits and Alt+Enter inserts a newline; if the terminal intercepts Alt, press Esc and then Enter. Tab completes slash commands with short descriptions, including second-level `/provider` and `/session` commands. Up/Ctrl-R read committed user prompts from the current Session and switch after `/resume` or `/session new`; slash, cancelled, and failed input is excluded. After submission, `• Working...` remains until the first visible event replaces it, and assistant output begins with `•`. A successfully committed turn that used tools also shows a Host-generated `Tool summary:`, so actual outcomes remain visible even when the model's final arithmetic is wrong. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete boundaries.
+A real TTY uses a `›` input marker and `model · context · workspace` status line. Before every real provider invocation it shows a block context meter; afterward it shows the provider's actual input/output tokens. Tool continuations are measured independently, then the turn and current-profile totals are summarized. `/usage` shows details at any time. Calls with missing usage metadata are explicitly unknown rather than zero. Accounting is process-local, resets after a successful `/provider use` or `/model` switch, is not persisted in the Session, and does not calculate cost. Enter submits and Alt+Enter inserts a newline; if the terminal intercepts Alt, press Esc and then Enter. Assistant output begins with `•`, and tool turns also show a Host-generated `Tool summary:`. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete boundaries.
 
 For a deterministic view of the bounded tool loop:
 
@@ -259,6 +261,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [Bounded Multi-tool Response Batches](./docs/decisions/0055-bounded-multi-tool-response-batches.md): provider batch extraction, sequential Host execution, the 8/32/24 budget, Session/context compatibility, and failure atomicity.
 - [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md): per-request Host accounting, authoritative forced text-only summaries, Session v5, and post-commit terminal summaries.
 - [Durable Tool Ledger Inspection](./docs/decisions/0057-durable-tool-ledger-inspection.md): bounded post-replay ledger queries, `session tools`, `/tools`, and explicit legacy availability.
+- [Runtime Context Meter and Provider Token Usage](./docs/decisions/0058-runtime-context-meter-and-provider-token-usage.md): per-invocation context progress, provider usage normalization, process-local turn/profile totals, and explicit unknown semantics.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.

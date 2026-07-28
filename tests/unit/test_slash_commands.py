@@ -10,6 +10,7 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchResult,
 )
 from leonervis_code.providers.request_context import ContextFitDecision
+from leonervis_code.providers.usage import RuntimeUsageTracker
 from leonervis_code.session import (
     CompactContextResult,
     EffectiveContextInspection,
@@ -118,6 +119,9 @@ class Session:
         assert 1 <= limit <= 20
         return ToolLedgerQueryResult(0, ())
 
+    def usage(self):
+        return RuntimeUsageTracker().snapshot()
+
     def latest_session_info(self):
         return self._info(self.latest)
 
@@ -176,6 +180,10 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert context.kind == "warning"
     assert "Context ID: ctx-v3-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
+    assert dispatch_slash("/usage", session).message == (
+        "No provider generation usage recorded for the current runtime."
+    )
+    assert dispatch_slash("/usage extra", session).message == "Usage: /usage"
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"
     assert "Full transcript and /history were preserved" in compact.message

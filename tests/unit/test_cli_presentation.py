@@ -9,6 +9,8 @@ import pytest
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    ProviderInvocationPreflighted,
+    ProviderInvocationUsageReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -24,6 +26,7 @@ from leonervis_code.cli.presentation import (
     YELLOW,
     MAX_TOOL_LEDGER_RENDER_BYTES,
     render_context_inspection,
+    render_context_meter,
     render_action_audits,
     render_message,
     render_prompt,
@@ -35,6 +38,7 @@ from leonervis_code.cli.presentation import (
     render_session_resume,
     render_switch_rejection,
     render_tool_ledgers,
+    render_usage_summary,
 )
 from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
 from leonervis_code.providers.request_context import (
@@ -66,6 +70,12 @@ from leonervis_code.session import (
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
+    TurnUsageCompleted,
+)
+from leonervis_code.providers.usage import (
+    ProviderInvocationKind,
+    ProviderTokenUsage,
+    RuntimeUsageTracker,
 )
 from leonervis_code.session_records import (
     ActionAuditStatus,
@@ -110,6 +120,40 @@ def test_prompt_is_minimal_and_toolbar_shows_model_and_workspace() -> None:
     assert render_prompt_toolbar(status(), Path("/workspace"), color=False) == (
         "  fake · /workspace"
     )
+
+
+def test_context_meter_toolbar_and_usage_summary_are_bounded_and_explicit() -> None:
+    report = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(72_400, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=8_000,
+        context_window_limit=128_000,
+        model_output_limit=16_000,
+        decision=ContextFitDecision.FITS,
+    )
+    tracker = RuntimeUsageTracker()
+    tracker.record_context(report)
+    cursor = tracker.turn_cursor()
+    tracker.record(ProviderInvocationKind.TURN, ProviderTokenUsage(70_000, 846))
+    usage = tracker.finish_turn(cursor)
+
+    meter = render_context_meter(report, invocation_index=2, invocation_limit=24)
+    assert meter == ("[context 2/24] [██████▒░░░] input 72.4k + reserve 8.0k / 128.0k · estimated")
+    assert "ctx ██████▒░░░ 63%" in render_prompt_toolbar(
+        status(mode="real", provider="openai", model="gpt-5"),
+        Path("/workspace"),
+        color=False,
+        usage=usage,
+    )
+    assert render_prompt_event(ProviderInvocationPreflighted(2, 24, report))[0] == meter
+    assert (
+        "70.0k in / 846 out"
+        in render_prompt_event(
+            ProviderInvocationUsageReceived(2, 24, ProviderTokenUsage(70_000, 846))
+        )[0]
+    )
+    assert "Latest turn: 70.0k in / 846 out" in render_usage_summary(usage)
+    assert "Turn usage:" in render_prompt_event(TurnUsageCompleted(usage))[0]
     assert (
         render_prompt_toolbar(
             status(mode="real", profile="work-openai", provider="openai", model="gpt-5"),

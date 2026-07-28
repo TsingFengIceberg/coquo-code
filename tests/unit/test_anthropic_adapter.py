@@ -54,6 +54,7 @@ from leonervis_code.providers.anthropic import (
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.streaming import ProviderTextDelta
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -163,6 +164,55 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
     assert "tools" not in client.requests[0]
     assert "tool_choice" not in client.requests[0]
     assert client.count_requests[0]["messages"] == client.requests[0]["messages"]
+
+
+def test_anthropic_response_outcome_retains_actual_usage_outside_response() -> None:
+    client = RecordingMessagesClient([message(TextBlock(text="done", type="text"))])
+    outcome = AnthropicConversationProvider(config(), client).respond_outcome(
+        request(UserMessage("hello"))
+    )
+
+    assert outcome.response == AssistantText("done")
+    assert outcome.usage == ProviderTokenUsage(1, 1)
+
+
+def test_anthropic_stream_normalizes_start_and_delta_usage() -> None:
+    stream = ClosableStream(
+        [
+            anthropic_event(
+                "message_start",
+                message=SimpleNamespace(
+                    role="assistant",
+                    usage=SimpleNamespace(input_tokens=22),
+                ),
+            ),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text=""),
+            ),
+            anthropic_event(
+                "content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="text_delta", text="done"),
+            ),
+            anthropic_event("content_block_stop", index=0),
+            anthropic_event(
+                "message_delta",
+                delta=SimpleNamespace(stop_reason="end_turn"),
+                usage=SimpleNamespace(output_tokens=4),
+            ),
+            anthropic_event("message_stop"),
+        ]
+    )
+    client = RecordingMessagesClient([stream])
+    outcome = AnthropicConversationProvider(config(), client).respond_stream_outcome(
+        request(UserMessage("hello")), event_sink=lambda _event: None
+    )
+
+    assert outcome.response == AssistantText("done")
+    assert outcome.usage == ProviderTokenUsage(22, 4)
+    assert stream.closed is True
 
 
 def test_official_token_count_uses_shared_input_projection_and_safe_fallback() -> None:

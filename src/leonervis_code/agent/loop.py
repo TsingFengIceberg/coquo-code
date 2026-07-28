@@ -11,6 +11,8 @@ from leonervis_code.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
+    ProviderInvocationPreflighted,
+    ProviderInvocationUsageReceived,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -49,6 +51,7 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.providers.streaming import ProviderResponseOutcome, respond_with_streaming
+from leonervis_code.providers.request_context import ContextFitReport
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
@@ -271,6 +274,7 @@ class AgentLoop:
                     allow_tools=allow_tools,
                 ),
                 event_sink,
+                provider_invocations + 1,
             )
             provider_invocations += 1
             response = outcome.response
@@ -282,6 +286,7 @@ class AgentLoop:
                         event_sink,
                         AssistantFinalTextStreamCommitted(response.text),
                     )
+                self._emit_invocation_usage(event_sink, provider_invocations, outcome)
                 if ledger.entries:
                     self._emit_prompt_event(event_sink, ToolTurnSummaryCommitted(ledger))
                 return response.text
@@ -306,6 +311,7 @@ class AgentLoop:
                     else AssistantToolTextReceived(response.assistant_text)
                 )
                 self._emit_prompt_event(event_sink, companion_event)
+            self._emit_invocation_usage(event_sink, provider_invocations, outcome)
             pending += (response,)
             if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
                 for offset, request in enumerate(requests, start=1):
@@ -421,8 +427,19 @@ class AgentLoop:
         provider: ConversationProvider,
         request: ConversationRequest,
         event_sink: AgentEventSink | None,
+        invocation_index: int,
     ) -> ProviderResponseOutcome:
-        return respond_with_streaming(
+        def receive_preflight(report: ContextFitReport) -> None:
+            self._emit_prompt_event(
+                event_sink,
+                ProviderInvocationPreflighted(
+                    invocation_index,
+                    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                    report,
+                ),
+            )
+
+        outcome = respond_with_streaming(
             provider,
             request,
             event_sink=lambda delta: self._emit_prompt_event(
@@ -430,6 +447,25 @@ class AgentLoop:
                 AssistantResponseTextDeltaReceived(delta.text),
             ),
             prefer_stream=event_sink is not None,
+            preflight_sink=receive_preflight,
+        )
+        return outcome
+
+    def _emit_invocation_usage(
+        self,
+        event_sink: AgentEventSink | None,
+        invocation_index: int,
+        outcome: ProviderResponseOutcome,
+    ) -> None:
+        if outcome.context_report is None:
+            return
+        self._emit_prompt_event(
+            event_sink,
+            ProviderInvocationUsageReceived(
+                invocation_index,
+                MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                outcome.usage,
+            ),
         )
 
     def install_action_dispatcher(self, dispatcher: ActionDispatcher) -> None:

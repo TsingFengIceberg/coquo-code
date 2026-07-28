@@ -41,6 +41,7 @@
 - [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
+- [Runtime Context Meter 与 Provider Token Usage](#runtime-context-meter-与-provider-token-usage)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -597,6 +598,16 @@ AgentLoop现在为每个provider tool request建立Host-owned typed entry，记�
 
 这是Host-only inspection slice：canonical system prompt保持v19及原fingerprint，provider adapter contract保持v20，ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit与`context_compacted` schema以及`ctx-v3`/`ctx-v4`representation均不升级。完整决策见[0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)。
 
+## Runtime Context Meter 与 Provider Token Usage
+
+每次真实provider invocation现在会在发送前发布同一次full preflight的`ContextFitReport`，终端以10格方块条区分当前input、requested output reserve和剩余window；工具结果引发的continuation也逐次更新。REPL底栏在两次输入之间保留最近一次短context状态，同步生成期间则使用即时事件，不宣称已经实现异步固定底栏。
+
+Anthropic与OpenAI-compatible adapter把厂商返回的actual input/output usage放进Host-only response envelope，不进入`AssistantText`、conversation history或Session。Anthropic同时支持non-streaming usage及stream中的`message_start`/`message_delta`；OpenAI-compatible支持non-streaming usage并在stream request中请求`stream_options.include_usage`、解析finish后的usage-only chunk。缺失或malformed metadata记为unknown invocation，绝不按0或本地estimate混入actual totals；provider调用失败也记unknown，因为远端仍可能产生费用。
+
+Runtime按最新invocation、最近user turn及当前profile target累计真实用量，普通turn与compaction分开。工具continuation属于同一turn；count-only inspection不属于generation usage。成功`/provider use`或`/model`切换会清零，`/resume`和`/session new`不会。`/usage`显示逐invocation与aggregate；这些值仅存在当前进程，不持久化、不计算货币费用，也不承诺跨进程计费对账。
+
+该变化把provider adapter contract升级为v21，因为OpenAI-compatible stream request和两类adapter response transport增加usage contract。Canonical system prompt保持v19，17个tool schema/order、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit、`context_compacted`及Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -820,3 +831,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 55. [0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)
 56. [0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
 57. [0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
+58. [0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)

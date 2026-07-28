@@ -203,12 +203,14 @@ def test_one_shot_auto_requires_explicit_write_capability_and_executes(tmp_path:
 
     assert status == 0
     assert stdout.getvalue() == "finished\n"
-    assert stderr.getvalue() == (
-        "[tool 1/32] write_file path='note.txt' content_bytes=21\n"
-        "[tool 1/32] succeeded code=created\n"
-        "Tool summary: requested=1 admitted=1 dispatched=1 succeeded=1\n"
-    )
-    assert "secret model content" not in stderr.getvalue()
+    rendered = stderr.getvalue()
+    assert "[context 1/24] input unknown + reserve 1.0k / unknown · unknown" in rendered
+    assert "Token usage [1/24]: unknown" in rendered
+    assert "[tool 1/32] write_file path='note.txt' content_bytes=21" in rendered
+    assert "[tool 1/32] succeeded code=created" in rendered
+    assert "Tool summary: requested=1 admitted=1 dispatched=1 succeeded=1" in rendered
+    assert "Turn usage: 0 in / 0 out · known=0 unknown=2" in rendered
+    assert "secret model content" not in rendered
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "secret model content\n"
 
 

@@ -234,13 +234,21 @@ def test_project_session_executes_displays_persists_and_resumes_mixed_tool_respo
     events = []
     assert first.prompt("inspect", event_sink=events.append) == "The file contains workspace notes."
     result = ToolResult("read-1", "workspace notes\n")
-    assert events[:-1] == [
+    tool_events = [
+        event
+        for event in events
+        if isinstance(
+            event,
+            (AssistantToolTextReceived, ToolRequestStarted, ToolRequestFinished),
+        )
+    ]
+    assert tool_events == [
         AssistantToolTextReceived("I will inspect the file first.\n"),
         ToolRequestStarted("read_file", 1, 32, "path='README.md'"),
         ToolRequestFinished("read_file", 1, 32, ToolEventStatus.SUCCEEDED, "ok"),
     ]
-    assert isinstance(events[-1], ToolTurnSummaryCommitted)
-    assert events[-1].ledger.requested == 1
+    ledger_event = next(event for event in events if isinstance(event, ToolTurnSummaryCommitted))
+    assert ledger_event.ledger.requested == 1
     assert first_provider.requests[1].history[-2:] == (call, result)
     assert first.history == (
         UserMessage("inspect"),
@@ -698,11 +706,16 @@ def test_pre_turn_high_water_auto_compacts_once_and_preserves_pending_prompt(
 
     assert response == "runtime: trigger"
     assert len(provider.summary_requests) == 1
-    assert [type(event) for event in events] == [
+    compaction_events = [
+        event
+        for event in events
+        if isinstance(event, (AutoCompactionStarted, AutoCompactionCommitted))
+    ]
+    assert [type(event) for event in compaction_events] == [
         AutoCompactionStarted,
         AutoCompactionCommitted,
     ]
-    assert events[-1].result.trigger.value == "high_water"
+    assert compaction_events[-1].result.trigger.value == "high_water"
     assert session._writer.state.records[-2].record_type == "context_compacted"
     assert session._writer.state.records[-2].trigger.value == "high_water"
     assert session._writer.state.records[-2].high_water_percent == 80

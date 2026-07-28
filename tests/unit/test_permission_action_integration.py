@@ -128,14 +128,17 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         audit = session.action_audits()[-1]
         assert audit.status == ActionAuditStatus.DENIED
         assert audit.execution_outcome is None
-        assert events[-2] == ToolRequestFinished(
-            "write_file",
-            1,
-            MAX_TOOL_REQUESTS_PER_TURN,
-            ToolEventStatus.DENIED,
-            "denied_read_only_mode",
+        assert (
+            ToolRequestFinished(
+                "write_file",
+                1,
+                MAX_TOOL_REQUESTS_PER_TURN,
+                ToolEventStatus.DENIED,
+                "denied_read_only_mode",
+            )
+            in events
         )
-        assert isinstance(events[-1], ToolTurnSummaryCommitted)
+        assert any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
     finally:
         session.close()
 
@@ -206,14 +209,17 @@ def test_hard_rejected_write_returns_tool_error_without_action_audit(
         )
         assert session._writer.state.action_audits == ()
         assert not (tmp_path / "nested").exists()
-        assert events[-2] == ToolRequestFinished(
-            "write_file",
-            1,
-            MAX_TOOL_REQUESTS_PER_TURN,
-            ToolEventStatus.ERROR,
-            "invalid_request",
+        assert (
+            ToolRequestFinished(
+                "write_file",
+                1,
+                MAX_TOOL_REQUESTS_PER_TURN,
+                ToolEventStatus.ERROR,
+                "invalid_request",
+            )
+            in events
         )
-        assert isinstance(events[-1], ToolTurnSummaryCommitted)
+        assert any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
     finally:
         session.close()
 
@@ -253,14 +259,17 @@ def test_workspace_write_ask_accept_creates_and_commits_exact_causality(tmp_path
         assert audit.status == ActionAuditStatus.SUCCEEDED
         assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
         assert audit.result_code == "created"
-        assert events[-2] == ToolRequestFinished(
-            "write_file",
-            1,
-            MAX_TOOL_REQUESTS_PER_TURN,
-            ToolEventStatus.SUCCEEDED,
-            "created",
+        assert (
+            ToolRequestFinished(
+                "write_file",
+                1,
+                MAX_TOOL_REQUESTS_PER_TURN,
+                ToolEventStatus.SUCCEEDED,
+                "created",
+            )
+            in events
         )
-        assert isinstance(events[-1], ToolTurnSummaryCommitted)
+        assert any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
     finally:
         session.close()
 
@@ -299,16 +308,19 @@ def test_workspace_write_ask_reject_or_cancel_returns_tool_error_and_commits(
             if resolution == ApprovalResolution.REJECT
             else ToolEventStatus.CANCELLED
         )
-        assert events[-2] == ToolRequestFinished(
-            "write_file",
-            1,
-            MAX_TOOL_REQUESTS_PER_TURN,
-            expected_event_status,
-            "approval_rejected"
-            if resolution == ApprovalResolution.REJECT
-            else "approval_cancelled",
+        assert (
+            ToolRequestFinished(
+                "write_file",
+                1,
+                MAX_TOOL_REQUESTS_PER_TURN,
+                expected_event_status,
+                "approval_rejected"
+                if resolution == ApprovalResolution.REJECT
+                else "approval_cancelled",
+            )
+            in events
         )
-        assert isinstance(events[-1], ToolTurnSummaryCommitted)
+        assert any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
     finally:
         session.close()
 

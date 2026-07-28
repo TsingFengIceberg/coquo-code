@@ -7,6 +7,8 @@ from typing import Literal, Protocol
 
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    ProviderInvocationPreflighted,
+    ProviderInvocationUsageReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -20,8 +22,10 @@ from leonervis_code.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
     AutoCompactionStarted,
+    TurnUsageCompleted,
 )
 from leonervis_code.session_store import MAX_TOOL_LEDGER_QUERY_TURNS
+from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
 
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
@@ -43,7 +47,7 @@ MessageKind = Literal["plain", "info", "success", "warning", "error"]
 HELP_TEXT = (
     "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
     "/provider, /status, "
-    "/context, /compact, "
+    "/context, /usage, /compact, "
     "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
     "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
     "cancels a draft or exits when empty; Ctrl-D exits when empty."
@@ -153,12 +157,15 @@ def render_prompt_toolbar(
     cwd: Path,
     *,
     color: bool,
+    usage: RuntimeUsageSnapshot | None = None,
 ) -> str:
     """Render a bounded model and workspace status line below the TTY editor."""
     fields = []
     runtime_label = _toolbar_runtime_label(status)
     if runtime_label is not None:
         fields.append(runtime_label)
+    if usage is not None and usage.latest_context is not None:
+        fields.append(_toolbar_context_label(usage.latest_context))
     fields.append(_toolbar_workspace_label(cwd))
     text = f"  {' · '.join(fields)}"
     return _ansi(text, BLUE, readline=False) if color else text
@@ -552,29 +559,29 @@ def render_prompt_event(event: object) -> tuple[str, MessageKind]:
             "warning",
         )
     if isinstance(event, ToolTurnSummaryCommitted):
-        ledger = event.ledger
-        fields = [
-            f"requested={ledger.requested}",
-            f"admitted={ledger.admitted}",
-            f"dispatched={ledger.dispatched}",
-            f"succeeded={ledger.count(ToolRequestOutcome.SUCCEEDED)}",
-        ]
-        labels = (
-            (ToolRequestOutcome.ERROR, "error"),
-            (ToolRequestOutcome.DENIED, "denied"),
-            (ToolRequestOutcome.REJECTED, "rejected"),
-            (ToolRequestOutcome.CANCELLED, "cancelled"),
-            (ToolRequestOutcome.FAILED, "failed"),
-            (ToolRequestOutcome.PARTIAL, "partial"),
-            (ToolRequestOutcome.OUTCOME_UNKNOWN, "unknown"),
-            (ToolRequestOutcome.SKIPPED_AFTER_FAILURE, "skipped"),
-            (ToolRequestOutcome.REJECTED_OVER_BUDGET, "over-budget"),
+        return f"Tool summary: {' '.join(_tool_ledger_fields(event.ledger))}", "info"
+    if isinstance(event, ProviderInvocationPreflighted):
+        return render_context_meter(
+            event.report,
+            invocation_index=event.invocation_index,
+            invocation_limit=event.invocation_limit,
+        ), "info"
+    if isinstance(event, ProviderInvocationUsageReceived):
+        if event.usage is None:
+            detail = "unknown (provider did not return usable metadata)"
+            kind: MessageKind = "warning"
+        else:
+            detail = (
+                f"{_format_tokens(event.usage.input_tokens)} in / "
+                f"{_format_tokens(event.usage.output_tokens)} out"
+            )
+            kind = "info"
+        return (
+            f"Token usage [{event.invocation_index}/{event.invocation_limit}]: {detail}",
+            kind,
         )
-        for outcome, label in labels:
-            count = ledger.count(outcome)
-            if count:
-                fields.append(f"{label}={count}")
-        return f"Tool summary: {' '.join(fields)}", "info"
+    if isinstance(event, TurnUsageCompleted):
+        return render_usage_summary(event.usage, compact=True), "info"
 
     if not isinstance(
         event,
@@ -684,6 +691,75 @@ def render_session_info(info: SessionInfoView) -> str:
     )
 
 
+def render_context_meter(
+    report: ContextFitReport,
+    *,
+    invocation_index: int,
+    invocation_limit: int,
+) -> str:
+    """Render one bounded input/reserve/remaining context meter."""
+    input_tokens = report.input_count.input_tokens
+    window = report.context_window_limit
+    prefix = f"[context {invocation_index}/{invocation_limit}]"
+    if input_tokens is None or window is None:
+        input_text = _format_tokens(input_tokens) if input_tokens is not None else "unknown"
+        window_text = _format_tokens(window) if window is not None else "unknown"
+        return (
+            f"{prefix} input {input_text} + reserve "
+            f"{_format_tokens(report.requested_output_tokens)} / {window_text} · "
+            f"{report.input_count.method.value}"
+        )
+    bar = _context_bar(input_tokens, report.requested_output_tokens, window)
+    return (
+        f"{prefix} [{bar}] input {_format_tokens(input_tokens)} + reserve "
+        f"{_format_tokens(report.requested_output_tokens)} / {_format_tokens(window)} · "
+        f"{report.input_count.method.value}"
+    )
+
+
+def render_usage_summary(usage: RuntimeUsageSnapshot, *, compact: bool = False) -> str:
+    """Render process-local actual usage without converting unknown calls to zero."""
+    latest = usage.latest_invocation
+    if latest is None:
+        return "No provider generation usage recorded for the current runtime."
+    if compact:
+        return (
+            f"Turn usage: {_totals_inline(usage.turn_totals)}\n"
+            f"Profile usage: {_totals_inline(usage.profile_turn_totals)}"
+            f" · compaction {_totals_inline(usage.profile_compaction_totals)}"
+        )
+    latest_text = (
+        "unknown"
+        if latest.usage is None
+        else (
+            f"{_format_tokens(latest.usage.input_tokens)} in / "
+            f"{_format_tokens(latest.usage.output_tokens)} out"
+        )
+    )
+    lines = [
+        f"Latest invocation: #{latest.sequence} ({latest.kind.value}) {latest_text}",
+        f"Latest turn: {_totals_inline(usage.turn_totals)}",
+    ]
+    for index, record in enumerate(usage.latest_turn, start=1):
+        detail = (
+            "unknown"
+            if record.usage is None
+            else (
+                f"{_format_tokens(record.usage.input_tokens)} in / "
+                f"{_format_tokens(record.usage.output_tokens)} out"
+            )
+        )
+        lines.append(f"  invocation {index}: {detail}")
+    lines.extend(
+        (
+            f"Current profile turns: {_totals_inline(usage.profile_turn_totals)}",
+            f"Current profile compaction: {_totals_inline(usage.profile_compaction_totals)}",
+            "Scope: current process and runtime target; /provider use or /model resets totals.",
+        )
+    )
+    return "\n".join(lines)
+
+
 def _safe_inline(value: str) -> str:
     """Escape control characters before rendering persisted text in a terminal."""
     rendered = repr(value)
@@ -729,6 +805,43 @@ def _toolbar_runtime_label(status: RuntimeStatusView | None) -> str | None:
     else:
         raw = status.selected_model or status.profile or status.provider_id or "unknown"
     return _truncate(_safe_toolbar_text(raw), _TOOLBAR_MODEL_WIDTH)
+
+
+def _toolbar_context_label(report: ContextFitReport) -> str:
+    input_tokens = report.input_count.input_tokens
+    window = report.context_window_limit
+    if input_tokens is None or window is None:
+        return "ctx unknown"
+    percent = min(999, round((input_tokens + report.requested_output_tokens) * 100 / window))
+    return f"ctx {_context_bar(input_tokens, report.requested_output_tokens, window)} {percent}%"
+
+
+def _context_bar(input_tokens: int, reserve_tokens: int, window_tokens: int) -> str:
+    cells = 10
+    input_cells = min(cells, (input_tokens * cells + window_tokens - 1) // window_tokens)
+    reserve_cells = min(
+        cells - input_cells,
+        (reserve_tokens * cells + window_tokens - 1) // window_tokens,
+    )
+    return "█" * input_cells + "▒" * reserve_cells + "░" * (cells - input_cells - reserve_cells)
+
+
+def _totals_inline(totals: ProviderUsageTotals) -> str:
+    return (
+        f"{_format_tokens(totals.input_tokens)} in / "
+        f"{_format_tokens(totals.output_tokens)} out · "
+        f"known={totals.known_invocations} unknown={totals.unknown_invocations}"
+    )
+
+
+def _format_tokens(value: int | None) -> str:
+    if value is None:
+        return "unknown"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}m"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
 
 
 def _toolbar_workspace_label(cwd: Path) -> str:

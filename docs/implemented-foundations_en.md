@@ -41,6 +41,7 @@
 - [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
+- [Runtime Context Meter and Provider Token Usage](#runtime-context-meter-and-provider-token-usage)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -597,6 +598,16 @@ Presentation excludes tool-use IDs, tool arguments, paths, prompts, assistant te
 
 This is a Host-only inspection slice. Canonical system prompt v19 and its fingerprint, provider adapter contract v20, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit and `context_compacted` schemas, and `ctx-v3`/`ctx-v4` representations all remain unchanged. See [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md).
 
+## Runtime Context Meter and Provider Token Usage
+
+Before every real provider invocation, the runtime now publishes the `ContextFitReport` from that invocation's full preflight. The terminal renders a ten-cell block meter separating current input, requested output reserve, and remaining window; continuations after tool results update independently. Between REPL inputs, the toolbar retains the latest short context state. During synchronous generation the CLI uses inline events and does not claim to provide an asynchronous pinned bottom bar.
+
+The Anthropic and OpenAI-compatible adapters carry provider-reported actual input/output usage in a Host-only response envelope outside `AssistantText`, conversation history, and Session state. Anthropic supports non-streaming usage plus `message_start`/`message_delta` stream usage. OpenAI-compatible requests `stream_options.include_usage` and accepts the usage-only chunk after stream completion in addition to non-streaming usage. Missing or malformed metadata increments an unknown-invocation count instead of becoming zero or being mixed with local estimates. Failed provider calls are also unknown because they may still incur remote usage.
+
+The runtime reports the latest invocation, latest user turn, and totals since entering the current profile target, with ordinary turns and compaction separated. Tool continuations belong to the same turn; count-only inspections are measurements rather than generation usage. Successful `/provider use` or `/model` switches reset totals, while `/resume` and `/session new` do not. `/usage` shows per-invocation and aggregate facts. Accounting is process-local, not persisted, does not calculate money, and is not a cross-process billing ledger.
+
+The provider adapter contract advances to v21 because the OpenAI-compatible stream request and both adapter response transports gain a usage contract. Canonical system prompt v19, the 17 tool schemas and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit, `context_compacted`, and Effective Context `ctx-v3`/`ctx-v4` remain unchanged. See [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -820,3 +831,4 @@ This slice establishes capacity facts only. It does not count current request to
 55. [0055: Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)
 56. [0056: Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
 57. [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
+58. [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)

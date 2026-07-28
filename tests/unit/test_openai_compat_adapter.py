@@ -61,6 +61,7 @@ from leonervis_code.providers.openai_compat import (
 )
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.streaming import ProviderTextDelta
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.providers.resolver import resolve_runtime_route
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
@@ -104,6 +105,16 @@ def stream_chunk(*, content=None, tool_calls=None, finish_reason=None, index=0):
                 finish_reason=finish_reason,
             )
         ]
+    )
+
+
+def stream_usage_chunk(prompt_tokens: int, completion_tokens: int):
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ),
     )
 
 
@@ -159,6 +170,36 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
     assert "tools" not in counted and "parallel_tool_calls" not in counted
     assert "tools" not in created and "parallel_tool_calls" not in created
     assert counted["messages"] == created["messages"]
+
+
+def test_compatible_response_outcome_retains_actual_usage_outside_response() -> None:
+    response = completion(content="done").model_copy(
+        update={"usage": SimpleNamespace(prompt_tokens=12, completion_tokens=3)}
+    )
+    outcome = OpenAICompatibleConversationProvider(
+        route(), RecordingChatClient([response])
+    ).respond_outcome(request(UserMessage("hello")))
+
+    assert outcome.response == AssistantText("done")
+    assert outcome.usage == ProviderTokenUsage(12, 3)
+
+
+def test_compatible_stream_requests_and_normalizes_final_usage_chunk() -> None:
+    stream = ClosableStream(
+        [
+            stream_chunk(content="done", finish_reason="stop"),
+            stream_usage_chunk(22, 4),
+        ]
+    )
+    client = RecordingChatClient([stream])
+    outcome = OpenAICompatibleConversationProvider(route(), client).respond_stream_outcome(
+        request(UserMessage("hello")), event_sink=lambda _event: None
+    )
+
+    assert outcome.response == AssistantText("done")
+    assert outcome.usage == ProviderTokenUsage(22, 4)
+    assert client.requests[0]["stream_options"] == {"include_usage": True}
+    assert stream.closed is True
 
 
 def completion(

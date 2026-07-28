@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import RLock
 
@@ -40,7 +40,16 @@ from leonervis_code.providers.request_context import (
     rejects_context_transition,
 )
 from leonervis_code.providers.resolver import resolve_profile_route, resolve_runtime_route
-from leonervis_code.providers.streaming import ProviderTextDeltaSink, respond_with_streaming
+from leonervis_code.providers.streaming import (
+    ProviderResponseOutcome,
+    ProviderTextDeltaSink,
+    respond_with_streaming,
+)
+from leonervis_code.providers.usage import (
+    ProviderInvocationKind,
+    RuntimeUsageSnapshot,
+    RuntimeUsageTracker,
+)
 
 ProviderFactory = Callable[..., ConversationProvider]
 
@@ -130,6 +139,7 @@ class CompactionRuntimeSnapshot:
     route: RuntimeProviderRoute
     capability: ModelContextCapability
     status: RuntimeStatus
+    usage_tracker: RuntimeUsageTracker = field(default_factory=RuntimeUsageTracker)
 
     def assess_summary_request(self, request: CompactSummaryRequest) -> ContextFitReport:
         return _assess_summary_request(
@@ -139,11 +149,33 @@ class CompactionRuntimeSnapshot:
         )
 
     def summarize(self, request: CompactSummaryRequest):
-        return _summarize_compact(
+        report = _assess_summary_request(
             provider=self.provider,
             capability=self.capability,
             request=request,
         )
+        raise_for_context_fit(report)
+        try:
+            operation = getattr(self.provider, "summarize_compact_outcome", None)
+            if callable(operation):
+                outcome = operation(request)
+                if not isinstance(outcome, ProviderResponseOutcome):
+                    raise ValueError("provider returned an invalid compact response outcome")
+                response = outcome.response
+                usage = outcome.usage
+            else:
+                operation = getattr(self.provider, "summarize_compact", None)
+                if not callable(operation):
+                    raise CompactionUnavailableError(
+                        "current provider does not support controlled compaction"
+                    )
+                response = operation(request)
+                usage = None
+        except BaseException:
+            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
+            raise
+        self.usage_tracker.record(ProviderInvocationKind.COMPACTION, usage)
+        return response
 
     def assess_context(self, request: ConversationRequest) -> ContextFitReport:
         return assess_context_fit(
@@ -189,6 +221,7 @@ class TurnRuntimeSnapshot:
     route: RuntimeProviderRoute | None
     capability: ModelContextCapability
     status: RuntimeStatus
+    usage_tracker: RuntimeUsageTracker = field(default_factory=RuntimeUsageTracker)
 
     @property
     def streaming_supported(self) -> bool:
@@ -233,23 +266,41 @@ class TurnRuntimeSnapshot:
             raise CompactionUnavailableError(
                 "controlled compaction requires a configured real provider"
             )
-        return _summarize_compact(
+        report = _assess_summary_request(
             provider=self.provider,
-            capability=self.capability,
-            request=request,
-        )
-
-    def respond(self, request: ConversationRequest) -> ProviderResponse:
-        if self.route is None:
-            return self.provider.respond(request)
-        report = assess_context_fit(
-            provider=self.provider,
-            route=self.route,
             capability=self.capability,
             request=request,
         )
         raise_for_context_fit(report)
-        return self.provider.respond(request)
+        try:
+            operation = getattr(self.provider, "summarize_compact_outcome", None)
+            if callable(operation):
+                outcome = operation(request)
+                if not isinstance(outcome, ProviderResponseOutcome):
+                    raise ValueError("provider returned an invalid compact response outcome")
+                response = outcome.response
+                usage = outcome.usage
+            else:
+                operation = getattr(self.provider, "summarize_compact", None)
+                if not callable(operation):
+                    raise CompactionUnavailableError(
+                        "current provider does not support controlled compaction"
+                    )
+                response = operation(request)
+                usage = None
+        except BaseException:
+            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
+            raise
+        self.usage_tracker.record(ProviderInvocationKind.COMPACTION, usage)
+        return response
+
+    def respond(self, request: ConversationRequest) -> ProviderResponse:
+        return self.respond_with_observation(
+            request,
+            event_sink=lambda _delta: None,
+            prefer_stream=False,
+            preflight_sink=None,
+        ).response
 
     def respond_stream(
         self,
@@ -258,21 +309,56 @@ class TurnRuntimeSnapshot:
         event_sink: ProviderTextDeltaSink,
     ) -> ProviderResponse:
         """Preflight once, then hold this pinned runtime through stream consumption."""
-        if self.route is not None:
-            report = assess_context_fit(
-                provider=self.provider,
-                route=self.route,
-                capability=self.capability,
-                request=request,
-            )
-            raise_for_context_fit(report)
-        outcome = respond_with_streaming(
-            self.provider,
+        return self.respond_with_observation(
             request,
             event_sink=event_sink,
             prefer_stream=True,
+            preflight_sink=None,
+        ).response
+
+    def respond_with_observation(
+        self,
+        request: ConversationRequest,
+        *,
+        event_sink: ProviderTextDeltaSink,
+        prefer_stream: bool,
+        preflight_sink: Callable[[ContextFitReport], None] | None,
+    ) -> ProviderResponseOutcome:
+        """Publish one preflight, invoke once, and account for actual or unknown usage."""
+        if self.route is None:
+            return respond_with_streaming(
+                self.provider,
+                request,
+                event_sink=event_sink,
+                prefer_stream=prefer_stream,
+            )
+        report = assess_context_fit(
+            provider=self.provider,
+            route=self.route,
+            capability=self.capability,
+            request=request,
         )
-        return outcome.response
+        raise_for_context_fit(report)
+        self.usage_tracker.record_context(report)
+        if preflight_sink is not None:
+            preflight_sink(report)
+        try:
+            outcome = respond_with_streaming(
+                self.provider,
+                request,
+                event_sink=event_sink,
+                prefer_stream=prefer_stream,
+            )
+        except BaseException:
+            self.usage_tracker.record(ProviderInvocationKind.TURN, None)
+            raise
+        self.usage_tracker.record(ProviderInvocationKind.TURN, outcome.usage)
+        return ProviderResponseOutcome(
+            outcome.response,
+            outcome.text_was_streamed,
+            outcome.usage,
+            report,
+        )
 
 
 @dataclass(frozen=True)
@@ -405,6 +491,7 @@ class RuntimeProviderManager:
         self._selection_source = "default"
         self._route: RuntimeProviderRoute | None = None
         self._capability = ModelContextCapability.unknown(None)
+        self._usage_tracker = RuntimeUsageTracker(self._generation)
 
         if profile is not None:
             selected_profile = store.get_profile(profile)
@@ -638,6 +725,7 @@ class RuntimeProviderManager:
                 route,
                 capability,
                 status,
+                self._usage_tracker,
             )
         try:
             yield snapshot
@@ -668,7 +756,13 @@ class RuntimeProviderManager:
                     generation=self._generation,
                 )
             )
-            snapshot = TurnRuntimeSnapshot(self._provider, route, capability, status)
+            snapshot = TurnRuntimeSnapshot(
+                self._provider,
+                route,
+                capability,
+                status,
+                self._usage_tracker,
+            )
         try:
             yield snapshot
         finally:
@@ -722,6 +816,7 @@ class RuntimeProviderManager:
                 self._direct_route = None
                 self._selection_source = selection.source
                 self._generation += 1
+                self._usage_tracker.reset(self._generation)
         except Exception:
             _close_provider(candidate.provider)
             raise
@@ -790,6 +885,7 @@ class RuntimeProviderManager:
                 self._direct_route = None
                 self._selection_source = source
                 self._generation += 1
+                self._usage_tracker.reset(self._generation)
         except Exception:
             _close_provider(candidate_provider)
             raise
@@ -839,6 +935,7 @@ class RuntimeProviderManager:
                     self._load_profile(loaded)
                 self._model_override = model
                 self._generation += 1
+                self._usage_tracker.reset(self._generation)
         except Exception:
             _close_provider(candidate.provider)
             raise
@@ -896,6 +993,18 @@ class RuntimeProviderManager:
                 capability=self._capability,
                 generation=self._generation,
             )
+
+    def begin_turn_usage(self) -> int:
+        self._ensure_open()
+        return self._usage_tracker.turn_cursor()
+
+    def finish_turn_usage(self, cursor: int) -> RuntimeUsageSnapshot:
+        self._ensure_open()
+        return self._usage_tracker.finish_turn(cursor)
+
+    def usage_snapshot(self) -> RuntimeUsageSnapshot:
+        self._ensure_open()
+        return self._usage_tracker.snapshot()
 
     def close(self) -> None:
         with self._lock:

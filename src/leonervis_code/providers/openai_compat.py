@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from collections.abc import Callable
 from typing import Protocol
 
 import openai
@@ -39,7 +40,9 @@ from leonervis_code.providers.streaming import (
     MAX_PROVIDER_STREAM_TEXT_CHARACTERS,
     ProviderTextDelta,
     ProviderTextDeltaSink,
+    ProviderResponseOutcome,
 )
+from leonervis_code.providers.usage import ProviderTokenUsage, parse_provider_usage
 from leonervis_code.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     model_tool_definitions,
@@ -95,21 +98,39 @@ class OpenAICompatibleConversationProvider:
 
     def summarize_compact(self, request_snapshot: CompactSummaryRequest) -> AssistantText:
         """Generate one text-only summary without exposing compatible tools."""
+        return self.summarize_compact_outcome(request_snapshot).response  # type: ignore[return-value]
+
+    def summarize_compact_outcome(
+        self, request_snapshot: CompactSummaryRequest
+    ) -> ProviderResponseOutcome:
+        """Generate one summary and retain actual provider usage outside history."""
         request = build_compact_summary_request(self._route, request_snapshot)
         try:
             response = self._client.create(**request)
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
-        return parse_compact_summary_response(response, route=self._route)
+        return ProviderResponseOutcome(
+            parse_compact_summary_response(response, route=self._route),
+            False,
+            _parse_compatible_usage(getattr(response, "usage", None)),
+        )
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
         """Make one non-streaming compatible request through the injected seam."""
+        return self.respond_outcome(request_snapshot).response
+
+    def respond_outcome(self, request_snapshot: ConversationRequest) -> ProviderResponseOutcome:
+        """Return one response with Host-only actual token usage."""
         request = build_request(self._route, request_snapshot)
         try:
             response = self._client.create(**request)
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
-        return parse_response(response, route=self._route)
+        return ProviderResponseOutcome(
+            parse_response(response, route=self._route),
+            False,
+            _parse_compatible_usage(getattr(response, "usage", None)),
+        )
 
     def respond_stream(
         self,
@@ -118,12 +139,34 @@ class OpenAICompatibleConversationProvider:
         event_sink: ProviderTextDeltaSink,
     ) -> ProviderResponse:
         """Consume one compatible response stream into the same neutral contract."""
+        return self.respond_stream_outcome(request_snapshot, event_sink=event_sink).response
+
+    def respond_stream_outcome(
+        self,
+        request_snapshot: ConversationRequest,
+        *,
+        event_sink: ProviderTextDeltaSink,
+    ) -> ProviderResponseOutcome:
+        """Consume one stream and retain final compatible usage metadata."""
         request = build_request(self._route, request_snapshot)
         request["stream"] = True
+        request["stream_options"] = {"include_usage": True}
+        _validate_request_size(self._route, request)
         stream = None
+        captured_usage: list[ProviderTokenUsage] = []
         try:
             stream = self._client.create(**request)
-            return parse_response_stream(stream, route=self._route, event_sink=event_sink)
+            response = parse_response_stream(
+                stream,
+                route=self._route,
+                event_sink=event_sink,
+                usage_sink=captured_usage.append,
+            )
+            return ProviderResponseOutcome(
+                response,
+                True,
+                captured_usage[0] if captured_usage else None,
+            )
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
         finally:
@@ -624,6 +667,7 @@ def parse_response_stream(
     *,
     route: RuntimeProviderRoute,
     event_sink: ProviderTextDeltaSink,
+    usage_sink: Callable[[ProviderTokenUsage], None] | None = None,
 ) -> ProviderResponse:
     """Assemble one strict sequential response from compatible chat chunks."""
     try:
@@ -638,15 +682,30 @@ def parse_response_stream(
     saw_chunk = False
     text_characters = 0
     text_bytes = 0
+    stream_usage: ProviderTokenUsage | None = None
+    saw_usage_metadata = False
 
     for chunk_index, chunk in enumerate(iterator, start=1):
         if chunk_index > MAX_PROVIDER_STREAM_EVENTS:
             raise _invalid_response(route, "provider stream contained too many chunks")
+        choices = getattr(chunk, "choices", None)
+        raw_usage = getattr(chunk, "usage", None)
+        chunk_usage = _parse_compatible_usage(raw_usage)
+        if choices == [] and finish_reason is not None and raw_usage is not None:
+            if saw_usage_metadata:
+                raise _invalid_response(route, "provider stream repeated usage metadata")
+            saw_usage_metadata = True
+            stream_usage = chunk_usage
+            continue
         if finish_reason is not None:
             raise _invalid_response(route, "provider stream continued after its finish reason")
-        choices = getattr(chunk, "choices", None)
         if not isinstance(choices, list) or len(choices) != 1:
             raise _invalid_response(route, "provider stream chunk must contain one choice")
+        if raw_usage is not None:
+            if saw_usage_metadata:
+                raise _invalid_response(route, "provider stream repeated usage metadata")
+            saw_usage_metadata = True
+            stream_usage = chunk_usage
         choice = choices[0]
         choice_index = getattr(choice, "index", None)
         if type(choice_index) is not int or choice_index != 0:
@@ -778,6 +837,8 @@ def parse_response_stream(
             code="content_refusal",
             message="provider refused or filtered the request",
         )
+    if usage_sink is not None and stream_usage is not None:
+        usage_sink(stream_usage)
 
     text = "".join(text_parts)
     has_tool_fragments = bool(tool_states)
@@ -842,6 +903,14 @@ def _close_stream(stream: object | None) -> None:
             close()
         except Exception:
             pass
+
+
+def _parse_compatible_usage(usage: object) -> ProviderTokenUsage | None:
+    return parse_provider_usage(
+        usage,
+        input_field="prompt_tokens",
+        output_field="completion_tokens",
+    )
 
 
 def token_limit_field(model: str) -> str:

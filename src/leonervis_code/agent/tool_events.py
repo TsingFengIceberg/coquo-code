@@ -14,6 +14,8 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.providers.streaming import ProviderTextDelta
+from leonervis_code.providers.request_context import ContextFitReport
+from leonervis_code.providers.usage import ProviderTokenUsage
 
 MAX_TOOL_EVENT_SUMMARY_CHARACTERS = 512
 MAX_TOOL_EVENT_VALUE_CHARACTERS = 160
@@ -154,6 +156,30 @@ class ToolTurnSummaryCommitted:
             raise ValueError("tool turn summary requires a non-empty ledger")
 
 
+@dataclass(frozen=True)
+class ProviderInvocationPreflighted:
+    invocation_index: int
+    invocation_limit: int
+    report: ContextFitReport
+
+    def __post_init__(self) -> None:
+        _validate_invocation_identity(self.invocation_index, self.invocation_limit)
+        if type(self.report) is not ContextFitReport:
+            raise ValueError("provider invocation context report is invalid")
+
+
+@dataclass(frozen=True)
+class ProviderInvocationUsageReceived:
+    invocation_index: int
+    invocation_limit: int
+    usage: ProviderTokenUsage | None
+
+    def __post_init__(self) -> None:
+        _validate_invocation_identity(self.invocation_index, self.invocation_limit)
+        if self.usage is not None and type(self.usage) is not ProviderTokenUsage:
+            raise ValueError("provider invocation token usage is invalid")
+
+
 ToolPromptEvent = (
     ToolRequestStarted
     | ToolRequestFinished
@@ -166,7 +192,18 @@ AssistantStreamEvent = (
     | AssistantToolTextStreamCompleted
     | AssistantFinalTextStreamCommitted
 )
-AgentPromptEvent = AssistantToolTextReceived | AssistantStreamEvent | ToolPromptEvent
+AgentPromptEvent = (
+    AssistantToolTextReceived
+    | AssistantStreamEvent
+    | ToolPromptEvent
+    | ProviderInvocationPreflighted
+    | ProviderInvocationUsageReceived
+)
+
+
+def _validate_invocation_identity(index: int, limit: int) -> None:
+    if type(index) is not int or type(limit) is not int or not 1 <= index <= limit:
+        raise ValueError("provider invocation event identity is invalid")
 
 
 @dataclass(frozen=True)

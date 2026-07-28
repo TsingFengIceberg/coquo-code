@@ -14,6 +14,8 @@ from leonervis_code.core.contracts import (
     ProviderResponse,
     ToolUse,
 )
+from leonervis_code.providers.usage import ProviderTokenUsage
+from leonervis_code.providers.request_context import ContextFitReport
 
 MAX_PROVIDER_STREAM_TEXT_CHARACTERS = 1024 * 1024
 MAX_PROVIDER_STREAM_TEXT_BYTES = 1024 * 1024
@@ -65,6 +67,8 @@ class ProviderResponseOutcome:
 
     response: ProviderResponse
     text_was_streamed: bool
+    usage: ProviderTokenUsage | None = None
+    context_report: ContextFitReport | None = None
 
 
 def respond_with_streaming(
@@ -73,11 +77,28 @@ def respond_with_streaming(
     *,
     event_sink: ProviderTextDeltaSink,
     prefer_stream: bool,
+    preflight_sink: Callable[[ContextFitReport], None] | None = None,
 ) -> ProviderResponseOutcome:
     """Use a provider stream when requested, otherwise preserve ``respond`` compatibility."""
+    observed_method = getattr(provider, "respond_with_observation", None)
+    if callable(observed_method):
+        return observed_method(
+            request,
+            event_sink=event_sink,
+            prefer_stream=prefer_stream,
+            preflight_sink=preflight_sink,
+        )
+
     stream_method = getattr(provider, "respond_stream", None)
+    stream_outcome_method = getattr(provider, "respond_stream_outcome", None)
     streaming_supported = getattr(provider, "streaming_supported", callable(stream_method))
     if not prefer_stream or not callable(stream_method) or streaming_supported is not True:
+        outcome_method = getattr(provider, "respond_outcome", None)
+        if callable(outcome_method):
+            outcome = outcome_method(request)
+            if not isinstance(outcome, ProviderResponseOutcome):
+                raise ValueError("provider returned an invalid response outcome")
+            return outcome
         return ProviderResponseOutcome(provider.respond(request), False)
 
     text_parts: list[str] = []
@@ -98,7 +119,15 @@ def respond_with_streaming(
         text_parts.append(delta.text)
         event_sink(delta)
 
-    response = stream_method(request, event_sink=receive)
+    if callable(stream_outcome_method):
+        outcome = stream_outcome_method(request, event_sink=receive)
+        if not isinstance(outcome, ProviderResponseOutcome):
+            raise ValueError("provider stream returned an invalid response outcome")
+        response = outcome.response
+        usage = outcome.usage
+    else:
+        response = stream_method(request, event_sink=receive)
+        usage = None
     if not isinstance(response, (AssistantText, ToolUse, AssistantToolBatch)):
         raise ValueError("provider stream returned an invalid response")
     streamed_text = "".join(text_parts)
@@ -107,4 +136,4 @@ def respond_with_streaming(
     )
     if streamed_text != response_text:
         raise ValueError("provider stream text does not match its completed response")
-    return ProviderResponseOutcome(response, bool(text_parts))
+    return ProviderResponseOutcome(response, bool(text_parts), usage)

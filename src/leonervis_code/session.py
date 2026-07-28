@@ -77,6 +77,7 @@ from leonervis_code.providers.request_context import (
     rejects_context_transition,
     raise_for_context_fit,
 )
+from leonervis_code.providers.usage import RuntimeUsageSnapshot
 from leonervis_code.session_records import (
     ActionAuditState,
     ActionExecutionOutcome,
@@ -254,8 +255,17 @@ class AutoCompactionNotApplied:
     prompt_continues: bool
 
 
+@dataclass(frozen=True)
+class TurnUsageCompleted:
+    usage: RuntimeUsageSnapshot
+
+
 PromptEvent = (
-    AutoCompactionStarted | AutoCompactionCommitted | AutoCompactionNotApplied | AgentPromptEvent
+    AutoCompactionStarted
+    | AutoCompactionCommitted
+    | AutoCompactionNotApplied
+    | TurnUsageCompleted
+    | AgentPromptEvent
 )
 PromptEventSink = Callable[[PromptEvent], None]
 
@@ -764,6 +774,7 @@ class ProjectSession:
             prepared = self._loop.prepare_turn(text)
             loop = self._loop
             binding: BindingSnapshot | None = None
+            usage_cursor = self._manager.begin_turn_usage()
             try:
                 with self._manager.provider_for_turn() as runtime:
                     binding = binding_from_status(runtime.status)
@@ -794,8 +805,17 @@ class ProjectSession:
                     prepared = prepared.with_action_lease(lease)
                     self._active_action_lease = lease
                     self._active_action_binding = binding
-                    return loop.run_prepared(prepared, provider=runtime, event_sink=event_sink)
+                    response = loop.run_prepared(
+                        prepared,
+                        provider=runtime,
+                        event_sink=event_sink,
+                    )
+                usage = self._manager.finish_turn_usage(usage_cursor)
+                if usage.latest_invocation is not None:
+                    self._emit_prompt_event(event_sink, TurnUsageCompleted(usage))
+                return response
             except BaseException as error:
+                self._manager.finish_turn_usage(usage_cursor)
                 self._record_failure(
                     binding or binding_from_status(self._manager.status()),
                     error,
@@ -1114,6 +1134,10 @@ class ProjectSession:
     def status(self) -> RuntimeStatus:
         self._ensure_open()
         return self._manager.status()
+
+    def usage(self) -> RuntimeUsageSnapshot:
+        self._ensure_open()
+        return self._manager.usage_snapshot()
 
     def close(self) -> None:
         with self._lock:

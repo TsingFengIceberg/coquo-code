@@ -37,7 +37,8 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.providers.streaming import ProviderTextDelta
+from leonervis_code.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.session import ProjectSession
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
@@ -223,6 +224,46 @@ def test_turn_runtime_preflights_and_holds_lease_while_consuming_stream(tmp_path
     assert provider.stream_calls == 1
     assert events == [ProviderTextDelta("streamed")]
     assert manager.use_profile("two").status.profile == "two"
+
+
+def test_runtime_accounts_actual_and_unknown_usage_and_resets_after_switch(tmp_path) -> None:
+    class UsageProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.outcomes = [ProviderTokenUsage(20, 5), None]
+
+        def respond_outcome(self, request):
+            self.requests.append(request)
+            usage = self.outcomes.pop(0)
+            return ProviderResponseOutcome(AssistantText("done"), False, usage)
+
+    providers = []
+
+    def factory(route, *, environment):
+        provider = UsageProvider(route.wire_model)
+        providers.append(provider)
+        return provider
+
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        provider_factory=factory,
+    )
+    conversation = ConversationRequest(build_system_prompt(), (UserMessage("hello"),))
+    cursor = manager.begin_turn_usage()
+    with manager.provider_for_turn() as runtime:
+        runtime.respond(conversation)
+        runtime.respond(conversation)
+    usage = manager.finish_turn_usage(cursor)
+
+    assert usage.turn_totals.input_tokens == 20
+    assert usage.turn_totals.output_tokens == 5
+    assert usage.turn_totals.known_invocations == 1
+    assert usage.turn_totals.unknown_invocations == 1
+
+    manager.use_profile("two")
+    assert manager.usage_snapshot().latest_invocation is None
 
 
 def test_context_transition_lease_is_pinned_read_only_and_releases_after_base_exception(
@@ -532,6 +573,7 @@ def test_preflight_rejects_known_overflow_before_provider_send(tmp_path) -> None
             runtime.respond_stream(request, event_sink=lambda _event: None)
     assert provider.requests == []
     assert provider.stream_calls == 0
+    assert manager.usage_snapshot().latest_invocation is None
 
 
 def test_switch_rejects_known_committed_context_overflow_without_changing_state(

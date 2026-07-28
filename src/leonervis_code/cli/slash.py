@@ -26,6 +26,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_switch_rejection,
     render_tool_ledgers,
+    render_usage_summary,
 )
 from leonervis_code.core.compaction import CompactionError
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -48,6 +49,7 @@ TOP_LEVEL_COMMANDS = (
     "/quit",
     "/status",
     "/context",
+    "/usage",
     "/compact",
     "/provider",
     "/model",
@@ -73,6 +75,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/tools", "Show durable tool ledgers", True),
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
+    SlashCompletionSpec("/usage", "Show provider token usage", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
     SlashCompletionSpec("/model", "Override the current model", True),
@@ -101,6 +104,8 @@ class ReplSession(Protocol):
     def status(self): ...
 
     def inspect_context(self): ...
+
+    def usage(self): ...
 
     def compact_context(self): ...
 
@@ -168,6 +173,10 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
             return _command_error(error, failure_prefix="Context inspection failed")
     if command.startswith("/context "):
         return _usage("Usage: /context")
+    if command == "/usage":
+        return _call(lambda: render_usage_summary(session.usage()), kind="info")
+    if command.startswith("/usage "):
+        return _usage("Usage: /usage")
     if command == "/compact":
         try:
             return SlashResult(

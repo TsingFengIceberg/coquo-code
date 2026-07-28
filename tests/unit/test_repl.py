@@ -103,13 +103,14 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 5) == "/quit"
     assert complete_command("/", 6) == "/status"
     assert complete_command("/", 7) == "/context"
-    assert complete_command("/", 8) == "/compact"
-    assert complete_command("/", 9) == "/provider"
-    assert complete_command("/", 10) == "/model"
-    assert complete_command("/", 11) == "/session"
-    assert complete_command("/", 12) == "/resume"
-    assert complete_command("/", 13) == "/clear"
-    assert complete_command("/", 14) is None
+    assert complete_command("/", 8) == "/usage"
+    assert complete_command("/", 9) == "/compact"
+    assert complete_command("/", 10) == "/provider"
+    assert complete_command("/", 11) == "/model"
+    assert complete_command("/", 12) == "/session"
+    assert complete_command("/", 13) == "/resume"
+    assert complete_command("/", 14) == "/clear"
+    assert complete_command("/", 15) is None
     assert complete_command("ordinary prompt", 0) is None
 
 
