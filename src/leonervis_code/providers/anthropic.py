@@ -24,6 +24,7 @@ from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
     adapter_error,
+    output_limit_error,
     safe_request_id,
     safe_retry_after,
 )
@@ -204,10 +205,16 @@ class AnthropicConversationProvider:
             response = self._client.create(**request)
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
+        usage = _parse_anthropic_usage(getattr(response, "usage", None))
         return ProviderResponseOutcome(
-            parse_compact_summary_response(response, config=self._config),
+            parse_compact_summary_response(
+                response,
+                config=self._config,
+                requested_output_tokens=request_snapshot.max_output_tokens,
+                usage=usage,
+            ),
             False,
-            _parse_anthropic_usage(getattr(response, "usage", None)),
+            usage,
         )
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
@@ -221,10 +228,11 @@ class AnthropicConversationProvider:
             response = self._client.create(**request)
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
+        usage = _parse_anthropic_usage(getattr(response, "usage", None))
         return ProviderResponseOutcome(
-            parse_response(response, config=self._config),
+            parse_response(response, config=self._config, usage=usage),
             False,
-            _parse_anthropic_usage(getattr(response, "usage", None)),
+            usage,
         )
 
     def respond_stream(
@@ -597,6 +605,8 @@ def parse_compact_summary_response(
     response: object,
     *,
     config: AnthropicProviderConfig,
+    requested_output_tokens: int | None = None,
+    usage: ProviderTokenUsage | None = None,
 ) -> AssistantText:
     """Decode only a normally completed text-only compact summary."""
     stop_reason = getattr(response, "stop_reason", None)
@@ -608,7 +618,17 @@ def parse_compact_summary_response(
             message="Anthropic refused the compact summary request",
         )
     if stop_reason == "max_tokens":
-        raise _invalid_response(config, "Anthropic compact summary reached the output-token limit")
+        raise _output_limit_response(
+            config,
+            "Anthropic compact summary reached the configured output-token limit",
+            requested_output_tokens=(
+                requested_output_tokens
+                if requested_output_tokens is not None
+                else config.max_output_tokens
+            ),
+            usage=usage,
+            partial_response_observed=_message_has_partial_response(response),
+        )
     if stop_reason != "end_turn":
         raise _invalid_response(config, "Anthropic compact summary used an unsupported stop reason")
     content = getattr(response, "content", None)
@@ -628,7 +648,12 @@ def parse_compact_summary_response(
     return AssistantText(text)
 
 
-def parse_response(response: object, *, config: AnthropicProviderConfig) -> ProviderResponse:
+def parse_response(
+    response: object,
+    *,
+    config: AnthropicProviderConfig,
+    usage: ProviderTokenUsage | None = None,
+) -> ProviderResponse:
     """Decode complete text or one bounded ordered tool-use batch."""
     stop_reason = getattr(response, "stop_reason", None)
     if stop_reason == "refusal":
@@ -639,7 +664,13 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
             message="Anthropic refused the request",
         )
     if stop_reason == "max_tokens":
-        raise _invalid_response(config, "Anthropic response reached the output-token limit")
+        raise _output_limit_response(
+            config,
+            "Anthropic response reached the configured output-token limit",
+            requested_output_tokens=config.max_output_tokens,
+            usage=usage,
+            partial_response_observed=_message_has_partial_response(response),
+        )
     if stop_reason not in {"end_turn", "tool_use"}:
         raise _invalid_response(config, "Anthropic response used an unsupported stop reason")
 
@@ -901,7 +932,21 @@ def parse_response_stream(
     if not started or not stopped or stop_reason is None:
         raise _invalid_response(config, "Anthropic stream ended before message_stop")
     if stop_reason == "max_tokens":
-        raise _invalid_response(config, "Anthropic response reached the output-token limit")
+        usage = (
+            ProviderTokenUsage(input_tokens, output_tokens)
+            if input_tokens is not None and output_tokens is not None
+            else None
+        )
+        raise _output_limit_response(
+            config,
+            "Anthropic response reached the configured output-token limit",
+            requested_output_tokens=config.max_output_tokens,
+            usage=usage,
+            partial_response_observed=(
+                text_characters > 0
+                or any(block.block_type == "tool_use" for block in completed_blocks)
+            ),
+        )
     if stop_reason == "refusal":
         raise _adapter_error(
             config,
@@ -1097,6 +1142,35 @@ def _invalid_response(config: AnthropicProviderConfig, message: str) -> Provider
         kind=ProviderFailureKind.RESPONSE_INVALID,
         code="response_invalid",
         message=message,
+    )
+
+
+def _output_limit_response(
+    config: AnthropicProviderConfig,
+    message: str,
+    *,
+    requested_output_tokens: int,
+    usage: ProviderTokenUsage | None,
+    partial_response_observed: bool,
+) -> ProviderAdapterError:
+    return output_limit_error(
+        provider_id=PROVIDER_ID,
+        model_id=config.model_id,
+        message=message,
+        requested_output_tokens=requested_output_tokens,
+        usage=usage,
+        partial_response_observed=partial_response_observed,
+    )
+
+
+def _message_has_partial_response(response: object) -> bool:
+    content = getattr(response, "content", None)
+    if not isinstance(content, list):
+        return False
+    return any(
+        (getattr(block, "type", None) == "text" and bool(getattr(block, "text", None)))
+        or getattr(block, "type", None) == "tool_use"
+        for block in content
     )
 
 

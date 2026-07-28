@@ -158,6 +158,7 @@ class ProviderFailureKind(StrEnum):
     TRANSPORT = "transport"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     RESPONSE_INVALID = "response_invalid"
+    OUTPUT_LIMIT = "output_limit"
     CONTENT_REFUSAL = "content_refusal"
 
 

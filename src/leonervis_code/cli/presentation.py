@@ -17,6 +17,8 @@ from leonervis_code.agent.tool_events import (
     ToolTurnSummaryCommitted,
 )
 from leonervis_code.core.contracts import ToolRequestOutcome
+from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
 from leonervis_code.session import (
     AutoCompactionCommitted,
@@ -69,6 +71,31 @@ PROVIDER_HELP = (
     "  /status\n"
     "  /model <model>"
 )
+
+
+def render_provider_adapter_error(
+    error: ProviderAdapterError,
+    *,
+    prefix: str,
+) -> str:
+    """Render normalized failure evidence without provider payload contents."""
+    failure = error.failure
+    trace = f" [request {failure.request_id}]" if failure.request_id else ""
+    lines = [f"{prefix} [{failure.kind}]{trace}: {failure.message}"]
+    if failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
+        requested = error.requested_output_tokens
+        usage = error.usage
+        if usage is None:
+            actual = "provider actual usage unavailable"
+        else:
+            actual = (
+                f"provider reported {usage.output_tokens} output tokens and "
+                f"{usage.input_tokens} input tokens"
+            )
+        lines.append(f"Output limit: requested {requested} tokens; {actual}.")
+        observed = " with partial content" if error.partial_response_observed else ""
+        lines.append(f"The provider response was incomplete{observed} and was rejected.")
+    return "\n".join(lines)
 
 
 class RuntimeStatusView(Protocol):

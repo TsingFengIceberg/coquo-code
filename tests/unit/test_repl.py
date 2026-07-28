@@ -34,7 +34,9 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.providers.errors import output_limit_error
 from leonervis_code.providers.manager import RuntimeStatus, RuntimeSwitchResult
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.session_records import BindingSnapshot
@@ -635,6 +637,41 @@ def test_repl_streams_final_text_once_and_continues_after_interrupted_partial_te
     assert "partial\nGeneration cancelled; partial assistant text was not committed.\n" in rendered
     assert rendered.count("final\n") == 1
     assert session.calls == 2
+
+
+def test_repl_explains_output_limit_and_keeps_partial_text_uncommitted(tmp_path) -> None:
+    class LimitedSession:
+        def prompt(self, _prompt, *, event_sink=None):
+            event_sink(AssistantResponseTextDeltaReceived("partial"))
+            raise output_limit_error(
+                provider_id="compatible",
+                model_id="model",
+                message="provider response reached the configured output-token limit",
+                requested_output_tokens=4096,
+                usage=ProviderTokenUsage(4900, 4096),
+                partial_response_observed=True,
+            )
+
+    output = io.StringIO()
+
+    assert (
+        run_repl(
+            LimitedSession(),
+            stdin=io.StringIO("long answer\n/exit\n"),
+            stdout=output,
+            version="0.1.0",
+            cwd=tmp_path,
+            color=False,
+        )
+        == 0
+    )
+
+    rendered = output.getvalue()
+    assert "partial\nPartial assistant text was not committed.\n" in rendered
+    assert "Provider error [output_limit]" in rendered
+    assert "Output limit: requested 4096 tokens" in rendered
+    assert "No turn was committed" in rendered
+    assert "remain in Action Audit" in rendered
 
 
 def test_repl_renders_nonstream_final_markdown_when_terminal_rendering_is_enabled(

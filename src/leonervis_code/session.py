@@ -1085,7 +1085,12 @@ class ProjectSession:
         if source_report.input_count.method != candidate_report.input_count.method:
             raise CompactionCandidateError("source and candidate input counts are not comparable")
         if after >= before:
-            raise CompactionCandidateError("candidate context did not reduce provider input tokens")
+            raise CompactionCandidateError(
+                "candidate context did not reduce provider input tokens",
+                before_input_tokens=before,
+                after_input_tokens=after,
+                input_method=candidate_report.input_count.method.value,
+            )
 
         with self._lock:
             self._ensure_open()

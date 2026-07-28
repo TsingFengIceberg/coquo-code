@@ -21,9 +21,11 @@ from leonervis_code.cli.prompt_editor import (
 )
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
+from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     render_message,
+    render_provider_adapter_error,
     render_prompt,
     render_prompt_toolbar,
     render_runtime_status,
@@ -166,8 +168,14 @@ def run_repl(
             stdout.write(f"{render_message(message, 'error', color=color)}\n")
         except ProviderAdapterError as error:
             _report_aborted_stream(event_sink, stdout, color=color)
-            message = f"Provider error [{error.failure.kind}]: {error.failure.message}"
+            message = render_provider_adapter_error(error, prefix="Provider error")
             stdout.write(f"{render_message(message, 'error', color=color)}\n")
+            if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
+                note = (
+                    "No turn was committed. Any tool side effects completed earlier in this "
+                    "attempt were not rolled back and remain in Action Audit."
+                )
+                stdout.write(f"{render_message(note, 'warning', color=color)}\n")
         except (ProviderProfileError, RuntimeProviderStateError) as error:
             _report_aborted_stream(event_sink, stdout, color=color)
             stdout.write(f"{render_message(f'Runtime error: {error}', 'error', color=color)}\n")

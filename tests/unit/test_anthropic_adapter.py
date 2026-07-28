@@ -176,6 +176,21 @@ def test_anthropic_response_outcome_retains_actual_usage_outside_response() -> N
     assert outcome.usage == ProviderTokenUsage(1, 1)
 
 
+def test_anthropic_output_limit_is_typed_and_retains_nonstream_usage() -> None:
+    truncated = message(TextBlock(text="partial", type="text"), stop_reason="max_tokens")
+    provider = AnthropicConversationProvider(config(), RecordingMessagesClient([truncated]))
+
+    with pytest.raises(ProviderAdapterError) as caught:
+        provider.respond_outcome(request(UserMessage("hello")))
+
+    error = caught.value
+    assert error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+    assert error.failure.diagnostic_code == "output_token_limit"
+    assert error.requested_output_tokens == 64
+    assert error.usage == ProviderTokenUsage(1, 1)
+    assert error.partial_response_observed is True
+
+
 def test_anthropic_stream_normalizes_start_and_delta_usage() -> None:
     stream = ClosableStream(
         [
@@ -212,6 +227,44 @@ def test_anthropic_stream_normalizes_start_and_delta_usage() -> None:
 
     assert outcome.response == AssistantText("done")
     assert outcome.usage == ProviderTokenUsage(22, 4)
+    assert stream.closed is True
+
+
+def test_anthropic_stream_output_limit_retains_usage_and_partial_observation() -> None:
+    stream = ClosableStream(
+        [
+            anthropic_event(
+                "message_start",
+                message=SimpleNamespace(
+                    role="assistant",
+                    usage=SimpleNamespace(input_tokens=22),
+                ),
+            ),
+            anthropic_event(
+                "content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="text", text="partial"),
+            ),
+            anthropic_event("content_block_stop", index=0),
+            anthropic_event(
+                "message_delta",
+                delta=SimpleNamespace(stop_reason="max_tokens"),
+                usage=SimpleNamespace(output_tokens=64),
+            ),
+            anthropic_event("message_stop"),
+        ]
+    )
+    events = []
+    provider = AnthropicConversationProvider(config(), RecordingMessagesClient([stream]))
+
+    with pytest.raises(ProviderAdapterError) as caught:
+        provider.respond_stream_outcome(request(UserMessage("hello")), event_sink=events.append)
+
+    error = caught.value
+    assert error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+    assert error.usage == ProviderTokenUsage(22, 64)
+    assert error.partial_response_observed is True
+    assert events == [ProviderTextDelta("partial")]
     assert stream.closed is True
 
 
@@ -1070,7 +1123,9 @@ def test_parser_classifies_refusal_and_rejects_truncated_text() -> None:
     truncated = message(TextBlock(text="partial", type="text"), stop_reason="max_tokens")
     with pytest.raises(ProviderAdapterError) as output_limit:
         parse_response(truncated, config=config())
-    assert output_limit.value.failure.kind == ProviderFailureKind.RESPONSE_INVALID
+    assert output_limit.value.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+    assert output_limit.value.requested_output_tokens == 64
+    assert output_limit.value.partial_response_observed is True
 
 
 def test_adapter_sends_explicit_temperature_when_configured() -> None:

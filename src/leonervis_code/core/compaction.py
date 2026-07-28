@@ -146,6 +146,43 @@ class CompactionNotEligibleError(CompactionError):
 class CompactionCandidateError(CompactionError):
     """Raised when generated effective context is unsafe or not useful."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        before_input_tokens: int | None = None,
+        after_input_tokens: int | None = None,
+        input_method: str | None = None,
+    ) -> None:
+        evidence = (before_input_tokens, after_input_tokens, input_method)
+        if any(value is not None for value in evidence) and not all(
+            value is not None for value in evidence
+        ):
+            raise ValueError("compaction candidate token evidence must be complete")
+        if before_input_tokens is not None and (
+            type(before_input_tokens) is not int or before_input_tokens < 0
+        ):
+            raise ValueError("compaction source input tokens must be non-negative")
+        if after_input_tokens is not None and (
+            type(after_input_tokens) is not int or after_input_tokens < 0
+        ):
+            raise ValueError("compaction candidate input tokens must be non-negative")
+        if input_method is not None and (not isinstance(input_method, str) or not input_method):
+            raise ValueError("compaction input method must be non-empty text")
+        self.message = message
+        self.before_input_tokens = before_input_tokens
+        self.after_input_tokens = after_input_tokens
+        self.input_method = input_method
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        if self.before_input_tokens is None:
+            return self.message
+        return (
+            f"{self.message} (input {self.before_input_tokens} -> "
+            f"{self.after_input_tokens} tokens; {self.input_method})"
+        )
+
 
 class CompactionConflictError(CompactionError):
     """Raised when the frozen source becomes stale before commit."""

@@ -3,14 +3,39 @@
 from __future__ import annotations
 
 from leonervis_code.core.orchestration import ProviderFailure, ProviderFailureKind
+from leonervis_code.providers.usage import ProviderTokenUsage
 
 
 class ProviderAdapterError(RuntimeError):
     """Expose only a normalized safe provider failure to callers."""
 
-    def __init__(self, failure: ProviderFailure) -> None:
+    def __init__(
+        self,
+        failure: ProviderFailure,
+        *,
+        requested_output_tokens: int | None = None,
+        usage: ProviderTokenUsage | None = None,
+        partial_response_observed: bool = False,
+    ) -> None:
         super().__init__(failure.message)
+        if requested_output_tokens is not None and (
+            type(requested_output_tokens) is not int or requested_output_tokens < 1
+        ):
+            raise ValueError("requested output tokens must be positive when known")
+        if usage is not None and type(usage) is not ProviderTokenUsage:
+            raise ValueError("provider error usage must be a ProviderTokenUsage")
+        if type(partial_response_observed) is not bool:
+            raise ValueError("partial response observation must be boolean")
+        if failure.kind == ProviderFailureKind.OUTPUT_LIMIT and requested_output_tokens is None:
+            raise ValueError("output-limit failures require the requested output tokens")
+        if failure.kind != ProviderFailureKind.OUTPUT_LIMIT and (
+            requested_output_tokens is not None or usage is not None or partial_response_observed
+        ):
+            raise ValueError("provider failure observations are reserved for output limits")
         self.failure = failure
+        self.requested_output_tokens = requested_output_tokens
+        self.usage = usage
+        self.partial_response_observed = partial_response_observed
 
 
 def adapter_error(
@@ -36,6 +61,31 @@ def adapter_error(
             retry_after_seconds=retry_after_seconds,
             request_id=request_id,
         )
+    )
+
+
+def output_limit_error(
+    *,
+    provider_id: str,
+    model_id: str,
+    message: str,
+    requested_output_tokens: int,
+    usage: ProviderTokenUsage | None = None,
+    partial_response_observed: bool = False,
+) -> ProviderAdapterError:
+    """Build one normalized output-limit failure with bounded Host observations."""
+    return ProviderAdapterError(
+        ProviderFailure(
+            provider_id=provider_id,
+            model_id=model_id,
+            kind=ProviderFailureKind.OUTPUT_LIMIT,
+            diagnostic_code="output_token_limit",
+            message=message,
+            retryable=False,
+        ),
+        requested_output_tokens=requested_output_tokens,
+        usage=usage,
+        partial_response_observed=partial_response_observed,
     )
 
 

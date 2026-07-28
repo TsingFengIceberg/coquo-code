@@ -37,6 +37,8 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
 )
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.errors import output_limit_error
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import (
     ActionAuthorization,
@@ -72,6 +74,49 @@ def test_prompt_command_runs_the_deterministic_foundation_loop(capsys, tmp_path)
     captured = capsys.readouterr()
     assert captured.out == "Fake response: Hello\n"
     assert captured.err == ""
+
+
+def test_prompt_command_explains_output_limit_without_committing_turn(
+    monkeypatch, tmp_path
+) -> None:
+    class LimitedSession:
+        startup_resume_result = None
+
+        def prompt(self, _text, *, event_sink=None):
+            raise output_limit_error(
+                provider_id="compatible",
+                model_id="model",
+                message="provider response reached the configured output-token limit",
+                requested_output_tokens=4096,
+                usage=ProviderTokenUsage(4900, 4096),
+                partial_response_observed=True,
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: LimitedSession())
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["prompt", "long answer"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+        )
+        == 2
+    )
+
+    assert output.getvalue() == ""
+    assert errors.getvalue().splitlines() == [
+        "provider error [output_limit]: provider response reached the configured output-token limit",
+        "Output limit: requested 4096 tokens; provider reported 4096 output tokens and 4900 input tokens.",
+        "The provider response was incomplete with partial content and was rejected.",
+        "No turn was committed. Any tool side effects completed earlier in this attempt were not rolled back and remain in Action Audit.",
+    ]
 
 
 def test_prompt_command_keeps_final_text_on_stdout_and_tool_events_on_stderr(

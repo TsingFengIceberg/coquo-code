@@ -43,6 +43,7 @@
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Runtime Context Meter and Provider Token Usage](#runtime-context-meter-and-provider-token-usage)
 - [Context and Compaction Observability](#context-and-compaction-observability)
+- [Provider Output-limit and Compaction Failure Diagnostics](#provider-output-limit-and-compaction-failure-diagnostics)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -619,6 +620,16 @@ The REPL adds `/compact preview` and `/compactions [count]`. Preview freezes the
 
 This slice is Host-only observability. Canonical system prompt v19, provider adapter contract v21, the 17 tool schemas and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, `context_compacted` v2/v3, and Effective Context `ctx-v3`/`ctx-v4` all remain unchanged. See [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md).
 
+## Provider Output-limit and Compaction Failure Diagnostics
+
+Anthropic and OpenAI-compatible now normalize exhausted output allowances for ordinary generation and compact summaries as `output_limit` instead of mixing them into general `response_invalid` failures. The structured error carries only the requested output limit, usable strict provider usage, and whether incomplete content was observed; it retains neither raw responses nor partial text. Non-streaming paths read valid usage before rejection. OpenAI-compatible streams retain a usage-only tail after the finish reason, while Anthropic streams combine input/output measurements from message start and delta events.
+
+Runtime records known actual usage on the output-limit exception path, so a later `/usage` accurately includes the failed turn or compaction invocation; absent or malformed metadata remains unknown. One-shot and REPL presentation show the requested limit, actual input/output or explicit unavailability, and explain that the incomplete response is not a final answer or committed turn. Tool side effects completed earlier in the attempt are not rolled back and remain governed by Action Audit. Streamed partial text is ephemeral terminal output and is explicitly marked uncommitted.
+
+A non-reducing compaction now retains comparable source/candidate input counts and the count method in a structured `CompactionCandidateError`, so the terminal can show evidence such as `input 4900 -> 5100 tokens; estimated`. The failure still installs no summary, appends no checkpoint, and changes no Effective Context; known process-local usage for the summary generation remains inspectable. The system does not automatically retry, commit partial text, or increase the profile output reserve.
+
+Provider adapter contract advances to v22 for failure transport and exception-path usage accounting. Native requests, successful responses, and tool/history projection are unchanged. Canonical system prompt remains v19, while the 17 tools and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit v1, `context_compacted` v2/v3, and Effective Context `ctx-v3`/`ctx-v4` do not advance. See [0060: Provider Output-limit and Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -844,3 +855,4 @@ This slice establishes capacity facts only. It does not count current request to
 57. [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
 58. [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
 59. [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
+60. [0060: Provider Output-limit and Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)

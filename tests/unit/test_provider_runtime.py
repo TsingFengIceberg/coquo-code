@@ -18,6 +18,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.providers.definitions import WireProtocol
+from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
 from leonervis_code.providers.manager import (
     RuntimeProviderManager,
     RuntimeProviderStateError,
@@ -264,6 +265,72 @@ def test_runtime_accounts_actual_and_unknown_usage_and_resets_after_switch(tmp_p
 
     manager.use_profile("two")
     assert manager.usage_snapshot().latest_invocation is None
+
+
+def test_runtime_usage_retains_known_usage_from_output_limit_failure(tmp_path) -> None:
+    class LimitedProvider(RecordingProvider):
+        def respond_outcome(self, request):
+            self.requests.append(request)
+            raise output_limit_error(
+                provider_id="custom",
+                model_id=self.label,
+                message="provider response reached the configured output-token limit",
+                requested_output_tokens=1024,
+                usage=ProviderTokenUsage(30, 1024),
+                partial_response_observed=True,
+            )
+
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: LimitedProvider(route.wire_model),
+    )
+    conversation = ConversationRequest(build_system_prompt(), (UserMessage("hello"),))
+    cursor = manager.begin_turn_usage()
+
+    with manager.provider_for_turn() as runtime:
+        with pytest.raises(ProviderAdapterError):
+            runtime.respond(conversation)
+    usage = manager.finish_turn_usage(cursor)
+
+    assert usage.turn_totals.input_tokens == 30
+    assert usage.turn_totals.output_tokens == 1024
+    assert usage.turn_totals.known_invocations == 1
+    assert usage.turn_totals.unknown_invocations == 0
+
+
+def test_compaction_usage_retains_known_usage_from_output_limit_failure(tmp_path) -> None:
+    class LimitedCompactProvider(RecordingProvider):
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED)
+
+        def summarize_compact_outcome(self, request):
+            raise output_limit_error(
+                provider_id="custom",
+                model_id=self.label,
+                message="compact summary reached the configured output-token limit",
+                requested_output_tokens=request.max_output_tokens,
+                usage=ProviderTokenUsage(40, 20),
+                partial_response_observed=True,
+            )
+
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: LimitedCompactProvider(route.wire_model),
+    )
+    request = CompactSummaryRequest(build_compact_prompt(), "source", 20)
+
+    with manager.provider_for_compaction() as runtime:
+        with pytest.raises(ProviderAdapterError):
+            runtime.summarize(request)
+    usage = manager.usage_snapshot()
+
+    assert usage.latest_compaction is not None
+    assert usage.latest_compaction.usage == ProviderTokenUsage(40, 20)
+    assert usage.profile_compaction_totals.known_invocations == 1
 
 
 def test_context_transition_lease_is_pinned_read_only_and_releases_after_base_exception(

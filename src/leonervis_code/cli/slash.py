@@ -21,6 +21,7 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_compact_preview,
     render_compaction_history,
+    render_provider_adapter_error,
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
@@ -473,7 +474,11 @@ def _model(command: str, session: ReplSession) -> SlashResult:
 
 def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
     if isinstance(error, ProviderAdapterError):
-        message = error.failure.message
+        return SlashResult(
+            handled=True,
+            message=render_provider_adapter_error(error, prefix=failure_prefix),
+            kind="error",
+        )
     elif isinstance(
         error,
         (

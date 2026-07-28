@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.slash import dispatch_slash
+from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.manager import (
     CurrentTargetContextAssessment,
     RuntimeStatus,
@@ -238,6 +239,25 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/tools details 21", session).message == (
         "Usage: /tools [1-20] | /tools details [1-20]"
     )
+
+
+def test_manual_compaction_failure_shows_nonreducing_token_evidence(tmp_path) -> None:
+    session = Session(tmp_path)
+
+    def fail_compaction():
+        raise CompactionCandidateError(
+            "candidate context did not reduce provider input tokens",
+            before_input_tokens=4900,
+            after_input_tokens=5100,
+            input_method="estimated",
+        )
+
+    session.compact_context = fail_compaction
+    result = dispatch_slash("/compact", session)
+
+    assert result.kind == "error"
+    assert "input 4900 -> 5100 tokens; estimated" in result.message
+    assert result.message.endswith("Full history and effective context are unchanged.")
     assert dispatch_slash("/clear", session).clear_screen is True
     assert dispatch_slash("/clear extra", session).message == "Usage: /clear"
     assert session.prompts == []

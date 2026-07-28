@@ -20,6 +20,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.profile import ProviderProfileSpec
@@ -574,6 +575,57 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     resumed.prompt("continue")
     assert resumed_provider.requests[-1].effective_summary is not None
     resumed.close()
+
+
+def test_nonreducing_compaction_reports_comparable_token_evidence_without_commit(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="compact",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="compact-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+
+    class NonReducingProvider(RecordingProvider):
+        def count_input_tokens(self, request):
+            value = 1100 if request.effective_summary is not None else 1000
+            return RequestTokenCount(value, RequestTokenCountMethod.ESTIMATED)
+
+    provider = NonReducingProvider("compact")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="compact",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for index in range(4):
+        session.prompt(f"turn-{index}")
+    before_bytes = session.transcript_path.read_bytes()
+    before_context = session.inspect_context()
+
+    with pytest.raises(CompactionCandidateError) as caught:
+        session.compact_context()
+
+    error = caught.value
+    assert error.before_input_tokens == 1000
+    assert error.after_input_tokens == 1100
+    assert error.input_method == "estimated"
+    assert "input 1000 -> 1100 tokens; estimated" in str(error)
+    assert len(provider.summary_requests) == 1
+    assert session.transcript_path.read_bytes() == before_bytes
+    assert session.inspect_context() == before_context
+    assert session.compaction_history(5).total_checkpoints == 0
+    session.close()
 
 
 def test_resume_screening_counts_compacted_effective_projection_only(tmp_path: Path) -> None:

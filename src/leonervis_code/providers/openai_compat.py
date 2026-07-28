@@ -25,6 +25,7 @@ from leonervis_code.providers.definitions import RuntimeProviderRoute
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
     adapter_error,
+    output_limit_error,
     safe_request_id,
     safe_retry_after,
 )
@@ -109,10 +110,16 @@ class OpenAICompatibleConversationProvider:
             response = self._client.create(**request)
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
+        usage = _parse_compatible_usage(getattr(response, "usage", None))
         return ProviderResponseOutcome(
-            parse_compact_summary_response(response, route=self._route),
+            parse_compact_summary_response(
+                response,
+                route=self._route,
+                requested_output_tokens=request_snapshot.max_output_tokens,
+                usage=usage,
+            ),
             False,
-            _parse_compatible_usage(getattr(response, "usage", None)),
+            usage,
         )
 
     def respond(self, request_snapshot: ConversationRequest) -> ProviderResponse:
@@ -126,10 +133,11 @@ class OpenAICompatibleConversationProvider:
             response = self._client.create(**request)
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
+        usage = _parse_compatible_usage(getattr(response, "usage", None))
         return ProviderResponseOutcome(
-            parse_response(response, route=self._route),
+            parse_response(response, route=self._route, usage=usage),
             False,
-            _parse_compatible_usage(getattr(response, "usage", None)),
+            usage,
         )
 
     def respond_stream(
@@ -517,6 +525,8 @@ def parse_compact_summary_response(
     response: object,
     *,
     route: RuntimeProviderRoute,
+    requested_output_tokens: int | None = None,
+    usage: ProviderTokenUsage | None = None,
 ) -> AssistantText:
     """Decode only one normally completed text-only compact summary."""
     choices = getattr(response, "choices", None)
@@ -525,7 +535,17 @@ def parse_compact_summary_response(
     choice = choices[0]
     finish_reason = getattr(choice, "finish_reason", None)
     if finish_reason in {"length", "max_tokens"}:
-        raise _invalid_response(route, "compact summary reached the output-token limit")
+        raise _output_limit_response(
+            route,
+            "compact summary reached the configured output-token limit",
+            requested_output_tokens=(
+                requested_output_tokens
+                if requested_output_tokens is not None
+                else route.max_output_tokens
+            ),
+            usage=usage,
+            partial_response_observed=_choice_has_partial_response(choice),
+        )
     if finish_reason in {"content_filter", "refusal"}:
         raise adapter_error(
             provider_id=route.definition.provider_id,
@@ -555,7 +575,12 @@ def parse_compact_summary_response(
     return AssistantText(content.strip())
 
 
-def parse_response(response: object, *, route: RuntimeProviderRoute) -> ProviderResponse:
+def parse_response(
+    response: object,
+    *,
+    route: RuntimeProviderRoute,
+    usage: ProviderTokenUsage | None = None,
+) -> ProviderResponse:
     """Decode complete text or one bounded ordered function-call batch."""
     choices = getattr(response, "choices", None)
     if not isinstance(choices, list) or len(choices) != 1:
@@ -563,7 +588,13 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
     choice = choices[0]
     finish_reason = getattr(choice, "finish_reason", None)
     if finish_reason in {"length", "max_tokens"}:
-        raise _invalid_response(route, "provider response reached the output-token limit")
+        raise _output_limit_response(
+            route,
+            "provider response reached the configured output-token limit",
+            requested_output_tokens=route.max_output_tokens,
+            usage=usage,
+            partial_response_observed=_choice_has_partial_response(choice),
+        )
     if finish_reason in {"content_filter", "refusal"}:
         raise adapter_error(
             provider_id=route.definition.provider_id,
@@ -828,7 +859,13 @@ def parse_response_stream(
     if not saw_chunk or finish_reason is None:
         raise _invalid_response(route, "provider stream ended before a finish reason")
     if finish_reason in {"length", "max_tokens"}:
-        raise _invalid_response(route, "provider response reached the output-token limit")
+        raise _output_limit_response(
+            route,
+            "provider response reached the configured output-token limit",
+            requested_output_tokens=route.max_output_tokens,
+            usage=stream_usage,
+            partial_response_observed=bool(text_parts or tool_states),
+        )
     if finish_reason in {"content_filter", "refusal"}:
         raise adapter_error(
             provider_id=route.definition.provider_id,
@@ -1047,3 +1084,30 @@ def _invalid_response(route: RuntimeProviderRoute, message: str) -> ProviderAdap
         code="response_invalid",
         message=message,
     )
+
+
+def _output_limit_response(
+    route: RuntimeProviderRoute,
+    message: str,
+    *,
+    requested_output_tokens: int,
+    usage: ProviderTokenUsage | None,
+    partial_response_observed: bool,
+) -> ProviderAdapterError:
+    return output_limit_error(
+        provider_id=route.definition.provider_id,
+        model_id=route.selected_model,
+        message=message,
+        requested_output_tokens=requested_output_tokens,
+        usage=usage,
+        partial_response_observed=partial_response_observed,
+    )
+
+
+def _choice_has_partial_response(choice: object) -> bool:
+    message = getattr(choice, "message", None)
+    if message is None:
+        return False
+    content = getattr(message, "content", None)
+    tool_calls = getattr(message, "tool_calls", None)
+    return bool(isinstance(content, str) and content) or bool(tool_calls)

@@ -43,6 +43,7 @@
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Runtime Context Meter 与 Provider Token Usage](#runtime-context-meter-与-provider-token-usage)
 - [Context 与 Compaction Observability](#context-与-compaction-observability)
+- [Provider Output-limit 与 Compaction Failure Diagnostics](#provider-output-limit-与-compaction-failure-diagnostics)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -619,6 +620,16 @@ REPL新增`/compact preview`与`/compactions [count]`。Preview在当前Session�
 
 该slice是Host-only observability。Canonical system prompt保持v19，provider adapter contract保持v21，17个tool schema/order、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)。
 
+## Provider Output-limit 与 Compaction Failure Diagnostics
+
+Anthropic与OpenAI-compatible现在把普通generation或compact summary耗尽输出额度统一表示为`output_limit`，不再混入一般`response_invalid`。结构化错误只携带requested output limit、可用的严格provider usage及是否观察到不完整内容，不保存raw response或partial text。非流式响应会在拒绝前读取合法usage；OpenAI-compatible stream保留finish reason后的usage-only tail，Anthropic stream组合message start/delta中的input/output计量。
+
+Runtime在output-limit异常路径也会记录已知actual usage，因此后续`/usage`能准确显示失败的turn或compaction调用；metadata缺失或malformed仍是unknown。One-shot与REPL会展示requested limit、actual input/output或明确不可用，并说明不完整回复不是final answer、没有committed turn。已经在该尝试较早阶段完成的工具副作用不会回滚，仍以Action Audit为准；stream partial text只在终端临时可见并明确标记未提交。
+
+非缩减compaction现在以结构化`CompactionCandidateError`保留可比较的source/candidate input count与计量方法，终端会显示例如`input 4900 -> 5100 tokens; estimated`。该失败仍不安装summary、不追加checkpoint、不修改Effective Context；summary generation的进程内usage若已知仍可查看。系统不自动retry、不提交partial text，也不自动提高profile output reserve。
+
+Provider adapter contract因失败transport与异常usage计量升级为v22。Native request、成功response、tool/history projection不变；canonical system prompt保持v19，17工具及顺序、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit v1、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不升级。完整决策见[0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -844,3 +855,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 57. [0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
 58. [0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
 59. [0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)
+60. [0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)

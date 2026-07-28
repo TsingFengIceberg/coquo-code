@@ -184,6 +184,44 @@ def test_compatible_response_outcome_retains_actual_usage_outside_response() -> 
     assert outcome.usage == ProviderTokenUsage(12, 3)
 
 
+def test_compatible_output_limit_is_typed_and_retains_nonstream_usage() -> None:
+    response = completion(content="partial", finish_reason="length").model_copy(
+        update={"usage": SimpleNamespace(prompt_tokens=12, completion_tokens=64)}
+    )
+    provider = OpenAICompatibleConversationProvider(route(), RecordingChatClient([response]))
+
+    with pytest.raises(ProviderAdapterError) as caught:
+        provider.respond_outcome(request(UserMessage("hello")))
+
+    error = caught.value
+    assert error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+    assert error.failure.diagnostic_code == "output_token_limit"
+    assert error.requested_output_tokens == route().max_output_tokens
+    assert error.usage == ProviderTokenUsage(12, 64)
+    assert error.partial_response_observed is True
+
+
+def test_compatible_stream_output_limit_retains_usage_and_partial_observation() -> None:
+    stream = ClosableStream(
+        [
+            stream_chunk(content="partial", finish_reason="length"),
+            stream_usage_chunk(22, 64),
+        ]
+    )
+    events = []
+    provider = OpenAICompatibleConversationProvider(route(), RecordingChatClient([stream]))
+
+    with pytest.raises(ProviderAdapterError) as caught:
+        provider.respond_stream_outcome(request(UserMessage("hello")), event_sink=events.append)
+
+    error = caught.value
+    assert error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+    assert error.usage == ProviderTokenUsage(22, 64)
+    assert error.partial_response_observed is True
+    assert events == [ProviderTextDelta("partial")]
+    assert stream.closed is True
+
+
 def test_compatible_stream_requests_and_normalizes_final_usage_chunk() -> None:
     stream = ClosableStream(
         [

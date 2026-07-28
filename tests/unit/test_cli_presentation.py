@@ -34,6 +34,7 @@ from leonervis_code.cli.presentation import (
     render_prompt,
     render_prompt_toolbar,
     render_prompt_event,
+    render_provider_adapter_error,
     render_resume_rejection,
     render_runtime_status,
     render_runtime_switch,
@@ -43,6 +44,7 @@ from leonervis_code.cli.presentation import (
     render_usage_summary,
 )
 from leonervis_code.providers.manager import CurrentTargetContextAssessment, RuntimeStatus
+from leonervis_code.providers.errors import output_limit_error
 from leonervis_code.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
@@ -102,6 +104,25 @@ from leonervis_code.tools.read_file import ReadFileTool
 @dataclass
 class Info:
     session_id: str = "12345678-1234-4234-9234-123456789abc"
+
+
+def test_output_limit_presentation_includes_requested_and_actual_usage() -> None:
+    error = output_limit_error(
+        provider_id="compatible",
+        model_id="model",
+        message="provider response reached the configured output-token limit",
+        requested_output_tokens=4096,
+        usage=ProviderTokenUsage(4900, 4096),
+        partial_response_observed=True,
+    )
+
+    rendered = render_provider_adapter_error(error, prefix="Provider error")
+
+    assert rendered.splitlines() == [
+        "Provider error [output_limit]: provider response reached the configured output-token limit",
+        "Output limit: requested 4096 tokens; provider reported 4096 output tokens and 4900 input tokens.",
+        "The provider response was incomplete with partial content and was rejected.",
+    ]
 
 
 def status(*, mode="fake", profile=None, provider="fake", model=None):

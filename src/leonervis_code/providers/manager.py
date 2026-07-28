@@ -19,6 +19,7 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.core.effective_context import EffectiveContextSnapshot
 from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
+from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.model_context import (
@@ -171,6 +172,9 @@ class CompactionRuntimeSnapshot:
                     )
                 response = operation(request)
                 usage = None
+        except ProviderAdapterError as error:
+            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, error.usage)
+            raise
         except BaseException:
             self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
             raise
@@ -288,6 +292,9 @@ class TurnRuntimeSnapshot:
                     )
                 response = operation(request)
                 usage = None
+        except ProviderAdapterError as error:
+            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, error.usage)
+            raise
         except BaseException:
             self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
             raise
@@ -349,6 +356,9 @@ class TurnRuntimeSnapshot:
                 event_sink=event_sink,
                 prefer_stream=prefer_stream,
             )
+        except ProviderAdapterError as error:
+            self.usage_tracker.record(ProviderInvocationKind.TURN, error.usage)
+            raise
         except BaseException:
             self.usage_tracker.record(ProviderInvocationKind.TURN, None)
             raise
