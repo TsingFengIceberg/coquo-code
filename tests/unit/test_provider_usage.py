@@ -43,6 +43,8 @@ def test_usage_tracker_separates_turn_compaction_unknown_and_reset() -> None:
     assert snapshot.turn_totals.known_invocations == 1
     assert snapshot.turn_totals.unknown_invocations == 1
     assert snapshot.profile_compaction_totals.input_tokens == 80
+    assert snapshot.latest_compaction is not None
+    assert snapshot.latest_compaction.usage == ProviderTokenUsage(80, 10)
     assert [record.kind for record in snapshot.latest_turn] == [
         ProviderInvocationKind.TURN,
         ProviderInvocationKind.TURN,
@@ -52,6 +54,7 @@ def test_usage_tracker_separates_turn_compaction_unknown_and_reset() -> None:
     reset = tracker.snapshot()
     assert reset.runtime_generation == 4
     assert reset.latest_invocation is None
+    assert reset.latest_compaction is None
     assert reset.latest_context is None
 
 

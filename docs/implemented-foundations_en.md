@@ -42,6 +42,7 @@
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Runtime Context Meter and Provider Token Usage](#runtime-context-meter-and-provider-token-usage)
+- [Context and Compaction Observability](#context-and-compaction-observability)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -608,6 +609,16 @@ The runtime reports the latest invocation, latest user turn, and totals since en
 
 The provider adapter contract advances to v21 because the OpenAI-compatible stream request and both adapter response transports gain a usage contract. Canonical system prompt v19, the 17 tool schemas and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, Action Audit, `context_compacted`, and Effective Context `ctx-v3`/`ctx-v4` remain unchanged. See [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md).
 
+## Context and Compaction Observability
+
+The REPL adds `/compact preview` and `/compactions [count]`. Preview freezes the current Effective Context under the Session lock, reuses the fixed policy of at least four effective turns while retaining the latest two, and performs current-target assessment. It reports eligibility, selected turn counts, and pressure without building a summary request, taking a compaction lease, or writing a checkpoint. Fake and unknown targets remain explicitly unknown. An Anthropic official target may use a count-only API for exact inspection, but preview performs no generation.
+
+`/compactions` selects the latest five and at most 20 `context_compacted` records from the already strictly replayed current Session state. It shows only sequence, timestamp, schema, manual/high-water/overflow trigger, the 80% threshold, full/summarized/retained turn counts, and previous checkpoint. Summary text, binding, context IDs, prompts, and credentials remain hidden. Existing v2/v3 checkpoints did not persist before/after token counts, so history marks those measurements unavailable instead of recomputing them or upgrading the schema.
+
+`/context` and preview classify current `input + output reserve` pressure as normal, approaching the threshold at 70%-79%, auto-compact range at 80%-89%, near full at 90%-100%, overflow, or unknown. These levels are Host presentation only. An ordinary prompt still reassesses the exact initial request including pending user input under the existing 80% and overflow policy. `/usage` additionally shows the latest known or unknown compaction invocation in the current runtime. Runtime switches still reset all usage, and Session state does not persist it.
+
+This slice is Host-only observability. Canonical system prompt v19, provider adapter contract v21, the 17 tool schemas and order, ToolArguments v1, ActionIdentity v1, `turn_committed` v5, `context_compacted` v2/v3, and Effective Context `ctx-v3`/`ctx-v4` all remain unchanged. See [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -832,3 +843,4 @@ This slice establishes capacity facts only. It does not count current request to
 56. [0056: Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
 57. [0057: Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
 58. [0058: Runtime Context Meter and Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
+59. [0059: Context and Compaction Observability](./decisions/0059-context-and-compaction-observability.md)

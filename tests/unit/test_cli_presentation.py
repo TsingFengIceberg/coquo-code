@@ -25,6 +25,8 @@ from leonervis_code.cli.presentation import (
     RESET,
     YELLOW,
     MAX_TOOL_LEDGER_RENDER_BYTES,
+    render_compact_preview,
+    render_compaction_history,
     render_context_inspection,
     render_context_meter,
     render_action_audits,
@@ -67,6 +69,9 @@ from leonervis_code.session import (
     AutoCompactionNotApplied,
     AutoCompactionStarted,
     CompactContextResult,
+    CompactContextPreview,
+    CompactionHistoryEntry,
+    CompactionHistoryResult,
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
@@ -153,6 +158,7 @@ def test_context_meter_toolbar_and_usage_summary_are_bounded_and_explicit() -> N
         )[0]
     )
     assert "Latest turn: 70.0k in / 846 out" in render_usage_summary(usage)
+    assert "Latest compaction invocation: none" in render_usage_summary(usage)
     assert "Turn usage:" in render_prompt_event(TurnUsageCompleted(usage))[0]
     assert (
         render_prompt_toolbar(
@@ -476,7 +482,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
         inspection(tmp_path, fits, None, UserMessage("x"), AssistantText("y"))
     )
 
-    assert kind == "info"
+    assert kind == "warning"
     assert "Source: full committed history" in rendered
     assert "Context ID: ctx-v3-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
@@ -484,6 +490,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
     assert "Input: 80 tokens (estimated)" in rendered
     assert "Fit: fits" in rendered
     assert "Remaining capacity: 0 tokens" in rendered
+    assert "Pressure: near full (100%); next prompt may auto-compact" in rendered
 
     unavailable, kind = render_context_inspection(
         inspection(tmp_path, None, "provider input assessment is unavailable for fake runtime")
@@ -493,6 +500,62 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
     assert "Output reserve: unavailable" in unavailable
     assert "Fit: unknown" in unavailable
     assert "Diagnostic: provider input assessment is unavailable for fake runtime" in unavailable
+    assert "Pressure: unknown" in unavailable
+
+
+def test_compaction_preview_and_history_render_without_summary_or_binding() -> None:
+    report = ContextFitReport(
+        target=None,
+        input_count=RequestTokenCount(72, RequestTokenCountMethod.ESTIMATED),
+        requested_output_tokens=8,
+        context_window_limit=100,
+        model_output_limit=20,
+        decision=ContextFitDecision.FITS,
+    )
+    preview = CompactContextPreview(
+        source_context_id="ctx-v4-" + "a" * 64,
+        full_turn_count=6,
+        effective_turn_count=4,
+        summary_present=True,
+        eligible=True,
+        reason=None,
+        summarized_turn_count=2,
+        retained_turn_count=2,
+        target_assessment=CurrentTargetContextAssessment(status(), report),
+    )
+
+    rendered, kind = render_compact_preview(preview)
+
+    assert kind == "warning"
+    assert "Selection: summarize 2" in rendered
+    assert "Pressure: auto-compact range (80%)" in rendered
+    assert "did not generate a summary or modify the Session" in rendered
+
+    history = CompactionHistoryResult(
+        total_checkpoints=2,
+        checkpoints=(
+            CompactionHistoryEntry(
+                sequence=9,
+                occurred_at="2026-07-28T00:00:00.000000Z",
+                schema_version=3,
+                trigger=CompactionTrigger.HIGH_WATER,
+                high_water_percent=80,
+                full_turn_count=6,
+                summarized_turn_count=2,
+                retained_turn_count=2,
+                previous_checkpoint_sequence=4,
+            ),
+        ),
+    )
+    rendered = render_compaction_history(history)
+    assert "Showing 1 most recent of 2" in rendered
+    assert "high water at 80%" in rendered
+    assert "summarized 2, retained 2" in rendered
+    assert "token counts are unavailable" in rendered
+    assert "summary" not in rendered.lower().replace("summarized", "")
+    assert render_compaction_history(CompactionHistoryResult(0, ())) == (
+        "No durable compaction checkpoints yet."
+    )
 
 
 def test_runtime_switch_rendering_distinguishes_fits_unknown_and_rejection() -> None:

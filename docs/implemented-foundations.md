@@ -42,6 +42,7 @@
 - [Structured Tool Outcome Ledger](#structured-tool-outcome-ledger)
 - [Durable Tool Ledger Inspection](#durable-tool-ledger-inspection)
 - [Runtime Context Meter 与 Provider Token Usage](#runtime-context-meter-与-provider-token-usage)
+- [Context 与 Compaction Observability](#context-与-compaction-observability)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -608,6 +609,16 @@ Runtime按最新invocation、最近user turn及当前profile target累计真实�
 
 该变化把provider adapter contract升级为v21，因为OpenAI-compatible stream request和两类adapter response transport增加usage contract。Canonical system prompt保持v19，17个tool schema/order、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit、`context_compacted`及Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)。
 
+## Context 与 Compaction Observability
+
+REPL新增`/compact preview`与`/compactions [count]`。Preview在当前Session锁内冻结Effective Context，复用固定的至少4个effective turns、保留最近2个turns策略和当前target assessment；它只报告eligible、将summary/retain的turn数量与context压力，不构造summary request、不获取compaction lease、不写checkpoint。Fake或unknown target明确显示unknown；Anthropic official target为了exact inspection可能使用count-only API，但不会发生generation。
+
+`/compactions`从已经strict replay的当前Session state中选择最近5条、最多20条`context_compacted`记录，只展示sequence、timestamp、schema、manual/high-water/overflow trigger、80% threshold、full/summarized/retained turn数量和previous checkpoint。它不展示summary、binding、context ID、prompt或credential。既有v2/v3 checkpoint没有持久化before/after token count，因此历史查询明确标为unavailable，而不是重算或升级schema。
+
+`/context`与preview把当前`input + output reserve`相对window分为normal、70%-79%接近阈值、80%-89% auto-compact range、90%-100% near full、overflow及unknown。分级只是Host展示；真正的普通prompt仍按包含pending user input的exact initial request和既有80%/overflow策略重新判定。`/usage`新增当前runtime最近一次compaction invocation的known/unknown actual usage；runtime切换仍整体清零，Session不持久化usage。
+
+该slice是Host-only observability。Canonical system prompt保持v19，provider adapter contract保持v21，17个tool schema/order、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -832,3 +843,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 56. [0056：Structured Tool Outcome Ledger](./decisions/0056-structured-tool-outcome-ledger.md)
 57. [0057：Durable Tool Ledger Inspection](./decisions/0057-durable-tool-ledger-inspection.md)
 58. [0058：Runtime Context Meter 与 Provider Token Usage](./decisions/0058-runtime-context-meter-and-provider-token-usage.md)
+59. [0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)

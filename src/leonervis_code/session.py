@@ -32,6 +32,7 @@ from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPreco
 from leonervis_code.core.compaction import (
     AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MAX_OUTPUT_TOKENS,
+    COMPACT_RETAINED_TURNS,
     CompactSummaryPlan,
     CompactSummaryRequest,
     CompactionCandidateError,
@@ -229,6 +230,46 @@ class CompactContextResult:
     input_method: str
     fit_decision: ContextFitDecision
     trigger: CompactionTrigger = CompactionTrigger.MANUAL
+
+
+@dataclass(frozen=True)
+class CompactContextPreview:
+    """Read-only eligibility, selection, and current-target pressure evidence."""
+
+    source_context_id: str
+    full_turn_count: int
+    effective_turn_count: int
+    summary_present: bool
+    eligible: bool
+    reason: str | None
+    summarized_turn_count: int
+    retained_turn_count: int
+    target_assessment: CurrentTargetContextAssessment
+
+    @property
+    def fit_report(self) -> ContextFitReport | None:
+        return self.target_assessment.fit_report
+
+
+@dataclass(frozen=True)
+class CompactionHistoryEntry:
+    """Redacted durable checkpoint facts derived from strict Session replay."""
+
+    sequence: int
+    occurred_at: str
+    schema_version: int
+    trigger: CompactionTrigger
+    high_water_percent: int | None
+    full_turn_count: int
+    summarized_turn_count: int
+    retained_turn_count: int
+    previous_checkpoint_sequence: int | None
+
+
+@dataclass(frozen=True)
+class CompactionHistoryResult:
+    total_checkpoints: int
+    checkpoints: tuple[CompactionHistoryEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -875,6 +916,80 @@ class ProjectSession:
                 return self._execute_compaction(prepared, runtime, pending_items=())
         finally:
             self._finish_compaction(prepared)
+
+    def preview_compaction(self) -> CompactContextPreview:
+        """Inspect fixed compaction selection without generation or durable mutation."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            snapshot = self._loop.effective_context_snapshot()
+            assessment = self._manager.assess_current_context(snapshot.to_conversation_request())
+            try:
+                plan = plan_compaction(
+                    source_summary=self._loop.effective_summary,
+                    effective_turns=snapshot.effective_turns,
+                )
+            except CompactionNotEligibleError as error:
+                return CompactContextPreview(
+                    source_context_id=snapshot.context_id,
+                    full_turn_count=snapshot.full_turn_count,
+                    effective_turn_count=snapshot.effective_turn_count,
+                    summary_present=snapshot.effective_summary is not None,
+                    eligible=False,
+                    reason=str(error),
+                    summarized_turn_count=0,
+                    retained_turn_count=min(
+                        snapshot.effective_turn_count,
+                        COMPACT_RETAINED_TURNS,
+                    ),
+                    target_assessment=assessment,
+                )
+            return CompactContextPreview(
+                source_context_id=snapshot.context_id,
+                full_turn_count=snapshot.full_turn_count,
+                effective_turn_count=snapshot.effective_turn_count,
+                summary_present=snapshot.effective_summary is not None,
+                eligible=True,
+                reason=None,
+                summarized_turn_count=plan.summarized_turn_count,
+                retained_turn_count=plan.retained_turn_count,
+                target_assessment=assessment,
+            )
+
+    def compaction_history(self, limit: int) -> CompactionHistoryResult:
+        """Return bounded redacted checkpoint history from current replayed state."""
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("compaction history limit must be between 1 and 20")
+        with self._lock:
+            self._ensure_open()
+            records = tuple(
+                record
+                for record in self._writer.state.records
+                if isinstance(record, ContextCompacted)
+            )
+            selected = records[-limit:]
+            return CompactionHistoryResult(
+                total_checkpoints=len(records),
+                checkpoints=tuple(
+                    CompactionHistoryEntry(
+                        sequence=record.sequence,
+                        occurred_at=record.occurred_at,
+                        schema_version=record.schema_version,
+                        trigger=record.trigger,
+                        high_water_percent=record.high_water_percent,
+                        full_turn_count=record.source_full_turn_count,
+                        summarized_turn_count=(
+                            record.source_effective_turn_count
+                            - (record.source_full_turn_count - record.retained_from_full_turn)
+                        ),
+                        retained_turn_count=(
+                            record.source_full_turn_count - record.retained_from_full_turn
+                        ),
+                        previous_checkpoint_sequence=record.previous_checkpoint_sequence,
+                    )
+                    for record in selected
+                ),
+            )
 
     def _prepare_compaction(self, trigger: CompactionTrigger) -> _PreparedCompaction:
         with self._lock:

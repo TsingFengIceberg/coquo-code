@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded tools are implemented. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers are safely inspectable from the CLI or REPL. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation. Foundation 5A remains deferred.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, and 17 bounded tools are implemented. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers and compaction checkpoints are inspectable, while context pressure and actual token usage are visible within the current process. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation. Foundation 5A remains deferred.
 
 ## Contents
 
@@ -189,7 +189,9 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | `/status` | Show redacted runtime, model, and context-window status |
 | `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
 | `/usage` | Show actual provider-token usage for the latest invocation, latest turn, and current process-local profile |
+| `/compact preview` | Preview fixed compaction selection and current context pressure without generating a summary or modifying the Session |
 | `/compact` | Use the current real provider to summarize older complete turns and persist an effective-context checkpoint |
+| `/compactions [count]` | Show recent durable compaction checkpoints, default 5 and maximum 20 |
 | `/provider list` | List named profiles |
 | `/provider current` | Show the current profile/provider/model |
 | `/provider use <name>` | Atomically switch the workspace's active profile |
@@ -206,6 +208,8 @@ Common REPL operations:
 ```text
 /status
 /context
+/compact preview
+/compactions 5
 /usage
 /actions
 /tools details 3
@@ -214,7 +218,7 @@ Common REPL operations:
 /history 5
 ```
 
-A real TTY uses a `›` input marker and `model · context · workspace` status line. Before every real provider invocation it shows a block context meter; afterward it shows the provider's actual input/output tokens. Tool continuations are measured independently, then the turn and current-profile totals are summarized. `/usage` shows details at any time. Calls with missing usage metadata are explicitly unknown rather than zero. Accounting is process-local, resets after a successful `/provider use` or `/model` switch, is not persisted in the Session, and does not calculate cost. Enter submits and Alt+Enter inserts a newline; if the terminal intercepts Alt, press Esc and then Enter. Assistant output begins with `•`, and tool turns also show a Host-generated `Tool summary:`. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete boundaries.
+A real TTY uses a `›` input marker and `model · context · workspace` status line. Before every real provider invocation it shows a block context meter; afterward it shows the provider's actual input/output tokens. Tool continuations are measured independently, then the turn and current-profile totals are summarized. `/context` and `/compact preview` label normal, approaching 80%, auto-compact, near-full, or unknown pressure; `/usage` also shows the latest compaction generation in the current runtime. Missing usage metadata is explicitly unknown rather than zero. Accounting is process-local, resets after a successful `/provider use` or `/model` switch, is not persisted in the Session, and does not calculate cost. Enter submits and Alt+Enter inserts a newline; if the terminal intercepts Alt, press Esc and then Enter. Assistant output begins with `•`, and tool turns also show a Host-generated `Tool summary:`. A TTY renders assistant Markdown, while pipes and redirects retain raw Markdown. `NO_COLOR=1` disables color but preserves Markdown layout. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete boundaries.
 
 For a deterministic view of the bounded tool loop:
 
@@ -262,6 +266,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md): per-request Host accounting, authoritative forced text-only summaries, Session v5, and post-commit terminal summaries.
 - [Durable Tool Ledger Inspection](./docs/decisions/0057-durable-tool-ledger-inspection.md): bounded post-replay ledger queries, `session tools`, `/tools`, and explicit legacy availability.
 - [Runtime Context Meter and Provider Token Usage](./docs/decisions/0058-runtime-context-meter-and-provider-token-usage.md): per-invocation context progress, provider usage normalization, process-local turn/profile totals, and explicit unknown semantics.
+- [Context and Compaction Observability](./docs/decisions/0059-context-and-compaction-observability.md): read-only compact preview, durable checkpoint history, context-risk levels, and latest compaction usage.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.

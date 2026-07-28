@@ -12,7 +12,9 @@ from leonervis_code.providers.manager import (
 from leonervis_code.providers.request_context import ContextFitDecision
 from leonervis_code.providers.usage import RuntimeUsageTracker
 from leonervis_code.session import (
+    CompactContextPreview,
     CompactContextResult,
+    CompactionHistoryResult,
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
@@ -95,6 +97,27 @@ class Session:
             input_method="estimated",
             fit_decision=ContextFitDecision.FITS,
         )
+
+    def preview_compaction(self):
+        return CompactContextPreview(
+            source_context_id="ctx-v3-" + "a" * 64,
+            full_turn_count=4,
+            effective_turn_count=4,
+            summary_present=False,
+            eligible=True,
+            reason=None,
+            summarized_turn_count=2,
+            retained_turn_count=2,
+            target_assessment=CurrentTargetContextAssessment(
+                self.status(),
+                None,
+                "provider input assessment is unavailable for fake runtime",
+            ),
+        )
+
+    def compaction_history(self, limit):
+        assert 1 <= limit <= 20
+        return CompactionHistoryResult(0, ())
 
     def _info(self, session_id):
         return SessionInfo(
@@ -187,7 +210,19 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"
     assert "Full transcript and /history were preserved" in compact.message
-    assert dispatch_slash("/compact extra", session).message == "Usage: /compact"
+    preview = dispatch_slash("/compact preview", session)
+    assert preview.kind == "warning"
+    assert "Selection: summarize 2" in preview.message
+    assert dispatch_slash("/compact extra", session).message == (
+        "Usage: /compact | /compact preview"
+    )
+    assert dispatch_slash("/compactions", session).message == (
+        "No durable compaction checkpoints yet."
+    )
+    assert dispatch_slash("/compactions 20", session).message == (
+        "No durable compaction checkpoints yet."
+    )
+    assert dispatch_slash("/compactions 21", session).message == "Usage: /compactions [1-20]"
     assert dispatch_slash("/actions", session).message == "No action audits yet."
     assert dispatch_slash("/actions 10", session).message == "No action audits yet."
     assert dispatch_slash("/actions 0", session).message == "Usage: /actions [1-100]"

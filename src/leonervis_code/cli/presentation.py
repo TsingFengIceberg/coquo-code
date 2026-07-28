@@ -41,13 +41,15 @@ MAX_ACTION_AUDIT_COUNT = 100
 DEFAULT_TOOL_LEDGER_COUNT = 5
 MAX_TOOL_LEDGER_COUNT = MAX_TOOL_LEDGER_QUERY_TURNS
 MAX_TOOL_LEDGER_RENDER_BYTES = 32 * 1024
+DEFAULT_COMPACTION_HISTORY_COUNT = 5
+MAX_COMPACTION_HISTORY_COUNT = 20
 CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
     "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
     "/provider, /status, "
-    "/context, /usage, /compact, "
+    "/context, /usage, /compact, /compactions [count], "
     "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
     "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
     "cancels a draft or exits when empty; Ctrl-D exits when empty."
@@ -138,6 +140,23 @@ class TurnToolLedgerView(Protocol):
 class ToolLedgerQueryResultView(Protocol):
     total_turns: int
     turns: tuple[TurnToolLedgerView, ...]
+
+
+class CompactContextPreviewView(Protocol):
+    source_context_id: str
+    full_turn_count: int
+    effective_turn_count: int
+    summary_present: bool
+    eligible: bool
+    reason: str | None
+    summarized_turn_count: int
+    retained_turn_count: int
+    fit_report: ContextFitReport | None
+
+
+class CompactionHistoryResultView(Protocol):
+    total_checkpoints: int
+    checkpoints: tuple
 
 
 def render_prompt(
@@ -449,6 +468,12 @@ def render_context_inspection(
             kind = "warning"
         else:
             kind = "error"
+    pressure, pressure_kind = _context_pressure(report)
+    lines.append(f"Pressure: {pressure}")
+    if pressure_kind == "error":
+        kind = "error"
+    elif pressure_kind == "warning" and kind == "info":
+        kind = "warning"
     if diagnostic:
         lines.append(f"Diagnostic: {diagnostic}")
     return "\n".join(lines), kind
@@ -635,6 +660,76 @@ def render_compact_result(result: object) -> str:
     )
 
 
+def render_compact_preview(preview: CompactContextPreviewView) -> tuple[str, MessageKind]:
+    """Render read-only fixed-policy selection without implying a summary exists."""
+    report = preview.fit_report
+    pressure, pressure_kind = _context_pressure(report)
+    lines = [
+        f"Eligible: {'yes' if preview.eligible else 'no'}",
+        f"Context ID: {preview.source_context_id}",
+        f"History: {preview.full_turn_count} full turns; "
+        f"{preview.effective_turn_count} effective turns; summary "
+        f"{'present' if preview.summary_present else 'absent'}.",
+    ]
+    if preview.eligible:
+        lines.append(
+            f"Selection: summarize {preview.summarized_turn_count} complete effective turns; "
+            f"retain the latest {preview.retained_turn_count} turns verbatim."
+        )
+    elif preview.reason is not None:
+        lines.append(f"Reason: {preview.reason}")
+    lines.append(f"Pressure: {pressure}")
+    lines.append(
+        "Next prompt: the Host reassesses the exact request including pending user input; "
+        "80% may trigger proactive compaction and known overflow requires compaction."
+    )
+    lines.append(
+        "Preview did not generate a summary or modify the Session. Exact Anthropic "
+        "inspection may use a count-only API request."
+    )
+    kind: MessageKind = "info" if preview.eligible else "warning"
+    if pressure_kind == "error":
+        kind = "error"
+    elif pressure_kind == "warning" and kind == "info":
+        kind = "warning"
+    return "\n".join(lines), kind
+
+
+def render_compaction_history(result: CompactionHistoryResultView) -> str:
+    """Render durable checkpoint metadata without summary text or binding details."""
+    if not result.checkpoints:
+        return "No durable compaction checkpoints yet."
+    lines = []
+    if len(result.checkpoints) < result.total_checkpoints:
+        lines.append(
+            f"Showing {len(result.checkpoints)} most recent of "
+            f"{result.total_checkpoints} compaction checkpoints."
+        )
+    for checkpoint in result.checkpoints:
+        threshold = (
+            f" at {checkpoint.high_water_percent}%"
+            if checkpoint.high_water_percent is not None
+            else ""
+        )
+        previous = (
+            str(checkpoint.previous_checkpoint_sequence)
+            if checkpoint.previous_checkpoint_sequence is not None
+            else "none"
+        )
+        lines.append(
+            f"Checkpoint #{checkpoint.sequence} ({checkpoint.occurred_at}): "
+            f"{checkpoint.trigger.value.replace('_', ' ')}{threshold}; summarized "
+            f"{checkpoint.summarized_turn_count}, retained {checkpoint.retained_turn_count}, "
+            f"full transcript {checkpoint.full_turn_count} turns; previous {previous}; "
+            f"schema v{checkpoint.schema_version}."
+        )
+    lines.append(
+        "Historical before/after token counts are unavailable because checkpoints do not "
+        "persist token measurements."
+    )
+    return "\n".join(lines)
+
+
 def render_runtime_switch(
     destination: str,
     report: ContextFitReport | None,
@@ -750,6 +845,19 @@ def render_usage_summary(usage: RuntimeUsageSnapshot, *, compact: bool = False) 
             )
         )
         lines.append(f"  invocation {index}: {detail}")
+    latest_compaction = usage.latest_compaction
+    if latest_compaction is None:
+        lines.append("Latest compaction invocation: none in current runtime")
+    else:
+        detail = (
+            "unknown"
+            if latest_compaction.usage is None
+            else (
+                f"{_format_tokens(latest_compaction.usage.input_tokens)} in / "
+                f"{_format_tokens(latest_compaction.usage.output_tokens)} out"
+            )
+        )
+        lines.append(f"Latest compaction invocation: #{latest_compaction.sequence} {detail}")
     lines.extend(
         (
             f"Current profile turns: {_totals_inline(usage.profile_turn_totals)}",
@@ -842,6 +950,28 @@ def _format_tokens(value: int | None) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def _context_pressure(report: ContextFitReport | None) -> tuple[str, MessageKind]:
+    if report is None:
+        return "unknown (current runtime cannot assess this context)", "warning"
+    if report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        return "output reserve exceeds the model limit", "error"
+    input_tokens = report.input_count.input_tokens
+    window = report.context_window_limit
+    if input_tokens is None or window is None:
+        return "unknown (input count or context window is unavailable)", "warning"
+    used = input_tokens + report.requested_output_tokens
+    percent = min(999, round(used * 100 / window))
+    if used > window:
+        return f"overflow ({percent}% of window)", "error"
+    if used * 100 >= window * 90:
+        return f"near full ({percent}%); next prompt may auto-compact", "warning"
+    if used * 100 >= window * 80:
+        return f"auto-compact range ({percent}%); threshold is 80%", "warning"
+    if used * 100 >= window * 70:
+        return f"approaching 80% threshold ({percent}%)", "warning"
+    return f"normal ({percent}% of window)", "info"
 
 
 def _toolbar_workspace_label(cwd: Path) -> str:

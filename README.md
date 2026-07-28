@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger可通过CLI或REPL安全查看。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger与compaction checkpoint可安全查看，context压力和真实Token用量在当前进程内可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
 
 ## 目录
 
@@ -189,7 +189,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/status` | 显示脱敏 runtime、model 和 context-window 状态 |
 | `/context` | 只读检查当前 Effective Context、内容 ID、计数与 target fit |
 | `/usage` | 查看当前进程内最近调用、最近turn及当前profile的真实provider Token用量 |
+| `/compact preview` | 只读预览固定compaction选择与当前context压力，不生成summary或修改Session |
 | `/compact` | 使用当前真实 provider 手动总结较早完整回合并持久化 effective-context checkpoint |
+| `/compactions [count]` | 查看最近的持久compaction checkpoint，默认5条、最多20条 |
 | `/provider list` | 列出命名 profile |
 | `/provider current` | 显示当前 profile/provider/model |
 | `/provider use <name>` | 为当前 workspace 原子切换 active profile |
@@ -206,6 +208,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 ```text
 /status
 /context
+/compact preview
+/compactions 5
 /usage
 /actions
 /tools details 3
@@ -214,7 +218,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /history 5
 ```
 
-真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。`/usage`可随时查看明细；缺失usage metadata的调用明确计为unknown，不按0处理。统计只属于当前进程，成功`/provider use`或`/model`切换后清零，不持久化到Session，也不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。缺失usage metadata明确计为unknown，不按0处理。统计只属于当前进程，成功`/provider use`或`/model`切换后清零，不持久化到Session，也不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -262,6 +266,7 @@ git diff --check
 - [Structured Tool Outcome Ledger](./docs/decisions/0056-structured-tool-outcome-ledger.md)：逐请求Host计账、强制text-only权威摘要、Session v5与提交后终端汇总。
 - [Durable Tool Ledger Inspection](./docs/decisions/0057-durable-tool-ledger-inspection.md)：严格replay后的有界账本查询、`session tools`、`/tools`与旧Session可用性标记。
 - [Runtime Context Meter 与 Provider Token Usage](./docs/decisions/0058-runtime-context-meter-and-provider-token-usage.md)：逐调用context进度、厂商usage归一化、turn/profile进程内累计与unknown语义。
+- [Context 与 Compaction Observability](./docs/decisions/0059-context-and-compaction-observability.md)：只读compact preview、持久checkpoint历史、context风险分级与最近compaction用量。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

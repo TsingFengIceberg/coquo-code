@@ -7,9 +7,11 @@ from typing import Protocol
 
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
+    DEFAULT_COMPACTION_HISTORY_COUNT,
     DEFAULT_TOOL_LEDGER_COUNT,
     HELP_TEXT,
     MAX_ACTION_AUDIT_COUNT,
+    MAX_COMPACTION_HISTORY_COUNT,
     MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
@@ -17,6 +19,8 @@ from leonervis_code.cli.presentation import (
     render_compact_result,
     render_action_audits,
     render_context_inspection,
+    render_compact_preview,
+    render_compaction_history,
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
@@ -51,6 +55,7 @@ TOP_LEVEL_COMMANDS = (
     "/context",
     "/usage",
     "/compact",
+    "/compactions",
     "/provider",
     "/model",
     "/session",
@@ -77,6 +82,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
+    SlashCompletionSpec("/compactions", "Show durable compaction history", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
@@ -91,6 +97,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session list", "List workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
+    SlashCompletionSpec("/compact preview", "Preview fixed compaction selection"),
 )
 
 
@@ -108,6 +115,10 @@ class ReplSession(Protocol):
     def usage(self): ...
 
     def compact_context(self): ...
+
+    def preview_compaction(self): ...
+
+    def compaction_history(self, limit: int): ...
 
     def session_info(self): ...
 
@@ -177,6 +188,12 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _call(lambda: render_usage_summary(session.usage()), kind="info")
     if command.startswith("/usage "):
         return _usage("Usage: /usage")
+    if command == "/compact preview":
+        try:
+            message, kind = render_compact_preview(session.preview_compaction())
+            return SlashResult(handled=True, message=message, kind=kind)
+        except Exception as error:
+            return _command_error(error, failure_prefix="Compaction preview failed")
     if command == "/compact":
         try:
             return SlashResult(
@@ -193,7 +210,9 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
                 kind=result.kind,
             )
     if command.startswith("/compact "):
-        return _usage("Usage: /compact")
+        return _usage("Usage: /compact | /compact preview")
+    if command == "/compactions" or command.startswith("/compactions "):
+        return _compactions(command, session)
     if command == "/history" or command.startswith("/history "):
         return _history(command, session)
     if command == "/actions" or command.startswith("/actions "):
@@ -290,6 +309,25 @@ def _tools(command: str, session: ReplSession) -> SlashResult:
         )
     return _call(
         lambda: render_tool_ledgers(session.tool_ledgers(count), details=details),
+        kind="info",
+    )
+
+
+def _compactions(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 1:
+        count = DEFAULT_COMPACTION_HISTORY_COUNT
+    elif (
+        len(parts) == 2
+        and parts[1].isascii()
+        and parts[1].isdigit()
+        and 1 <= int(parts[1]) <= MAX_COMPACTION_HISTORY_COUNT
+    ):
+        count = int(parts[1])
+    else:
+        return _usage(f"Usage: /compactions [1-{MAX_COMPACTION_HISTORY_COUNT}]")
+    return _call(
+        lambda: render_compaction_history(session.compaction_history(count)),
         kind="info",
     )
 

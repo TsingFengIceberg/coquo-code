@@ -52,6 +52,7 @@ class RecordingProvider:
 
     def __post_init__(self) -> None:
         self.requests = []
+        self.summary_requests = []
 
     def count_input_tokens(self, request):
         value = 100 if request.effective_summary is not None else 1000 + len(request.history)
@@ -61,6 +62,7 @@ class RecordingProvider:
         return RequestTokenCount(len(request.source_text), RequestTokenCountMethod.ESTIMATED)
 
     def summarize_compact(self, request):
+        self.summary_requests.append(request)
         return AssistantText("Earlier turns summarized compactly.")
 
     def respond(self, request):
@@ -518,11 +520,22 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     before_turns = session.turns
     before_bytes = session.transcript_path.read_bytes()
 
+    preview = session.preview_compaction()
+
+    assert preview.eligible
+    assert preview.summarized_turn_count == 2
+    assert preview.retained_turn_count == 2
+    assert preview.fit_report.decision == ContextFitDecision.FITS
+    assert session.transcript_path.read_bytes() == before_bytes
+    assert len(provider.requests) == 4
+    assert provider.summary_requests == []
+
     result = session.compact_context()
 
     assert result.summarized_turn_count == 2
     assert result.retained_turn_count == 2
     assert result.after_input_tokens < result.before_input_tokens
+    assert len(provider.summary_requests) == 1
     assert session.history == before_history
     assert session.turns == before_turns
     assert session.effective_history == before_history[-4:]
@@ -530,6 +543,14 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert session.inspect_context().context_id.startswith("ctx-v4-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
+    history = session.compaction_history(5)
+    assert history.total_checkpoints == 1
+    checkpoint = history.checkpoints[0]
+    assert checkpoint.sequence == result.checkpoint_sequence
+    assert checkpoint.trigger.value == "manual"
+    assert checkpoint.summarized_turn_count == 2
+    assert checkpoint.retained_turn_count == 2
+    assert checkpoint.previous_checkpoint_sequence is None
     transcript = session.transcript_path
     session.close()
 
@@ -548,6 +569,8 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert resumed.history == before_history
     assert resumed.effective_history == before_history[-4:]
     assert resumed.inspect_context().summary_present
+    resumed_history = resumed.compaction_history(1)
+    assert resumed_history == history
     resumed.prompt("continue")
     assert resumed_provider.requests[-1].effective_summary is not None
     resumed.close()

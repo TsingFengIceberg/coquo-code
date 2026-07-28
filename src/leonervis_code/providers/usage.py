@@ -77,6 +77,7 @@ class RuntimeUsageSnapshot:
     runtime_generation: int
     latest_context: ContextFitReport | None
     latest_invocation: ProviderInvocationUsage | None
+    latest_compaction: ProviderInvocationUsage | None
     latest_turn: tuple[ProviderInvocationUsage, ...]
     turn_totals: ProviderUsageTotals
     profile_turn_totals: ProviderUsageTotals
@@ -146,10 +147,19 @@ class RuntimeUsageTracker:
         latest_turn_totals = ProviderUsageTotals()
         for record in self._latest_turn:
             latest_turn_totals = latest_turn_totals.add(record.usage)
+        latest_compaction = next(
+            (
+                record
+                for record in reversed(self._records)
+                if record.kind == ProviderInvocationKind.COMPACTION
+            ),
+            None,
+        )
         return RuntimeUsageSnapshot(
             runtime_generation=self._generation,
             latest_context=self._latest_context,
             latest_invocation=self._records[-1] if self._records else None,
+            latest_compaction=latest_compaction,
             latest_turn=self._latest_turn,
             turn_totals=latest_turn_totals,
             profile_turn_totals=turn_profile,
