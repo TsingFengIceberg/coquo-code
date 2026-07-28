@@ -24,6 +24,7 @@ from leonervis_code.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
     AutoCompactionStarted,
+    DurableUsageSnapshot,
     TurnUsageCompleted,
 )
 from leonervis_code.session_store import MAX_TOOL_LEDGER_QUERY_TURNS
@@ -51,7 +52,8 @@ MessageKind = Literal["plain", "info", "success", "warning", "error"]
 HELP_TEXT = (
     "Commands: /help, /history <count>, /actions [count], /tools [count], /session, "
     "/provider, /status, "
-    "/context, /usage, /output [tokens|reset], /compact, /compactions [count], "
+    "/context, /usage [session|turns], /output [tokens|reset], /compact, "
+    "/compactions [count], "
     "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
     "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
     "cancels a draft or exits when empty; Ctrl-D exits when empty."
@@ -967,6 +969,52 @@ def render_usage_summary(usage: RuntimeUsageSnapshot, *, compact: bool = False) 
         )
     )
     return "\n".join(lines)
+
+
+def render_durable_usage_summary(
+    usage: DurableUsageSnapshot,
+    *,
+    turns: bool = False,
+) -> str:
+    """Render replayed Session usage while preserving legacy-unavailable evidence."""
+    if turns:
+        if not usage.operations:
+            return "No committed or failed turn usage is available in this Session."
+        lines = ["Recent Session turn usage:"]
+        for operation in usage.operations:
+            target = operation.provider_id
+            if operation.model is not None:
+                target += f"/{operation.model}"
+            totals = operation.totals
+            detail = "legacy usage unavailable" if totals is None else _totals_inline(totals)
+            lines.append(
+                f"  record #{operation.record_sequence} {operation.outcome} · {target} · {detail}"
+            )
+        return "\n".join(lines)
+
+    turn_totals = ProviderUsageTotals()
+    compaction_totals = ProviderUsageTotals()
+    for operation in usage.operations:
+        totals = operation.totals
+        if totals is None:
+            continue
+        destination = turn_totals if operation.operation == "turn" else compaction_totals
+        for invocation in operation.invocations or ():
+            destination = destination.add(invocation.usage)
+        if operation.operation == "turn":
+            turn_totals = destination
+        else:
+            compaction_totals = destination
+    return "\n".join(
+        (
+            f"Session usage: {_totals_inline(usage.totals)}",
+            f"Turns: {_totals_inline(turn_totals)}",
+            f"Compaction: {_totals_inline(compaction_totals)}",
+            f"Operations: {len(usage.operations)} recorded · "
+            f"legacy usage unavailable={usage.unavailable_operations}",
+            "Scope: durable current Session audit; resume and process restart preserve it.",
+        )
+    )
 
 
 def _safe_inline(value: str) -> str:

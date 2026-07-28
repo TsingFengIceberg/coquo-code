@@ -48,6 +48,7 @@ from leonervis_code.providers.streaming import (
 )
 from leonervis_code.providers.usage import (
     ProviderInvocationKind,
+    ProviderInvocationUsage,
     RuntimeUsageSnapshot,
     RuntimeUsageTracker,
 )
@@ -1123,6 +1124,15 @@ class RuntimeProviderManager:
     def finish_turn_usage(self, cursor: int) -> RuntimeUsageSnapshot:
         self._ensure_open()
         return self._usage_tracker.finish_turn(cursor)
+
+    def usage_since(
+        self,
+        cursor: int,
+        *,
+        kind: ProviderInvocationKind | None = None,
+    ) -> tuple[ProviderInvocationUsage, ...]:
+        self._ensure_open()
+        return self._usage_tracker.records_since(cursor, kind=kind)
 
     def usage_snapshot(self) -> RuntimeUsageSnapshot:
         self._ensure_open()

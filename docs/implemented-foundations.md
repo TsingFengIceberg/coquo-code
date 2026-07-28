@@ -617,7 +617,7 @@ REPL新增`/compact preview`与`/compactions [count]`。Preview在当前Session�
 
 `/compactions`从已经strict replay的当前Session state中选择最近5条、最多20条`context_compacted`记录，只展示sequence、timestamp、schema、manual/high-water/overflow trigger、80% threshold、full/summarized/retained turn数量和previous checkpoint。它不展示summary、binding、context ID、prompt或credential。既有v2/v3 checkpoint没有持久化before/after token count，因此历史查询明确标为unavailable，而不是重算或升级schema。
 
-`/context`与preview把当前`input + output reserve`相对window分为normal、70%-79%接近阈值、80%-89% auto-compact range、90%-100% near full、overflow及unknown。分级只是Host展示；真正的普通prompt仍按包含pending user input的exact initial request和既有80%/overflow策略重新判定。`/usage`新增当前runtime最近一次compaction invocation的known/unknown actual usage；runtime切换仍整体清零，Session不持久化usage。
+`/context`与preview把当前`input + output reserve`相对window分为normal、70%-79%接近阈值、80%-89% auto-compact range、90%-100% near full、overflow及unknown。分级只是Host展示；真正的普通prompt仍按包含pending user input的exact initial request和既有80%/overflow策略重新判定。`/usage`新增当前runtime最近一次compaction invocation的known/unknown actual usage；该slice当时仍让runtime切换整体清零且不持久化usage，后续ADR 0062现已增加独立Session audit。
 
 该slice是Host-only observability。Canonical system prompt保持v19，provider adapter contract保持v21，17个tool schema/order、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0059：Context 与 Compaction Observability](./decisions/0059-context-and-compaction-observability.md)。
 
@@ -627,7 +627,7 @@ Anthropic与OpenAI-compatible现在把普通generation或compact summary耗尽�
 
 Runtime在output-limit异常路径也会记录已知actual usage，因此后续`/usage`能准确显示失败的turn或compaction调用；metadata缺失或malformed仍是unknown。One-shot与REPL会展示requested limit、actual input/output或明确不可用，并说明不完整回复不是final answer、没有committed turn。已经在该尝试较早阶段完成的工具副作用不会回滚，仍以Action Audit为准；stream partial text只在终端临时可见并明确标记未提交。
 
-非缩减compaction现在以结构化`CompactionCandidateError`保留可比较的source/candidate input count与计量方法，终端会显示例如`input 4900 -> 5100 tokens; estimated`。该失败仍不安装summary、不追加checkpoint、不修改Effective Context；summary generation的进程内usage若已知仍可查看。系统不自动retry、不提交partial text，也不自动提高profile output reserve。
+非缩减compaction现在以结构化`CompactionCandidateError`保留可比较的source/candidate input count与计量方法，终端会显示例如`input 4900 -> 5100 tokens; estimated`。该失败仍不安装summary、不追加checkpoint、不修改Effective Context；summary generation的进程内usage若已知仍可查看，后续ADR 0062还会追加独立`compaction_failed` audit保存跨重启证据。系统不自动retry、不提交partial text，也不自动提高profile output reserve。
 
 Provider adapter contract因失败transport与异常usage计量升级为v22。Native request、成功response、tool/history projection不变；canonical system prompt保持v19，17工具及顺序、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit v1、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不升级。完整决策见[0060：Provider Output-limit 与 Compaction Failure Diagnostics](./decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)。
 
@@ -641,13 +641,23 @@ Runtime把预算调整作为新的provider route candidate：先重建provider�
 
 该slice不自动retry或续写截断回答，不修改compaction的4096-token Host cap、profile schema或provider成功response。Canonical system prompt保持v19，provider adapter contract保持v22，17工具及顺序、ToolArguments v1、ActionIdentity v1、`turn_committed` v5、Action Audit v1、`context_compacted` v2/v3和Effective Context `ctx-v3`/`ctx-v4`均不变。完整决策见[0061：Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)。
 
+## Durable Session Provider Usage Audit
+
+Provider实际Token用量现在不仅保留在进程内tracker，也附着到严格replay的Session终局事实。普通成功turn把所有generation与tool continuation按顺序写入`turn_committed` v6；失败turn使用record-local `turn_failed` v2。成功compaction使用`context_compacted` v4，失败compaction追加Host-only `compaction_failed` v1。每个调用要么保存有界input/output pair，要么明确保存unknown；不会把metadata缺失解释为0。
+
+`/usage`继续显示当前runtime/profile的进程内窗口，`/usage session`累计当前Session中的成功turn、失败turn、成功compaction与失败compaction，`/usage turns`显示最近10个成功或失败turn。Resume和进程重启后仍可查询；旧`turn_committed` v1-v5、`turn_failed` v1及`context_compacted` v2/v3缺少该字段，因此显示legacy unavailable而不是0。Usage audit不进入full/effective history、不进入summary、不参与context identity，也不从历史binding重建当前runtime。
+
+成功usage与对应turn或checkpoint在同一record中原子提交；失败usage与安全失败分类一起提交。Non-reducing compaction仍不安装checkpoint或改变Effective Context，但会留下独立失败audit。系统不保存raw response、partial text、credential、价格或厂商billing细分，也不声称缺失终局记录的provider调用能够形成crash-proof账单。
+
+该slice保持canonical system prompt v19、provider adapter contract v22、17工具及顺序、ToolArguments v1、ActionIdentity v1、Action Audit v1和Effective Context `ctx-v3`/`ctx-v4`不变。新记录使用`turn_committed` v6、`turn_failed` v2和`context_compacted` v4；旧prefix不重写。完整决策见[0062：Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
 
 Grep具有明确hard bounds：最多1,000个candidates、每file 1 MiB、aggregate 16 MiB、200个matching lines和32 KiB model-visible output，并继续受selector的entry/directory/depth bounds约束。Unreadable、oversized、NUL或invalid-UTF-8 selected file均为whole-call safe error；只有match/output cap返回complete JSON records的stable prefix与`{"truncated":true}` sentinel。No-match仅在bounded candidate set被完整搜索时为空成功。读取时再次执行regular/non-symlink与descriptor identity检查，同时保留local single-user TOCTOU边界。
 
-为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text与multi-tool batch曾依次把writer升级到v3/v4，当前tool outcome ledger再升级到v5，同时保留v1/v2/v3/v4 reader。其他Session records仍v1，`context_compacted`仍兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
+为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text、multi-tool batch与tool outcome ledger曾依次把writer升级到v3/v4/v5，当前provider usage audit再升级到v6，同时保留v1-v5 reader。`turn_failed`新写v2，`context_compacted`新写v4并继续兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
 
 三个工具继续共享每user turn三次顺序execution预算，AgentLoop和ProjectSession仍显式composition/dispatch而非dynamic registry。Anthropic与OpenAI-compatible ordinary count/create按相同catalog投影exact three schemas，compact summary仍no-tools，parallel calls仍关闭。Adapter contract升级为v5；canonical model system prompt升级为v4并声明literal grep、no-match/truncation解释及仍不可用的write/Bash/regex能力。Generic arguments、prompt与catalog会按设计改变current-binary context IDs，但不重写历史checkpoint。
 

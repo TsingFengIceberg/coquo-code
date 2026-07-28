@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger与compaction checkpoint可安全查看，context压力和真实Token用量在当前进程内可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
 
 ## 目录
 
@@ -190,6 +190,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/status` | 显示脱敏 runtime、model 和 context-window 状态 |
 | `/context` | 只读检查当前 Effective Context、内容 ID、计数与 target fit |
 | `/usage` | 查看当前进程内最近调用、最近turn及当前profile的真实provider Token用量 |
+| `/usage session` | 查看当前Session跨重启保留的turn、失败与compaction累计用量 |
+| `/usage turns` | 查看最近10个成功或失败turn的持久Token用量 |
 | `/output [tokens\|reset]` | 查看、临时调整或恢复当前runtime的输出Token预算 |
 | `/compact preview` | 只读预览固定compaction选择与当前context压力，不生成summary或修改Session |
 | `/compact` | 使用当前真实 provider 手动总结较早完整回合并持久化 effective-context checkpoint |
@@ -213,6 +215,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /compact preview
 /compactions 5
 /usage
+/usage session
+/usage turns
 /actions
 /tools details 3
 /compact
@@ -220,7 +224,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /history 5
 ```
 
-真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。缺失usage metadata明确计为unknown，不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变。统计只属于当前进程，成功`/provider use`或`/model`切换后清零，不持久化到Session，也不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。`/usage session`与`/usage turns`从严格replay的Session终局记录读取跨重启用量；旧记录显示legacy unavailable，缺失usage metadata明确计为unknown而不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变，同时持久保存失败调用的usage audit。进程内统计仍在成功`/provider use`或`/model`切换后清零；Session统计持久保留，但不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -271,6 +275,7 @@ git diff --check
 - [Context 与 Compaction Observability](./docs/decisions/0059-context-and-compaction-observability.md)：只读compact preview、持久checkpoint历史、context风险分级与最近compaction用量。
 - [Provider Output-limit 与 Compaction Failure Diagnostics](./docs/decisions/0060-provider-output-limit-and-compaction-failure-diagnostics.md)：结构化输出截断、失败调用usage计量、未提交说明与非缩减压缩证据。
 - [Process-local Runtime Output Budget Control](./docs/decisions/0061-process-local-runtime-output-budget-control.md)：CLI/REPL临时预算、target-aware筛查、切换语义与usage连续性。
+- [Durable Session Provider Usage Audit](./docs/decisions/0062-durable-session-provider-usage-audit.md)：成功/失败终局usage、跨resume统计、legacy unavailable与Host-only边界。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -308,4 +313,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有真实动作仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、结构化tool outcome ledger及持久查看、脱敏live activity、mixed response、streaming、TTY Markdown rendering与process-local输出预算控制现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v19、provider adapter contract v22、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v5、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3/v4与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前输出预算设计见[ADR 0061](./docs/decisions/0061-process-local-runtime-output-budget-control.md)。
+Provider batch、结构化tool outcome ledger及持久查看、脱敏live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制与Session级provider usage audit现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v19、provider adapter contract v22、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v6、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-29ff59405090ba544b2bacb144d5961daecc7d0d6359123a9262c097d0fa654d`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前usage持久化设计见[ADR 0062](./docs/decisions/0062-durable-session-provider-usage-audit.md)。

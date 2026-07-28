@@ -23,6 +23,7 @@ from leonervis_code.core.contracts import (
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
+from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
 from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_context import (
@@ -30,6 +31,8 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
+from leonervis_code.providers.streaming import ProviderResponseOutcome
+from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
@@ -38,6 +41,7 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeContextError,
 )
+from leonervis_code.session_records import CompactionFailed
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
 
@@ -116,6 +120,106 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert resumed_ledgers.turns[0].turn_number == 2
     assert second.transcript_path == transcript
     second.close()
+
+
+def test_project_session_persists_known_turn_usage_across_resume(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="usage",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="usage-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+
+    class UsageProvider(RecordingProvider):
+        def respond_outcome(self, request):
+            self.requests.append(request)
+            return ProviderResponseOutcome(
+                AssistantText("done"),
+                False,
+                ProviderTokenUsage(120, 30),
+            )
+
+    first = ProjectSession.open(
+        tmp_path,
+        profile="usage",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: UsageProvider("usage"),
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    assert first.prompt("hello") == "done"
+    durable = first.session_usage()
+    assert durable.totals.input_tokens == 120
+    assert durable.totals.output_tokens == 30
+    assert durable.unavailable_operations == 0
+    assert first.turn_usage_history().operations[0].outcome == "committed"
+    first.close()
+
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: UsageProvider("usage"),
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+    assert resumed.session_usage().totals.input_tokens == 120
+    assert resumed.session_usage().operations[0].model == "usage-model"
+    resumed.close()
+
+
+def test_project_session_persists_failed_provider_usage(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="usage-failure",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="usage-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+
+    class FailingUsageProvider(RecordingProvider):
+        def respond_outcome(self, request):
+            raise output_limit_error(
+                provider_id="custom",
+                model_id="usage-model",
+                message="output limit",
+                requested_output_tokens=4096,
+                usage=ProviderTokenUsage(200, 4096),
+                partial_response_observed=True,
+            )
+
+    session = ProjectSession.open(
+        tmp_path,
+        profile="usage-failure",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: FailingUsageProvider("usage"),
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    with pytest.raises(ProviderAdapterError, match="output limit"):
+        session.prompt("long answer")
+
+    durable = session.session_usage()
+    assert durable.totals.input_tokens == 200
+    assert durable.totals.output_tokens == 4096
+    assert durable.operations[0].outcome == "failed"
+    assert session.history == ()
+    session.close()
 
 
 def test_project_session_persists_exact_multiline_prompt_as_one_turn(tmp_path: Path) -> None:
@@ -587,6 +691,13 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert len(provider.summary_requests) == 1
     assert session.history == before_history
     assert session.turns == before_turns
+    checkpoint = session._writer.state.latest_checkpoint
+    assert checkpoint is not None
+    assert len(checkpoint.provider_usage) == 1
+    assert checkpoint.provider_usage[0].usage is None
+    durable_usage = session.session_usage()
+    assert durable_usage.totals.unknown_invocations == 5
+    assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
     assert session.inspect_context().context_id.startswith("ctx-v4-")
@@ -670,7 +781,12 @@ def test_nonreducing_compaction_reports_comparable_token_evidence_without_commit
     assert error.input_method == "estimated"
     assert "input 1000 -> 1100 tokens; estimated" in str(error)
     assert len(provider.summary_requests) == 1
-    assert session.transcript_path.read_bytes() == before_bytes
+    assert session.transcript_path.read_bytes().startswith(before_bytes)
+    failure = session._writer.state.records[-1]
+    assert isinstance(failure, CompactionFailed)
+    assert failure.failure_kind == "CompactionCandidateError"
+    assert len(failure.provider_usage) == 1
+    assert failure.provider_usage[0].usage is None
     assert session.inspect_context() == before_context
     assert session.compaction_history(5).total_checkpoints == 0
     session.close()

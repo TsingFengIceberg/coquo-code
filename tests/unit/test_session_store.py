@@ -185,7 +185,7 @@ def test_tool_ledger_query_rejects_invalid_limits(tmp_path: Path, limit) -> None
         TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     ],
 )
-def test_resume_appends_v5_turn_without_rewriting_legacy_prefix(
+def test_resume_appends_current_turn_without_rewriting_legacy_prefix(
     tmp_path: Path, legacy_schema: int
 ) -> None:
     session_store = store(tmp_path)
@@ -215,7 +215,8 @@ def test_resume_appends_v5_turn_without_rewriting_legacy_prefix(
     appended = after[len(prefix) :]
     assert b'"record_type":"session_resumed"' in appended
     assert b'"record_type":"turn_committed"' in appended
-    assert b'"schema_version":5' in appended
+    assert f'"schema_version":{TURN_COMMITTED_SCHEMA_VERSION}'.encode() in appended
+    assert b'"provider_usage":[]' in appended
     assert b'"tool_ledger":{"entries":[' in appended
     assert b'"arguments":{"path":"README.md"}' in appended
     assert b'"assistant_text":null' in appended

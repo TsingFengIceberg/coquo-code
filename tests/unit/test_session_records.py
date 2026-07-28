@@ -24,6 +24,7 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.session_records import (
     BindingSnapshot,
+    CompactionFailed,
     ContextCompacted,
     Recovery,
     RuntimeChanged,
@@ -35,11 +36,19 @@ from leonervis_code.session_records import (
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
+    TURN_FAILED_LEGACY_SCHEMA_VERSION,
+    TURN_FAILED_SCHEMA_VERSION,
     TurnCommitted,
+    TurnFailed,
     decode_record,
     encode_record,
     replay_records,
     workspace_fingerprint,
+)
+from leonervis_code.providers.usage import (
+    ProviderInvocationKind,
+    ProviderInvocationUsage,
+    ProviderTokenUsage,
 )
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
@@ -113,6 +122,64 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.turns[0].user.text == "read it"
     assert state.binding == second_binding
     assert state.next_sequence == 3
+
+
+def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Path) -> None:
+    binding = BindingSnapshot.fake()
+    turn_usage = (
+        ProviderInvocationUsage(
+            1,
+            ProviderInvocationKind.TURN,
+            ProviderTokenUsage(120, 30),
+        ),
+        ProviderInvocationUsage(2, ProviderInvocationKind.TURN, None),
+    )
+    compact_usage = (
+        ProviderInvocationUsage(
+            1,
+            ProviderInvocationKind.COMPACTION,
+            ProviderTokenUsage(80, 12),
+        ),
+    )
+    failed = TurnFailed(1, NOW, binding, "ProviderError", "failed", turn_usage)
+    compact_failed = CompactionFailed(
+        2,
+        NOW,
+        binding,
+        CompactionTrigger.MANUAL,
+        "CompactionCandidateError",
+        "not smaller",
+        compact_usage,
+    )
+
+    assert decode_record(encode_record(failed)) == failed
+    assert decode_record(encode_record(compact_failed)) == compact_failed
+    assert b'"input_tokens":120' in encode_record(failed)
+    assert b'"input_tokens":null' in encode_record(failed)
+
+    legacy = replace(
+        failed,
+        schema_version=TURN_FAILED_LEGACY_SCHEMA_VERSION,
+        provider_usage=(),
+    )
+    decoded_legacy = decode_record(encode_record(legacy))
+    assert decoded_legacy.schema_version == TURN_FAILED_LEGACY_SCHEMA_VERSION
+    assert decoded_legacy.provider_usage == ()
+    assert TURN_FAILED_SCHEMA_VERSION == 2
+
+    with pytest.raises(SessionRecordError, match="contiguous"):
+        encode_record(
+            replace(
+                failed,
+                provider_usage=(
+                    ProviderInvocationUsage(
+                        2,
+                        ProviderInvocationKind.TURN,
+                        ProviderTokenUsage(1, 1),
+                    ),
+                ),
+            )
+        )
 
 
 def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:

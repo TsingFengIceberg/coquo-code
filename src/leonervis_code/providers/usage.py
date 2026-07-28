@@ -117,6 +117,26 @@ class RuntimeUsageTracker:
         with self._lock:
             return len(self._records)
 
+    def records_since(
+        self,
+        cursor: int,
+        *,
+        kind: ProviderInvocationKind | None = None,
+    ) -> tuple[ProviderInvocationUsage, ...]:
+        """Return a stable operation-local suffix without mutating latest-turn state."""
+        with self._lock:
+            if type(cursor) is not int or not 0 <= cursor <= len(self._records):
+                raise ValueError("provider usage cursor is invalid")
+            if kind is not None and type(kind) is not ProviderInvocationKind:
+                raise ValueError("provider usage kind is invalid")
+            selected = (
+                record for record in self._records[cursor:] if kind is None or record.kind == kind
+            )
+            return tuple(
+                ProviderInvocationUsage(index, record.kind, record.usage)
+                for index, record in enumerate(selected, start=1)
+            )
+
     def finish_turn(self, cursor: int) -> RuntimeUsageSnapshot:
         with self._lock:
             if type(cursor) is not int or not 0 <= cursor <= len(self._records):

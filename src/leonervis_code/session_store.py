@@ -29,6 +29,8 @@ from leonervis_code.core.permissions import (
     PermissionMode,
     PermissionResult,
 )
+from leonervis_code.core.compaction import CompactionTrigger
+from leonervis_code.providers.usage import ProviderInvocationUsage
 from leonervis_code.session_records import (
     ActionAuditState,
     ActionAuthorization,
@@ -40,6 +42,7 @@ from leonervis_code.session_records import (
     ApprovalResolved,
     AuditRecord,
     BindingSnapshot,
+    CompactionFailed,
     ContextCompacted,
     MAX_RECORD_BYTES,
     MAX_RECORDS,
@@ -53,7 +56,7 @@ from leonervis_code.session_records import (
     SessionRecordError,
     SessionResumed,
     TurnCommitted,
-    TURN_COMMITTED_SCHEMA_VERSION,
+    TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
     TurnFailed,
     canonical_session_id,
     decode_record,
@@ -111,7 +114,7 @@ def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
             schema_version=record.schema_version,
             ledger=(
                 record.tool_ledger
-                if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION
+                if record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION
                 else None
             ),
         )
@@ -862,6 +865,7 @@ class SessionWriter:
         *,
         binding: BindingSnapshot,
         tool_ledger: ToolTurnLedger,
+        provider_usage: tuple[ProviderInvocationUsage, ...] = (),
         committed_at: str | None = None,
     ) -> TurnCommitted:
         """Durably commit one complete turn as exactly one JSONL record."""
@@ -872,6 +876,7 @@ class SessionWriter:
             binding=binding,
             items=tuple(items),
             tool_ledger=tool_ledger,
+            provider_usage=provider_usage,
         )
         self._append(record)
         return record
@@ -921,6 +926,7 @@ class SessionWriter:
         binding: BindingSnapshot,
         failure_kind: str,
         message: str,
+        provider_usage: tuple[ProviderInvocationUsage, ...] = (),
         occurred_at: str | None = None,
     ) -> TurnFailed:
         """Convenience API for a typed turn_failed audit event."""
@@ -930,6 +936,30 @@ class SessionWriter:
             binding=binding,
             failure_kind=failure_kind,
             message=message,
+            provider_usage=provider_usage,
+        )
+        self.append_audit(record)
+        return record
+
+    def compaction_failed(
+        self,
+        *,
+        binding: BindingSnapshot,
+        trigger: CompactionTrigger,
+        failure_kind: str,
+        message: str,
+        provider_usage: tuple[ProviderInvocationUsage, ...],
+        occurred_at: str | None = None,
+    ) -> CompactionFailed:
+        """Persist one terminal compaction failure and its provider usage."""
+        record = CompactionFailed(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            binding=binding,
+            trigger=trigger,
+            failure_kind=failure_kind,
+            message=message,
+            provider_usage=provider_usage,
         )
         self.append_audit(record)
         return record

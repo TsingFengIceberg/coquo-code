@@ -34,6 +34,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_switch_rejection,
     render_tool_ledgers,
+    render_durable_usage_summary,
     render_usage_summary,
 )
 from leonervis_code.core.compaction import CompactionError
@@ -87,6 +88,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
+    SlashCompletionSpec("/usage session", "Show durable Session usage"),
+    SlashCompletionSpec("/usage turns", "Show recent durable turn usage"),
     SlashCompletionSpec("/output", "Inspect or change output budget", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
     SlashCompletionSpec("/compactions", "Show durable compaction history", True),
@@ -120,6 +123,10 @@ class ReplSession(Protocol):
     def inspect_context(self): ...
 
     def usage(self): ...
+
+    def session_usage(self): ...
+
+    def turn_usage_history(self, limit: int = 10): ...
 
     def set_output_budget(self, max_output_tokens: int | None): ...
 
@@ -195,8 +202,21 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _usage("Usage: /context")
     if command == "/usage":
         return _call(lambda: render_usage_summary(session.usage()), kind="info")
+    if command == "/usage session":
+        return _call(
+            lambda: render_durable_usage_summary(session.session_usage()),
+            kind="info",
+        )
+    if command == "/usage turns":
+        return _call(
+            lambda: render_durable_usage_summary(
+                session.turn_usage_history(),
+                turns=True,
+            ),
+            kind="info",
+        )
     if command.startswith("/usage "):
-        return _usage("Usage: /usage")
+        return _usage("Usage: /usage [session|turns]")
     if command == "/output" or command.startswith("/output "):
         return _output(command, session)
     if command == "/compact preview":

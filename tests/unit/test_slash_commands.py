@@ -12,11 +12,12 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchResult,
 )
 from leonervis_code.providers.request_context import ContextFitDecision
-from leonervis_code.providers.usage import RuntimeUsageTracker
+from leonervis_code.providers.usage import ProviderUsageTotals, RuntimeUsageTracker
 from leonervis_code.session import (
     CompactContextPreview,
     CompactContextResult,
     CompactionHistoryResult,
+    DurableUsageSnapshot,
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
@@ -147,6 +148,13 @@ class Session:
     def usage(self):
         return RuntimeUsageTracker().snapshot()
 
+    def session_usage(self):
+        return DurableUsageSnapshot((), ProviderUsageTotals(), 0)
+
+    def turn_usage_history(self, limit=10):
+        assert limit == 10
+        return DurableUsageSnapshot((), ProviderUsageTotals(), 0)
+
     def latest_session_info(self):
         return self._info(self.latest)
 
@@ -208,7 +216,11 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/usage", session).message == (
         "No provider generation usage recorded for the current runtime."
     )
-    assert dispatch_slash("/usage extra", session).message == "Usage: /usage"
+    assert "Session usage: 0 in / 0 out" in dispatch_slash("/usage session", session).message
+    assert dispatch_slash("/usage turns", session).message == (
+        "No committed or failed turn usage is available in this Session."
+    )
+    assert dispatch_slash("/usage extra", session).message == "Usage: /usage [session|turns]"
     assert "real provider runtime" in dispatch_slash("/output", session).message
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"

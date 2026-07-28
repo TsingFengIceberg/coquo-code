@@ -44,6 +44,7 @@ from leonervis_code.cli.presentation import (
     render_session_resume,
     render_switch_rejection,
     render_tool_ledgers,
+    render_durable_usage_summary,
     render_usage_summary,
 )
 from leonervis_code.providers.manager import (
@@ -81,6 +82,8 @@ from leonervis_code.session import (
     CompactContextPreview,
     CompactionHistoryEntry,
     CompactionHistoryResult,
+    DurableUsageOperation,
+    DurableUsageSnapshot,
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
@@ -88,7 +91,9 @@ from leonervis_code.session import (
 )
 from leonervis_code.providers.usage import (
     ProviderInvocationKind,
+    ProviderInvocationUsage,
     ProviderTokenUsage,
+    ProviderUsageTotals,
     RuntimeUsageTracker,
 )
 from leonervis_code.session_records import (
@@ -244,6 +249,48 @@ def test_context_meter_toolbar_and_usage_summary_are_bounded_and_explicit() -> N
     assert "Latest turn: 70.0k in / 846 out" in render_usage_summary(usage)
     assert "Latest compaction invocation: none" in render_usage_summary(usage)
     assert "Turn usage:" in render_prompt_event(TurnUsageCompleted(usage))[0]
+
+
+def test_durable_usage_presentation_distinguishes_unknown_and_legacy() -> None:
+    operations = (
+        DurableUsageOperation(
+            3,
+            "2026-07-28T00:00:00.000000Z",
+            "turn",
+            "committed",
+            "custom",
+            "model",
+            (
+                ProviderInvocationUsage(
+                    1,
+                    ProviderInvocationKind.TURN,
+                    ProviderTokenUsage(120, 30),
+                ),
+                ProviderInvocationUsage(2, ProviderInvocationKind.TURN, None),
+            ),
+        ),
+        DurableUsageOperation(
+            4,
+            "2026-07-28T00:00:01.000000Z",
+            "turn",
+            "failed",
+            "custom",
+            "model",
+            None,
+        ),
+    )
+    snapshot = DurableUsageSnapshot(
+        operations,
+        ProviderUsageTotals(120, 30, 1, 1),
+        1,
+    )
+
+    summary = render_durable_usage_summary(snapshot)
+    assert "Session usage: 120 in / 30 out · known=1 unknown=1" in summary
+    assert "legacy usage unavailable=1" in summary
+    turns = render_durable_usage_summary(snapshot, turns=True)
+    assert "record #3 committed · custom/model" in turns
+    assert "record #4 failed · custom/model · legacy usage unavailable" in turns
     assert (
         render_prompt_toolbar(
             status(mode="real", profile="work-openai", provider="openai", model="gpt-5"),

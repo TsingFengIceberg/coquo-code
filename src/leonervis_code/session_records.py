@@ -57,15 +57,24 @@ from leonervis_code.core.effective_context import (
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
     validate_complete_history,
 )
+from leonervis_code.providers.usage import (
+    ProviderInvocationKind,
+    ProviderInvocationUsage,
+    ProviderTokenUsage,
+)
 
 SCHEMA_VERSION = 1
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
 TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
 TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION = 3
 TURN_COMMITTED_BATCH_SCHEMA_VERSION = 4
-TURN_COMMITTED_SCHEMA_VERSION = 5
+TURN_COMMITTED_LEDGER_SCHEMA_VERSION = 5
+TURN_COMMITTED_SCHEMA_VERSION = 6
+TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
+TURN_FAILED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
-CONTEXT_COMPACTED_SCHEMA_VERSION = 3
+CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION = 3
+CONTEXT_COMPACTED_SCHEMA_VERSION = 4
 WORKSPACE_FINGERPRINT_VERSION = "v1"
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
@@ -197,6 +206,7 @@ class TurnCommitted:
     binding: BindingSnapshot
     items: tuple[ConversationItem, ...]
     tool_ledger: ToolTurnLedger = ToolTurnLedger()
+    provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
     record_type: str = "turn_committed"
     schema_version: int = TURN_COMMITTED_SCHEMA_VERSION
 
@@ -218,8 +228,9 @@ class TurnFailed:
     binding: BindingSnapshot
     failure_kind: str
     message: str
+    provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
     record_type: str = "turn_failed"
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = TURN_FAILED_SCHEMA_VERSION
 
 
 class ApprovalAuditOutcome(StrEnum):
@@ -375,10 +386,24 @@ class ContextCompacted:
     continuation_version: int
     continuation_fingerprint: str
     effective_context_representation_version: int
+    provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
     trigger: CompactionTrigger = CompactionTrigger.MANUAL
     high_water_percent: int | None = None
     record_type: str = "context_compacted"
     schema_version: int = CONTEXT_COMPACTED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class CompactionFailed:
+    sequence: int
+    occurred_at: str
+    binding: BindingSnapshot
+    trigger: CompactionTrigger
+    failure_kind: str
+    message: str
+    provider_usage: tuple[ProviderInvocationUsage, ...]
+    record_type: str = "compaction_failed"
+    schema_version: int = SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -403,6 +428,7 @@ SessionRecord: TypeAlias = (
     | SessionResumed
     | Recovery
     | ContextCompacted
+    | CompactionFailed
     | SessionClosed
 )
 AuditRecord: TypeAlias = (
@@ -415,6 +441,7 @@ AuditRecord: TypeAlias = (
     | ActionExecutionFinished
     | SessionResumed
     | Recovery
+    | CompactionFailed
     | SessionClosed
 )
 
@@ -570,6 +597,14 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
             _required_text(record.message, "turn_failed message", allow_empty=True)
+            if record.schema_version == TURN_FAILED_SCHEMA_VERSION:
+                _validate_provider_usage(
+                    record.provider_usage,
+                    expected_kind=ProviderInvocationKind.TURN,
+                    label="turn_failed",
+                )
+            elif record.provider_usage not in (None, ()):
+                raise SessionRecordError("legacy turn_failed cannot contain provider usage")
             _interrupt_live_action(action_states, live_action_request_id, record.sequence)
             live_action_request_id = None
             binding = record.binding
@@ -709,6 +744,11 @@ def replay_records(
             effective_source = EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT
             latest_checkpoint = record
             binding = record.binding
+        elif isinstance(record, CompactionFailed):
+            _require_no_live_action(live_action_request_id, "compaction_failed")
+            _validate_compaction_failed(record)
+            if record.binding != binding:
+                raise SessionRecordError("compaction_failed binding does not match current runtime")
         elif isinstance(record, SessionClosed):
             _require_no_live_action(live_action_request_id, "session_closed")
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -891,8 +931,14 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
                 _item_to_dict(item, schema_version=record.schema_version) for item in record.items
             ],
         )
-        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
             common["tool_ledger"] = _tool_ledger_to_dict(record.tool_ledger)
+        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            common["provider_usage"] = _provider_usage_to_value(
+                record.provider_usage,
+                expected_kind=ProviderInvocationKind.TURN,
+                label="turn_committed",
+            )
     elif isinstance(record, RuntimeChanged):
         _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
         _required_text(record.reason, "runtime_changed reason", allow_empty=True)
@@ -911,6 +957,12 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             failure_kind=record.failure_kind,
             message=record.message,
         )
+        if record.schema_version == TURN_FAILED_SCHEMA_VERSION:
+            common["provider_usage"] = _provider_usage_to_value(
+                record.provider_usage,
+                expected_kind=ProviderInvocationKind.TURN,
+                label="turn_failed",
+            )
     elif isinstance(record, ActionRequested):
         _validate_action_requested_fields(record)
         common.update(
@@ -983,11 +1035,31 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             continuation_fingerprint=record.continuation_fingerprint,
             effective_context_representation_version=record.effective_context_representation_version,
         )
-        if record.schema_version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+        if record.schema_version >= CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION:
             common.update(
                 trigger=record.trigger.value,
                 high_water_percent=record.high_water_percent,
             )
+        if record.schema_version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+            common["provider_usage"] = _provider_usage_to_value(
+                record.provider_usage,
+                expected_kind=ProviderInvocationKind.COMPACTION,
+                label="context_compacted",
+            )
+    elif isinstance(record, CompactionFailed):
+        _validate_compaction_failed(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            binding=_binding_to_dict(record.binding),
+            trigger=record.trigger.value,
+            failure_kind=record.failure_kind,
+            message=record.message,
+            provider_usage=_provider_usage_to_value(
+                record.provider_usage,
+                expected_kind=ProviderInvocationKind.COMPACTION,
+                label="compaction_failed",
+            ),
+        )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
         _required_text(record.reason, "session_closed reason", allow_empty=True)
@@ -1003,6 +1075,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
     if record_type == "context_compacted":
         allowed_versions = {
             CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
+            CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION,
             CONTEXT_COMPACTED_SCHEMA_VERSION,
         }
     elif record_type == "turn_committed":
@@ -1011,8 +1084,11 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
+    elif record_type == "turn_failed":
+        allowed_versions = {TURN_FAILED_LEGACY_SCHEMA_VERSION, TURN_FAILED_SCHEMA_VERSION}
     else:
         allowed_versions = {SCHEMA_VERSION}
     if type(version) is not int or version not in allowed_versions:
@@ -1055,8 +1131,10 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "binding",
             "items",
         }
-        if version == TURN_COMMITTED_SCHEMA_VERSION:
+        if version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
             fields.add("tool_ledger")
+        if version == TURN_COMMITTED_SCHEMA_VERSION:
+            fields.add("provider_usage")
         _closed_fields(
             value,
             fields,
@@ -1073,8 +1151,17 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             items=items,
             tool_ledger=(
                 _tool_ledger_from_value(value.get("tool_ledger"))
-                if version == TURN_COMMITTED_SCHEMA_VERSION
+                if version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION
                 else ToolTurnLedger()
+            ),
+            provider_usage=(
+                _provider_usage_from_value(
+                    value.get("provider_usage"),
+                    expected_kind=ProviderInvocationKind.TURN,
+                    label=record_type,
+                )
+                if version == TURN_COMMITTED_SCHEMA_VERSION
+                else ()
             ),
             schema_version=version,
         )
@@ -1108,6 +1195,8 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "failure_kind",
             "message",
         }
+        if version == TURN_FAILED_SCHEMA_VERSION:
+            fields.add("provider_usage")
         _closed_fields(value, fields, record_type)
         return TurnFailed(
             sequence=sequence,
@@ -1115,6 +1204,16 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             binding=_binding_from_value(value.get("binding")),
             failure_kind=_required_field_text(value, "failure_kind", record_type),
             message=_required_field_text(value, "message", record_type, allow_empty=True),
+            provider_usage=(
+                _provider_usage_from_value(
+                    value.get("provider_usage"),
+                    expected_kind=ProviderInvocationKind.TURN,
+                    label=record_type,
+                )
+                if version == TURN_FAILED_SCHEMA_VERSION
+                else ()
+            ),
+            schema_version=version,
         )
     if record_type == "action_requested":
         fields = {
@@ -1252,15 +1351,17 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "continuation_fingerprint",
             "effective_context_representation_version",
         }
-        if version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+        if version >= CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION:
             fields |= {"trigger", "high_water_percent"}
+        if version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+            fields.add("provider_usage")
         _closed_fields(value, fields, record_type)
         previous = value.get("previous_checkpoint_sequence")
         if previous is not None and (type(previous) is not int or previous < 0):
             raise SessionRecordError(
                 "context_compacted previous_checkpoint_sequence must be non-negative or null"
             )
-        if version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+        if version >= CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION:
             try:
                 trigger = CompactionTrigger(_required_field_text(value, "trigger", record_type))
             except ValueError:
@@ -1299,11 +1400,52 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             effective_context_representation_version=_required_field_int(
                 value, "effective_context_representation_version", record_type
             ),
+            provider_usage=(
+                _provider_usage_from_value(
+                    value.get("provider_usage"),
+                    expected_kind=ProviderInvocationKind.COMPACTION,
+                    label=record_type,
+                )
+                if version == CONTEXT_COMPACTED_SCHEMA_VERSION
+                else ()
+            ),
             trigger=trigger,
             high_water_percent=high_water_percent,
             schema_version=version,
         )
         _validate_context_compacted_fields(record)
+        return record
+    if record_type == "compaction_failed":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "binding",
+            "trigger",
+            "failure_kind",
+            "message",
+            "provider_usage",
+        }
+        _closed_fields(value, fields, record_type)
+        try:
+            trigger = CompactionTrigger(_required_field_text(value, "trigger", record_type))
+        except ValueError:
+            raise SessionRecordError("compaction_failed trigger is invalid") from None
+        record = CompactionFailed(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            binding=_binding_from_value(value.get("binding")),
+            trigger=trigger,
+            failure_kind=_required_field_text(value, "failure_kind", record_type),
+            message=_required_field_text(value, "message", record_type, allow_empty=True),
+            provider_usage=_provider_usage_from_value(
+                value.get("provider_usage"),
+                expected_kind=ProviderInvocationKind.COMPACTION,
+                label=record_type,
+            ),
+        )
+        _validate_compaction_failed(record)
         return record
     simple_fields = {"record_type", "schema_version", "sequence", "occurred_at"}
     if record_type == "session_resumed":
@@ -1717,8 +1859,85 @@ def _tool_ledger_from_value(value: object) -> ToolTurnLedger:
         raise SessionRecordError(str(error)) from None
 
 
+def _provider_usage_to_value(
+    records: tuple[ProviderInvocationUsage, ...] | None,
+    *,
+    expected_kind: ProviderInvocationKind,
+    label: str,
+) -> list[dict[str, int | None]]:
+    _validate_provider_usage(records, expected_kind=expected_kind, label=label)
+    assert records is not None
+    return [
+        {
+            "index": record.sequence,
+            "input_tokens": record.usage.input_tokens if record.usage is not None else None,
+            "output_tokens": record.usage.output_tokens if record.usage is not None else None,
+        }
+        for record in records
+    ]
+
+
+def _provider_usage_from_value(
+    value: object,
+    *,
+    expected_kind: ProviderInvocationKind,
+    label: str,
+) -> tuple[ProviderInvocationUsage, ...]:
+    if not isinstance(value, list):
+        raise SessionRecordError(f"{label} provider_usage must be an array")
+    records: list[ProviderInvocationUsage] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise SessionRecordError(f"{label} provider usage entry must be an object")
+        _closed_fields(
+            item,
+            {"index", "input_tokens", "output_tokens"},
+            f"{label} provider usage entry",
+        )
+        index = item.get("index")
+        input_tokens = item.get("input_tokens")
+        output_tokens = item.get("output_tokens")
+        if (input_tokens is None) != (output_tokens is None):
+            raise SessionRecordError(
+                f"{label} provider usage tokens must both be integers or both null"
+            )
+        try:
+            usage = (
+                None if input_tokens is None else ProviderTokenUsage(input_tokens, output_tokens)  # type: ignore[arg-type]
+            )
+            records.append(ProviderInvocationUsage(index, expected_kind, usage))  # type: ignore[arg-type]
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+    result = tuple(records)
+    _validate_provider_usage(result, expected_kind=expected_kind, label=label)
+    return result
+
+
+def _validate_provider_usage(
+    records: tuple[ProviderInvocationUsage, ...] | None,
+    *,
+    expected_kind: ProviderInvocationKind,
+    label: str,
+) -> None:
+    if records is None:
+        raise SessionRecordError(f"{label} provider_usage is unavailable in the current schema")
+    if type(records) is not tuple or len(records) > 24:
+        raise SessionRecordError(f"{label} provider_usage must contain at most 24 entries")
+    for index, record in enumerate(records, start=1):
+        if type(record) is not ProviderInvocationUsage:
+            raise SessionRecordError(f"{label} provider usage entry is invalid")
+        try:
+            record.__post_init__()
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        if record.sequence != index or record.kind != expected_kind:
+            raise SessionRecordError(
+                f"{label} provider usage entries must be contiguous and operation-local"
+            )
+
+
 def _validate_turn_ledger(record: TurnCommitted) -> None:
-    if record.schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+    if record.schema_version < TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
         if record.tool_ledger.entries:
             raise SessionRecordError("legacy turn_committed cannot contain a tool ledger")
         return
@@ -1746,6 +1965,14 @@ def _validate_turn_ledger(record: TurnCommitted) -> None:
         result = results[request.tool_use_id]
         if (entry.outcome == ToolRequestOutcome.SUCCEEDED) == result.is_error:
             raise SessionRecordError("turn_committed tool ledger outcome contradicts tool result")
+    if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        _validate_provider_usage(
+            record.provider_usage,
+            expected_kind=ProviderInvocationKind.TURN,
+            label="turn_committed",
+        )
+    elif record.provider_usage not in (None, ()):
+        raise SessionRecordError("legacy turn_committed cannot contain provider usage")
 
 
 def _validate_header(header: SessionHeader) -> None:
@@ -1783,6 +2010,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -1790,9 +2018,17 @@ def _validate_record_version(record: SessionRecord) -> None:
     if isinstance(record, ContextCompacted):
         expected = {
             CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
+            CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION,
             CONTEXT_COMPACTED_SCHEMA_VERSION,
         }
         if record.schema_version not in expected:
+            raise SessionRecordError("unsupported session record schema version")
+        return
+    if isinstance(record, TurnFailed):
+        if record.schema_version not in {
+            TURN_FAILED_LEGACY_SCHEMA_VERSION,
+            TURN_FAILED_SCHEMA_VERSION,
+        }:
             raise SessionRecordError("unsupported session record schema version")
         return
     if record.schema_version != SCHEMA_VERSION:
@@ -1816,6 +2052,14 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
             )
     else:
         raise SessionRecordError("context_compacted trigger is invalid")
+    if record.schema_version == CONTEXT_COMPACTED_SCHEMA_VERSION:
+        _validate_provider_usage(
+            record.provider_usage,
+            expected_kind=ProviderInvocationKind.COMPACTION,
+            label="context_compacted",
+        )
+    elif record.provider_usage not in (None, ()):
+        raise SessionRecordError("legacy context_compacted cannot contain provider usage")
     _validate_timestamp(record.occurred_at, "context_compacted occurred_at")
     record.binding.__post_init__()
     _context_id(record.source_context_id, "context_compacted source_context_id")
@@ -1856,6 +2100,20 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
         raise SessionRecordError(
             "context_compacted effective-context representation is unsupported"
         )
+
+
+def _validate_compaction_failed(record: CompactionFailed) -> None:
+    _validate_timestamp(record.occurred_at, "compaction_failed occurred_at")
+    record.binding.__post_init__()
+    if type(record.trigger) is not CompactionTrigger:
+        raise SessionRecordError("compaction_failed trigger is invalid")
+    _required_text(record.failure_kind, "compaction_failed failure_kind")
+    _required_text(record.message, "compaction_failed message", allow_empty=True)
+    _validate_provider_usage(
+        record.provider_usage,
+        expected_kind=ProviderInvocationKind.COMPACTION,
+        label="compaction_failed",
+    )
 
 
 def _validate_context_compacted(

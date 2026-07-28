@@ -49,6 +49,15 @@ def test_usage_tracker_separates_turn_compaction_unknown_and_reset() -> None:
         ProviderInvocationKind.TURN,
         ProviderInvocationKind.TURN,
     ]
+    compact_suffix = tracker.records_since(
+        cursor,
+        kind=ProviderInvocationKind.COMPACTION,
+    )
+    assert len(compact_suffix) == 1
+    assert compact_suffix[0].sequence == 1
+    assert compact_suffix[0].usage == ProviderTokenUsage(80, 10)
+    with pytest.raises(ValueError, match="cursor"):
+        tracker.records_since(99)
 
     tracker.reset(4)
     reset = tracker.snapshot()

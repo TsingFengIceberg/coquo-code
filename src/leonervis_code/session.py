@@ -79,12 +79,24 @@ from leonervis_code.providers.request_context import (
     rejects_context_transition,
     raise_for_context_fit,
 )
-from leonervis_code.providers.usage import RuntimeUsageSnapshot
+from leonervis_code.providers.usage import (
+    ProviderInvocationKind,
+    ProviderInvocationUsage,
+    ProviderUsageTotals,
+    RuntimeUsageSnapshot,
+)
 from leonervis_code.session_records import (
     ActionAuditState,
     ActionExecutionOutcome,
     BindingSnapshot,
+    CompactionFailed,
     ContextCompacted,
+    CONTEXT_COMPACTED_SCHEMA_VERSION,
+    SessionRecord,
+    TurnCommitted,
+    TURN_COMMITTED_SCHEMA_VERSION,
+    TurnFailed,
+    TURN_FAILED_SCHEMA_VERSION,
 )
 from leonervis_code.session_store import (
     LatestUpdateStatus,
@@ -302,6 +314,33 @@ class TurnUsageCompleted:
     usage: RuntimeUsageSnapshot
 
 
+@dataclass(frozen=True)
+class DurableUsageOperation:
+    record_sequence: int
+    occurred_at: str
+    operation: str
+    outcome: str
+    provider_id: str
+    model: str | None
+    invocations: tuple[ProviderInvocationUsage, ...] | None
+
+    @property
+    def totals(self) -> ProviderUsageTotals | None:
+        if self.invocations is None:
+            return None
+        totals = ProviderUsageTotals()
+        for invocation in self.invocations:
+            totals = totals.add(invocation.usage)
+        return totals
+
+
+@dataclass(frozen=True)
+class DurableUsageSnapshot:
+    operations: tuple[DurableUsageOperation, ...]
+    totals: ProviderUsageTotals
+    unavailable_operations: int
+
+
 PromptEvent = (
     AutoCompactionStarted
     | AutoCompactionCommitted
@@ -474,6 +513,7 @@ class ProjectSession:
         self._action_uuid_factory = action_uuid_factory
         self._active_action_lease: ActionLease | None = None
         self._active_action_binding: BindingSnapshot | None = None
+        self._active_usage_cursor: int | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -601,6 +641,7 @@ class ProjectSession:
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
+            session_holder: dict[str, ProjectSession] = {}
             try:
                 loop = cls._loop_from_state(
                     prepared.state,
@@ -612,10 +653,8 @@ class ProjectSession:
                     stat_path,
                     list_tree,
                     grep_regex,
-                    commit_turn=lambda turn: writer_holder["writer"].append_turn(
-                        turn.items,
-                        binding=binding_from_status(manager.status()),
-                        tool_ledger=turn.tool_ledger,
+                    commit_turn=lambda turn: session_holder["session"]._commit_turn(
+                        writer_holder["writer"], turn
                     ),
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -635,7 +674,7 @@ class ProjectSession:
                     committed.latest_status,
                     committed.latest_diagnostic,
                 )
-                return cls(
+                session = cls(
                     resolved_workspace,
                     store,
                     manager,
@@ -665,6 +704,8 @@ class ProjectSession:
                     loop=loop,
                     startup_resume_result=result,
                 )
+                session_holder["session"] = session
+                return session
             except BaseException:
                 prepared.abort()
                 raise
@@ -819,6 +860,7 @@ class ProjectSession:
             loop = self._loop
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
+            self._active_usage_cursor = usage_cursor
             try:
                 with self._manager.provider_for_turn() as runtime:
                     binding = binding_from_status(runtime.status)
@@ -863,11 +905,16 @@ class ProjectSession:
                 self._record_failure(
                     binding or binding_from_status(self._manager.status()),
                     error,
+                    provider_usage=self._manager.usage_since(
+                        usage_cursor,
+                        kind=ProviderInvocationKind.TURN,
+                    ),
                 )
                 raise
             finally:
                 self._active_action_lease = None
                 self._active_action_binding = None
+                self._active_usage_cursor = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -926,7 +973,22 @@ class ProjectSession:
         prepared = self._prepare_compaction(CompactionTrigger.MANUAL)
         try:
             with self._manager.provider_for_compaction() as runtime:
-                return self._execute_compaction(prepared, runtime, pending_items=())
+                usage_cursor = runtime.usage_tracker.turn_cursor()
+                try:
+                    return self._execute_compaction(
+                        prepared,
+                        runtime,
+                        pending_items=(),
+                        usage_cursor=usage_cursor,
+                    )
+                except BaseException as error:
+                    self._record_compaction_failure(
+                        prepared,
+                        runtime,
+                        error,
+                        usage_cursor=usage_cursor,
+                    )
+                    raise
         finally:
             self._finish_compaction(prepared)
 
@@ -1038,6 +1100,7 @@ class ProjectSession:
         runtime: CompactionRuntimeSnapshot | TurnRuntimeSnapshot,
         *,
         pending_items: tuple[ConversationItem, ...],
+        usage_cursor: int,
     ) -> CompactContextResult:
         source = prepared.source
         status = runtime.status
@@ -1141,6 +1204,10 @@ class ProjectSession:
                 continuation_version=summary.continuation_version,
                 continuation_fingerprint=summary.continuation_fingerprint,
                 effective_context_representation_version=candidate.representation_version,
+                provider_usage=runtime.usage_tracker.records_since(
+                    usage_cursor,
+                    kind=ProviderInvocationKind.COMPACTION,
+                ),
                 trigger=prepared.trigger,
                 high_water_percent=(
                     AUTO_COMPACT_HIGH_WATER_PERCENT
@@ -1167,6 +1234,32 @@ class ProjectSession:
             fit_decision=candidate_report.decision,
             trigger=prepared.trigger,
         )
+
+    def _record_compaction_failure(
+        self,
+        prepared: _PreparedCompaction,
+        runtime: CompactionRuntimeSnapshot | TurnRuntimeSnapshot,
+        error: BaseException,
+        *,
+        usage_cursor: int,
+    ) -> None:
+        with self._lock:
+            if (
+                self._writer is not prepared.writer
+                or self._active_compaction is not prepared
+                or prepared.writer.state.next_sequence != prepared.captured_sequence
+            ):
+                return
+            prepared.writer.compaction_failed(
+                binding=binding_from_status(runtime.status),
+                trigger=prepared.trigger,
+                failure_kind=type(error).__name__,
+                message=_safe_failure_message(error),
+                provider_usage=runtime.usage_tracker.records_since(
+                    usage_cursor,
+                    kind=ProviderInvocationKind.COMPACTION,
+                ),
+            )
 
     def _finish_compaction(self, prepared: _PreparedCompaction) -> None:
         with self._lock:
@@ -1211,17 +1304,25 @@ class ProjectSession:
                 raise_for_context_fit(source_report)
             return turn
         try:
+            usage_cursor = runtime.usage_tracker.turn_cursor()
             try:
                 result = self._execute_compaction(
                     prepared,
                     runtime,
                     pending_items=turn.pending_items,
+                    usage_cursor=usage_cursor,
                 )
             except (
                 CompactionCandidateError,
                 ContextPreflightError,
                 ProviderAdapterError,
             ) as error:
+                self._record_compaction_failure(
+                    prepared,
+                    runtime,
+                    error,
+                    usage_cursor=usage_cursor,
+                )
                 self._emit_prompt_event(
                     event_sink,
                     AutoCompactionNotApplied(trigger, _safe_failure_message(error), not mandatory),
@@ -1271,6 +1372,25 @@ class ProjectSession:
     def usage(self) -> RuntimeUsageSnapshot:
         self._ensure_open()
         return self._manager.usage_snapshot()
+
+    def session_usage(self) -> DurableUsageSnapshot:
+        """Return durable usage totals across all replayed Session operations."""
+        with self._lock:
+            self._ensure_open()
+            return _durable_usage_snapshot(self._writer.state.records)
+
+    def turn_usage_history(self, limit: int = 10) -> DurableUsageSnapshot:
+        """Return bounded recent committed and failed turn usage."""
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("turn usage history limit must be between 1 and 20")
+        with self._lock:
+            self._ensure_open()
+            operations = tuple(
+                operation
+                for operation in _durable_usage_operations(self._writer.state.records)
+                if operation.operation == "turn"
+            )[-limit:]
+            return _usage_snapshot_from_operations(operations)
 
     def close(self) -> None:
         with self._lock:
@@ -1731,10 +1851,17 @@ class ProjectSession:
     def _commit_turn(self, writer: SessionWriter, turn: CommittedTurn) -> None:
         if writer is not self._writer:
             raise SessionStoreError("conversation session changed before turn commit")
+        usage_cursor = self._active_usage_cursor
+        if usage_cursor is None:
+            raise SessionStoreError("provider usage cursor is unavailable before turn commit")
         writer.append_turn(
             turn.items,
             binding=binding_from_status(self._manager.status()),
             tool_ledger=turn.tool_ledger,
+            provider_usage=self._manager.usage_since(
+                usage_cursor,
+                kind=ProviderInvocationKind.TURN,
+            ),
         )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
@@ -1743,12 +1870,19 @@ class ProjectSession:
         except Exception as error:
             raise RuntimeSwitchAuditError(result) from error
 
-    def _record_failure(self, binding: BindingSnapshot, error: BaseException) -> None:
+    def _record_failure(
+        self,
+        binding: BindingSnapshot,
+        error: BaseException,
+        *,
+        provider_usage: tuple[ProviderInvocationUsage, ...] = (),
+    ) -> None:
         try:
             self._writer.turn_failed(
                 binding=binding,
                 failure_kind=type(error).__name__,
                 message=_safe_failure_message(error),
+                provider_usage=provider_usage,
             )
         except SessionStoreError:
             pass
@@ -1764,6 +1898,77 @@ class ProjectSession:
 
 def _cancel_approval(_request) -> ApprovalResolution:
     return ApprovalResolution.CANCEL
+
+
+def _durable_usage_snapshot(records: tuple[SessionRecord, ...]) -> DurableUsageSnapshot:
+    return _usage_snapshot_from_operations(_durable_usage_operations(records))
+
+
+def _durable_usage_operations(
+    records: tuple[SessionRecord, ...],
+) -> tuple[DurableUsageOperation, ...]:
+    operations: list[DurableUsageOperation] = []
+    for record in records:
+        if isinstance(record, TurnCommitted):
+            operation = "turn"
+            outcome = "committed"
+            occurred_at = record.committed_at
+            invocations = (
+                record.provider_usage
+                if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION
+                else None
+            )
+        elif isinstance(record, TurnFailed):
+            operation = "turn"
+            outcome = "failed"
+            occurred_at = record.occurred_at
+            invocations = (
+                record.provider_usage
+                if record.schema_version == TURN_FAILED_SCHEMA_VERSION
+                else None
+            )
+        elif isinstance(record, ContextCompacted):
+            operation = "compaction"
+            outcome = "committed"
+            occurred_at = record.occurred_at
+            invocations = (
+                record.provider_usage
+                if record.schema_version == CONTEXT_COMPACTED_SCHEMA_VERSION
+                else None
+            )
+        elif isinstance(record, CompactionFailed):
+            operation = "compaction"
+            outcome = "failed"
+            occurred_at = record.occurred_at
+            invocations = record.provider_usage
+        else:
+            continue
+        operations.append(
+            DurableUsageOperation(
+                record_sequence=record.sequence,
+                occurred_at=occurred_at,
+                operation=operation,
+                outcome=outcome,
+                provider_id=record.binding.provider_id,
+                model=record.binding.wire_model or record.binding.selected_model,
+                invocations=invocations,
+            )
+        )
+    return tuple(operations)
+
+
+def _usage_snapshot_from_operations(
+    operations: tuple[DurableUsageOperation, ...],
+) -> DurableUsageSnapshot:
+    totals = ProviderUsageTotals()
+    unavailable = 0
+    for operation in operations:
+        if operation.invocations is None:
+            unavailable += 1
+            continue
+        for invocation in operation.invocations:
+            totals = totals.add(invocation.usage)
+    return DurableUsageSnapshot(operations, totals, unavailable)
 
 
 def _uuid4_text(value: UUID | str, label: str) -> str:
