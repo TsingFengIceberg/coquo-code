@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 from typing import Protocol
 
@@ -9,6 +10,7 @@ import openai
 
 from leonervis_code.core.compaction import CompactSummaryRequest, EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationItem,
     ConversationRequest,
@@ -39,6 +41,7 @@ from leonervis_code.providers.streaming import (
     ProviderTextDeltaSink,
 )
 from leonervis_code.tools.catalog import (
+    MAX_TOOL_CALLS_PER_RESPONSE,
     model_tool_definitions,
     tool_input_from_use,
     tool_use_from_input,
@@ -254,7 +257,7 @@ def build_input_projection(
     committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the native fields that contribute provider input tokens."""
-    return {
+    projection: dict[str, object] = {
         "model": route.wire_model,
         "messages": [
             {"role": "system", "content": request_snapshot.system_prompt.text},
@@ -265,9 +268,11 @@ def build_input_projection(
                 committed_context=committed_context,
             ),
         ],
-        "tools": list(model_tool_definitions_for_openai()),
-        "parallel_tool_calls": False,
     }
+    if request_snapshot.allow_tools:
+        projection["tools"] = list(model_tool_definitions_for_openai())
+        projection["parallel_tool_calls"] = False
+    return projection
 
 
 def build_request(
@@ -330,7 +335,7 @@ def serialize_history(
         raise _invalid_history(route, "conversation history must not be empty")
     messages: list[dict[str, object]] = []
     expected = "user"
-    pending_tool_use_id: str | None = None
+    pending_tool_use_ids: tuple[str, ...] = ()
 
     for item in history:
         if isinstance(item, UserMessage):
@@ -385,11 +390,49 @@ def serialize_history(
                     ],
                 }
             )
-            pending_tool_use_id = item.tool_use_id
+            pending_tool_use_ids = (item.tool_use_id,)
+            expected = "tool_result"
+            continue
+        if isinstance(item, AssistantToolBatch):
+            if expected != "assistant":
+                raise _invalid_history(route, "tool batch is out of causal order")
+            tool_calls: list[dict[str, object]] = []
+            for request in item.tool_uses:
+                try:
+                    tool_input = tool_input_from_use(request)
+                except ValueError:
+                    raise _invalid_history(
+                        route, f"unsupported tool in history: {request.name}"
+                    ) from None
+                tool_calls.append(
+                    {
+                        "id": request.tool_use_id,
+                        "type": "function",
+                        "function": {
+                            "name": request.name,
+                            "arguments": json.dumps(
+                                tool_input,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    }
+                )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": item.assistant_text,
+                    "tool_calls": tool_calls,
+                }
+            )
+            pending_tool_use_ids = tuple(request.tool_use_id for request in item.tool_uses)
             expected = "tool_result"
             continue
         if isinstance(item, ToolResult):
-            if expected != "tool_result" or item.tool_use_id != pending_tool_use_id:
+            if expected != "tool_result" or not pending_tool_use_ids:
+                raise _invalid_history(route, "tool result does not match the pending tool use")
+            if item.tool_use_id != pending_tool_use_ids[0]:
                 raise _invalid_history(route, "tool result does not match the pending tool use")
             messages.append(
                 {
@@ -398,8 +441,8 @@ def serialize_history(
                     "content": item.content,
                 }
             )
-            pending_tool_use_id = None
-            expected = "assistant"
+            pending_tool_use_ids = pending_tool_use_ids[1:]
+            expected = "tool_result" if pending_tool_use_ids else "assistant"
             continue
         raise _invalid_history(route, "conversation history contains an unknown item")
 
@@ -470,7 +513,7 @@ def parse_compact_summary_response(
 
 
 def parse_response(response: object, *, route: RuntimeProviderRoute) -> ProviderResponse:
-    """Decode only complete text or one supported sequential function call."""
+    """Decode complete text or one bounded ordered function-call batch."""
     choices = getattr(response, "choices", None)
     if not isinstance(choices, list) or len(choices) != 1:
         raise _invalid_response(route, "provider response must contain exactly one choice")
@@ -509,8 +552,10 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
         if tool_calls:
             raise _invalid_response(route, "text response unexpectedly contained tool calls")
         return AssistantText(text=content)
-    if len(tool_calls) != 1:
-        raise _invalid_response(route, "tool response must contain exactly one tool call")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        raise _invalid_response(route, "tool response contained no tool calls")
+    if len(tool_calls) > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise _invalid_response(route, "tool response exceeded the per-response call limit")
     if content is None or content == "":
         assistant_text = None
     elif isinstance(content, str):
@@ -518,38 +563,60 @@ def parse_response(response: object, *, route: RuntimeProviderRoute) -> Provider
     else:
         raise _invalid_response(route, "provider assistant tool text was malformed")
 
-    call = tool_calls[0]
-    tool_use_id = getattr(call, "id", None)
-    function = getattr(call, "function", None)
-    name = getattr(function, "name", None)
-    arguments = getattr(function, "arguments", None)
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        raise _invalid_response(route, "provider tool call ID was malformed")
-    if not isinstance(name, str):
-        raise _invalid_response(route, "provider requested an unsupported tool")
-    if not isinstance(arguments, str):
-        raise _invalid_response(route, "provider tool arguments were not JSON text")
+    requests: list[ToolUse] = []
+    seen_ids: set[str] = set()
+    for call in tool_calls:
+        if getattr(call, "type", "function") != "function":
+            raise _invalid_response(route, "provider tool call type was unsupported")
+        tool_use_id = getattr(call, "id", None)
+        function = getattr(call, "function", None)
+        name = getattr(function, "name", None)
+        arguments = getattr(function, "arguments", None)
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            raise _invalid_response(route, "provider tool call ID was malformed")
+        if tool_use_id in seen_ids:
+            raise _invalid_response(route, "provider tool call ID was duplicated")
+        seen_ids.add(tool_use_id)
+        if not isinstance(name, str):
+            raise _invalid_response(route, "provider requested an unsupported tool")
+        if not isinstance(arguments, str):
+            raise _invalid_response(route, "provider tool arguments were not JSON text")
+        try:
+            tool_input = json.loads(arguments)
+        except (TypeError, json.JSONDecodeError):
+            raise _invalid_response(route, "provider tool arguments were invalid JSON") from None
+        if not isinstance(tool_input, dict):
+            raise _invalid_response(route, f"provider {name} arguments were malformed")
+        try:
+            requests.append(tool_use_from_input(tool_use_id, name, tool_input))
+        except ValueError:
+            raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+    if len(requests) == 1:
+        request = requests[0]
+        if assistant_text is None:
+            return request
+        try:
+            return ToolUse(
+                request.tool_use_id,
+                request.name,
+                request.arguments,
+                assistant_text=assistant_text,
+            )
+        except ValueError:
+            raise _invalid_response(route, "provider assistant tool text was malformed") from None
     try:
-        tool_input = json.loads(arguments)
-    except (TypeError, json.JSONDecodeError):
-        raise _invalid_response(route, "provider tool arguments were invalid JSON") from None
-    if not isinstance(tool_input, dict):
-        raise _invalid_response(route, f"provider {name} arguments were malformed")
-    try:
-        request = tool_use_from_input(tool_use_id, name, tool_input)
+        return AssistantToolBatch(tuple(requests), assistant_text)
     except ValueError:
-        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
-    if assistant_text is None:
-        return request
-    try:
-        return ToolUse(
-            request.tool_use_id,
-            request.name,
-            request.arguments,
-            assistant_text=assistant_text,
-        )
-    except ValueError:
-        raise _invalid_response(route, "provider assistant tool text was malformed") from None
+        raise _invalid_response(route, "provider tool batch was malformed") from None
+
+
+@dataclass
+class _CompatibleStreamToolCall:
+    tool_use_id: str | None = None
+    name_parts: list[str] = field(default_factory=list)
+    argument_parts: list[str] = field(default_factory=list)
+    name_bytes: int = 0
+    argument_bytes: int = 0
 
 
 def parse_response_stream(
@@ -565,11 +632,8 @@ def parse_response_stream(
         raise _invalid_response(route, "provider stream was not iterable") from None
 
     text_parts: list[str] = []
-    tool_use_id: str | None = None
-    tool_name_parts: list[str] = []
-    argument_parts: list[str] = []
-    argument_bytes = 0
-    tool_name_bytes = 0
+    tool_states: dict[int, _CompatibleStreamToolCall] = {}
+    total_argument_bytes = 0
     finish_reason: str | None = None
     saw_chunk = False
     text_characters = 0
@@ -629,18 +693,19 @@ def parse_response_stream(
                 event_sink(event)
 
         tool_calls = getattr(delta, "tool_calls", None) or []
-        if not isinstance(tool_calls, list) or len(tool_calls) > 1:
-            raise _invalid_response(route, "provider stream delta contained multiple tool calls")
-        if tool_calls:
-            call = tool_calls[0]
+        if not isinstance(tool_calls, list):
+            raise _invalid_response(route, "provider stream tool-call delta was malformed")
+        if len(tool_calls) > MAX_TOOL_CALLS_PER_RESPONSE:
+            raise _invalid_response(route, "provider stream tool-call delta was too large")
+        for call in tool_calls:
             call_index = getattr(call, "index", None)
             if type(call_index) is not int or call_index < 0:
                 raise _invalid_response(route, "provider stream tool-call index was invalid")
-            if call_index != 0:
+            if call_index >= MAX_TOOL_CALLS_PER_RESPONSE:
                 raise _invalid_response(
-                    route,
-                    "provider stream contained multiple tool calls; only one sequential tool call is supported",
+                    route, "provider stream exceeded the per-response call limit"
                 )
+            state = tool_states.setdefault(call_index, _CompatibleStreamToolCall())
             call_id = getattr(call, "id", None)
             if call_id is not None:
                 if not isinstance(call_id, str) or not call_id:
@@ -653,9 +718,9 @@ def parse_response_stream(
                     ) from None
                 if len(encoded_call_id) > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES:
                     raise _invalid_response(route, "provider stream tool-call ID was too large")
-                if tool_use_id is not None and call_id != tool_use_id:
+                if state.tool_use_id is not None and call_id != state.tool_use_id:
                     raise _invalid_response(route, "provider stream changed its tool-call ID")
-                tool_use_id = call_id
+                state.tool_use_id = call_id
             call_type = getattr(call, "type", None)
             if call_type not in {None, "function"}:
                 raise _invalid_response(route, "provider stream tool-call type was unsupported")
@@ -672,10 +737,10 @@ def parse_response_stream(
                     raise _invalid_response(
                         route, "provider stream tool name was malformed"
                     ) from None
-                tool_name_bytes += len(encoded_name)
-                if tool_name_bytes > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES:
+                state.name_bytes += len(encoded_name)
+                if state.name_bytes > MAX_PROVIDER_STREAM_IDENTIFIER_BYTES:
                     raise _invalid_response(route, "provider stream tool name was too large")
-                tool_name_parts.append(name)
+                state.name_parts.append(name)
             arguments = getattr(function, "arguments", None)
             if arguments is not None:
                 if not isinstance(arguments, str):
@@ -686,10 +751,14 @@ def parse_response_stream(
                     raise _invalid_response(
                         route, "provider stream tool arguments were malformed"
                     ) from None
-                argument_bytes += len(encoded_arguments)
-                if argument_bytes > MAX_PROVIDER_STREAM_ARGUMENT_BYTES:
+                state.argument_bytes += len(encoded_arguments)
+                total_argument_bytes += len(encoded_arguments)
+                if (
+                    state.argument_bytes > MAX_PROVIDER_STREAM_ARGUMENT_BYTES
+                    or total_argument_bytes > MAX_PROVIDER_STREAM_ARGUMENT_BYTES
+                ):
                     raise _invalid_response(route, "provider stream tool arguments were too large")
-                argument_parts.append(arguments)
+                state.argument_parts.append(arguments)
 
         current_finish = getattr(choice, "finish_reason", None)
         if current_finish is not None:
@@ -711,7 +780,7 @@ def parse_response_stream(
         )
 
     text = "".join(text_parts)
-    has_tool_fragments = bool(tool_use_id or tool_name_parts or argument_parts)
+    has_tool_fragments = bool(tool_states)
     if finish_reason == "stop":
         if has_tool_fragments:
             raise _invalid_response(route, "text stream unexpectedly contained a tool call")
@@ -720,27 +789,48 @@ def parse_response_stream(
         return AssistantText(text)
     if finish_reason != "tool_calls" or not has_tool_fragments:
         raise _invalid_response(route, "provider stream used an unsupported finish reason")
-    if tool_use_id is None:
-        raise _invalid_response(route, "provider stream tool-call ID was missing")
-    name = "".join(tool_name_parts)
-    if not name:
-        raise _invalid_response(route, "provider stream tool name was missing")
-    raw_arguments = "".join(argument_parts)
+    expected_indexes = list(range(len(tool_states)))
+    if sorted(tool_states) != expected_indexes:
+        raise _invalid_response(route, "provider stream tool-call indexes were not contiguous")
+    requests: list[ToolUse] = []
+    seen_ids: set[str] = set()
+    for call_index in expected_indexes:
+        state = tool_states[call_index]
+        if state.tool_use_id is None:
+            raise _invalid_response(route, "provider stream tool-call ID was missing")
+        if state.tool_use_id in seen_ids:
+            raise _invalid_response(route, "provider stream tool-call ID was duplicated")
+        seen_ids.add(state.tool_use_id)
+        name = "".join(state.name_parts)
+        if not name:
+            raise _invalid_response(route, "provider stream tool name was missing")
+        try:
+            tool_input = json.loads("".join(state.argument_parts))
+        except json.JSONDecodeError:
+            raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+        if not isinstance(tool_input, dict):
+            raise _invalid_response(route, f"provider {name} arguments were malformed")
+        try:
+            requests.append(tool_use_from_input(state.tool_use_id, name, tool_input))
+        except ValueError:
+            raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+    if len(requests) == 1:
+        request = requests[0]
+        if not text:
+            return request
+        try:
+            return ToolUse(
+                request.tool_use_id,
+                request.name,
+                request.arguments,
+                assistant_text=text,
+            )
+        except ValueError:
+            raise _invalid_response(route, "provider assistant tool text was malformed") from None
     try:
-        tool_input = json.loads(raw_arguments)
-    except json.JSONDecodeError:
-        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
-    if not isinstance(tool_input, dict):
-        raise _invalid_response(route, f"provider {name} arguments were malformed")
-    try:
-        return tool_use_from_input(
-            tool_use_id,
-            name,
-            tool_input,
-            assistant_text=text or None,
-        )
+        return AssistantToolBatch(tuple(requests), text or None)
     except ValueError:
-        raise _invalid_response(route, f"provider {name} arguments were malformed") from None
+        raise _invalid_response(route, "provider tool batch was malformed") from None
 
 
 def _close_stream(stream: object | None) -> None:

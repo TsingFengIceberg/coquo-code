@@ -9,6 +9,7 @@ import json
 from typing import TYPE_CHECKING
 
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationItem,
     ToolResult,
@@ -241,6 +242,12 @@ def _compact_item(item: ConversationItem) -> dict[str, object]:
         if item.assistant_text is not None:
             payload["assistant_text"] = item.assistant_text
         return payload
+    if isinstance(item, AssistantToolBatch):
+        return {
+            "assistant_text": item.assistant_text,
+            "item_type": "assistant_tool_batch",
+            "tool_uses": [_compact_item(request) for request in item.tool_uses],
+        }
     assert isinstance(item, ToolResult)
     return {
         "content": item.content,

@@ -12,6 +12,7 @@ from leonervis_code.agent.tool_events import (
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
+    ToolRequestSkipped,
     ToolRequestStarted,
 )
 from leonervis_code.cli.presentation import (
@@ -334,7 +335,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
 
     assert kind == "info"
     assert "Source: full committed history" in rendered
-    assert "Context ID: ctx-v1-" in rendered
+    assert "Context ID: ctx-v3-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
     assert "Effective history: 1 turn, 2 items" in rendered
     assert "Input: 80 tokens (estimated)" in rendered
@@ -588,6 +589,12 @@ def test_tool_prompt_events_render_stable_safe_lines_and_semantic_kinds() -> Non
     ) == ("[tool 1/6] succeeded code=ok truncated=true", "success")
     assert render_prompt_event(ToolRequestLimited("read_file", 7, 6, "path='secret.txt'")) == (
         "[tool 7/6] read_file not executed: tool-call limit reached",
+        "warning",
+    )
+    assert render_prompt_event(
+        ToolRequestSkipped("mkdir", 2, 32, "prior_batch_action_not_succeeded")
+    ) == (
+        "[tool 2/32] mkdir skipped: prior_batch_action_not_succeeded",
         "warning",
     )
 

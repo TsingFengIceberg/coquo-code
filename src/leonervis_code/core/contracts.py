@@ -127,19 +127,30 @@ class ToolUse:
         text = self.assistant_text
         if text is None:
             return
-        if not isinstance(text, str) or not text:
-            raise ValueError("assistant tool text must be non-empty text or null")
-        try:
-            encoded = text.encode("utf-8")
-        except UnicodeEncodeError:
-            raise ValueError("assistant tool text must be valid UTF-8") from None
-        if "\x00" in text:
-            raise ValueError("assistant tool text must not contain NUL")
-        if (
-            len(text) > MAX_ASSISTANT_TOOL_TEXT_CHARACTERS
-            or len(encoded) > MAX_ASSISTANT_TOOL_TEXT_BYTES
-        ):
-            raise ValueError("assistant tool text exceeds the supported size")
+        _validate_assistant_tool_text(text)
+
+
+@dataclass(frozen=True)
+class AssistantToolBatch:
+    """One assistant response containing ordered provider-requested tool uses."""
+
+    tool_uses: tuple[ToolUse, ...]
+    assistant_text: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool_uses, tuple) or not self.tool_uses:
+            raise ValueError("assistant tool batch must contain tool uses")
+        seen_ids: set[str] = set()
+        for request in self.tool_uses:
+            if not isinstance(request, ToolUse):
+                raise ValueError("assistant tool batch contains an invalid tool use")
+            if request.assistant_text is not None:
+                raise ValueError("assistant tool batch text must be stored on the batch")
+            if request.tool_use_id in seen_ids:
+                raise ValueError("assistant tool batch contains a duplicate tool use ID")
+            seen_ids.add(request.tool_use_id)
+        if self.assistant_text is not None:
+            _validate_assistant_tool_text(self.assistant_text)
 
 
 @dataclass(frozen=True)
@@ -169,9 +180,27 @@ class CommittedTurn:
     assistant: AssistantText
 
 
-ConversationItem: TypeAlias = UserMessage | AssistantText | ToolUse | ToolResult
+ConversationItem: TypeAlias = (
+    UserMessage | AssistantText | ToolUse | AssistantToolBatch | ToolResult
+)
 TurnCommitter: TypeAlias = Callable[[CommittedTurn], None]
-ProviderResponse: TypeAlias = AssistantText | ToolUse
+ProviderResponse: TypeAlias = AssistantText | ToolUse | AssistantToolBatch
+
+
+def _validate_assistant_tool_text(text: str) -> None:
+    if not isinstance(text, str) or not text:
+        raise ValueError("assistant tool text must be non-empty text or null")
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("assistant tool text must be valid UTF-8") from None
+    if "\x00" in text:
+        raise ValueError("assistant tool text must not contain NUL")
+    if (
+        len(text) > MAX_ASSISTANT_TOOL_TEXT_CHARACTERS
+        or len(encoded) > MAX_ASSISTANT_TOOL_TEXT_BYTES
+    ):
+        raise ValueError("assistant tool text exceeds the supported size")
 
 
 @dataclass(frozen=True)
@@ -181,6 +210,11 @@ class ConversationRequest:
     system_prompt: SystemPromptSnapshot
     history: tuple[ConversationItem, ...]
     effective_summary: EffectiveContextSummary | None = None
+    allow_tools: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.allow_tools) is not bool:
+            raise ValueError("conversation request allow_tools must be boolean")
 
 
 class ConversationProvider(Protocol):

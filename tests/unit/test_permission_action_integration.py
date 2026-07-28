@@ -9,6 +9,7 @@ from leonervis_code.agent.tool_events import ToolEventStatus, ToolRequestFinishe
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
 from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ToolArguments,
     ToolResult,
@@ -29,6 +30,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
 )
 from leonervis_code.tools import grep_regex as grep_regex_module
+from leonervis_code.tools.catalog import MAX_TOOL_REQUESTS_PER_TURN
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -69,21 +71,8 @@ def session_store_factory(workspace: Path) -> SessionStore:
 
 
 def uuid_factory():
-    values = iter(
-        [
-            "22345678-1234-4234-9234-123456789abc",
-            "32345678-1234-4234-9234-123456789abc",
-            "42345678-1234-4234-9234-123456789abc",
-            "52345678-1234-4234-9234-123456789abc",
-            "62345678-1234-4234-9234-123456789abc",
-            "72345678-1234-4234-9234-123456789abc",
-            "82345678-1234-4234-9234-123456789abc",
-            "92345678-1234-4234-9234-123456789abc",
-            "a2345678-1234-4234-9234-123456789abc",
-            "b2345678-1234-4234-9234-123456789abc",
-        ]
-    )
-    return lambda: UUID(next(values))
+    values = iter(UUID(int=index, version=4) for index in range(1, 129))
+    return lambda: next(values)
 
 
 def open_session(
@@ -138,7 +127,7 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         assert events[-1] == ToolRequestFinished(
             "write_file",
             1,
-            6,
+            MAX_TOOL_REQUESTS_PER_TURN,
             ToolEventStatus.DENIED,
             "denied_read_only_mode",
         )
@@ -213,7 +202,11 @@ def test_hard_rejected_write_returns_tool_error_without_action_audit(
         assert session._writer.state.action_audits == ()
         assert not (tmp_path / "nested").exists()
         assert events[-1] == ToolRequestFinished(
-            "write_file", 1, 6, ToolEventStatus.ERROR, "invalid_request"
+            "write_file",
+            1,
+            MAX_TOOL_REQUESTS_PER_TURN,
+            ToolEventStatus.ERROR,
+            "invalid_request",
         )
     finally:
         session.close()
@@ -255,7 +248,11 @@ def test_workspace_write_ask_accept_creates_and_commits_exact_causality(tmp_path
         assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
         assert audit.result_code == "created"
         assert events[-1] == ToolRequestFinished(
-            "write_file", 1, 6, ToolEventStatus.SUCCEEDED, "created"
+            "write_file",
+            1,
+            MAX_TOOL_REQUESTS_PER_TURN,
+            ToolEventStatus.SUCCEEDED,
+            "created",
         )
     finally:
         session.close()
@@ -298,7 +295,7 @@ def test_workspace_write_ask_reject_or_cancel_returns_tool_error_and_commits(
         assert events[-1] == ToolRequestFinished(
             "write_file",
             1,
-            6,
+            MAX_TOOL_REQUESTS_PER_TURN,
             expected_event_status,
             "approval_rejected"
             if resolution == ApprovalResolution.REJECT
@@ -2080,24 +2077,28 @@ def test_new_read_tools_execute_as_workspace_read_and_share_durable_audit(
         session.close()
 
 
-def test_new_tools_share_six_call_budget(tmp_path: Path) -> None:
+def test_new_tools_share_total_tool_request_budget(tmp_path: Path) -> None:
     calls = [
         ToolUse(
             f"stat-{index}",
             "stat_path",
             ToolArguments.from_mapping({"path": "."}),
         )
-        for index in range(1, 8)
+        for index in range(1, MAX_TOOL_REQUESTS_PER_TURN + 2)
     ]
-    provider = ToolProvider([*calls, AssistantText("stopped")])
+    batches = [
+        AssistantToolBatch(tuple(calls[start : start + 8]))
+        for start in range(0, MAX_TOOL_REQUESTS_PER_TURN, 8)
+    ]
+    provider = ToolProvider([*batches, calls[-1], AssistantText("stopped")])
     session = open_session(tmp_path, provider)
     try:
         assert session.prompt("inspect repeatedly") == "stopped"
 
-        assert len(session.action_audits()) == 6
+        assert len(session.action_audits()) == MAX_TOOL_REQUESTS_PER_TURN
         assert provider.requests[-1].history[-1] == ToolResult(
-            "stat-7",
-            "tool call limit reached for this conversation turn",
+            f"stat-{MAX_TOOL_REQUESTS_PER_TURN + 1}",
+            "tool batch was not executed because it exceeds the remaining tool-request budget",
             is_error=True,
         )
     finally:

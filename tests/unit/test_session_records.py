@@ -12,6 +12,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ToolArguments,
     ToolResult,
@@ -143,6 +144,34 @@ def test_turn_schema_v3_round_trips_assistant_tool_text_without_normalizing_it()
 
     assert decoded == turn
     assert b'"assistant_text":"  I will read it.\\n"' in encoded
+
+
+def test_turn_schema_v4_round_trips_one_atomic_tool_batch() -> None:
+    batch = AssistantToolBatch(
+        (
+            ToolUse("mkdir-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("mkdir-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        ),
+        "Creating directories.",
+    )
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("create"),
+            batch,
+            ToolResult("mkdir-src", "directory_created"),
+            ToolResult("mkdir-tests", "directory_created"),
+            AssistantText("done"),
+        ),
+    )
+
+    encoded = encode_record(turn)
+
+    assert decode_record(encoded) == turn
+    assert b'"item_type":"assistant_tool_batch"' in encoded
+    assert encoded.count(b'"tool_use_id"') == 4
 
 
 def test_turn_schema_v2_remains_readable_and_cannot_claim_assistant_tool_text() -> None:

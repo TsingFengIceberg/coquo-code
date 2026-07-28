@@ -14,7 +14,7 @@ from leonervis_code.agent.tool_events import (
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
-    ToolRequestLimited,
+    ToolRequestSkipped,
     ToolRequestStarted,
     infer_tool_dispatch_result,
     safe_result_code,
@@ -23,6 +23,7 @@ from leonervis_code.agent.tool_events import (
 from leonervis_code.core.actions import ActionLease
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     CommittedTurn,
     ConversationItem,
@@ -45,7 +46,12 @@ from leonervis_code.core.effective_context import (
 )
 from leonervis_code.providers.streaming import ProviderResponseOutcome, respond_with_streaming
 from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.catalog import MAX_TOOL_EXECUTIONS_PER_TURN, TOOL_CATALOG
+from leonervis_code.tools.catalog import (
+    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+    MAX_TOOL_CALLS_PER_RESPONSE,
+    MAX_TOOL_REQUESTS_PER_TURN,
+    TOOL_CATALOG,
+)
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
 from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
@@ -237,14 +243,26 @@ class AgentLoop:
         user = prepared.user
         context = prepared.context
         pending = prepared.pending_items
-        tool_calls = 0
+        tool_requests = 0
+        provider_invocations = 0
+        force_final = False
+        seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
 
         while True:
+            if provider_invocations >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
+                raise ToolLoopLimitError("provider invocation limit reached")
+            allow_tools = (
+                not force_final and provider_invocations < MAX_PROVIDER_INVOCATIONS_PER_TURN - 1
+            )
             outcome = self._respond(
                 turn_provider,
-                context.to_conversation_request(pending_items=pending),
+                context.to_conversation_request(
+                    pending_items=pending,
+                    allow_tools=allow_tools,
+                ),
                 event_sink,
             )
+            provider_invocations += 1
             response = outcome.response
             if isinstance(response, AssistantText):
                 self._commit(pending + (response,), user, response)
@@ -255,6 +273,19 @@ class AgentLoop:
                     )
                 return response.text
 
+            if not allow_tools:
+                raise ToolLoopLimitError(
+                    "provider requested tools during the final text-only invocation"
+                )
+            requests = (
+                response.tool_uses if isinstance(response, AssistantToolBatch) else (response,)
+            )
+            if len(requests) > MAX_TOOL_CALLS_PER_RESPONSE:
+                raise ToolLoopLimitError("provider tool batch exceeded the per-response limit")
+            if any(request.tool_use_id in seen_tool_ids for request in requests):
+                raise ValueError("provider reused a tool use ID")
+            seen_tool_ids.update(request.tool_use_id for request in requests)
+
             if response.assistant_text is not None:
                 companion_event = (
                     AssistantToolTextStreamCompleted(response.assistant_text)
@@ -263,81 +294,86 @@ class AgentLoop:
                 )
                 self._emit_prompt_event(event_sink, companion_event)
             pending += (response,)
-            if tool_calls == MAX_TOOL_EXECUTIONS_PER_TURN:
+            if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
+                for offset, request in enumerate(requests, start=1):
+                    self._emit_prompt_event(
+                        event_sink,
+                        ToolRequestSkipped(
+                            request.name,
+                            tool_requests + offset,
+                            MAX_TOOL_REQUESTS_PER_TURN,
+                            "batch_exceeds_remaining_budget",
+                        ),
+                    )
+                    pending += (
+                        ToolResult(
+                            request.tool_use_id,
+                            "tool batch was not executed because it exceeds the remaining tool-request budget",
+                            is_error=True,
+                        ),
+                    )
+                force_final = True
+                continue
+
+            first_call_index = tool_requests + 1
+            tool_requests += len(requests)
+            stop_remaining = False
+            for offset, request in enumerate(requests):
+                call_index = first_call_index + offset
+                if stop_remaining:
+                    self._emit_prompt_event(
+                        event_sink,
+                        ToolRequestSkipped(
+                            request.name,
+                            call_index,
+                            MAX_TOOL_REQUESTS_PER_TURN,
+                            "prior_batch_action_not_succeeded",
+                        ),
+                    )
+                    pending += (
+                        ToolResult(
+                            request.tool_use_id,
+                            "tool was not executed because an earlier action in the same batch did not succeed",
+                            is_error=True,
+                        ),
+                    )
+                    continue
                 self._emit_prompt_event(
                     event_sink,
-                    ToolRequestLimited(
-                        response.name,
-                        tool_calls + 1,
-                        MAX_TOOL_EXECUTIONS_PER_TURN,
-                        safe_tool_request_summary(response),
+                    ToolRequestStarted(
+                        request.name,
+                        call_index,
+                        MAX_TOOL_REQUESTS_PER_TURN,
+                        safe_tool_request_summary(request),
                     ),
                 )
-                pending += (
-                    ToolResult(
-                        tool_use_id=response.tool_use_id,
-                        content="tool call limit reached for this conversation turn",
-                        is_error=True,
-                    ),
-                )
-                final_outcome = self._respond(
-                    turn_provider,
-                    context.to_conversation_request(pending_items=pending),
-                    event_sink,
-                )
-                final_response = final_outcome.response
-                if isinstance(final_response, AssistantText):
-                    self._commit(pending + (final_response,), user, final_response)
-                    if final_outcome.text_was_streamed:
-                        self._emit_prompt_event(
-                            event_sink,
-                            AssistantFinalTextStreamCommitted(final_response.text),
-                        )
-                    return final_response.text
-                if final_response.assistant_text is not None:
-                    companion_event = (
-                        AssistantToolTextStreamCompleted(final_response.assistant_text)
-                        if final_outcome.text_was_streamed
-                        else AssistantToolTextReceived(final_response.assistant_text)
+                try:
+                    dispatch = self._execute(request, prepared.action_lease)
+                except Exception:
+                    self._emit_prompt_event(
+                        event_sink,
+                        ToolRequestFinished(
+                            request.name,
+                            call_index,
+                            MAX_TOOL_REQUESTS_PER_TURN,
+                            ToolEventStatus.OUTCOME_UNKNOWN,
+                        ),
                     )
-                    self._emit_prompt_event(event_sink, companion_event)
-                raise ToolLoopLimitError("provider requested a tool after the tool call limit")
-
-            tool_calls += 1
-            self._emit_prompt_event(
-                event_sink,
-                ToolRequestStarted(
-                    response.name,
-                    tool_calls,
-                    MAX_TOOL_EXECUTIONS_PER_TURN,
-                    safe_tool_request_summary(response),
-                ),
-            )
-            try:
-                dispatch = self._execute(response, prepared.action_lease)
-            except Exception:
+                    raise
                 self._emit_prompt_event(
                     event_sink,
                     ToolRequestFinished(
-                        response.name,
-                        tool_calls,
-                        MAX_TOOL_EXECUTIONS_PER_TURN,
-                        ToolEventStatus.OUTCOME_UNKNOWN,
+                        request.name,
+                        call_index,
+                        MAX_TOOL_REQUESTS_PER_TURN,
+                        dispatch.status,
+                        safe_result_code(dispatch.result_code),
+                        dispatch.tool_result.truncated,
                     ),
                 )
-                raise
-            self._emit_prompt_event(
-                event_sink,
-                ToolRequestFinished(
-                    response.name,
-                    tool_calls,
-                    MAX_TOOL_EXECUTIONS_PER_TURN,
-                    dispatch.status,
-                    safe_result_code(dispatch.result_code),
-                    dispatch.tool_result.truncated,
-                ),
-            )
-            pending += (dispatch.tool_result,)
+                pending += (dispatch.tool_result,)
+                if len(requests) > 1 and dispatch.status != ToolEventStatus.SUCCEEDED:
+                    stop_remaining = True
 
     def _respond(
         self,

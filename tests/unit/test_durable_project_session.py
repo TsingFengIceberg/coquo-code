@@ -228,8 +228,8 @@ def test_project_session_executes_displays_persists_and_resumes_mixed_tool_respo
     result = ToolResult("read-1", "workspace notes\n")
     assert events == [
         AssistantToolTextReceived("I will inspect the file first.\n"),
-        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
-        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok"),
+        ToolRequestStarted("read_file", 1, 32, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, 32, ToolEventStatus.SUCCEEDED, "ok"),
     ]
     assert first_provider.requests[1].history[-2:] == (call, result)
     assert first.history == (
@@ -509,7 +509,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert session.turns == before_turns
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v2-")
+    assert session.inspect_context().context_id.startswith("ctx-v4-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     transcript = session.transcript_path

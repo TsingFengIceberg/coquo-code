@@ -10,6 +10,7 @@ from leonervis_code.agent.tool_events import (
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
+    ToolRequestSkipped,
     ToolRequestStarted,
 )
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
@@ -463,6 +464,12 @@ def render_prompt_event(event: object) -> tuple[str, MessageKind]:
         return (
             f"[tool {event.call_index}/{event.call_limit}] {event.tool_name} not executed: "
             "tool-call limit reached",
+            "warning",
+        )
+    if isinstance(event, ToolRequestSkipped):
+        return (
+            f"[tool {event.call_index}/{event.call_limit}] {event.tool_name} skipped: "
+            f"{event.reason_code}",
             "warning",
         )
 

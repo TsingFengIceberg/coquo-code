@@ -19,6 +19,7 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.session_records import (
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+    TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
@@ -99,9 +100,13 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "legacy_schema",
-    [TURN_COMMITTED_LEGACY_SCHEMA_VERSION, TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION],
+    [
+        TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+        TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+        TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+    ],
 )
-def test_resume_appends_v3_turn_without_rewriting_legacy_prefix(
+def test_resume_appends_v4_turn_without_rewriting_legacy_prefix(
     tmp_path: Path, legacy_schema: int
 ) -> None:
     session_store = store(tmp_path)
@@ -127,7 +132,7 @@ def test_resume_appends_v3_turn_without_rewriting_legacy_prefix(
     appended = after[len(prefix) :]
     assert b'"record_type":"session_resumed"' in appended
     assert b'"record_type":"turn_committed"' in appended
-    assert b'"schema_version":3' in appended
+    assert b'"schema_version":4' in appended
     assert b'"arguments":{"path":"README.md"}' in appended
     assert b'"assistant_text":null' in appended
 
@@ -137,7 +142,14 @@ def test_store_reopens_v3_assistant_tool_text_exactly(tmp_path: Path) -> None:
     writer = session_store.create(BindingSnapshot.fake())
     mixed = committed_items(assistant_text="  I will read it.\n")
 
-    writer.append_turn(mixed, binding=BindingSnapshot.fake())
+    legacy = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=mixed,
+        schema_version=TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+    )
+    writer.path.write_bytes(writer.path.read_bytes() + encode_record(legacy))
     transcript = writer.path.read_bytes()
     writer.release()
 

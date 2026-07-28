@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationProvider,
     ConversationRequest,
@@ -98,7 +99,7 @@ def respond_with_streaming(
         event_sink(delta)
 
     response = stream_method(request, event_sink=receive)
-    if not isinstance(response, (AssistantText, ToolUse)):
+    if not isinstance(response, (AssistantText, ToolUse, AssistantToolBatch)):
         raise ValueError("provider stream returned an invalid response")
     streamed_text = "".join(text_parts)
     response_text = (

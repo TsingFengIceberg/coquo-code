@@ -20,6 +20,7 @@ from leonervis_code.core.compaction import (
     summary_continuation_fingerprint,
 )
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     ToolArguments,
     AssistantText,
     ConversationTurn,
@@ -124,6 +125,24 @@ def test_compact_source_serializes_complete_tool_turns_and_previous_summary() ->
         ),
     )
     assert '"assistant_text":"I will inspect it first."' in mixed_source
+    batch_source = build_compact_source_text(
+        previous_summary=None,
+        summarized_history=(
+            UserMessage("create"),
+            AssistantToolBatch(
+                (
+                    ToolUse("src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+                    ToolUse("tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+                ),
+                "Creating both.",
+            ),
+            ToolResult("src", "directory_created"),
+            ToolResult("tests", "directory_created"),
+            AssistantText("done"),
+        ),
+    )
+    assert '"item_type":"assistant_tool_batch"' in batch_source
+    assert batch_source.index('"tool_use_id":"src"') < batch_source.index('"tool_use_id":"tests"')
     with pytest.raises(ValueError, match="unmatched tool use"):
         build_compact_source_text(
             previous_summary=None,

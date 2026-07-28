@@ -8,6 +8,7 @@ import json
 
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationItem,
     ConversationRequest,
@@ -20,8 +21,8 @@ from leonervis_code.core.contracts import (
     system_prompt_fingerprint,
 )
 
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 1
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 2
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 3
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 4
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
@@ -87,6 +88,8 @@ class EffectiveContextSnapshot:
 
     def __post_init__(self) -> None:
         supported = {
+            1,
+            2,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }
@@ -111,15 +114,23 @@ class EffectiveContextSnapshot:
         validate_complete_history(self.full_history)
         validate_complete_history(self.effective_history)
         if self.source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:
-            if self.representation_version != EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
-                raise ValueError("full-history effective context must use representation version 1")
+            if self.representation_version not in {
+                1,
+                EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            }:
+                raise ValueError(
+                    "full-history effective context uses an unsupported representation"
+                )
             if self.effective_summary is not None:
                 raise ValueError("full-history effective context must not contain a summary")
             if self.full_history != self.effective_history:
                 raise ValueError("full-history effective context must equal full history")
         else:
-            if self.representation_version != COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
-                raise ValueError("compacted effective context must use representation version 2")
+            if self.representation_version not in {
+                2,
+                COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            }:
+                raise ValueError("compacted effective context uses an unsupported representation")
             if not isinstance(self.effective_summary, EffectiveContextSummary):
                 raise ValueError("compacted effective context requires a summary")
             if not _is_complete_turn_suffix(self.full_turns, self.effective_turns):
@@ -179,6 +190,7 @@ class EffectiveContextSnapshot:
         self,
         *,
         pending_items: tuple[ConversationItem, ...] = (),
+        allow_tools: bool = True,
     ) -> ConversationRequest:
         """Project effective history plus one optional uncommitted turn suffix."""
         if not isinstance(pending_items, tuple):
@@ -187,6 +199,7 @@ class EffectiveContextSnapshot:
             system_prompt=self.system_prompt,
             history=self.effective_history + pending_items,
             effective_summary=self.effective_summary,
+            allow_tools=allow_tools,
         )
 
 
@@ -226,19 +239,25 @@ def validate_complete_history(
             raise ValueError("conversation turn must start with a user message")
         index += 1
 
-        while index < len(history) and isinstance(history[index], ToolUse):
-            request = history[index]
-            _validate_item(request)
-            if request.tool_use_id in seen_tool_ids:
-                raise ValueError(f"duplicate tool use ID: {request.tool_use_id}")
-            if index + 1 >= len(history):
+        while index < len(history) and isinstance(history[index], (ToolUse, AssistantToolBatch)):
+            response = history[index]
+            _validate_item(response)
+            requests = (
+                response.tool_uses if isinstance(response, AssistantToolBatch) else (response,)
+            )
+            for request in requests:
+                if request.tool_use_id in seen_tool_ids:
+                    raise ValueError(f"duplicate tool use ID: {request.tool_use_id}")
+                seen_tool_ids.add(request.tool_use_id)
+            result_start = index + 1
+            result_end = result_start + len(requests)
+            if result_end > len(history):
                 raise ValueError("conversation history has an unmatched tool use")
-            result = history[index + 1]
-            _validate_item(result)
-            if not isinstance(result, ToolResult) or result.tool_use_id != request.tool_use_id:
-                raise ValueError("conversation tool result does not match its tool use")
-            seen_tool_ids.add(request.tool_use_id)
-            index += 2
+            for request, result in zip(requests, history[result_start:result_end], strict=True):
+                _validate_item(result)
+                if not isinstance(result, ToolResult) or result.tool_use_id != request.tool_use_id:
+                    raise ValueError("conversation tool result does not match its tool use")
+            index = result_end
 
         if index >= len(history):
             raise ValueError("conversation turn must end with assistant text")
@@ -294,6 +313,14 @@ def _validate_item(item: object) -> None:
             except ValueError:
                 raise ValueError("assistant tool text is invalid") from None
         return
+    if isinstance(item, AssistantToolBatch):
+        try:
+            AssistantToolBatch(item.tool_uses, item.assistant_text)
+        except ValueError:
+            raise ValueError("assistant tool batch is invalid") from None
+        for request in item.tool_uses:
+            _validate_item(request)
+        return
     if isinstance(item, ToolResult):
         if not isinstance(item.tool_use_id, str) or not item.tool_use_id:
             raise ValueError("tool result ID must not be blank")
@@ -322,6 +349,12 @@ def _item_identity(item: ConversationItem) -> dict[str, object]:
         if item.assistant_text is not None:
             identity["assistant_text"] = item.assistant_text
         return identity
+    if isinstance(item, AssistantToolBatch):
+        return {
+            "item_type": "assistant_tool_batch",
+            "assistant_text": item.assistant_text,
+            "tool_uses": [_item_identity(request) for request in item.tool_uses],
+        }
     assert isinstance(item, ToolResult)
     return {
         "item_type": "tool_result",

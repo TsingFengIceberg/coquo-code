@@ -170,7 +170,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/status extra", session).message == "Usage: /status"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v1-" in context.message
+    assert "Context ID: ctx-v3-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"

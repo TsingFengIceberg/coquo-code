@@ -15,6 +15,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     ToolArguments,
     AssistantText,
     ConversationRequest,
@@ -138,8 +139,30 @@ def config() -> AnthropicProviderConfig:
     return AnthropicProviderConfig(model_id="claude-opus-4-8", max_output_tokens=64)
 
 
-def request(*history) -> ConversationRequest:
-    return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
+def request(*history, allow_tools: bool = True) -> ConversationRequest:
+    return ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=tuple(history),
+        allow_tools=allow_tools,
+    )
+
+
+def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
+    client = RecordingMessagesClient(
+        [message(TextBlock(text="done", type="text"))],
+        counts=[SimpleNamespace(input_tokens=5)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+    snapshot = request(UserMessage("finish"), allow_tools=False)
+
+    provider.count_input_tokens(snapshot)
+    assert provider.respond(snapshot) == AssistantText("done")
+
+    assert "tools" not in client.count_requests[0]
+    assert "tool_choice" not in client.count_requests[0]
+    assert "tools" not in client.requests[0]
+    assert "tool_choice" not in client.requests[0]
+    assert client.count_requests[0]["messages"] == client.requests[0]["messages"]
 
 
 def test_official_token_count_uses_shared_input_projection_and_safe_fallback() -> None:
@@ -251,6 +274,57 @@ def test_serializer_preserves_every_current_causal_item_and_tool_id() -> None:
         },
         {"role": "assistant", "content": [{"type": "text", "text": "Done"}]},
         {"role": "user", "content": [{"type": "text", "text": "Continue"}]},
+    ]
+
+
+def test_serializer_projects_one_batch_and_grouped_ordered_results() -> None:
+    batch = AssistantToolBatch(
+        (
+            ToolUse("tool-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("tool-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        ),
+        "Creating directories.",
+    )
+
+    assert serialize_history(
+        (
+            UserMessage("Create them"),
+            batch,
+            ToolResult("tool-src", "directory_created"),
+            ToolResult("tool-tests", "directory_created"),
+        ),
+        config=config(),
+    )[1:] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Creating directories."},
+                {"type": "tool_use", "id": "tool-src", "name": "mkdir", "input": {"path": "src"}},
+                {
+                    "type": "tool_use",
+                    "id": "tool-tests",
+                    "name": "mkdir",
+                    "input": {"path": "tests"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool-src",
+                    "content": "directory_created",
+                    "is_error": False,
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool-tests",
+                    "content": "directory_created",
+                    "is_error": False,
+                },
+            ],
+        },
     ]
 
 
@@ -604,6 +678,137 @@ def test_anthropic_stream_parser_emits_text_and_assembles_fragmented_tool_input(
     )
 
 
+def test_anthropic_nonstream_parser_preserves_ordered_tool_batch() -> None:
+    response = message(
+        TextBlock(text="I will create both directories.", type="text"),
+        ToolUseBlock(id="tool-src", name="mkdir", input={"path": "src"}, type="tool_use"),
+        ToolUseBlock(id="tool-tests", name="mkdir", input={"path": "tests"}, type="tool_use"),
+    )
+
+    assert parse_response(response, config=config()) == AssistantToolBatch(
+        (
+            ToolUse("tool-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("tool-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        ),
+        "I will create both directories.",
+    )
+
+
+def test_anthropic_stream_parser_assembles_multiple_tool_blocks() -> None:
+    stream = [
+        anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+        anthropic_event(
+            "content_block_start",
+            index=0,
+            content_block=SimpleNamespace(
+                type="tool_use", id="tool-src", name="mkdir", input={"path": "src"}
+            ),
+        ),
+        anthropic_event("content_block_stop", index=0),
+        anthropic_event(
+            "content_block_start",
+            index=1,
+            content_block=SimpleNamespace(type="tool_use", id="tool-tests", name="mkdir", input={}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="input_json_delta", partial_json='{"path":"tests"}'),
+        ),
+        anthropic_event("content_block_stop", index=1),
+        anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="tool_use")),
+        anthropic_event("message_stop"),
+    ]
+
+    assert parse_response_stream(
+        stream, config=config(), event_sink=lambda _event: None
+    ) == AssistantToolBatch(
+        (
+            ToolUse("tool-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("tool-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "blocks, message_text",
+    [
+        (
+            [
+                ToolUseBlock(
+                    id="duplicate",
+                    name="mkdir",
+                    input={"path": "src"},
+                    type="tool_use",
+                ),
+                ToolUseBlock(
+                    id="duplicate",
+                    name="mkdir",
+                    input={"path": "tests"},
+                    type="tool_use",
+                ),
+            ],
+            "duplicated",
+        ),
+        (
+            [
+                ToolUseBlock(
+                    id=f"tool-{index}",
+                    name="mkdir",
+                    input={"path": str(index)},
+                    type="tool_use",
+                )
+                for index in range(9)
+            ],
+            "per-response",
+        ),
+    ],
+)
+def test_anthropic_nonstream_parser_rejects_invalid_batch_identity_and_bounds(
+    blocks, message_text
+) -> None:
+    with pytest.raises(ProviderAdapterError, match=message_text):
+        parse_response(message(*blocks), config=config())
+
+
+@pytest.mark.parametrize(
+    "tool_ids, message_text",
+    [
+        (["duplicate", "duplicate"], "duplicated"),
+        ([f"tool-{index}" for index in range(9)], "per-response"),
+    ],
+)
+def test_anthropic_stream_parser_rejects_invalid_batch_identity_and_bounds(
+    tool_ids, message_text
+) -> None:
+    events = [anthropic_event("message_start", message=SimpleNamespace(role="assistant"))]
+    for index, tool_id in enumerate(tool_ids):
+        events.extend(
+            [
+                anthropic_event(
+                    "content_block_start",
+                    index=index,
+                    content_block=SimpleNamespace(
+                        type="tool_use",
+                        id=tool_id,
+                        name="mkdir",
+                        input={"path": str(index)},
+                    ),
+                ),
+                anthropic_event("content_block_stop", index=index),
+            ]
+        )
+    events.extend(
+        [
+            anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="tool_use")),
+            anthropic_event("message_stop"),
+        ]
+    )
+
+    with pytest.raises(ProviderAdapterError, match=message_text):
+        parse_response_stream(events, config=config(), event_sink=lambda _event: None)
+
+
 def test_anthropic_stream_request_sets_stream_and_closes_resource() -> None:
     stream = ClosableStream(
         [
@@ -798,10 +1003,6 @@ def test_anthropic_stream_enforces_event_and_identifier_bounds(monkeypatch) -> N
         message(ToolUseBlock(id="toolu_1", name="search", input={"path": "x"}, type="tool_use")),
         message(ToolUseBlock(id="toolu_1", name="read_file", input={}, type="tool_use")),
         message(ToolUseBlock(id="toolu_1", name="read_file", input={"path": 1}, type="tool_use")),
-        message(
-            ToolUseBlock(id="toolu_1", name="read_file", input={"path": "a"}, type="tool_use"),
-            ToolUseBlock(id="toolu_2", name="read_file", input={"path": "b"}, type="tool_use"),
-        ),
     ],
 )
 def test_parser_rejects_response_shapes_the_loop_cannot_represent(response: Message) -> None:

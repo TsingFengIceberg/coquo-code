@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限顺序工具。Anthropic与OpenAI-compatible现已支持完整mixed response和流式文字；REPL与TTY one-shot会渲染Markdown，REPL逐次审批会展示与exact action绑定的有界diff或风险摘要，pipe/redirect仍输出原始Markdown。全部能力继续经过共享六次调用预算、PermissionGate、Action Audit、Session与Effective Context边界。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及17个受限工具。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
 
 ## 目录
 
@@ -83,7 +83,7 @@ uv run leonervis-code session --help
 | 一次性自动运行获准命令 | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
 | 查看版本 | `uv run leonervis-code --version` |
 
-`prompt`用于脚本和一次性任务；裸命令用于有状态多轮REPL。成功turn会自动保存，工具执行时会显示脱敏的`[tool 1/6] ...`状态行。
+`prompt`用于脚本和一次性任务；裸命令用于有状态多轮REPL。成功turn会自动保存，工具执行时会显示脱敏的`[tool 1/32] ...`状态行。
 
 常用权限模式：
 
@@ -251,6 +251,7 @@ git diff --check
 - [Exact Bounded Informed Approval Previews](./docs/decisions/0052-exact-bounded-informed-approval-previews.md)：prepared candidate diff、exact action绑定、风险摘要、terminal安全与stale revalidation。
 - [TTY Prompt Editor 与交互反馈](./docs/decisions/0053-tty-multiline-prompt-editor.md)：exact多行输入、Session派生历史、slash补全、清屏与临时assistant状态。
 - [Sequential Tool-call Budget Hardening](./docs/decisions/0054-sequential-tool-call-budget-hardening.md)：超预算任务分批、multiple-call精确诊断与不变的顺序执行边界。
+- [Bounded Multi-tool Response Batches](./docs/decisions/0055-bounded-multi-tool-response-batches.md)：provider batch抽取、Host顺序执行、8/32/24预算、Session/context兼容与failure atomicity。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -286,6 +287,6 @@ git diff --check
 
 ## 当前范围与下一步
 
-当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`；17个工具共享每个user turn最多六次顺序调用。第七次请求只得到structured limit result，不进入permission、approval、executor或Action Audit；模型若继续请求工具则candidate turn不提交。四个新增读取/导航工具复用`workspace-read`，`patch_file`复用`workspace-overwrite`，其余action class保持不变。
+当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有真实动作仍分别经过permission、approval、executor和Action Audit。
 
-工具批次A/B/C、六次预算、脱敏live tool activity、mixed response、provider streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v17、provider adapter contract v19、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v3、Action Audit schema v1、`context_compacted` v2/v3 replay及`ctx-v1`/`ctx-v2`representation；empty full-context identity为`ctx-v1-4bcd666498bd96b3af1aa59a1d6793b31cdcdcff1dc274db80c6f051f1e8b6da`。超预算任务必须在六次顺序调用内分批并报告剩余工作，不能把多个tool calls打包。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。工具批次设计见[ADR 0037](./docs/decisions/0037-batch-a-bounded-workspace-navigation.md)、[0038](./docs/decisions/0038-batch-b-process-isolated-regex-grep.md)和[0039](./docs/decisions/0039-batch-c-structured-exact-multi-edit-patch.md)，六次预算见[ADR 0040](./docs/decisions/0040-shared-six-call-tool-budget.md)，顺序预算hardening见[ADR 0054](./docs/decisions/0054-sequential-tool-call-budget-hardening.md)，live activity见[ADR 0041](./docs/decisions/0041-live-redacted-tool-activity-events.md)，mixed response见[ADR 0042](./docs/decisions/0042-provider-neutral-assistant-tool-text-representation.md)至[ADR 0046](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)，streaming见[ADR 0047](./docs/decisions/0047-provider-neutral-synchronous-response-streaming.md)至[ADR 0050](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)，Markdown rendering见[ADR 0051](./docs/decisions/0051-tty-markdown-rendering.md)。
+Provider batch、脱敏live activity、mixed response、streaming及TTY Markdown rendering现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v18、provider adapter contract v20、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v4、Action Audit schema v1、`context_compacted` v2/v3 replay及current `ctx-v3`/`ctx-v4`representation；旧Session v1/v2/v3与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-9007cd576ff595afb6a103a199437d28580836f2a3a5b551819f0f8574d4cf80`。Recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前batch设计见[ADR 0055](./docs/decisions/0055-bounded-multi-tool-response-batches.md)。

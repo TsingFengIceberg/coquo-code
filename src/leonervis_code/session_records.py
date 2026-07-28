@@ -30,6 +30,7 @@ from leonervis_code.core.compaction import (
     summary_continuation_fingerprint,
 )
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationItem,
     ConversationTurn,
@@ -57,7 +58,8 @@ from leonervis_code.core.effective_context import (
 SCHEMA_VERSION = 1
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
 TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
-TURN_COMMITTED_SCHEMA_VERSION = 3
+TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION = 3
+TURN_COMMITTED_SCHEMA_VERSION = 4
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_SCHEMA_VERSION = 3
 WORKSPACE_FINGERPRINT_VERSION = "v1"
@@ -998,6 +1000,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         allowed_versions = {
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     else:
@@ -1385,6 +1388,7 @@ def _item_to_dict(
     if schema_version not in {
         TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
         TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+        TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -1397,7 +1401,11 @@ def _item_to_dict(
     if isinstance(item, ToolUse):
         _required_text(item.tool_use_id, "tool_use ID")
         _required_text(item.name, "tool_use name")
-        if item.assistant_text is not None and schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+        supports_assistant_text = schema_version in {
+            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }
+        if item.assistant_text is not None and not supports_assistant_text:
             raise SessionRecordError(
                 "assistant tool text requires a newer turn_committed schema version"
             )
@@ -1427,7 +1435,7 @@ def _item_to_dict(
             "arguments_version": item.arguments.version,
             "arguments": arguments,
         }
-        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if supports_assistant_text:
             if item.assistant_text is not None:
                 try:
                     ToolUse(
@@ -1441,6 +1449,28 @@ def _item_to_dict(
                 _text_payload(item.assistant_text, "assistant tool text")
             payload["assistant_text"] = item.assistant_text
         return payload
+    if isinstance(item, AssistantToolBatch):
+        if schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+            raise SessionRecordError(
+                "assistant tool batch requires a newer turn_committed schema version"
+            )
+        try:
+            AssistantToolBatch(item.tool_uses, item.assistant_text)
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        return {
+            "item_type": "assistant_tool_batch",
+            "assistant_text": item.assistant_text,
+            "tool_uses": [
+                {
+                    "tool_use_id": request.tool_use_id,
+                    "name": request.name,
+                    "arguments_version": request.arguments.version,
+                    "arguments": request.arguments.as_mapping(),
+                }
+                for request in item.tool_uses
+            ],
+        }
     if isinstance(item, ToolResult):
         _required_text(item.tool_use_id, "tool_result ID")
         _text_payload(item.content, "tool_result content")
@@ -1485,7 +1515,10 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             "arguments_version",
             "arguments",
         }
-        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version in {
+            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }:
             fields.add("assistant_text")
         _closed_fields(value, fields, item_type)
         arguments_version = value.get("arguments_version")
@@ -1502,7 +1535,10 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         except ValueError as error:
             raise SessionRecordError(str(error)) from None
         assistant_text = None
-        if schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version in {
+            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
+            TURN_COMMITTED_SCHEMA_VERSION,
+        }:
             raw_assistant_text = value.get("assistant_text")
             if raw_assistant_text is not None:
                 if not isinstance(raw_assistant_text, str):
@@ -1522,6 +1558,53 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         if assistant_text is not None:
             _text_payload(assistant_text, "tool_use assistant_text")
         return request
+    if item_type == "assistant_tool_batch":
+        if schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+            raise SessionRecordError(
+                "assistant tool batch requires a newer turn_committed schema version"
+            )
+        _closed_fields(value, {"item_type", "assistant_text", "tool_uses"}, item_type)
+        raw_text = value.get("assistant_text")
+        if raw_text is not None and not isinstance(raw_text, str):
+            raise SessionRecordError("assistant tool batch text must be text or null")
+        raw_uses = value.get("tool_uses")
+        if not isinstance(raw_uses, list) or not raw_uses:
+            raise SessionRecordError("assistant tool batch tool_uses must be a non-empty array")
+        requests: list[ToolUse] = []
+        for raw_use in raw_uses:
+            if not isinstance(raw_use, dict):
+                raise SessionRecordError("assistant tool batch tool use must be an object")
+            _closed_fields(
+                raw_use,
+                {"tool_use_id", "name", "arguments_version", "arguments"},
+                "assistant tool batch tool use",
+            )
+            arguments_version = raw_use.get("arguments_version")
+            if type(arguments_version) is not int:
+                raise SessionRecordError("tool_use arguments_version must be an integer")
+            raw_arguments = raw_use.get("arguments")
+            if not isinstance(raw_arguments, dict):
+                raise SessionRecordError("tool_use arguments must be a JSON object")
+            try:
+                arguments = ToolArguments.from_mapping(
+                    raw_arguments,
+                    version=arguments_version,
+                )
+                requests.append(
+                    ToolUse(
+                        _required_field_text(
+                            raw_use, "tool_use_id", "assistant tool batch tool use"
+                        ),
+                        _required_field_text(raw_use, "name", "assistant tool batch tool use"),
+                        arguments,
+                    )
+                )
+            except ValueError as error:
+                raise SessionRecordError(str(error)) from None
+        try:
+            return AssistantToolBatch(tuple(requests), raw_text)
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
     if item_type == "tool_result":
         _closed_fields(
             value,
@@ -1575,6 +1658,7 @@ def _validate_record_version(record: SessionRecord) -> None:
         if record.schema_version not in {
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
             TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
+            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -1641,10 +1725,10 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
         != summary_continuation_fingerprint(SUMMARY_CONTINUATION_VERSION)
     ):
         raise SessionRecordError("context_compacted continuation provenance is unsupported")
-    if (
-        record.effective_context_representation_version
-        != COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
-    ):
+    if record.effective_context_representation_version not in {
+        2,
+        COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+    }:
         raise SessionRecordError(
             "context_compacted effective-context representation is unsupported"
         )
@@ -1683,7 +1767,7 @@ def _validate_context_compacted(
 
 
 def _context_id(value: object, label: str) -> None:
-    if not isinstance(value, str) or re.fullmatch(r"ctx-v[12]-[0-9a-f]{64}", value) is None:
+    if not isinstance(value, str) or re.fullmatch(r"ctx-v[1-4]-[0-9a-f]{64}", value) is None:
         raise SessionRecordError(f"{label} is invalid")
 
 

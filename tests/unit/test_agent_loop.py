@@ -16,11 +16,12 @@ from leonervis_code.agent.tool_events import (
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
-    ToolRequestLimited,
+    ToolRequestSkipped,
     ToolRequestStarted,
 )
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     ToolArguments,
     AssistantText,
     CommittedTurn,
@@ -35,6 +36,10 @@ from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.catalog import (
+    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+    MAX_TOOL_REQUESTS_PER_TURN,
+)
 
 
 def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
@@ -133,6 +138,124 @@ def test_loop_executes_list_directory_and_returns_exact_causal_result(tmp_path) 
     )
 
 
+def test_loop_executes_one_tool_batch_sequentially_and_returns_all_results(tmp_path) -> None:
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    batch = AssistantToolBatch(
+        (
+            ToolUse("glob-batch", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
+            ToolUse("read-batch", "read_file", ToolArguments.from_mapping({"path": "a.py"})),
+        ),
+        "Inspecting both.",
+    )
+    provider = ScriptedFakeProvider([batch, AssistantText("done")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    events = []
+
+    assert loop.run("inspect", event_sink=events.append) == "done"
+    assert loop.history == (
+        UserMessage("inspect"),
+        batch,
+        ToolResult("glob-batch", "a.py\n"),
+        ToolResult("read-batch", "a\n"),
+        AssistantText("done"),
+    )
+    assert provider.received_requests[1].history[-3:] == loop.history[1:4]
+    assert events == [
+        AssistantToolTextReceived("Inspecting both."),
+        ToolRequestStarted("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, "pattern='*.py'"),
+        ToolRequestFinished("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
+        ToolRequestStarted("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, "path='a.py'"),
+        ToolRequestFinished("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
+    ]
+
+
+def test_loop_skips_remaining_batch_calls_after_first_non_success(tmp_path) -> None:
+    batch = AssistantToolBatch(
+        (
+            ToolUse(
+                "read-missing",
+                "read_file",
+                ToolArguments.from_mapping({"path": "missing.txt"}),
+            ),
+            ToolUse("glob-skipped", "glob", ToolArguments.from_mapping({"pattern": "*.py"})),
+        )
+    )
+    provider = ScriptedFakeProvider([batch, AssistantText("replanned")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert loop.run("inspect") == "replanned"
+    assert loop.history[2:4] == (
+        ToolResult("read-missing", "read_file path does not exist", is_error=True),
+        ToolResult(
+            "glob-skipped",
+            "tool was not executed because an earlier action in the same batch did not succeed",
+            is_error=True,
+        ),
+    )
+
+
+def test_loop_rejects_oversized_provider_batch_before_any_dispatch(tmp_path) -> None:
+    batch = AssistantToolBatch(
+        tuple(
+            ToolUse(
+                f"read-{index}",
+                "read_file",
+                ToolArguments.from_mapping({"path": "missing.txt"}),
+            )
+            for index in range(1, 10)
+        )
+    )
+    provider = ScriptedFakeProvider([batch])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    with pytest.raises(ToolLoopLimitError, match="per-response"):
+        loop.run("inspect")
+
+    assert loop.history == ()
+
+
+def test_twenty_fourth_provider_invocation_is_text_only(tmp_path) -> None:
+    calls = [
+        ToolUse(
+            f"read-{index}",
+            "read_file",
+            ToolArguments.from_mapping({"path": "missing.txt"}),
+        )
+        for index in range(1, MAX_PROVIDER_INVOCATIONS_PER_TURN)
+    ]
+    provider = ScriptedFakeProvider([*calls, AssistantText("bounded")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert loop.run("inspect") == "bounded"
+    assert len(provider.received_requests) == MAX_PROVIDER_INVOCATIONS_PER_TURN
+    assert all(request.allow_tools for request in provider.received_requests[:-1])
+    assert provider.received_requests[-1].allow_tools is False
+
+
 def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
     (tmp_path / "a.py").write_text("a", encoding="utf-8")
     provider = ScriptedFakeProvider(
@@ -166,9 +289,7 @@ def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
         "read-3",
         "glob-4",
     ]
-    assert results[-1] == ToolResult(
-        "glob-4", "tool call limit reached for this conversation turn", is_error=True
-    )
+    assert results[-1] == ToolResult("glob-4", "a.py\n")
 
 
 def test_loop_commits_structured_tool_causality_after_final_text(tmp_path) -> None:
@@ -303,9 +424,15 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
             name="read_file",
             arguments=ToolArguments.from_mapping({"path": "README.md"}),
         )
-        for number in range(1, 8)
+        for number in range(1, MAX_TOOL_REQUESTS_PER_TURN + 2)
     ]
-    provider = ScriptedFakeProvider([*requests, AssistantText(text="Finished after the limit.")])
+    batches = [
+        AssistantToolBatch(tuple(requests[start : start + 8]))
+        for start in range(0, MAX_TOOL_REQUESTS_PER_TURN, 8)
+    ]
+    provider = ScriptedFakeProvider(
+        [*batches, requests[-1], AssistantText(text="Finished after the limit.")]
+    )
     loop = AgentLoop(
         provider,
         ReadFileTool(tmp_path),
@@ -316,36 +443,30 @@ def test_loop_bounds_tool_requests_and_returns_budget_error_before_final_text(tm
 
     assert loop.run("Read repeatedly") == "Finished after the limit."
     results = [item for item in loop.history if isinstance(item, ToolResult)]
-    assert [result.tool_use_id for result in results] == [
-        "read-1",
-        "read-2",
-        "read-3",
-        "read-4",
-        "read-5",
-        "read-6",
-        "read-7",
-    ]
+    assert len(results) == MAX_TOOL_REQUESTS_PER_TURN + 1
     assert results[-1] == ToolResult(
-        tool_use_id="read-7",
-        content="tool call limit reached for this conversation turn",
+        tool_use_id=f"read-{MAX_TOOL_REQUESTS_PER_TURN + 1}",
+        content="tool batch was not executed because it exceeds the remaining tool-request budget",
         is_error=True,
     )
+    assert provider.received_requests[-1].allow_tools is False
 
 
 def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) -> None:
     (tmp_path / "README.md").write_text("contents", encoding="utf-8")
-    provider = ScriptedFakeProvider(
-        [
-            *[
-                ToolUse(
-                    tool_use_id=f"read-{number}",
-                    name="read_file",
-                    arguments=ToolArguments.from_mapping({"path": "README.md"}),
-                )
-                for number in range(1, 9)
-            ]
-        ]
-    )
+    requests = [
+        ToolUse(
+            tool_use_id=f"read-{number}",
+            name="read_file",
+            arguments=ToolArguments.from_mapping({"path": "README.md"}),
+        )
+        for number in range(1, MAX_TOOL_REQUESTS_PER_TURN + 3)
+    ]
+    batches = [
+        AssistantToolBatch(tuple(requests[start : start + 8]))
+        for start in range(0, MAX_TOOL_REQUESTS_PER_TURN, 8)
+    ]
+    provider = ScriptedFakeProvider([*batches, requests[-2], requests[-1]])
     loop = AgentLoop(
         provider,
         ReadFileTool(tmp_path),
@@ -354,7 +475,7 @@ def test_loop_rejects_another_tool_after_the_limit_without_committing(tmp_path) 
         ListDirectoryTool(tmp_path),
     )
 
-    with pytest.raises(ToolLoopLimitError, match="tool call limit"):
+    with pytest.raises(ToolLoopLimitError, match="final text-only"):
         loop.run("Read repeatedly")
 
     assert loop.history == ()
@@ -662,16 +783,20 @@ def test_action_dispatcher_receives_the_same_lease_across_tool_continuations(tmp
     assert provider.received_requests[2].history[-1] == ToolResult("glob-1", "resolved glob")
 
 
-def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tmp_path) -> None:
+def test_over_budget_batch_gets_results_without_entering_action_dispatch(tmp_path) -> None:
     calls = [
         ToolUse(
             f"read-{index}",
             "read_file",
             ToolArguments.from_mapping({"path": f"{index}.txt"}),
         )
-        for index in range(1, 8)
+        for index in range(1, MAX_TOOL_REQUESTS_PER_TURN + 2)
     ]
-    provider = ScriptedFakeProvider([*calls, AssistantText("stopped")])
+    batches = [
+        AssistantToolBatch(tuple(calls[start : start + 8]))
+        for start in range(0, MAX_TOOL_REQUESTS_PER_TURN, 8)
+    ]
+    provider = ScriptedFakeProvider([*batches, calls[-1], AssistantText("stopped")])
     loop = AgentLoop(
         None,
         ReadFileTool(tmp_path),
@@ -686,7 +811,7 @@ def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tm
 
     def dispatch(request, _lease):
         dispatched.append(request.tool_use_id)
-        return ToolResult(request.tool_use_id, "permission denied", is_error=True)
+        return ToolResult(request.tool_use_id, "ok")
 
     loop.install_action_dispatcher(dispatch)
 
@@ -696,16 +821,15 @@ def test_seventh_tool_call_gets_limit_result_without_entering_action_dispatch(tm
         )
         == "stopped"
     )
-    assert dispatched == ["read-1", "read-2", "read-3", "read-4", "read-5", "read-6"]
+    assert dispatched == [f"read-{index}" for index in range(1, 33)]
     assert provider.received_requests[-1].history[-1] == ToolResult(
-        "read-7",
-        "tool call limit reached for this conversation turn",
+        "read-33",
+        "tool batch was not executed because it exceeds the remaining tool-request budget",
         is_error=True,
     )
-    assert len(events) == 13
-    assert isinstance(events[-1], ToolRequestLimited)
-    assert events[-1].call_index == 7
-    assert events[-1].call_limit == 6
+    assert isinstance(events[-1], ToolRequestSkipped)
+    assert events[-1].call_index == 33
+    assert events[-1].call_limit == MAX_TOOL_REQUESTS_PER_TURN
 
 
 def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_path) -> None:
@@ -749,10 +873,23 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
         == "done"
     )
     assert events == [
-        ToolRequestStarted("read_file", 1, 6, "path='a.txt'"),
-        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED, "ok", truncated=True),
-        ToolRequestStarted("grep", 2, 6, "include='*.txt' query_bytes=12"),
-        ToolRequestFinished("grep", 2, 6, ToolEventStatus.DENIED, "denied_read_only_mode"),
+        ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='a.txt'"),
+        ToolRequestFinished(
+            "read_file",
+            1,
+            MAX_TOOL_REQUESTS_PER_TURN,
+            ToolEventStatus.SUCCEEDED,
+            "ok",
+            truncated=True,
+        ),
+        ToolRequestStarted("grep", 2, MAX_TOOL_REQUESTS_PER_TURN, "include='*.txt' query_bytes=12"),
+        ToolRequestFinished(
+            "grep",
+            2,
+            MAX_TOOL_REQUESTS_PER_TURN,
+            ToolEventStatus.DENIED,
+            "denied_read_only_mode",
+        ),
     ]
     assert "secret query" not in repr(events)
 
@@ -803,8 +940,10 @@ def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -
         )
 
     assert events == [
-        ToolRequestStarted("read_file", 1, 6, "path='a.txt'"),
-        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.OUTCOME_UNKNOWN),
+        ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='a.txt'"),
+        ToolRequestFinished(
+            "read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.OUTCOME_UNKNOWN
+        ),
     ]
     assert loop.history == ()
 
@@ -831,8 +970,8 @@ def test_assistant_tool_text_is_displayed_executed_continued_and_committed(tmp_p
     result = ToolResult("read-1", "notes\n")
     assert events == [
         AssistantToolTextReceived("I will read the file."),
-        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
-        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED),
+        ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
     ]
     assert provider.received_requests[1].history[-2:] == (call, result)
     assert loop.history == (
@@ -886,8 +1025,8 @@ def test_streaming_loop_orders_complete_tool_text_execution_and_durable_final_co
         AssistantResponseTextDeltaReceived("I will "),
         AssistantResponseTextDeltaReceived("read."),
         AssistantToolTextStreamCompleted("I will read."),
-        ToolRequestStarted("read_file", 1, 6, "path='README.md'"),
-        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED),
+        ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='README.md'"),
+        ToolRequestFinished("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
         AssistantResponseTextDeltaReceived("Do"),
         AssistantResponseTextDeltaReceived("ne."),
         AssistantFinalTextStreamCommitted("Done."),
@@ -955,20 +1094,20 @@ def test_streaming_event_sink_failure_cannot_change_execution_or_commit(tmp_path
     assert loop.history == (UserMessage("inspect"), AssistantText("done"))
 
 
-def test_assistant_tool_text_after_limit_result_is_visible_but_cannot_extend_budget(
-    tmp_path,
-) -> None:
+def test_tool_request_during_final_text_only_invocation_cannot_extend_budget(tmp_path) -> None:
     calls = [
         ToolUse(
             f"read-{index}",
             "read_file",
             ToolArguments.from_mapping({"path": "missing.txt"}),
         )
-        for index in range(1, 8)
+        for index in range(1, MAX_TOOL_REQUESTS_PER_TURN + 3)
     ]
-    calls[-1] = replace(calls[-1], assistant_text="One more check.")
-    calls.append(replace(calls[-1], tool_use_id="mixed-8", assistant_text="I will retry."))
-    provider = ScriptedFakeProvider(calls)
+    batches = [
+        AssistantToolBatch(tuple(calls[start : start + 8]))
+        for start in range(0, MAX_TOOL_REQUESTS_PER_TURN, 8)
+    ]
+    provider = ScriptedFakeProvider([*batches, calls[-2], calls[-1]])
     loop = AgentLoop(
         provider,
         ReadFileTool(tmp_path),
@@ -977,14 +1116,8 @@ def test_assistant_tool_text_after_limit_result_is_visible_but_cannot_extend_bud
         ListDirectoryTool(tmp_path),
     )
 
-    events = []
-    with pytest.raises(ToolLoopLimitError, match="after the tool call limit"):
-        loop.run("inspect", event_sink=events.append)
+    with pytest.raises(ToolLoopLimitError, match="final text-only"):
+        loop.run("inspect")
 
     assert loop.history == ()
-    assert [event for event in events if isinstance(event, AssistantToolTextReceived)] == [
-        AssistantToolTextReceived("One more check."),
-        AssistantToolTextReceived("I will retry."),
-    ]
-    assert isinstance(events[-2], ToolRequestLimited)
-    assert events[-2].call_index == 7
+    assert provider.received_requests[-1].allow_tools is False

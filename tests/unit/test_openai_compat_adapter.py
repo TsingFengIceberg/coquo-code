@@ -20,6 +20,7 @@ from leonervis_code.core.compaction import (
     build_compact_prompt,
 )
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     ToolArguments,
     AssistantText,
     ConversationRequest,
@@ -33,6 +34,7 @@ from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.openai_compat import (
     OpenAICompatibleConversationProvider,
     build_compact_summary_request,
+    build_input_projection,
     build_request,
     create_openai_compatible_provider,
     copy_file_tool_definition,
@@ -140,8 +142,23 @@ def route(selector: str = "openai/gpt-4.1"):
     return resolve_runtime_route(selector, environment={})
 
 
-def request(*history) -> ConversationRequest:
-    return ConversationRequest(system_prompt=build_system_prompt(), history=tuple(history))
+def request(*history, allow_tools: bool = True) -> ConversationRequest:
+    return ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=tuple(history),
+        allow_tools=allow_tools,
+    )
+
+
+def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
+    snapshot = request(UserMessage("finish"), allow_tools=False)
+
+    counted = build_input_projection(route(), snapshot)
+    created = build_request(route(), snapshot)
+
+    assert "tools" not in counted and "parallel_tool_calls" not in counted
+    assert "tools" not in created and "parallel_tool_calls" not in created
+    assert counted["messages"] == created["messages"]
 
 
 def completion(
@@ -228,6 +245,45 @@ def test_serializer_preserves_tool_call_and_result_pairing() -> None:
             ],
         },
         {"role": "tool", "tool_call_id": "call_provider", "content": "notes\n"},
+    ]
+
+
+def test_serializer_projects_one_batch_and_all_ordered_tool_results() -> None:
+    batch = AssistantToolBatch(
+        (
+            ToolUse("call-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("call-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        ),
+        "Creating directories.",
+    )
+
+    assert serialize_history(
+        (
+            UserMessage("Create them"),
+            batch,
+            ToolResult("call-src", "directory_created"),
+            ToolResult("call-tests", "directory_created"),
+        ),
+        route=route(),
+    )[1:] == [
+        {
+            "role": "assistant",
+            "content": "Creating directories.",
+            "tool_calls": [
+                {
+                    "id": "call-src",
+                    "type": "function",
+                    "function": {"name": "mkdir", "arguments": '{"path":"src"}'},
+                },
+                {
+                    "id": "call-tests",
+                    "type": "function",
+                    "function": {"name": "mkdir", "arguments": '{"path":"tests"}'},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-src", "content": "directory_created"},
+        {"role": "tool", "tool_call_id": "call-tests", "content": "directory_created"},
     ]
 
 
@@ -495,14 +551,33 @@ def test_stream_parser_emits_exact_text_and_assembles_fragmented_tool_call() -> 
     )
 
 
-def test_stream_parser_classifies_nonzero_tool_index_as_multiple_calls() -> None:
+def test_nonstream_parser_preserves_ordered_multiple_tool_calls_and_companion_text() -> None:
+    response = completion(
+        content="I will create both directories.",
+        finish_reason="tool_calls",
+        tool_calls=[
+            tool_call(call_id="call-src", name="mkdir", arguments='{"path":"src"}'),
+            tool_call(call_id="call-tests", name="mkdir", arguments='{"path":"tests"}'),
+        ],
+    )
+
+    assert parse_response(response, route=route()) == AssistantToolBatch(
+        (
+            ToolUse("call-src", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("call-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        ),
+        "I will create both directories.",
+    )
+
+
+def test_stream_parser_assembles_interleaved_multiple_calls_by_index() -> None:
     stream = [
         stream_chunk(
             tool_calls=[
                 stream_tool_delta(
                     call_id="call-one",
                     name="mkdir",
-                    arguments='{"path":"src"}',
+                    arguments='{"pa',
                 )
             ]
         ),
@@ -511,16 +586,106 @@ def test_stream_parser_classifies_nonzero_tool_index_as_multiple_calls() -> None
                 stream_tool_delta(
                     call_id="call-two",
                     name="mkdir",
-                    arguments='{"path":"tests"}',
+                    arguments='{"pa',
                     index=1,
                 )
+            ]
+        ),
+        stream_chunk(
+            tool_calls=[
+                stream_tool_delta(arguments='th":"tests"}', index=1),
+                stream_tool_delta(arguments='th":"src"}', index=0),
             ]
         ),
         stream_chunk(finish_reason="tool_calls"),
     ]
 
-    with pytest.raises(ProviderAdapterError, match="contained multiple tool calls"):
-        parse_response_stream(stream, route=route(), event_sink=lambda _event: None)
+    assert parse_response_stream(
+        stream, route=route(), event_sink=lambda _event: None
+    ) == AssistantToolBatch(
+        (
+            ToolUse("call-one", "mkdir", ToolArguments.from_mapping({"path": "src"})),
+            ToolUse("call-two", "mkdir", ToolArguments.from_mapping({"path": "tests"})),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "chunks, message",
+    [
+        (
+            [
+                stream_chunk(
+                    tool_calls=[
+                        stream_tool_delta(
+                            call_id="call-one",
+                            name="mkdir",
+                            arguments='{"path":"src"}',
+                            index=1,
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ],
+            "not contiguous",
+        ),
+        (
+            [
+                stream_chunk(
+                    tool_calls=[
+                        stream_tool_delta(
+                            call_id="duplicate",
+                            name="mkdir",
+                            arguments='{"path":"src"}',
+                        ),
+                        stream_tool_delta(
+                            call_id="duplicate",
+                            name="mkdir",
+                            arguments='{"path":"tests"}',
+                            index=1,
+                        ),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ],
+            "duplicated",
+        ),
+        (
+            [
+                stream_chunk(
+                    tool_calls=[
+                        stream_tool_delta(
+                            call_id="call-nine",
+                            name="mkdir",
+                            arguments='{"path":"nine"}',
+                            index=8,
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ],
+            "per-response",
+        ),
+    ],
+)
+def test_stream_parser_rejects_invalid_batch_identity_and_bounds(chunks, message) -> None:
+    with pytest.raises(ProviderAdapterError, match=message):
+        parse_response_stream(chunks, route=route(), event_sink=lambda _event: None)
+
+
+@pytest.mark.parametrize(
+    "calls, message",
+    [
+        ([tool_call(call_id="duplicate"), tool_call(call_id="duplicate")], "duplicated"),
+        ([tool_call(call_id=f"call-{index}") for index in range(9)], "per-response"),
+    ],
+)
+def test_nonstream_parser_rejects_invalid_batch_identity_and_bounds(calls, message) -> None:
+    with pytest.raises(ProviderAdapterError, match=message):
+        parse_response(
+            completion(finish_reason="tool_calls", tool_calls=calls),
+            route=route(),
+        )
 
 
 def test_compatible_stream_request_sets_stream_and_closes_resource() -> None:
@@ -633,9 +798,6 @@ def test_compatible_stream_enforces_chunk_and_identifier_bounds(monkeypatch) -> 
             content="x" * (32 * 1024 + 1),
             finish_reason="tool_calls",
             tool_calls=[tool_call()],
-        ),
-        completion(
-            finish_reason="tool_calls", tool_calls=[tool_call(), tool_call(call_id="call_2")]
         ),
         completion(finish_reason="tool_calls", tool_calls=[tool_call(arguments="not json")]),
         completion(finish_reason="tool_calls", tool_calls=[tool_call(arguments='{"path":1}')]),

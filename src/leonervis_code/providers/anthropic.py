@@ -10,6 +10,7 @@ import anthropic
 
 from leonervis_code.core.compaction import CompactSummaryRequest, EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     ConversationItem,
     ConversationRequest,
@@ -45,6 +46,7 @@ from leonervis_code.providers.streaming import (
     ProviderTextDeltaSink,
 )
 from leonervis_code.tools.catalog import (
+    MAX_TOOL_CALLS_PER_RESPONSE,
     model_tool_definitions,
     tool_input_from_use,
     tool_use_from_input,
@@ -253,7 +255,7 @@ def build_input_projection(
     committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the Anthropic fields that contribute provider input tokens."""
-    return {
+    projection: dict[str, object] = {
         "model": config.model_id,
         "system": request_snapshot.system_prompt.text,
         "messages": [
@@ -264,9 +266,11 @@ def build_input_projection(
                 committed_context=committed_context,
             ),
         ],
-        "tools": list(model_tool_definitions()),
-        "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
     }
+    if request_snapshot.allow_tools:
+        projection["tools"] = list(model_tool_definitions())
+        projection["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+    return projection
 
 
 def build_request(
@@ -410,7 +414,8 @@ def serialize_history(
 
     messages: list[dict[str, object]] = []
     expected = "user"
-    pending_tool_use_id: str | None = None
+    pending_tool_use_ids: tuple[str, ...] = ()
+    pending_result_blocks: list[dict[str, object]] = []
 
     for item in history:
         if isinstance(item, UserMessage):
@@ -459,30 +464,59 @@ def serialize_history(
                 }
             )
             messages.append({"role": "assistant", "content": content})
-            pending_tool_use_id = item.tool_use_id
+            pending_tool_use_ids = (item.tool_use_id,)
+            expected = "tool_result"
+            continue
+
+        if isinstance(item, AssistantToolBatch):
+            if expected != "assistant":
+                raise _invalid_history(config, "tool batch is out of causal order")
+            content: list[dict[str, object]] = []
+            if item.assistant_text is not None:
+                content.append({"type": "text", "text": item.assistant_text})
+            for request in item.tool_uses:
+                try:
+                    tool_input = tool_input_from_use(request)
+                except ValueError:
+                    raise _invalid_history(
+                        config, f"unsupported tool in history: {request.name}"
+                    ) from None
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": request.tool_use_id,
+                        "name": request.name,
+                        "input": tool_input,
+                    }
+                )
+            messages.append({"role": "assistant", "content": content})
+            pending_tool_use_ids = tuple(request.tool_use_id for request in item.tool_uses)
+            pending_result_blocks = []
             expected = "tool_result"
             continue
 
         if isinstance(item, ToolResult):
-            if expected != "tool_result" or item.tool_use_id != pending_tool_use_id:
+            if expected != "tool_result" or not pending_tool_use_ids:
+                raise _invalid_history(config, "tool result does not match the pending tool use")
+            if item.tool_use_id != pending_tool_use_ids[0]:
                 raise _invalid_history(config, "tool result does not match the pending tool use")
             if not isinstance(item.content, str):
                 raise _invalid_history(config, "tool result content must be text")
-            messages.append(
+            pending_result_blocks.append(
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": item.tool_use_id,
-                            "content": item.content,
-                            "is_error": item.is_error,
-                        }
-                    ],
+                    "type": "tool_result",
+                    "tool_use_id": item.tool_use_id,
+                    "content": item.content,
+                    "is_error": item.is_error,
                 }
             )
-            pending_tool_use_id = None
-            expected = "assistant"
+            pending_tool_use_ids = pending_tool_use_ids[1:]
+            if pending_tool_use_ids:
+                expected = "tool_result"
+            else:
+                messages.append({"role": "user", "content": pending_result_blocks})
+                pending_result_blocks = []
+                expected = "assistant"
             continue
 
         raise _invalid_history(config, "conversation history contains an unknown item")
@@ -550,7 +584,7 @@ def parse_compact_summary_response(
 
 
 def parse_response(response: object, *, config: AnthropicProviderConfig) -> ProviderResponse:
-    """Decode only complete text or one supported sequential tool response."""
+    """Decode complete text or one bounded ordered tool-use batch."""
     stop_reason = getattr(response, "stop_reason", None)
     if stop_reason == "refusal":
         raise _adapter_error(
@@ -588,31 +622,46 @@ def parse_response(response: object, *, config: AnthropicProviderConfig) -> Prov
         return AssistantText(text="".join(text_parts))
     if stop_reason != "tool_use":
         raise _invalid_response(config, "tool response did not end with tool_use")
-    if len(tool_blocks) != 1:
-        raise _invalid_response(config, "Anthropic response must contain exactly one tool use")
+    if len(tool_blocks) > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise _invalid_response(config, "Anthropic response exceeded the per-response call limit")
 
-    block = tool_blocks[0]
-    tool_use_id = getattr(block, "id", None)
-    name = getattr(block, "name", None)
-    tool_input = getattr(block, "input", None)
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        raise _invalid_response(config, "Anthropic tool use ID was malformed")
-    if not isinstance(name, str):
-        raise _invalid_response(config, "Anthropic requested an unsupported tool")
-    if not isinstance(tool_input, dict):
-        raise _invalid_response(config, f"Anthropic {name} input was malformed")
-    try:
-        request = tool_use_from_input(tool_use_id, name, tool_input)
-    except ValueError:
-        raise _invalid_response(config, f"Anthropic {name} input was malformed") from None
-    if not text_parts:
+    requests: list[ToolUse] = []
+    seen_ids: set[str] = set()
+    for block in tool_blocks:
+        tool_use_id = getattr(block, "id", None)
+        name = getattr(block, "name", None)
+        tool_input = getattr(block, "input", None)
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            raise _invalid_response(config, "Anthropic tool use ID was malformed")
+        if tool_use_id in seen_ids:
+            raise _invalid_response(config, "Anthropic tool use ID was duplicated")
+        seen_ids.add(tool_use_id)
+        if not isinstance(name, str):
+            raise _invalid_response(config, "Anthropic requested an unsupported tool")
+        if not isinstance(tool_input, dict):
+            raise _invalid_response(config, f"Anthropic {name} input was malformed")
+        try:
+            requests.append(tool_use_from_input(tool_use_id, name, tool_input))
+        except ValueError:
+            raise _invalid_response(config, f"Anthropic {name} input was malformed") from None
+    joined_text = "".join(text_parts)
+    if text_parts and not joined_text:
+        raise _invalid_response(config, "Anthropic assistant tool text was malformed")
+    text = joined_text or None
+    if len(requests) > 1:
+        try:
+            return AssistantToolBatch(tuple(requests), text)
+        except ValueError:
+            raise _invalid_response(config, "Anthropic tool batch was malformed") from None
+    request = requests[0]
+    if text is None:
         return request
     try:
         return ToolUse(
             request.tool_use_id,
             request.name,
             request.arguments,
-            assistant_text="".join(text_parts),
+            assistant_text=text,
         )
     except ValueError:
         raise _invalid_response(config, "Anthropic assistant tool text was malformed") from None
@@ -818,35 +867,56 @@ def parse_response_stream(
         if stop_reason != "end_turn" or not text:
             raise _invalid_response(config, "Anthropic text stream did not end correctly")
         return AssistantText(text)
-    if stop_reason != "tool_use" or len(tools) != 1:
-        raise _invalid_response(config, "Anthropic stream must contain exactly one tool use")
+    if stop_reason != "tool_use":
+        raise _invalid_response(config, "Anthropic tool stream did not end correctly")
+    if len(tools) > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise _invalid_response(config, "Anthropic stream exceeded the per-response call limit")
 
-    tool = tools[0]
-    assert tool.tool_use_id is not None and tool.tool_name is not None
-    assert tool.initial_input is not None and tool.input_parts is not None
-    if tool.input_parts:
-        if tool.initial_input:
-            raise _invalid_response(config, "Anthropic stream tool input was ambiguous")
+    requests: list[ToolUse] = []
+    seen_ids: set[str] = set()
+    for tool in tools:
+        assert tool.tool_use_id is not None and tool.tool_name is not None
+        assert tool.initial_input is not None and tool.input_parts is not None
+        if tool.tool_use_id in seen_ids:
+            raise _invalid_response(config, "Anthropic stream tool use ID was duplicated")
+        seen_ids.add(tool.tool_use_id)
+        if tool.input_parts:
+            if tool.initial_input:
+                raise _invalid_response(config, "Anthropic stream tool input was ambiguous")
+            try:
+                tool_input = json.loads("".join(tool.input_parts))
+            except json.JSONDecodeError:
+                raise _invalid_response(
+                    config, "Anthropic stream tool input was malformed"
+                ) from None
+        else:
+            tool_input = tool.initial_input
+        if not isinstance(tool_input, dict):
+            raise _invalid_response(config, "Anthropic stream tool input was malformed")
         try:
-            tool_input = json.loads("".join(tool.input_parts))
-        except json.JSONDecodeError:
-            raise _invalid_response(config, "Anthropic stream tool input was malformed") from None
-    else:
-        tool_input = tool.initial_input
-    if not isinstance(tool_input, dict):
-        raise _invalid_response(config, "Anthropic stream tool input was malformed")
+            requests.append(tool_use_from_input(tool.tool_use_id, tool.tool_name, tool_input))
+        except ValueError:
+            raise _invalid_response(
+                config,
+                f"Anthropic {tool.tool_name} input was malformed",
+            ) from None
+    if len(requests) == 1:
+        request = requests[0]
+        if not text:
+            return request
+        try:
+            return ToolUse(
+                request.tool_use_id,
+                request.name,
+                request.arguments,
+                assistant_text=text,
+            )
+        except ValueError:
+            raise _invalid_response(config, "Anthropic assistant tool text was malformed") from None
     try:
-        return tool_use_from_input(
-            tool.tool_use_id,
-            tool.tool_name,
-            tool_input,
-            assistant_text=text or None,
-        )
+        return AssistantToolBatch(tuple(requests), text or None)
     except ValueError:
-        raise _invalid_response(
-            config,
-            f"Anthropic {tool.tool_name} input was malformed",
-        ) from None
+        raise _invalid_response(config, "Anthropic stream tool batch was malformed") from None
 
 
 def _close_stream(stream: object | None) -> None:

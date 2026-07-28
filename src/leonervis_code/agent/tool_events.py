@@ -130,7 +130,19 @@ class ToolRequestLimited:
         _validate_safe_text(self.safe_summary, "tool event summary")
 
 
-ToolPromptEvent = ToolRequestStarted | ToolRequestFinished | ToolRequestLimited
+@dataclass(frozen=True)
+class ToolRequestSkipped:
+    tool_name: str
+    call_index: int
+    call_limit: int
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
+        _validate_safe_text(self.reason_code, "tool skip reason")
+
+
+ToolPromptEvent = ToolRequestStarted | ToolRequestFinished | ToolRequestLimited | ToolRequestSkipped
 AssistantStreamEvent = (
     AssistantResponseTextDeltaReceived
     | AssistantToolTextStreamCompleted

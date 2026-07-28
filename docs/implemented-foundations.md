@@ -38,6 +38,7 @@
 - [TTY Markdown Rendering](#tty-markdown-rendering)
 - [Exact Bounded Informed Approval](#exact-bounded-informed-approval)
 - [Sequential Tool-call Budget Hardening](#sequential-tool-call-budget-hardening)
+- [Bounded Multi-tool Response Batches](#bounded-multi-tool-response-batches)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -61,7 +62,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 17。它允许一个tool response携带brief companion text，同时明确该文字不是final answer、Tool result、permission、approval或execution proof；它还要求超出remaining tool budget的工作分批完成并报告剩余内容，绝不能在一个response中打包多个calls。普通Agent仍不能主动compact，Host summary信任边界保持不变。既有Foundation提供literal search、单层目录、受控写入/edit/command、目录创建、文件移动、文件/空目录删除和binary copy；工具批次A/B/C再加入`read_file_lines`、`stat_path`、`list_tree`、process-isolated `grep_regex`与structured exact `patch_file`。17个model-visible tools共享六次顺序预算。
+Canonical model system prompt当前为version 18。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。普通Agent仍不能主动compact，Host summary信任边界保持不变。既有17个model-visible tools、PermissionGate、approval、Action Audit及各工具hard bounds均不变，多call response也不获得并行执行许可。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -474,7 +475,7 @@ Patch复用`workspace-overwrite`、source SHA-256 precondition、approval后reva
 
 ## Shared Six-call Tool Budget
 
-随着model-visible surface扩展到17个工具，原共享三次预算不足以在一个普通turn内完成“搜索、读取、修改、验证、复查”。当前固定Host上限提升为每user turn六次顺序请求，全部工具共用；成功、工具错误、permission denial、approval rejection/cancel与executor failure都消耗已进入normal dispatch的名额且不退款。Approval mode不会改变额度。
+随着model-visible surface扩展到17个工具，原共享三次预算不足以在一个普通turn内完成“搜索、读取、修改、验证、复查”。该slice当时把固定Host上限提升为每user turn六次顺序请求，全部工具共用；成功、工具错误、permission denial、approval rejection/cancel与executor failure都消耗已进入normal dispatch的名额且不退款。Approval mode不会改变额度。该历史预算后来由[0055](./decisions/0055-bounded-multi-tool-response-batches.md)的三层预算取代。
 
 前六次照常经过validation、PermissionGate、optional approval、Action Audit和executor。第七次不进入这些边界，只得到与原`tool_use_id`匹配的structured limit result；模型随后必须输出final text，若第八次仍请求工具则candidate turn不提交并确定性停止。新user turn重新获得六次额度，Host不会自动开启turn或继续任务。
 
@@ -482,7 +483,7 @@ Canonical system prompt升级到v15；工具schema、顺序及provider projectio
 
 ## Live Redacted Tool Activity
 
-AgentLoop现在为每次正常工具dispatch发出typed started/finished事件，并复用共享六次预算的index。第七次请求只发limited事件且不进入dispatch；若dispatch异常后effect不能可靠判断，结束状态明确为`outcome-unknown`。ProjectSession从结构化PermissionGate、approval resolution和ActionCoordinator execution metadata映射`error | denied | rejected | cancelled | succeeded | failed | partial`，不解析ToolResult文本。
+该slice让AgentLoop为每次正常工具dispatch发出typed started/finished事件，并复用当时共享六次预算的index。第七次请求只发limited事件且不进入dispatch；若dispatch异常后effect不能可靠判断，结束状态明确为`outcome-unknown`。ProjectSession从结构化PermissionGate、approval resolution和ActionCoordinator execution metadata映射`error | denied | rejected | cancelled | succeeded | failed | partial`，不解析ToolResult文本。
 
 摘要按工具类型最小化：显示workspace-relative path、include、byte/edit/argument count、command basename、cwd和timeout；不显示file/edit/query内容、完整argv、absolute path、digest、lease、内部ID或raw result。参数执行校验前出现的absolute path会隐藏为`<absolute>`，控制字符被转义，摘要长度有界。One-shot通过可复用`TerminalEventSink`把事件写到stderr并保持stdout只有最终回答；REPL写到自身stdout。Sink异常被隔离，不能改变工具执行、Action Audit、turn commit或Session state。
 
@@ -516,7 +517,7 @@ Reader继续兼容v1 single-path与v2 generic-arguments turn；二者在内存�
 
 两个真实adapter现在能把provider-neutral mixed history无损投影回各自wire protocol。Anthropic在同一个assistant message中按`text block -> tool_use block`顺序发送，OpenAI-compatible在同一个assistant message中同时设置exact `content`与唯一`tool_calls`；匹配`ToolResult`仍紧随其后。Pure tool call保持原有wire shape，companion text不会被拆成final answer、复制到result或获得新的tool ID。
 
-Serializer继续复用closed tool schema与完整因果校验，malformed text、unknown tool、multiple calls和broken pairing都fail closed。Ordinary count/create共享同一projection，compact summary仍无tools。该变化把adapter contract升级到v17；tool catalog/order、六次预算、ToolArguments v1、`turn_committed` v3、Action Audit、compaction与context representation均不变。完整决策见[0045：Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)。
+在该slice边界，Serializer继续复用closed tool schema与完整因果校验，malformed text、unknown tool、multiple calls和broken pairing都fail closed。Ordinary count/create共享同一projection，compact summary仍无tools。该变化把adapter contract升级到v17；tool catalog/order、六次预算、ToolArguments v1、`turn_committed` v3、Action Audit、compaction与context representation均不变。完整决策见[0045：Provider Mixed-response History Projection](./decisions/0045-provider-mixed-response-history-projection.md)。
 
 ## AgentLoop 与 Terminal Assistant Tool Text Integration
 
@@ -528,7 +529,7 @@ Canonical system prompt升级为v16，empty full-context golden变为`ctx-v1-bc2
 
 ## Provider Streaming 与 Terminal Failure Atomicity
 
-Anthropic Messages与OpenAI-compatible Chat Completions现在可在同步provider调用中流式返回assistant文字。两个adapter各自严格组装native event/chunk、finish reason和fragmented tool JSON，只有形成完整且通过known-tool schema验证的neutral `ToolUse`后才允许AgentLoop执行；missing stop、wrong index/order、multiple calls、invalid JSON、refusal或output truncation都会在工具边界前fail closed。没有stream能力的fake/custom provider继续使用既有`respond()`。
+该streaming阶段让Anthropic Messages与OpenAI-compatible Chat Completions可在同步provider调用中流式返回assistant文字。两个adapter各自严格组装native event/chunk、finish reason和fragmented tool JSON；在该阶段，只有形成完整且通过known-tool schema验证的单个neutral `ToolUse`后才允许AgentLoop执行，multiple calls仍fail closed。0055随后把完整有界batch纳入同一“先完整解析、再执行”边界。
 
 REPL即时显示文字delta；tool companion完整解析后才接tool activity，final text只有在Session turn append+fsync成功后才得到committed确认，因此不会重复打印。Provider中断、Ctrl-C或commit失败会明确说明visible partial text未提交。One-shot因stream结束前不能知道文字是final还是tool companion而先buffer：companion与tool activity写stderr，stdout仍只在durable commit后输出一次final answer。Runtime在第一个delta前完成context preflight，并在完整同步stream期间保持原turn lease。
 
@@ -570,13 +571,21 @@ OpenAI-compatible parser现在把positive tool-call index准确分类为unsuppor
 
 Host仍强制每turn六次调用，17工具schema/order、`parallel_tool_calls=false` projection、permission/approval、Action Audit、Session schema和causality不变。Accepted provider shape不变，因此adapter contract保持v19；new prompt fingerprint为`v17-1c66b2e9cf6b622477408f99106294b2cdab14a9983a7fb6b4d628218307b851`，empty full-context identity为`ctx-v1-4bcd666498bd96b3af1aa59a1d6793b31cdcdcff1dc274db80c6f051f1e8b6da`，representation仍为`ctx-v1`/`ctx-v2`。完整决策见[0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)。
 
+## Bounded Multi-tool Response Batches
+
+Leonervis现在接受provider一次回复中的有界有序工具batch。统一内部`AssistantToolBatch`保存整份回复的companion text和多个唯一ID的`ToolUse`；单调用仍沿用旧`ToolUse`。OpenAI-compatible parser按`tool_calls[]`或stream index分别组装每个call，Anthropic按content blocks组装。整份回复必须先通过数量、ID、JSON、closed schema和因果校验，任一call无效都会在该batch任何动作前整体拒绝。
+
+Host仍不并行。可接纳batch按provider顺序逐项进入PermissionGate、approval、Action Audit和executor；一个动作非成功会让同批后续项返回明确skipped error而不执行。三层预算为每response最多8个calls、每user turn最多32个admitted requests、最多24次provider invocations且最后一次text-only。无法装入剩余请求预算的整批零执行并返回匹配的budget errors。已成功副作用不因后项失败回滚，最终assistant text和durable turn commit前candidate history仍不提交。
+
+OpenAI-compatible history投影一个assistant `tool_calls[]`后接ordered tool messages；Anthropic投影一个assistant tool block sequence后接一个包含ordered results的user message。Count/create共享projection，text-only invocation不暴露tools。Canonical system prompt升级为v18，adapter contract升级为v20，`turn_committed` current schema升级为v4，Effective Context current full/compacted representation升级为`ctx-v3`/`ctx-v4`。ToolArguments v1、ActionIdentity/Action Audit、ordinary Session records及`context_compacted` record schema不变；Session v1/v2/v3与旧`ctx-v1`/`ctx-v2`checkpoint继续replay且不重写。Fingerprint为`v18-6ddfaa8302427bbe25c1ee28cee6b1e5975949da111a96876baa8e834cd86f8c`，empty full-context identity为`ctx-v3-9007cd576ff595afb6a103a199437d28580836f2a3a5b551819f0f8574d4cf80`。完整决策见[0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
 
 Grep具有明确hard bounds：最多1,000个candidates、每file 1 MiB、aggregate 16 MiB、200个matching lines和32 KiB model-visible output，并继续受selector的entry/directory/depth bounds约束。Unreadable、oversized、NUL或invalid-UTF-8 selected file均为whole-call safe error；只有match/output cap返回complete JSON records的stable prefix与`{"truncated":true}` sentinel。No-match仅在bounded candidate set被完整搜索时为空成功。读取时再次执行regular/non-symlink与descriptor identity检查，同时保留local single-user TOCTOU边界。
 
-为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text持久化已让current writer升级到v3，但v1/v2 reader继续兼容。其他Session records仍v1，`context_compacted`仍兼容v2/v3，Effective Context representation仍为ctx-v1/v2。
+为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text曾把writer升级到v3，当前multi-tool batch再升级到v4，同时保留v1/v2/v3 reader。其他Session records仍v1，`context_compacted`仍兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
 
 三个工具继续共享每user turn三次顺序execution预算，AgentLoop和ProjectSession仍显式composition/dispatch而非dynamic registry。Anthropic与OpenAI-compatible ordinary count/create按相同catalog投影exact three schemas，compact summary仍no-tools，parallel calls仍关闭。Adapter contract升级为v5；canonical model system prompt升级为v4并声明literal grep、no-match/truncation解释及仍不可用的write/Bash/regex能力。Generic arguments、prompt与catalog会按设计改变current-binary context IDs，但不重写历史checkpoint。
 
@@ -790,3 +799,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 52. [0052：Exact Bounded Informed Approval Previews](./decisions/0052-exact-bounded-informed-approval-previews.md)
 53. [0053：TTY Prompt Editor 与交互反馈](./decisions/0053-tty-multiline-prompt-editor.md)
 54. [0054：Sequential Tool-call Budget Hardening](./decisions/0054-sequential-tool-call-budget-hardening.md)
+55. [0055：Bounded Multi-tool Response Batches](./decisions/0055-bounded-multi-tool-response-batches.md)

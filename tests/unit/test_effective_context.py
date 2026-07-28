@@ -6,6 +6,7 @@ import pytest
 
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
+    AssistantToolBatch,
     AssistantText,
     SystemPromptSnapshot,
     ToolArguments,
@@ -46,7 +47,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v1-4bcd666498bd96b3af1aa59a1d6793b31cdcdcff1dc274db80c6f051f1e8b6da"
+        == "ctx-v3-9007cd576ff595afb6a103a199437d28580836f2a3a5b551819f0f8574d4cf80"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -79,6 +80,34 @@ def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
         history[3],
     )
     assert context.context_id != changed_arguments.context_id
+
+
+def test_complete_tool_batch_is_atomic_and_identity_preserves_order() -> None:
+    first = ToolUse("mkdir-src", "mkdir", ToolArguments.from_mapping({"path": "src"}))
+    second = ToolUse("mkdir-tests", "mkdir", ToolArguments.from_mapping({"path": "tests"}))
+    history = (
+        UserMessage("create"),
+        AssistantToolBatch((first, second), "Creating directories."),
+        ToolResult("mkdir-src", "directory_created"),
+        ToolResult("mkdir-tests", "directory_created"),
+        AssistantText("done"),
+    )
+
+    context = snapshot(*history)
+
+    assert context.full_turn_count == 1
+    assert (
+        context.context_id
+        != snapshot(
+            history[0],
+            AssistantToolBatch((second, first), "Creating directories."),
+            history[3],
+            history[2],
+            history[4],
+        ).context_id
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        snapshot(history[0], history[1], history[3], history[2], history[4])
 
 
 def test_assistant_text_and_tool_use_are_one_atomic_history_item_and_identity_input() -> None:
@@ -210,7 +239,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v2-")
+    assert context.context_id.startswith("ctx-v4-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary
