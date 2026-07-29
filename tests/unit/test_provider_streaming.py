@@ -9,6 +9,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 from leonervis_code.providers.streaming import (
     ProviderTextDelta,
     respond_with_streaming,
@@ -116,6 +117,38 @@ def test_streaming_helper_rejects_aggregate_text_over_bound(monkeypatch) -> None
             request(),
             event_sink=lambda _event: None,
             prefer_stream=True,
+        )
+
+
+def test_streaming_helper_observes_cancellation_between_deltas() -> None:
+    cancellation = TurnCancellation()
+    provider = StreamingProvider(AssistantText("hello"))
+
+    with pytest.raises(TurnCancelled):
+        respond_with_streaming(
+            provider,
+            request(),
+            event_sink=lambda _event: cancellation.request(),
+            prefer_stream=True,
+            cancellation=cancellation,
+        )
+
+
+def test_nonstreaming_helper_observes_cancellation_after_blocking_response() -> None:
+    cancellation = TurnCancellation()
+
+    class CancellingProvider:
+        def respond(self, _request):
+            cancellation.request()
+            return AssistantText("not committed")
+
+    with pytest.raises(TurnCancelled):
+        respond_with_streaming(
+            CancellingProvider(),
+            request(),
+            event_sink=lambda _event: None,
+            prefer_stream=False,
+            cancellation=cancellation,
         )
 
 

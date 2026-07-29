@@ -92,8 +92,8 @@ def test_abort_discards_incomplete_markdown_suffix() -> None:
 
 
 def test_terminal_control_escaping_preserves_unicode_newlines_and_tabs() -> None:
-    assert escape_terminal_controls("中文\n\ttext\x00\x1b\r") == (
-        r"中文" "\n\ttext" r"\x00\x1b\x0d"
+    assert escape_terminal_controls("中文\n\ttext\x00\x1b\r\u202e\u2028") == (
+        r"中文" "\n\ttext" r"\x00\x1b\x0d\u202e\u2028"
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 from typing import TextIO
+import unicodedata
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -83,8 +84,24 @@ def write_markdown_document(
     width: int | None = None,
 ) -> None:
     """Render one complete Markdown document and terminate its terminal line."""
-    renderer = TerminalMarkdownRenderer(stream, color=color, width=width)
-    renderer.render_complete(markdown)
+    selected_width = _terminal_width(stream) if width is None else _validate_width(width)
+    stream.write(render_markdown_document(markdown, color=color, width=selected_width))
+    stream.flush()
+
+
+def render_markdown_document(
+    markdown: str,
+    *,
+    color: bool,
+    width: int | None = None,
+) -> str:
+    """Purely render one complete untrusted Markdown document to safe terminal text."""
+    selected_width = DEFAULT_TERMINAL_WIDTH if width is None else _validate_width(width)
+    safe_markdown = escape_terminal_controls(markdown)
+    rendered = _render_to_ansi(safe_markdown, color=color, width=selected_width)
+    if rendered:
+        return rendered
+    return safe_markdown if safe_markdown.endswith("\n") else f"{safe_markdown}\n"
 
 
 def escape_terminal_controls(text: str) -> str:
@@ -92,14 +109,16 @@ def escape_terminal_controls(text: str) -> str:
     escaped: list[str] = []
     for character in text:
         codepoint = ord(character)
-        if character in {"\n", "\t"} or not (
-            codepoint < 32 or codepoint == 127 or 0x80 <= codepoint <= 0x9F
-        ):
+        if character in {"\n", "\t"}:
+            escaped.append(character)
+        elif unicodedata.category(character) not in {"Cc", "Cf", "Zl", "Zp"}:
             escaped.append(character)
         elif codepoint <= 0xFF:
             escaped.append(f"\\x{codepoint:02x}")
-        else:
+        elif codepoint <= 0xFFFF:
             escaped.append(f"\\u{codepoint:04x}")
+        else:
+            escaped.append(f"\\U{codepoint:08x}")
     return "".join(escaped)
 
 

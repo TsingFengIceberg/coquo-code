@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TextIO
+from threading import Condition, Lock
+from typing import Callable, TextIO
 import unicodedata
 
 from leonervis_code.core.action_coordinator import (
@@ -10,6 +11,7 @@ from leonervis_code.core.action_coordinator import (
     HumanApprovalRequest,
 )
 from leonervis_code.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
+from leonervis_code.core.cancellation import TurnCancellation
 
 _RED = "\x1b[31m"
 _GREEN = "\x1b[32m"
@@ -57,6 +59,94 @@ def terminal_approval_handler(stdin: TextIO, stdout: TextIO, *, color: bool = Fa
         return ApprovalResolution.CANCEL
 
     return handle
+
+
+class TerminalApprovalBroker:
+    """Bridge synchronous action approval to one UI-owned input state."""
+
+    def __init__(self, publish: Callable[[int, HumanApprovalRequest], None]) -> None:
+        self._publish = publish
+        self._lock = Lock()
+        self._turn_id: int | None = None
+        self._cancellation: TurnCancellation | None = None
+        self._pending: _PendingApproval | None = None
+
+    def activate(self, turn_id: int, cancellation: TurnCancellation) -> None:
+        with self._lock:
+            if self._turn_id is not None or self._pending is not None:
+                raise RuntimeError("approval broker is already active")
+            self._turn_id = turn_id
+            self._cancellation = cancellation
+
+    def deactivate(self, turn_id: int) -> None:
+        with self._lock:
+            if self._turn_id != turn_id:
+                return
+            pending = self._pending
+            self._turn_id = None
+            self._cancellation = None
+            self._pending = None
+        if pending is not None:
+            pending.resolve(ApprovalResolution.CANCEL)
+
+    def __call__(self, request: HumanApprovalRequest) -> ApprovalResolution:
+        with self._lock:
+            if self._turn_id is None or self._cancellation is None or self._pending is not None:
+                return ApprovalResolution.CANCEL
+            turn_id = self._turn_id
+            cancellation = self._cancellation
+            pending = _PendingApproval(request)
+            self._pending = pending
+        self._publish(turn_id, request)
+        resolution = pending.wait(cancellation)
+        with self._lock:
+            if self._pending is pending:
+                self._pending = None
+        return resolution
+
+    def resolve(self, resolution: ApprovalResolution) -> bool:
+        if type(resolution) is not ApprovalResolution:
+            raise ValueError("approval resolution is invalid")
+        with self._lock:
+            pending = self._pending
+        return pending.resolve(resolution) if pending is not None else False
+
+    @property
+    def pending_request(self) -> HumanApprovalRequest | None:
+        with self._lock:
+            return self._pending.request if self._pending is not None else None
+
+
+class _PendingApproval:
+    def __init__(self, request: HumanApprovalRequest) -> None:
+        self.request = request
+        self._condition = Condition()
+        self._resolution: ApprovalResolution | None = None
+
+    def resolve(self, resolution: ApprovalResolution) -> bool:
+        with self._condition:
+            if self._resolution is not None:
+                return False
+            self._resolution = resolution
+            self._condition.notify_all()
+            return True
+
+    def wait(self, cancellation: TurnCancellation) -> ApprovalResolution:
+        with self._condition:
+            while self._resolution is None:
+                if cancellation.requested:
+                    self._resolution = ApprovalResolution.CANCEL
+                    break
+                self._condition.wait(0.1)
+            return self._resolution
+
+
+def render_approval_request(request: HumanApprovalRequest, *, color: bool) -> str:
+    """Render one bounded approval request without reading terminal input."""
+    header = _approval_header(request)
+    if request.preview is None:
+        return f"{header}\nApprove this exact action? [y/N/c]"
+    return f"{header}\n{_render_preview(request.preview, color=color)}Approve this exact action? [y/N/c]"
 
 
 def _approval_header(request: HumanApprovalRequest) -> str:

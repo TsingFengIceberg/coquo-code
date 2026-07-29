@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import replace
 import io
 from pathlib import Path
+from threading import Thread
+import time
 
 import pytest
 
+from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.main import main, terminal_approval_handler
 from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
@@ -16,6 +19,7 @@ from leonervis_code.core.approval_preview import (
 )
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionAction,
@@ -152,6 +156,30 @@ def test_terminal_approval_keyboard_interrupt_cancels() -> None:
         == ApprovalResolution.CANCEL
     )
     assert stdout.getvalue().endswith("\n")
+
+
+def test_terminal_approval_broker_preserves_exact_request_and_single_resolution() -> None:
+    published = []
+    broker = TerminalApprovalBroker(lambda turn_id, request: published.append((turn_id, request)))
+    cancellation = TurnCancellation()
+    request = approval_request()
+    resolutions = []
+    broker.activate(7, cancellation)
+    thread = Thread(target=lambda: resolutions.append(broker(request)))
+
+    thread.start()
+    deadline = time.monotonic() + 1
+    while not published and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert published == [(7, request)]
+    assert broker.pending_request is request
+    assert broker.resolve(ApprovalResolution.ACCEPT)
+    assert not broker.resolve(ApprovalResolution.REJECT)
+    thread.join(1)
+    broker.deactivate(7)
+
+    assert resolutions == [ApprovalResolution.ACCEPT]
+    assert broker.pending_request is None
 
 
 def test_one_shot_ask_never_reads_stdin_and_cancels_without_writing(tmp_path: Path) -> None:

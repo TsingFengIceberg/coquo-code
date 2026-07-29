@@ -12,6 +12,7 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.cli.markdown_renderer import (
     TerminalMarkdownRenderer,
+    escape_terminal_controls,
     write_markdown_document,
 )
 from leonervis_code.cli.presentation import ToolDetailMode, render_message, render_prompt_event
@@ -30,6 +31,7 @@ class TerminalEventSink:
         show_role_markers: bool = False,
         show_waiting: bool = False,
         tool_detail_mode: ToolDetailMode = ToolDetailMode.COMPACT,
+        markdown_width: int | None = None,
     ) -> None:
         self._stream = stream
         self._color = color
@@ -37,7 +39,11 @@ class TerminalEventSink:
         self._response_parts: list[str] = []
         self._visible_response = False
         self._final_text_was_streamed = False
-        self._markdown = TerminalMarkdownRenderer(stream, color=color) if render_markdown else None
+        self._markdown = (
+            TerminalMarkdownRenderer(stream, color=color, width=markdown_width)
+            if render_markdown
+            else None
+        )
         self._show_role_markers = show_role_markers
         self._show_waiting = show_waiting
         self._waiting_visible = False
@@ -69,7 +75,7 @@ class TerminalEventSink:
         if isinstance(event, AssistantToolTextReceived):
             self._begin_assistant_output()
             if self._markdown is None:
-                self._stream.write(event.text)
+                self._stream.write(escape_terminal_controls(event.text))
                 if not event.text.endswith("\n"):
                     self._stream.write("\n")
                 self._stream.flush()
@@ -82,7 +88,7 @@ class TerminalEventSink:
             self._response_parts.append(event.text)
             if self._stream_deltas:
                 if self._markdown is None:
-                    self._stream.write(event.text)
+                    self._stream.write(escape_terminal_controls(event.text))
                     self._stream.flush()
                     self._visible_response = True
                 elif self._markdown.push(event.text):

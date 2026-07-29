@@ -46,6 +46,7 @@ from leonervis_code.core.compaction import (
     decide_auto_compaction,
     plan_compaction,
 )
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.contracts import (
     CommittedTurn,
     ConversationItem,
@@ -547,6 +548,7 @@ class ProjectSession:
         self._active_action_lease: ActionLease | None = None
         self._active_action_binding: BindingSnapshot | None = None
         self._active_usage_cursor: int | None = None
+        self._active_cancellation: TurnCancellation | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -938,10 +940,13 @@ class ProjectSession:
         *,
         event_sink: PromptEventSink | None = None,
         include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
     ) -> str:
         """Run one serialized preflighted turn with one exact prepared-action lease."""
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
+        if cancellation is not None and type(cancellation) is not TurnCancellation:
+            raise ValueError("turn cancellation token is invalid")
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
@@ -950,10 +955,15 @@ class ProjectSession:
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
             self._active_usage_cursor = usage_cursor
+            self._active_cancellation = cancellation
             try:
+                if cancellation is not None:
+                    cancellation.check()
                 with self._manager.provider_for_turn() as runtime:
                     binding = binding_from_status(runtime.status)
                     assessment = runtime.assess_context(prepared.initial_request)
+                    if cancellation is not None:
+                        cancellation.check()
                     report = assessment.fit_report
                     if (
                         report is not None
@@ -970,6 +980,7 @@ class ProjectSession:
                             mandatory=decision.mandatory,
                             source_report=report,
                             event_sink=event_sink,
+                            cancellation=cancellation,
                         )
                     lease = ActionLease(
                         session_id=self._writer.session_id,
@@ -985,6 +996,7 @@ class ProjectSession:
                         provider=runtime,
                         event_sink=event_sink,
                         include_tool_details=include_tool_details,
+                        cancellation=cancellation,
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:
@@ -1005,6 +1017,7 @@ class ProjectSession:
                 self._active_action_lease = None
                 self._active_action_binding = None
                 self._active_usage_cursor = None
+                self._active_cancellation = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -1191,6 +1204,7 @@ class ProjectSession:
         *,
         pending_items: tuple[ConversationItem, ...],
         usage_cursor: int,
+        cancellation: TurnCancellation | None = None,
     ) -> CompactContextResult:
         source = prepared.source
         status = runtime.status
@@ -1223,7 +1237,11 @@ class ProjectSession:
             ),
             max_output_tokens=output_limit,
         )
+        if cancellation is not None:
+            cancellation.check()
         summary_response = runtime.summarize(summary_request)
+        if cancellation is not None:
+            cancellation.check()
         summary = EffectiveContextSummary(summary_response.text.strip())
         candidate = EffectiveContextSnapshot(
             representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
@@ -1257,6 +1275,9 @@ class ProjectSession:
                 after_input_tokens=after,
                 input_method=candidate_report.input_count.method.value,
             )
+
+        if cancellation is not None:
+            cancellation.check()
 
         with self._lock:
             self._ensure_open()
@@ -1366,6 +1387,7 @@ class ProjectSession:
         mandatory: bool,
         source_report: ContextFitReport,
         event_sink: PromptEventSink | None,
+        cancellation: TurnCancellation | None,
     ) -> PreparedAgentTurn:
         self._emit_prompt_event(
             event_sink,
@@ -1401,6 +1423,7 @@ class ProjectSession:
                     runtime,
                     pending_items=turn.pending_items,
                     usage_cursor=usage_cursor,
+                    cancellation=cancellation,
                 )
             except (
                 CompactionCandidateError,
@@ -1562,6 +1585,9 @@ class ProjectSession:
     def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolDispatchResult:
         """Prepare and run one model tool request through the exact Host boundary."""
         self._assert_action_lease(lease)
+        cancellation = self._active_cancellation
+        if cancellation is not None:
+            cancellation.check()
         binding = self._active_action_binding
         if binding is None:
             raise RuntimeError("action binding is unavailable")
@@ -1732,6 +1758,8 @@ class ProjectSession:
 
         def revalidate(current: ActionIdentity) -> ActionIdentity:
             self._assert_action_lease(lease)
+            if cancellation is not None:
+                cancellation.check()
             if prepared_write is not None:
                 refreshed = self._write_file.refresh_precondition(prepared_write)
                 return replace(current, precondition=refreshed)
@@ -1764,6 +1792,8 @@ class ProjectSession:
         def execute(current: ActionIdentity) -> ActionExecutionResult:
             nonlocal command_observation
             self._assert_action_lease(lease)
+            if cancellation is not None:
+                cancellation.check()
             if request.name == READ_FILE_TOOL_NAME:
                 result = self._read_file.execute(request)
             elif request.name == GLOB_TOOL_NAME:
@@ -1815,7 +1845,10 @@ class ProjectSession:
                     audit_message=edit_result.audit_message,
                 )
             elif request.name == RUN_COMMAND_TOOL_NAME and prepared_command is not None:
-                command_result = self._run_command.execute_detailed(prepared_command)
+                command_result = self._run_command.execute_detailed(
+                    prepared_command,
+                    cancellation=cancellation,
+                )
                 command_observation = command_result.observation
                 outcome = {
                     RunCommandOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,

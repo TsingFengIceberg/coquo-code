@@ -688,6 +688,14 @@ Compact完成行会追加exit或lifecycle status、duration及两路输出byte c
 
 Observation与result details只在当前live event链路存在，不写Session、Action Audit schema、provider history、profile或Effective Context。本slice审阅全部模型可见合同后确认无变化，因此canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog、tool schema/order、empty Effective Context identity及所有Session/context schema均不升级。完整决策见[0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)。
 
+## Persistent Inline Terminal Frontend
+
+真实TTY不再按“读一次PromptSession、同步跑完整turn、再创建下一次PromptSession”工作，而由一个non-full-screen `prompt_toolkit.Application`长期持有输入区、状态栏、补全、history、审批焦点和inline scrollback。提交后buffer立即清空并保持新prompt可见；busy期间允许编辑一份draft，但Enter不会排队、插入或触发slash mutation。审批保存并恢复draft，Ctrl-C请求取消，Ctrl-D等待active worker完成清理后退出。
+
+一个closed `TerminalViewState`、纯reducer与有界local queue把单后台worker的assistant、tool、context、usage、compaction和failure事件交给唯一TTY renderer。只有连续assistant delta可合并；工具、审批、失败和durable final事实不可丢失。Renderer和terminal sink仍是best-effort，不能改变执行、Action Audit或turn commit。One-shot、redirect、injected stream与non-TTY继续走旧同步路径。
+
+`TurnCancellation`贯穿ProjectSession、AgentLoop、provider stream、tool边界、approval broker和`run_command`。Command会轮询取消并执行既有有界TERM到KILL process-group cleanup；blocking provider SDK只能在调用返回或下一stream chunk时观察取消，系统不使用unsafe thread exception injection。该Host-only改造保持canonical system prompt v21、provider adapter contract v24、21-tool catalog、Effective Context identity及全部Session/Action Audit schema不变。完整决策见[0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -920,3 +928,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 64. [0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
 65. [0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
 66. [0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
+67. [0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)

@@ -11,7 +11,13 @@ from typing import TextIO
 
 from leonervis_code import ProjectSession, __version__
 from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.cli.approval import noninteractive_approval, terminal_approval_handler
+from leonervis_code.cli.approval import (
+    TerminalApprovalBroker,
+    noninteractive_approval,
+    terminal_approval_handler,
+)
+from leonervis_code.cli.frontend import ApprovalPending, FrontendEventQueue
+from leonervis_code.cli.terminal_app import supports_terminal_application
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
@@ -786,15 +792,22 @@ def main(
                 )
                 return 2
         input_stream = stdin or sys.stdin
-        approval_handler = (
-            terminal_approval_handler(
+        frontend_queue: FrontendEventQueue | None = None
+        approval_broker: TerminalApprovalBroker | None = None
+        if arguments.command is None and supports_terminal_application(input_stream, output):
+            frontend_queue = FrontendEventQueue()
+            approval_broker = TerminalApprovalBroker(
+                lambda turn_id, request: frontend_queue.put(ApprovalPending(turn_id, request))
+            )
+            approval_handler = approval_broker
+        elif arguments.command is None:
+            approval_handler = terminal_approval_handler(
                 input_stream,
                 output,
                 color=color_enabled(output, env),
             )
-            if arguments.command is None
-            else noninteractive_approval
-        )
+        else:
+            approval_handler = noninteractive_approval
         session = ProjectSession.open(
             workspace,
             resume=arguments.resume,
@@ -862,6 +875,8 @@ def main(
                 cwd=workspace,
                 color=color_enabled(output, env),
                 render_markdown=output.isatty(),
+                frontend_queue=frontend_queue,
+                approval_broker=approval_broker,
             )
         finally:
             session.close()

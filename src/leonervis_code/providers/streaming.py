@@ -16,6 +16,7 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.providers.request_context import ContextFitReport
+from leonervis_code.core.cancellation import TurnCancellation
 
 MAX_PROVIDER_STREAM_TEXT_CHARACTERS = 1024 * 1024
 MAX_PROVIDER_STREAM_TEXT_BYTES = 1024 * 1024
@@ -78,16 +79,28 @@ def respond_with_streaming(
     event_sink: ProviderTextDeltaSink,
     prefer_stream: bool,
     preflight_sink: Callable[[ContextFitReport], None] | None = None,
+    cancellation: TurnCancellation | None = None,
 ) -> ProviderResponseOutcome:
     """Use a provider stream when requested, otherwise preserve ``respond`` compatibility."""
+    if cancellation is not None:
+        cancellation.check()
+
+    def checked_sink(delta: ProviderTextDelta) -> None:
+        if cancellation is not None:
+            cancellation.check()
+        event_sink(delta)
+
     observed_method = getattr(provider, "respond_with_observation", None)
     if callable(observed_method):
-        return observed_method(
+        outcome = observed_method(
             request,
-            event_sink=event_sink,
+            event_sink=checked_sink,
             prefer_stream=prefer_stream,
             preflight_sink=preflight_sink,
         )
+        if cancellation is not None:
+            cancellation.check()
+        return outcome
 
     stream_method = getattr(provider, "respond_stream", None)
     stream_outcome_method = getattr(provider, "respond_stream_outcome", None)
@@ -98,8 +111,13 @@ def respond_with_streaming(
             outcome = outcome_method(request)
             if not isinstance(outcome, ProviderResponseOutcome):
                 raise ValueError("provider returned an invalid response outcome")
+            if cancellation is not None:
+                cancellation.check()
             return outcome
-        return ProviderResponseOutcome(provider.respond(request), False)
+        response = provider.respond(request)
+        if cancellation is not None:
+            cancellation.check()
+        return ProviderResponseOutcome(response, False)
 
     text_parts: list[str] = []
     character_count = 0
@@ -117,7 +135,7 @@ def respond_with_streaming(
         ):
             raise ValueError("provider stream text exceeds the supported size")
         text_parts.append(delta.text)
-        event_sink(delta)
+        checked_sink(delta)
 
     if callable(stream_outcome_method):
         outcome = stream_outcome_method(request, event_sink=receive)
@@ -136,4 +154,6 @@ def respond_with_streaming(
     )
     if streamed_text != response_text:
         raise ValueError("provider stream text does not match its completed response")
+    if cancellation is not None:
+        cancellation.check()
     return ProviderResponseOutcome(response, bool(text_parts), usage)

@@ -26,6 +26,7 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.core.actions import ActionLease
 from leonervis_code.core.compaction import EffectiveContextSummary
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.contracts import (
     AssistantToolBatch,
     AssistantText,
@@ -244,6 +245,7 @@ class AgentLoop:
         provider: ConversationProvider | None = None,
         event_sink: AgentEventSink | None = None,
         include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
@@ -251,6 +253,7 @@ class AgentLoop:
             provider=provider,
             event_sink=event_sink,
             include_tool_details=include_tool_details,
+            cancellation=cancellation,
         )
 
     def run_prepared(
@@ -260,6 +263,7 @@ class AgentLoop:
         provider: ConversationProvider | None = None,
         event_sink: AgentEventSink | None = None,
         include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         if type(include_tool_details) is not bool:
@@ -278,6 +282,8 @@ class AgentLoop:
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
 
         while True:
+            if cancellation is not None:
+                cancellation.check()
             if provider_invocations >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
                 raise ToolLoopLimitError("provider invocation limit reached")
             allow_tools = (
@@ -295,10 +301,13 @@ class AgentLoop:
                 ),
                 event_sink,
                 provider_invocations + 1,
+                cancellation,
             )
             provider_invocations += 1
             response = outcome.response
             if isinstance(response, AssistantText):
+                if cancellation is not None:
+                    cancellation.check()
                 ledger = ToolTurnLedger(tuple(ledger_entries))
                 self._commit(pending + (response,), user, response, ledger)
                 if outcome.text_was_streamed:
@@ -368,6 +377,8 @@ class AgentLoop:
             tool_requests += len(requests)
             stop_remaining = False
             for offset, request in enumerate(requests):
+                if cancellation is not None:
+                    cancellation.check()
                 call_index = first_call_index + offset
                 if stop_remaining:
                     self._emit_prompt_event(
@@ -431,6 +442,8 @@ class AgentLoop:
                         dispatch.result_details,
                     ),
                 )
+                if cancellation is not None:
+                    cancellation.check()
                 pending += (dispatch.tool_result,)
                 ledger_entries.append(
                     ToolOutcomeEntry(
@@ -450,6 +463,7 @@ class AgentLoop:
         request: ConversationRequest,
         event_sink: AgentEventSink | None,
         invocation_index: int,
+        cancellation: TurnCancellation | None,
     ) -> ProviderResponseOutcome:
         def receive_preflight(report: ContextFitReport) -> None:
             self._emit_prompt_event(
@@ -470,6 +484,7 @@ class AgentLoop:
             ),
             prefer_stream=event_sink is not None,
             preflight_sink=receive_preflight,
+            cancellation=cancellation,
         )
         return outcome
 

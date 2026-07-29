@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from threading import Thread
 import time
 
 import leonervis_code.tools.run_command as run_command_module
 from leonervis_code.core.contracts import ToolArguments, ToolUse
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.tools.run_command import (
     MAX_COMMAND_STDOUT_BYTES,
     RunCommandExecutionStatus,
@@ -60,6 +62,35 @@ def test_direct_execution_captures_stdout_stderr_and_literal_metacharacters(
     assert result.observation.stderr.bytes_total == 4
     assert result.observation.cleanup_complete is True
     assert not (tmp_path / "should-not-exist").exists()
+
+
+def test_cooperative_cancellation_terminates_the_command_process_group(tmp_path: Path) -> None:
+    tool = RunCommandTool(tmp_path)
+    marker = tmp_path / "child-survived.txt"
+    code = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c',"
+        "\"import pathlib,time; time.sleep(1); pathlib.Path('child-survived.txt').touch()\"]); "
+        "time.sleep(10)"
+    )
+    prepared = tool.prepare(command([sys.executable, "-c", code]))
+    cancellation = TurnCancellation()
+    holder = []
+    thread = Thread(
+        target=lambda: holder.append(tool.execute_detailed(prepared, cancellation=cancellation))
+    )
+
+    thread.start()
+    time.sleep(0.2)
+    assert cancellation.request()
+    thread.join(3)
+    time.sleep(1.1)
+
+    assert not thread.is_alive()
+    assert holder[0].result_code == "command_cancelled"
+    assert holder[0].observation.status == RunCommandExecutionStatus.CANCELLED
+    assert holder[0].observation.cleanup_complete is True
+    assert not marker.exists()
 
 
 def test_environment_is_closed_and_pwd_tracks_relative_cwd(tmp_path: Path) -> None:

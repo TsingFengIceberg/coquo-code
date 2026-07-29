@@ -688,6 +688,14 @@ Compact completion lines append exit or lifecycle status, duration, and both out
 
 Observations and result details exist only in the current live-event path and are stored in neither Sessions, Action Audit schemas, provider history, profiles, nor Effective Context. Review confirms no model-visible contract change, so canonical system prompt remains v21, provider adapter contract remains v24, the 21-tool catalog, tool schemas/order, empty Effective Context identity, and all Session/context schemas remain unchanged. See [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md).
 
+## Persistent Inline Terminal Frontend
+
+A real TTY no longer follows “read one PromptSession, synchronously run the complete turn, then create the next PromptSession.” One non-full-screen `prompt_toolkit.Application` now retains the input area, toolbar, completion, history, approval focus, and inline scrollback. Submission clears the buffer immediately and leaves the next prompt visible. A draft remains editable while busy, but Enter cannot queue, insert, or dispatch a slash mutation. Approval saves and restores the draft, Ctrl-C requests cancellation, and Ctrl-D waits for active-worker cleanup before exit.
+
+A closed `TerminalViewState`, pure reducer, and bounded local queue move assistant, tool, context, usage, compaction, and failure events from one background worker to the sole TTY renderer. Only consecutive assistant deltas may be coalesced; tool, approval, failure, and durable-final facts cannot be lost. Renderer and terminal-sink failures remain best-effort and cannot affect execution, Action Audit, or turn commit. One-shot, redirect, injected-stream, and non-TTY paths remain synchronous.
+
+`TurnCancellation` crosses ProjectSession, AgentLoop, provider streams, tool boundaries, the approval broker, and `run_command`. Commands poll cancellation and use the existing bounded TERM-to-KILL process-group cleanup. A blocking provider SDK call can observe cancellation only after return or at the next stream chunk, and no unsafe thread exception injection is used. This Host-only redesign preserves canonical system prompt v21, provider adapter contract v24, the 21-tool catalog, Effective Context identity, and every Session/Action Audit schema. See [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -920,3 +928,4 @@ This slice establishes capacity facts only. It does not count current request to
 64. [0064: Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
 65. [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
 66. [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
+67. [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)

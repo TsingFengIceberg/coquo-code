@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+import io
+from pathlib import Path
+from threading import Event, Thread
+import time
+
+import pytest
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+
+from leonervis_code.agent.tool_events import AssistantResponseTextDeltaReceived
+from leonervis_code.cli.approval import TerminalApprovalBroker
+from leonervis_code.cli.frontend import (
+    ApprovalPending,
+    CancellationRequested,
+    FrontendEventQueue,
+    PromptActivity,
+    TerminalPhase,
+    TerminalViewState,
+    TurnFinished,
+    TurnSubmitted,
+    reduce_terminal_state,
+)
+from leonervis_code.cli.terminal_app import TerminalApplication
+from leonervis_code.core.action_coordinator import (
+    ApprovalResolution,
+    HumanApprovalRequest,
+)
+from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
+from leonervis_code.core.contracts import ToolArguments
+from leonervis_code.core.permissions import (
+    PermissionAction,
+    PermissionDecision,
+    PermissionReason,
+    PermissionResult,
+)
+
+
+def test_terminal_reducer_accepts_only_one_matching_active_turn() -> None:
+    state = reduce_terminal_state(TerminalViewState(), TurnSubmitted(1))
+    assert state.phase == TerminalPhase.GENERATING
+    assert state.active_turn == 1
+
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(1, AssistantResponseTextDeltaReceived("hello")),
+    )
+    assert state.status == "Responding"
+
+    with pytest.raises(ValueError, match="active turn"):
+        reduce_terminal_state(state, TurnFinished(2, "wrong"))
+    with pytest.raises(ValueError, match="submission"):
+        reduce_terminal_state(state, TurnSubmitted(2))
+
+    state = reduce_terminal_state(state, CancellationRequested(1, exit_after_turn=True))
+    assert state.phase == TerminalPhase.CANCELLING
+    assert state.exit_after_turn is True
+    state = reduce_terminal_state(state, TurnFinished(1, ""))
+    assert state.phase == TerminalPhase.IDLE
+    assert state.exit_after_turn is True
+
+
+def test_frontend_queue_coalesces_only_consecutive_text_deltas() -> None:
+    queue = FrontendEventQueue(capacity=2)
+    assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("a")))
+    assert not queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("b")))
+    queue.put(TurnFinished(1, "ab"))
+
+    events = queue.drain()
+    assert events == (
+        PromptActivity(1, AssistantResponseTextDeltaReceived("ab")),
+        TurnFinished(1, "ab"),
+    )
+
+
+def test_frontend_queue_close_releases_a_blocked_critical_event_producer() -> None:
+    queue = FrontendEventQueue(capacity=2)
+    queue.put(TurnSubmitted(1))
+    queue.put(TurnFinished(1, "done"))
+    result = []
+    producer = Thread(target=lambda: result.append(queue.put(TurnFinished(1, "late"))))
+
+    producer.start()
+    time.sleep(0.05)
+    assert producer.is_alive()
+    queue.close()
+    producer.join(1)
+
+    assert not producer.is_alive()
+    assert result == [False]
+
+
+def test_turn_cancellation_is_idempotent_and_checked() -> None:
+    cancellation = TurnCancellation()
+    assert cancellation.requested is False
+    assert cancellation.request() is True
+    assert cancellation.request() is False
+    with pytest.raises(TurnCancelled):
+        cancellation.check()
+
+
+class _InteractiveSession:
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+        self.prompts: list[str] = []
+
+    @property
+    def turns(self):
+        return ()
+
+    def prompt(self, text, *, event_sink, include_tool_details, cancellation):
+        del include_tool_details
+        self.prompts.append(text)
+        self.started.set()
+        while not self.release.wait(0.01):
+            cancellation.check()
+        event_sink(AssistantResponseTextDeltaReceived("reply"))
+        return "reply"
+
+
+def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: Path) -> None:
+    session = _InteractiveSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("hello\r")
+        assert session.started.wait(1)
+        _wait_until(lambda: terminal.state.busy)
+
+        pipe.send_text("next draft")
+        _wait_until(lambda: terminal.draft == "next draft")
+        pipe.send_text("\r")
+        time.sleep(0.05)
+        assert terminal.draft == "next draft"
+        assert session.prompts == ["hello"]
+
+        session.release.set()
+        _wait_until(lambda: not terminal.state.busy)
+        assert terminal.draft == "next draft"
+        pipe.send_text("\x03")
+        _wait_until(lambda: terminal.draft == "")
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert "› hello" in stdout.getvalue()
+    assert "reply" in stdout.getvalue()
+    assert stdout.getvalue().index("› hello") < stdout.getvalue().index("reply")
+
+
+def test_persistent_application_ctrl_d_waits_for_turn_cancellation(tmp_path: Path) -> None:
+    session = _InteractiveSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("cancel me\r")
+        assert session.started.wait(1)
+        _wait_until(lambda: terminal.state.busy)
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+
+
+class _ApprovalSession:
+    def __init__(self) -> None:
+        self.started = Event()
+        self.request_approval = Event()
+        self.broker = None
+        self.resolution = None
+
+    @property
+    def turns(self):
+        return ()
+
+    def prompt(self, _text, *, event_sink, include_tool_details, cancellation):
+        del event_sink, include_tool_details, cancellation
+        self.started.set()
+        self.request_approval.wait(1)
+        self.resolution = self.broker(_approval_request())
+        return "approval complete"
+
+
+def test_persistent_application_approval_temporarily_owns_input_and_restores_draft(
+    tmp_path: Path,
+) -> None:
+    session = _ApprovalSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    session.broker = broker
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("do work\r")
+        assert session.started.wait(1)
+        pipe.send_text("keep this draft")
+        _wait_until(lambda: terminal.draft == "keep this draft")
+        session.request_approval.set()
+        _wait_until(lambda: terminal.state.phase == TerminalPhase.APPROVAL)
+        assert terminal.draft == ""
+
+        pipe.send_text("y\r")
+        _wait_until(lambda: not terminal.state.busy)
+        assert session.resolution == ApprovalResolution.ACCEPT
+        assert terminal.draft == "keep this draft"
+        pipe.send_text("\x03\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert "Approval required" in stdout.getvalue()
+
+
+def _approval_request() -> HumanApprovalRequest:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="write-1",
+        tool_name="write_file",
+        arguments=ToolArguments.from_mapping({"path": "note.txt", "content": "value\n"}),
+        action=PermissionAction.WORKSPACE_CREATE,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.path_absent(),
+    )
+    return HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
+        ),
+    )
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition was not reached")

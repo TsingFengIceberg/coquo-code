@@ -38,6 +38,9 @@ from leonervis_code.providers.manager import RuntimeProviderStateError
 from leonervis_code.providers.profile import ProviderProfileError
 from leonervis_code.providers.request_context import ContextPreflightError
 from leonervis_code.session_store import SessionStoreError
+from leonervis_code.cli.approval import TerminalApprovalBroker
+from leonervis_code.cli.frontend import FrontendEventQueue
+from leonervis_code.cli.terminal_app import TerminalApplication, supports_terminal_application
 
 
 def parse_history_count(command: str) -> int | None:
@@ -64,6 +67,8 @@ def run_repl(
     color: bool,
     render_markdown: bool = False,
     prompt_editor: PromptEditor | None = None,
+    frontend_queue: FrontendEventQueue | None = None,
+    approval_broker: TerminalApprovalBroker | None = None,
 ) -> int:
     """Read input, dispatch local commands, and route ordinary text to the model."""
     editor = prompt_editor or create_prompt_editor(stdin, stdout)
@@ -77,6 +82,21 @@ def run_repl(
         stdout.write(f"\n{render_session_info(session_info)}\nAuto-save: enabled\n")
     stdout.write("\n")
     stdout.flush()
+    if (
+        prompt_editor is None
+        and frontend_queue is not None
+        and approval_broker is not None
+        and supports_terminal_application(stdin, stdout)
+    ):
+        return TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=cwd,
+            color=color,
+            render_markdown=render_markdown,
+            queue=frontend_queue,
+            approval_broker=approval_broker,
+        ).run()
     tool_details = ToolDetailSettings()
 
     while True:

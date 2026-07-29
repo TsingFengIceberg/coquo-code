@@ -16,6 +16,7 @@ from threading import Thread
 import time
 
 from leonervis_code.core.actions import ActionPrecondition
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.contracts import ToolResult, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.permissions import PermissionAction
@@ -220,14 +221,28 @@ class RunCommandTool:
         self._validate_cwd(prepared.relative_cwd)
         return ActionPrecondition.none()
 
-    def execute(self, prepared: PreparedRunCommand) -> ToolResult:
+    def execute(
+        self,
+        prepared: PreparedRunCommand,
+        *,
+        cancellation: TurnCancellation | None = None,
+    ) -> ToolResult:
         """Execute one prepared command and return its structured model result."""
-        return self.execute_detailed(prepared).tool_result
+        return self.execute_detailed(prepared, cancellation=cancellation).tool_result
 
-    def execute_detailed(self, prepared: PreparedRunCommand) -> RunCommandExecutionResult:
+    def execute_detailed(
+        self,
+        prepared: PreparedRunCommand,
+        *,
+        cancellation: TurnCancellation | None = None,
+    ) -> RunCommandExecutionResult:
         """Run argv directly with bounded output, timeout, and process-group cleanup."""
         if type(prepared) is not PreparedRunCommand:
             raise ValueError("prepared run_command is invalid")
+        if cancellation is not None and type(cancellation) is not TurnCancellation:
+            raise ValueError("run_command cancellation token is invalid")
+        if cancellation is not None:
+            cancellation.check()
         request = prepared.request
         try:
             self._validate_cwd(prepared.relative_cwd)
@@ -319,10 +334,22 @@ class RunCommandTool:
         cleanup_complete = True
         interrupted = False
         try:
-            process.wait(timeout=prepared.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            status = RunCommandExecutionStatus.TIMED_OUT
-            cleanup_complete = self._terminate_process_group(process)
+            deadline = started + prepared.timeout_seconds
+            while process.poll() is None:
+                if cancellation is not None and cancellation.requested:
+                    status = RunCommandExecutionStatus.CANCELLED
+                    interrupted = True
+                    cleanup_complete = self._terminate_process_group(process)
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    status = RunCommandExecutionStatus.TIMED_OUT
+                    cleanup_complete = self._terminate_process_group(process)
+                    break
+                try:
+                    process.wait(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
         except KeyboardInterrupt:
             status = RunCommandExecutionStatus.CANCELLED
             interrupted = True
