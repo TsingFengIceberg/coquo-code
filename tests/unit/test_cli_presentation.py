@@ -37,6 +37,7 @@ from leonervis_code.cli.presentation import (
     render_git_status,
     render_action_audits,
     render_message,
+    render_message_separator,
     render_output_budget,
     render_output_budget_rejection,
     render_output_budget_update,
@@ -233,6 +234,8 @@ def status(*, mode="fake", profile=None, provider="fake", model=None):
 
 def test_prompt_is_minimal_and_toolbar_shows_model_and_workspace() -> None:
     assert render_prompt(status(), Info(), color=False) == "› "
+    assert render_message_separator(60, color=False) == f"  {'─' * 20}"
+    assert render_message_separator(120, color=False) == f"  {'─' * 24}"
     assert render_prompt_toolbar(status(), Path("/workspace"), color=False) == (
         "  fake · /workspace"
     )

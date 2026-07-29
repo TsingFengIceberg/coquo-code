@@ -696,6 +696,14 @@ Observation与result details只在当前live event链路存在，不写Session�
 
 `TurnCancellation`贯穿ProjectSession、AgentLoop、provider stream、tool边界、approval broker和`run_command`。Command会轮询取消并执行既有有界TERM到KILL process-group cleanup；blocking provider SDK只能在调用返回或下一stream chunk时观察取消，系统不使用unsafe thread exception injection。该Host-only改造保持canonical system prompt v21、provider adapter contract v24、21-tool catalog、Effective Context identity及全部Session/Action Audit schema不变。完整决策见[0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)。
 
+## Terminal Message Hierarchy 与 Hanging Indent
+
+真实TTY把conversation和Host过程信息分成稳定视觉层级。已提交用户消息使用`› `，assistant正文使用`• `；两者都保留两列role prefix，显式换行及按terminal display width产生的自动换行统一从正文列继续。新的conversation message block前使用缩进两列、长度为terminal width约三分之一且最多24格的低强度短分隔线。Plain用户文本先转义terminal controls再按显示宽度折行，assistant Markdown则先从可用宽度扣除role prefix后渲染，避免长行回到终端最左侧或越过右边界。
+
+Markdown stream不再先单独写出`• `。未形成安全render boundary的delta继续留在内存；marker与第一段可见正文在同一次frontend write中出现，后续chunk使用continuation indent。Routine tool、context、usage、compaction和slash output作为缩进Host block，在color模式下使用dim或dim-green；warning、approval、error、partial与durability uncertainty继续保留高对比。`NO_COLOR`只移除ANSI样式，不移除结构。
+
+终端协议无法portable地为单独一行选择更小字号，因此本slice不伪造字号能力，也不引入alternate-screen TUI。One-shot、redirect、无role UI的injected stream、Session、Action Audit及全部模型可见合同保持不变；canonical system prompt仍为v21，provider adapter contract仍为v24。完整决策见[0068：Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -929,3 +937,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 65. [0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
 66. [0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
 67. [0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)
+68. [0068：Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)

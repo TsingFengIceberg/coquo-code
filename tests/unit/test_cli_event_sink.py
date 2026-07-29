@@ -13,8 +13,7 @@ from leonervis_code.agent.tool_events import (
     ToolResultDetails,
 )
 from leonervis_code.cli.event_sink import TerminalEventSink
-from leonervis_code.cli.markdown_renderer import write_markdown_document
-from leonervis_code.cli.presentation import GREEN, RESET, ToolDetailMode
+from leonervis_code.cli.presentation import DIM, GREEN, RESET, ToolDetailMode
 
 
 class FlushingStream(io.StringIO):
@@ -220,8 +219,10 @@ def test_tty_feedback_replaces_waiting_with_plain_assistant_role_markers() -> No
     sink.begin_final_output()
     stream.write("Done.\n")
 
+    rule = f"  {'─' * 24}"
     assert stream.getvalue() == (
-        "• Working...\r\x1b[2K• I will inspect.\n[tool 1/6] succeeded code=ok\n• Done.\n"
+        f"  Working...\r\x1b[2K\n{rule}\n• I will inspect.\n"
+        f"  [tool 1/6] succeeded code=ok\n\n{rule}\n• Done.\n"
     )
 
 
@@ -240,7 +241,7 @@ def test_tty_feedback_marks_streamed_markdown_without_rendering_marker_as_a_list
     sink(AssistantFinalTextStreamCommitted("**Done**"))
 
     rendered = stream.getvalue()
-    assert rendered.startswith("• Working...\r\x1b[2K• Done")
+    assert rendered.startswith(f"  Working...\r\x1b[2K\n  {'─' * 24}\n• Done")
     assert "Done" in rendered
     assert "**" not in rendered
 
@@ -256,10 +257,39 @@ def test_tty_feedback_keeps_nonstream_markdown_final_on_the_role_marker_line() -
     )
 
     sink.start_waiting()
-    sink.begin_final_output()
-    write_markdown_document(stream, "**HISTORY_TEST_OK**", color=False)
+    sink.write_final_text("**HISTORY_TEST_OK**")
 
-    assert stream.getvalue() == "• Working...\r\x1b[2K• HISTORY_TEST_OK\n"
+    assert stream.getvalue() == (f"  Working...\r\x1b[2K\n  {'─' * 24}\n• HISTORY_TEST_OK\n")
+
+
+def test_tty_markdown_defers_role_marker_until_visible_text_is_ready() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        render_markdown=True,
+        show_role_markers=True,
+    )
+
+    sink(AssistantResponseTextDeltaReceived("**Done**"))
+    assert stream.getvalue() == ""
+
+    sink(AssistantFinalTextStreamCommitted("**Done**"))
+    assert stream.getvalue().startswith(f"\n  {'─' * 24}\n• Done")
+
+
+def test_tty_host_events_are_indented_and_muted_without_weakening_errors() -> None:
+    success_stream = io.StringIO()
+    TerminalEventSink(success_stream, color=True, show_role_markers=True)(
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.SUCCEEDED)
+    )
+    assert success_stream.getvalue() == (f"{DIM}{GREEN}  [tool 1/6] succeeded{RESET}\n")
+
+    error_stream = io.StringIO()
+    TerminalEventSink(error_stream, color=False, show_role_markers=True)(
+        ToolRequestFinished("read_file", 1, 6, ToolEventStatus.FAILED, "failed")
+    )
+    assert error_stream.getvalue() == "  [tool 1/6] failed code=failed\n"
 
 
 def test_default_sink_contract_has_no_waiting_or_role_marker() -> None:

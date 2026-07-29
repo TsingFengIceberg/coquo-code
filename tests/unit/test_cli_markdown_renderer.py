@@ -8,6 +8,8 @@ import pytest
 from leonervis_code.cli.markdown_renderer import (
     TerminalMarkdownRenderer,
     escape_terminal_controls,
+    render_markdown_document,
+    render_plain_document,
     write_markdown_document,
 )
 
@@ -95,6 +97,34 @@ def test_terminal_control_escaping_preserves_unicode_newlines_and_tabs() -> None
     assert escape_terminal_controls("中文\n\ttext\x00\x1b\r\u202e\u2028") == (
         r"中文" "\n\ttext" r"\x00\x1b\x0d\u202e\u2028"
     )
+
+
+def test_role_documents_wrap_with_hanging_body_indentation() -> None:
+    user = render_plain_document(
+        "0123456789 0123456789 0123456789 0123456789\nsecond line",
+        width=40,
+        first_prefix="› ",
+        continuation_prefix="  ",
+        prefix_width=2,
+    )
+    assert user.splitlines() == [
+        "› 0123456789 0123456789 0123456789 ",
+        "  0123456789",
+        "  second line",
+    ]
+
+    assistant = render_markdown_document(
+        "A long assistant response that must wrap inside the role body column.",
+        color=False,
+        width=40,
+        first_prefix="• ",
+        continuation_prefix="  ",
+        prefix_width=2,
+    )
+    lines = assistant.splitlines()
+    assert lines[0].startswith("• ")
+    assert all(line.startswith(("• ", "  ")) for line in lines)
+    assert all(len(line) <= 40 for line in lines)
 
 
 @pytest.mark.parametrize("width", [39, 241, True])

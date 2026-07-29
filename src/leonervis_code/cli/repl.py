@@ -7,7 +7,6 @@ from typing import TextIO
 
 from leonervis_code.cli.brand import render_banner
 from leonervis_code.cli.event_sink import TerminalEventSink
-from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.prompt_editor import (
     MAX_PROMPT_BYTES,
     MAX_PROMPT_CHARACTERS,
@@ -173,11 +172,7 @@ def run_repl(
             else:
                 response = getattr(session, "run")(prompt)
             if not event_sink.final_text_was_streamed:
-                event_sink.begin_final_output()
-                if render_markdown:
-                    write_markdown_document(stdout, response, color=color)
-                else:
-                    stdout.write(f"{response}\n")
+                event_sink.write_final_text(response)
         except KeyboardInterrupt:
             if event_sink.abort_stream():
                 stdout.write(

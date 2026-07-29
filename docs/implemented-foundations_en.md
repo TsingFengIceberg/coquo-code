@@ -696,6 +696,14 @@ A closed `TerminalViewState`, pure reducer, and bounded local queue move assista
 
 `TurnCancellation` crosses ProjectSession, AgentLoop, provider streams, tool boundaries, the approval broker, and `run_command`. Commands poll cancellation and use the existing bounded TERM-to-KILL process-group cleanup. A blocking provider SDK call can observe cancellation only after return or at the next stream chunk, and no unsafe thread exception injection is used. This Host-only redesign preserves canonical system prompt v21, provider adapter contract v24, the 21-tool catalog, Effective Context identity, and every Session/Action Audit schema. See [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md).
 
+## Terminal Message Hierarchy and Hanging Indent
+
+The real TTY separates conversation and Host process information into stable visual levels. Submitted user messages use `› ` and assistant bodies use `• `. Both reserve a two-column role prefix, and explicit newlines or automatic terminal-display-width wrapping continue from the body column. A new conversation message block is preceded by a low-intensity short rule indented by two columns and bounded to roughly one third of terminal width or 24 cells. Plain user text has terminal controls escaped before display-width wrapping. Assistant Markdown renders after subtracting the role prefix from available width, preventing long lines from returning to the terminal's left edge or crossing its right boundary.
+
+Markdown streams no longer write `• ` by itself. Deltas without a safe rendering boundary stay in memory; the marker and first visible body appear in one frontend write, and later chunks use the continuation indent. Routine tool, context, usage, compaction, and slash output becomes an indented Host block with dim or dim-green styling in color mode. Warnings, approvals, errors, partial outcomes, and durability uncertainty retain high contrast. `NO_COLOR` removes ANSI styling only, not structure.
+
+Terminal protocols cannot portably select a smaller font for one line, so this slice does not claim font-size control or introduce an alternate-screen TUI. One-shot output, redirects, injected streams without the role UI, Sessions, Action Audit, and every model-visible contract remain unchanged. Canonical system prompt remains v21 and provider adapter contract remains v24. See [0068: Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -929,3 +937,4 @@ This slice establishes capacity facts only. It does not count current request to
 65. [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
 66. [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
 67. [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)
+68. [0068: Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)

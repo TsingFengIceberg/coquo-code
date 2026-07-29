@@ -156,14 +156,17 @@ def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: P
         session.release.set()
         _wait_until(lambda: not terminal.state.busy)
         assert terminal.draft == "next draft"
-        pipe.send_text("\x03")
-        _wait_until(lambda: terminal.draft == "")
+        pipe.send_text("\r")
+        _wait_until(lambda: session.prompts == ["hello", "next draft"])
+        _wait_until(lambda: not terminal.state.busy)
         pipe.send_text("\x04")
         thread.join(2)
 
     assert not thread.is_alive()
     assert "› hello" in stdout.getvalue()
-    assert "reply" in stdout.getvalue()
+    assert "› next draft" in stdout.getvalue()
+    assert stdout.getvalue().count(f"  {'─' * 24}") == 3
+    assert "\n• reply" in stdout.getvalue()
     assert stdout.getvalue().index("› hello") < stdout.getvalue().index("reply")
 
 

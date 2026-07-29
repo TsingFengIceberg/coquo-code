@@ -36,6 +36,7 @@ RED = "\x1b[31m"
 GREEN = "\x1b[32m"
 YELLOW = "\x1b[33m"
 BLUE = "\x1b[34m"
+DIM = "\x1b[2m"
 _READLINE_START = "\001"
 _READLINE_END = "\002"
 _TOOLBAR_MODEL_WIDTH = 36
@@ -257,6 +258,19 @@ def render_prompt(
     return f"{_ansi('›', GREEN, readline=readline)} " if color else "› "
 
 
+def render_assistant_prefix(*, color: bool) -> str:
+    """Render the stable assistant role marker and body separator."""
+    return f"{_ansi('•', BLUE, readline=False)} " if color else "• "
+
+
+def render_message_separator(width: int, *, color: bool) -> str:
+    """Render a short secondary rule between complete conversation blocks."""
+    if type(width) is not int or width < 1:
+        raise ValueError("terminal message separator width is invalid")
+    rule = f"  {'─' * max(8, min(24, width // 3))}"
+    return f"{DIM}{rule}{RESET}" if color else rule
+
+
 def render_prompt_toolbar(
     status: RuntimeStatusView | None,
     cwd: Path,
@@ -277,7 +291,7 @@ def render_prompt_toolbar(
 
 
 def render_message(text: str, kind: MessageKind, *, color: bool) -> str:
-    """Apply a traditional semantic color without changing message text."""
+    """Apply a semantic terminal style without changing message text."""
     if not color or kind == "plain":
         return text
     code = {
@@ -287,6 +301,25 @@ def render_message(text: str, kind: MessageKind, *, color: bool) -> str:
         "error": RED,
     }[kind]
     return f"{code}{text}{RESET}"
+
+
+def indent_terminal_block(text: str, indent: str = "  ") -> str:
+    """Indent every visible logical line while preserving existing ANSI styling."""
+    if not text:
+        return indent
+    return "".join(f"{indent}{line}" for line in text.splitlines(keepends=True))
+
+
+def render_host_message(text: str, kind: MessageKind, *, color: bool) -> str:
+    """Render non-assistant terminal information as an indented secondary block."""
+    indented = indent_terminal_block(text)
+    if not color or kind == "plain":
+        return indented
+    if kind == "info":
+        return f"{DIM}{indented}{RESET}"
+    if kind == "success":
+        return f"{DIM}{GREEN}{indented}{RESET}"
+    return render_message(indented, kind, color=color)
 
 
 def render_recent_history(turns: tuple[ConversationTurnView, ...], count: int) -> str:

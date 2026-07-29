@@ -42,11 +42,14 @@ from leonervis_code.cli.markdown_renderer import (
     MIN_TERMINAL_WIDTH,
     escape_terminal_controls,
     render_markdown_document,
+    render_plain_document,
 )
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     ToolDetailMode,
-    render_message,
+    indent_terminal_block,
+    render_host_message,
+    render_message_separator,
     render_prompt,
     render_prompt_toolbar,
 )
@@ -111,16 +114,8 @@ class _QueuedPromptRenderer:
         self._sink = self._new_sink()
 
     def render_final(self, response: str) -> str:
-        self._sink.begin_final_output()
-        marker = self._take_output()
-        if self._render_markdown:
-            return marker + render_markdown_document(
-                response,
-                color=self._color,
-                width=self._width,
-            )
-        safe_response = escape_terminal_controls(response)
-        return marker + (safe_response if safe_response.endswith("\n") else f"{safe_response}\n")
+        self._sink.write_final_text(response)
+        return self._take_output()
 
     def configure(self, mode: ToolDetailMode, *, width: int) -> None:
         if type(mode) is not ToolDetailMode:
@@ -179,6 +174,7 @@ class TerminalApplication:
         self._approval_draft: tuple[str, int] | None = None
         self._turn_starting = False
         self._cancel_pending_start = False
+        self._conversation_output_started = False
         self._history = InMemoryHistory(_session_prompt_history(session))
         self._buffer = Buffer(
             multiline=True,
@@ -257,7 +253,10 @@ class TerminalApplication:
                 return
             self._approval_draft = (self._buffer.text, self._buffer.cursor_position)
             self._buffer.set_document(self._buffer.document.__class__("", 0), bypass_readonly=True)
-            await self._write(render_approval_request(event.request, color=self._color) + "\n")
+            await self._write(
+                indent_terminal_block(render_approval_request(event.request, color=self._color))
+                + "\n"
+            )
         elif isinstance(event, PromptActivity):
             rendered = self._renderer.render(event.event)
             if rendered:
@@ -267,7 +266,7 @@ class TerminalApplication:
             if trailing:
                 await self._write(trailing)
             await self._write(
-                render_message(
+                render_host_message(
                     escape_terminal_controls(event.message),
                     "warning" if event.cancelled else "error",
                     color=self._color,
@@ -322,10 +321,26 @@ class TerminalApplication:
         return False
 
     async def _start_turn_after_echo(self, text: str, *, include_tool_details: bool) -> None:
-        safe_text = escape_terminal_controls(text)
-        await self._write(
-            f"\n{render_prompt(self._status, self._session_info, color=self._color, readline=False)}{safe_text}\n"
+        width = self._current_width()
+        rendered = render_plain_document(
+            text,
+            width=width,
+            first_prefix=render_prompt(
+                self._status,
+                self._session_info,
+                color=self._color,
+                readline=False,
+            ),
+            continuation_prefix="  ",
+            prefix_width=2,
         )
+        separator = (
+            f"{render_message_separator(width, color=self._color)}\n"
+            if self._conversation_output_started
+            else ""
+        )
+        await self._write(f"\n{separator}{rendered}")
+        self._conversation_output_started = True
         if self._cancel_pending_start:
             self._turn_starting = False
             self._cancel_pending_start = False
@@ -345,7 +360,7 @@ class TerminalApplication:
                 self._schedule_write(CLEAR_SCREEN)
             if result.message is not None:
                 self._schedule_write(
-                    render_message(result.message, result.kind, color=self._color) + "\n"
+                    render_host_message(result.message, result.kind, color=self._color) + "\n"
                 )
             if result.exit:
                 self._application.exit(result=None)
@@ -353,7 +368,7 @@ class TerminalApplication:
             self._replace_history()
         except BaseException as error:
             self._schedule_write(
-                render_message(
+                render_host_message(
                     f"Operation failed: {type(error).__name__}: {error}", "error", color=self._color
                 )
                 + "\n"

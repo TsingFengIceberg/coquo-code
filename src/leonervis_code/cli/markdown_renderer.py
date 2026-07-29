@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from typing import TextIO
 import unicodedata
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.text import Text
 
 DEFAULT_TERMINAL_WIDTH = 100
 MIN_TERMINAL_WIDTH = 40
 MAX_TERMINAL_WIDTH = 240
+_TRAILING_RENDER_PADDING = re.compile(r"[ \t]+((?:\x1b\[[0-?]*[ -/]*[@-~])*)(\r?\n)")
 
 
 class TerminalMarkdownRenderer:
@@ -24,11 +27,21 @@ class TerminalMarkdownRenderer:
         *,
         color: bool,
         width: int | None = None,
+        first_prefix: str = "",
+        continuation_prefix: str = "",
+        prefix_width: int = 0,
     ) -> None:
         self._stream = stream
         self._color = color
         self._width = _terminal_width(stream) if width is None else _validate_width(width)
+        self._first_prefix, self._continuation_prefix, self._prefix_width = _validate_prefixes(
+            first_prefix,
+            continuation_prefix,
+            prefix_width,
+            self._width,
+        )
         self._pending = ""
+        self._started = False
 
     def push(self, delta: str) -> bool:
         """Buffer one exact delta and render its largest stream-safe prefix."""
@@ -57,6 +70,12 @@ class TerminalMarkdownRenderer:
     def abort(self) -> None:
         """Discard an incomplete suffix without presenting it as completed Markdown."""
         self._pending = ""
+        self._started = False
+
+    def reset(self) -> None:
+        """Start a new assistant document after one stream completes."""
+        self._pending = ""
+        self._started = False
 
     def _render(self, markdown: str) -> bool:
         if not markdown:
@@ -65,14 +84,16 @@ class TerminalMarkdownRenderer:
         rendered = _render_to_ansi(
             safe_markdown,
             color=self._color,
-            width=self._width,
+            width=self._width - self._prefix_width,
         )
         if not rendered:
             rendered = safe_markdown
             if not rendered.endswith("\n"):
                 rendered += "\n"
-        self._stream.write(rendered)
+        first_prefix = self._continuation_prefix if self._started else self._first_prefix
+        self._stream.write(_apply_hanging_prefix(rendered, first_prefix, self._continuation_prefix))
         self._stream.flush()
+        self._started = True
         return True
 
 
@@ -82,10 +103,22 @@ def write_markdown_document(
     *,
     color: bool,
     width: int | None = None,
+    first_prefix: str = "",
+    continuation_prefix: str = "",
+    prefix_width: int = 0,
 ) -> None:
     """Render one complete Markdown document and terminate its terminal line."""
     selected_width = _terminal_width(stream) if width is None else _validate_width(width)
-    stream.write(render_markdown_document(markdown, color=color, width=selected_width))
+    stream.write(
+        render_markdown_document(
+            markdown,
+            color=color,
+            width=selected_width,
+            first_prefix=first_prefix,
+            continuation_prefix=continuation_prefix,
+            prefix_width=prefix_width,
+        )
+    )
     stream.flush()
 
 
@@ -94,14 +127,65 @@ def render_markdown_document(
     *,
     color: bool,
     width: int | None = None,
+    first_prefix: str = "",
+    continuation_prefix: str = "",
+    prefix_width: int = 0,
 ) -> str:
     """Purely render one complete untrusted Markdown document to safe terminal text."""
     selected_width = DEFAULT_TERMINAL_WIDTH if width is None else _validate_width(width)
+    first_prefix, continuation_prefix, prefix_width = _validate_prefixes(
+        first_prefix,
+        continuation_prefix,
+        prefix_width,
+        selected_width,
+    )
     safe_markdown = escape_terminal_controls(markdown)
-    rendered = _render_to_ansi(safe_markdown, color=color, width=selected_width)
-    if rendered:
-        return rendered
-    return safe_markdown if safe_markdown.endswith("\n") else f"{safe_markdown}\n"
+    rendered = _render_to_ansi(
+        safe_markdown,
+        color=color,
+        width=selected_width - prefix_width,
+    )
+    if not rendered:
+        rendered = safe_markdown if safe_markdown.endswith("\n") else f"{safe_markdown}\n"
+    return _apply_hanging_prefix(rendered, first_prefix, continuation_prefix)
+
+
+def render_plain_document(
+    text: str,
+    *,
+    width: int,
+    first_prefix: str = "",
+    continuation_prefix: str = "",
+    prefix_width: int = 0,
+) -> str:
+    """Render escaped plain text with display-width wrapping and a hanging prefix."""
+    selected_width = _validate_width(width)
+    first_prefix, continuation_prefix, prefix_width = _validate_prefixes(
+        first_prefix,
+        continuation_prefix,
+        prefix_width,
+        selected_width,
+    )
+    body_width = selected_width - prefix_width
+    safe_text = escape_terminal_controls(text)
+    logical_lines = safe_text.split("\n")
+    if logical_lines and logical_lines[-1] == "":
+        logical_lines.pop()
+    if not logical_lines:
+        logical_lines = [""]
+    console = Console(
+        width=body_width,
+        height=25,
+        markup=False,
+        emoji=False,
+        highlight=False,
+    )
+    visual_lines: list[str] = []
+    for logical_line in logical_lines:
+        wrapped = Text(logical_line).wrap(console, body_width, overflow="fold", no_wrap=False)
+        visual_lines.extend(line.plain for line in wrapped or [Text("")])
+    rendered = "\n".join(visual_lines) + "\n"
+    return _apply_hanging_prefix(rendered, first_prefix, continuation_prefix)
 
 
 def escape_terminal_controls(text: str) -> str:
@@ -130,15 +214,17 @@ def _render_to_ansi(markdown: str, *, color: bool, width: int) -> str:
         color_system="standard" if color else None,
         no_color=not color,
         width=width,
+        height=25,
         markup=False,
         emoji=False,
         highlight=False,
     )
     console.print(
         Markdown(markdown, code_theme="monokai", hyperlinks=False),
-        soft_wrap=True,
+        soft_wrap=False,
+        overflow="fold",
     )
-    return output.getvalue()
+    return _TRAILING_RENDER_PADDING.sub(r"\1\2", output.getvalue())
 
 
 def _terminal_width(stream: TextIO) -> int:
@@ -153,6 +239,33 @@ def _validate_width(width: int) -> int:
     if type(width) is not int or not MIN_TERMINAL_WIDTH <= width <= MAX_TERMINAL_WIDTH:
         raise ValueError("terminal Markdown width is out of range")
     return width
+
+
+def _validate_prefixes(
+    first_prefix: str,
+    continuation_prefix: str,
+    prefix_width: int,
+    width: int,
+) -> tuple[str, str, int]:
+    if not isinstance(first_prefix, str) or not isinstance(continuation_prefix, str):
+        raise ValueError("terminal prefixes must be strings")
+    if type(prefix_width) is not int or prefix_width < 0 or prefix_width >= width:
+        raise ValueError("terminal prefix width is invalid")
+    return first_prefix, continuation_prefix, prefix_width
+
+
+def _apply_hanging_prefix(
+    rendered: str,
+    first_prefix: str,
+    continuation_prefix: str,
+) -> str:
+    if not rendered:
+        return ""
+    result: list[str] = []
+    for index, line in enumerate(rendered.splitlines(keepends=True)):
+        result.append(first_prefix if index == 0 else continuation_prefix)
+        result.append(line)
+    return "".join(result)
 
 
 def _stream_safe_boundary(markdown: str) -> int | None:
