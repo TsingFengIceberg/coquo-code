@@ -145,6 +145,17 @@ from leonervis_code.tools.git_diff import (
     GitDiffSnapshot,
     GitDiffTool,
 )
+from leonervis_code.tools.git_log import (
+    DEFAULT_GIT_LOG_LIMIT,
+    GIT_LOG_TOOL_NAME,
+    GitLogSnapshot,
+    GitLogTool,
+)
+from leonervis_code.tools.git_show import (
+    GIT_SHOW_TOOL_NAME,
+    GitShowSnapshot,
+    GitShowTool,
+)
 from leonervis_code.tools.git_status import (
     GIT_STATUS_TOOL_NAME,
     GitStatusSnapshot,
@@ -487,6 +498,8 @@ class ProjectSession:
         patch_file: PatchFileTool | None = None,
         git_status: GitStatusTool | None = None,
         git_diff: GitDiffTool | None = None,
+        git_log: GitLogTool | None = None,
+        git_show: GitShowTool | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -518,6 +531,8 @@ class ProjectSession:
         self._patch_file = patch_file or PatchFileTool(workspace)
         self._git_status = git_status or GitStatusTool(workspace)
         self._git_diff = git_diff or GitDiffTool(workspace)
+        self._git_log = git_log or GitLogTool(workspace)
+        self._git_show = git_show or GitShowTool(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -573,6 +588,8 @@ class ProjectSession:
         patch_file_factory: Callable[[Path], PatchFileTool] = PatchFileTool,
         git_status_factory: Callable[[Path], GitStatusTool] = GitStatusTool,
         git_diff_factory: Callable[[Path], GitDiffTool] = GitDiffTool,
+        git_log_factory: Callable[[Path], GitLogTool] = GitLogTool,
+        git_show_factory: Callable[[Path], GitShowTool] = GitShowTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -626,6 +643,8 @@ class ProjectSession:
             patch_file = patch_file_factory(resolved_workspace)
             git_status = git_status_factory(resolved_workspace)
             git_diff = git_diff_factory(resolved_workspace)
+            git_log = git_log_factory(resolved_workspace)
+            git_show = git_show_factory(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -655,6 +674,8 @@ class ProjectSession:
                     patch_file=patch_file,
                     git_status=git_status,
                     git_diff=git_diff,
+                    git_log=git_log,
+                    git_show=git_show,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -676,6 +697,8 @@ class ProjectSession:
                     grep_regex,
                     git_status,
                     git_diff,
+                    git_log,
+                    git_show,
                     commit_turn=lambda turn: session_holder["session"]._commit_turn(
                         writer_holder["writer"], turn
                     ),
@@ -722,6 +745,8 @@ class ProjectSession:
                     patch_file=patch_file,
                     git_status=git_status,
                     git_diff=git_diff,
+                    git_log=git_log,
+                    git_show=git_show,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -791,6 +816,18 @@ class ProjectSession:
             self._ensure_open()
             return self._git_diff.observe(scope, ".")
 
+    def git_log(self, limit: int = DEFAULT_GIT_LOG_LIMIT, path: str = ".") -> GitLogSnapshot:
+        """Observe current-HEAD history without model invocation or Session mutation."""
+        with self._lock:
+            self._ensure_open()
+            return self._git_log.observe(limit, path)
+
+    def git_show(self, commit_id: str, path: str = ".") -> GitShowSnapshot:
+        """Observe one reachable commit without model invocation or Session mutation."""
+        with self._lock:
+            self._ensure_open()
+            return self._git_show.observe(commit_id, path)
+
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""
         with self._lock:
@@ -853,6 +890,8 @@ class ProjectSession:
                     self._grep_regex,
                     self._git_status,
                     self._git_diff,
+                    self._git_log,
+                    self._git_show,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
@@ -1462,6 +1501,8 @@ class ProjectSession:
         grep_regex,
         git_status,
         git_diff,
+        git_log,
+        git_show,
         *,
         commit_turn,
     ) -> AgentLoop:
@@ -1477,6 +1518,8 @@ class ProjectSession:
             grep_regex,
             git_status=git_status,
             git_diff=git_diff,
+            git_log=git_log,
+            git_show=git_show,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -1497,6 +1540,8 @@ class ProjectSession:
             self._grep_regex,
             self._git_status,
             self._git_diff,
+            self._git_log,
+            self._git_show,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
         )
         loop.install_action_dispatcher(self._dispatch_action)
@@ -1529,6 +1574,8 @@ class ProjectSession:
             GREP_REGEX_TOOL_NAME,
             GIT_STATUS_TOOL_NAME,
             GIT_DIFF_TOOL_NAME,
+            GIT_LOG_TOOL_NAME,
+            GIT_SHOW_TOOL_NAME,
         }:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -1723,6 +1770,10 @@ class ProjectSession:
                 result = self._git_status.execute(request)
             elif request.name == GIT_DIFF_TOOL_NAME:
                 result = self._git_diff.execute(request)
+            elif request.name == GIT_LOG_TOOL_NAME:
+                result = self._git_log.execute(request)
+            elif request.name == GIT_SHOW_TOOL_NAME:
+                result = self._git_show.execute(request)
             elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
                 write_result = self._write_file.execute_detailed(prepared_write)
                 outcome = {

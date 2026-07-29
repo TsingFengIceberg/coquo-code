@@ -30,6 +30,8 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_context_meter,
     render_git_diff,
+    render_git_log,
+    render_git_show,
     render_git_status,
     render_action_audits,
     render_message,
@@ -114,6 +116,8 @@ from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.git_diff import GitDiffScope, GitDiffSnapshot
+from leonervis_code.tools.git_log import GitLogEntry, GitLogSnapshot
+from leonervis_code.tools.git_show import GitShowSnapshot
 from leonervis_code.tools.git_status import GitStatusEntry, GitStatusSnapshot
 
 
@@ -142,6 +146,47 @@ def test_render_git_changes_is_bounded_clear_and_terminal_safe() -> None:
     assert "Git diff (unstaged):" in rendered_diff
     assert "\\x1b[2J\\x0d" in rendered_diff
     assert "\x1b" not in rendered_diff
+
+
+def test_render_git_history_and_commit_are_copyable_and_terminal_safe() -> None:
+    commit_id = "a" * 40
+    history = GitLogSnapshot(
+        (
+            GitLogEntry(
+                commit_id,
+                ("b" * 40,),
+                "2026-07-29T01:02:03+08:00",
+                "unsafe\nsubject\x1b[2J",
+                True,
+            ),
+        ),
+        "src/app.py",
+        True,
+        "unused",
+    )
+    rendered_history = render_git_log(history)
+    assert commit_id in rendered_history
+    assert "unsafe\\nsubject\\x1b[2J" in rendered_history
+    assert "subject truncated" in rendered_history
+    assert "\x1b" not in rendered_history
+
+    shown = GitShowSnapshot(
+        commit_id,
+        ("b" * 40,),
+        "2026-07-29T01:02:03+08:00",
+        ".",
+        "message\x1b[2J\n",
+        False,
+        "+patch\r\n",
+        True,
+        "unused",
+    )
+    rendered_show = render_git_show(shown)
+    assert f"Git commit: {commit_id}" in rendered_show
+    assert "message\\x1b[2J" in rendered_show
+    assert "+patch\\x0d\n" in rendered_show
+    assert "Patch (truncated):" in rendered_show
+    assert "\x1b" not in rendered_show
 
 
 @dataclass

@@ -22,6 +22,8 @@ from leonervis_code.cli.presentation import (
     render_compact_preview,
     render_compaction_history,
     render_git_diff,
+    render_git_log,
+    render_git_show,
     render_git_status,
     render_provider_adapter_error,
     render_output_budget,
@@ -52,6 +54,7 @@ from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
 from leonervis_code.tools.git_repository import GitObservationError
+from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 
 TOP_LEVEL_COMMANDS = (
     "/help",
@@ -59,6 +62,8 @@ TOP_LEVEL_COMMANDS = (
     "/actions",
     "/tools",
     "/changes",
+    "/commit",
+    "/commits",
     "/exit",
     "/quit",
     "/status",
@@ -92,6 +97,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/changes", "Show Git working changes", True),
     SlashCompletionSpec("/changes unstaged", "Show unstaged tracked patch"),
     SlashCompletionSpec("/changes staged", "Show staged tracked patch"),
+    SlashCompletionSpec("/commit", "Show one reachable Git commit", True),
+    SlashCompletionSpec("/commits", "Show recent reachable Git commits", True),
     SlashCompletionSpec("/status", "Show runtime status", True),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
@@ -128,6 +135,10 @@ class ReplSession(Protocol):
     def git_status(self): ...
 
     def git_diff(self, scope: str): ...
+
+    def git_log(self, limit: int, path: str): ...
+
+    def git_show(self, commit_id: str, path: str): ...
 
     def status(self): ...
 
@@ -235,6 +246,10 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         return _call(lambda: render_git_diff(session.git_diff(scope)), kind="plain")
     if command.startswith("/changes "):
         return _usage("Usage: /changes [unstaged|staged]")
+    if command == "/commits" or command.startswith("/commits "):
+        return _commits(command, session)
+    if command == "/commit" or command.startswith("/commit "):
+        return _commit(command, session)
     if command == "/output" or command.startswith("/output "):
         return _output(command, session)
     if command == "/compact preview":
@@ -310,6 +325,32 @@ def _history(command: str, session: ReplSession) -> SlashResult:
     if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit() or int(parts[1]) <= 0:
         return _usage("Usage: /history <positive integer>")
     return _call(lambda: render_recent_history(session.turns, int(parts[1])))
+
+
+def _commits(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=2)
+    if len(parts) == 1:
+        limit = DEFAULT_GIT_LOG_LIMIT
+        path = "."
+    elif len(parts) >= 2 and parts[1].isascii() and parts[1].isdigit():
+        limit = int(parts[1])
+        path = parts[2] if len(parts) == 3 else "."
+    else:
+        return _usage(f"Usage: /commits [1-{MAX_GIT_LOG_LIMIT}] [path]")
+    if not 1 <= limit <= MAX_GIT_LOG_LIMIT or not path:
+        return _usage(f"Usage: /commits [1-{MAX_GIT_LOG_LIMIT}] [path]")
+    return _call(lambda: render_git_log(session.git_log(limit, path)), kind="info")
+
+
+def _commit(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=2)
+    if len(parts) not in {2, 3}:
+        return _usage("Usage: /commit <full-commit-id> [path]")
+    commit_id = parts[1]
+    path = parts[2] if len(parts) == 3 else "."
+    if not path:
+        return _usage("Usage: /commit <full-commit-id> [path]")
+    return _call(lambda: render_git_show(session.git_show(commit_id, path)), kind="plain")
 
 
 def _actions(command: str, session: ReplSession) -> SlashResult:

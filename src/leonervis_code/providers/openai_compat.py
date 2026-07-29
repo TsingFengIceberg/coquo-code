@@ -304,6 +304,14 @@ def git_diff_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[18])
 
 
+def git_log_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[19])
+
+
+def git_show_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[20])
+
+
 def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())

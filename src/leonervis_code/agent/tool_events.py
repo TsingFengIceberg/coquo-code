@@ -313,6 +313,15 @@ def safe_tool_request_summary(request: ToolUse) -> str:
             f"scope={_safe_argument(arguments.get('scope'))} "
             f"path={_safe_path(arguments.get('path'))}"
         )
+    elif name == "git_log":
+        summary = (
+            f"limit={_safe_number(arguments.get('limit'))} path={_safe_path(arguments.get('path'))}"
+        )
+    elif name == "git_show":
+        summary = (
+            f"commit={_safe_argument(arguments.get('commit_id'))} "
+            f"path={_safe_path(arguments.get('path'))}"
+        )
     else:
         summary = "arguments=<redacted>"
     return summary[:MAX_TOOL_EVENT_SUMMARY_CHARACTERS]

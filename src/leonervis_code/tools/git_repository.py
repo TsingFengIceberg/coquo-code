@@ -23,6 +23,7 @@ GIT_PIPE_DRAIN_GRACE_SECONDS = 0.5
 MAX_GIT_CONFIG_BYTES = 1024 * 1024
 _INCLUDE_SECTION = re.compile(r"^\s*\[\s*include(?:if)?(?:\s|\])", re.IGNORECASE)
 _FILTER_SECTION = re.compile(r"^\s*\[\s*filter(?:\s|\])", re.IGNORECASE)
+GIT_OBJECT_ID_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 class GitObservationError(RuntimeError):
@@ -35,6 +36,7 @@ class GitCommandOutput:
 
     stdout: bytes
     stdout_total: int
+    returncode: int
 
     @property
     def truncated(self) -> bool:
@@ -100,6 +102,21 @@ class GitRepository:
         self._validate_repository()
         return self._run(arguments, stdout_limit=stdout_limit)
 
+    def history(self, arguments: Sequence[str], *, stdout_limit: int) -> GitCommandOutput:
+        """Return bounded bytes from one caller-selected reviewed history command."""
+        self._validate_repository()
+        return self._run(arguments, stdout_limit=stdout_limit)
+
+    def commit_is_reachable(self, commit_id: str) -> bool:
+        """Return whether one exact object ID is a commit reachable from current HEAD."""
+        self._validate_repository()
+        result = self._run(
+            ("merge-base", "--is-ancestor", commit_id, "HEAD"),
+            stdout_limit=1,
+            accepted_returncodes=(0, 1),
+        )
+        return result.returncode == 0
+
     def _validate_repository(self) -> None:
         try:
             root = self._workspace.lstat()
@@ -124,9 +141,17 @@ class GitRepository:
         if not top_level_text or Path(top_level_text).resolve() != self._workspace:
             raise GitObservationError("workspace must be the Git worktree top level")
 
-    def _run(self, arguments: Sequence[str], *, stdout_limit: int) -> GitCommandOutput:
+    def _run(
+        self,
+        arguments: Sequence[str],
+        *,
+        stdout_limit: int,
+        accepted_returncodes: tuple[int, ...] = (0,),
+    ) -> GitCommandOutput:
         if stdout_limit <= 0:
             raise ValueError("Git stdout limit must be positive")
+        if not accepted_returncodes or any(type(code) is not int for code in accepted_returncodes):
+            raise ValueError("Git accepted return codes are invalid")
         command = (
             self._executable,
             "--no-optional-locks",
@@ -151,6 +176,10 @@ class GitRepository:
             "-c",
             "pager.diff=false",
             "-c",
+            "pager.log=false",
+            "-c",
+            "pager.show=false",
+            "-c",
             "submodule.recurse=false",
             *arguments,
         )
@@ -160,6 +189,7 @@ class GitRepository:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_EXTERNAL_DIFF": "",
+            "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_PAGER": "cat",
             "GIT_TERMINAL_PROMPT": "0",
@@ -207,9 +237,9 @@ class GitRepository:
         readers_complete = _finish_readers(process, readers)
         if not readers_complete or stdout.failed or stderr.failed:
             raise GitObservationError("git observation output could not be collected")
-        if process.returncode != 0:
+        if process.returncode not in accepted_returncodes:
             raise GitObservationError("workspace Git observation failed")
-        return GitCommandOutput(bytes(stdout.data), stdout.total)
+        return GitCommandOutput(bytes(stdout.data), stdout.total, process.returncode)
 
     def _validate_repository_metadata(self) -> None:
         git_dir = self._workspace / ".git"

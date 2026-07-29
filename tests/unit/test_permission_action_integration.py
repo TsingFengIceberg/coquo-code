@@ -192,6 +192,13 @@ def test_git_observation_tools_are_read_only_audited_and_committed_without_appro
     (tmp_path / "tracked.txt").write_text("before\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    commit_id = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     (tmp_path / "tracked.txt").write_text("after\n", encoding="utf-8")
     status_call = ToolUse("status-1", "git_status", ToolArguments.from_mapping({}))
     diff_call = ToolUse(
@@ -199,8 +206,21 @@ def test_git_observation_tools_are_read_only_audited_and_committed_without_appro
         "git_diff",
         ToolArguments.from_mapping({"scope": "unstaged", "path": "tracked.txt"}),
     )
+    log_call = ToolUse(
+        "log-1",
+        "git_log",
+        ToolArguments.from_mapping({"limit": 1, "path": "tracked.txt"}),
+    )
+    show_call = ToolUse(
+        "show-1",
+        "git_show",
+        ToolArguments.from_mapping({"commit_id": commit_id, "path": "tracked.txt"}),
+    )
     provider = ToolProvider(
-        [AssistantToolBatch((status_call, diff_call)), AssistantText("observed")]
+        [
+            AssistantToolBatch((status_call, diff_call, log_call, show_call)),
+            AssistantText("observed"),
+        ]
     )
     approvals = []
     session = open_session(
@@ -211,12 +231,20 @@ def test_git_observation_tools_are_read_only_audited_and_committed_without_appro
     try:
         assert session.prompt("inspect Git changes") == "observed"
         continuation = provider.requests[1].history
-        assert '"path":"tracked.txt"' in continuation[-2].content
-        assert "-before" in continuation[-1].content
-        assert "+after" in continuation[-1].content
+        assert '"path":"tracked.txt"' in continuation[-4].content
+        assert "-before" in continuation[-3].content
+        assert "+after" in continuation[-3].content
+        assert commit_id in continuation[-2].content
+        assert '"message":"initial\\n"' in continuation[-1].content
+        assert "+before" in continuation[-1].content
         assert approvals == []
         audits = session.action_audits()
-        assert [audit.identity.tool_name for audit in audits] == ["git_status", "git_diff"]
+        assert [audit.identity.tool_name for audit in audits] == [
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_show",
+        ]
         assert all(audit.identity.action.value == "workspace-read" for audit in audits)
         assert all(audit.status == ActionAuditStatus.SUCCEEDED for audit in audits)
     finally:

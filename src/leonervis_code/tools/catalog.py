@@ -20,6 +20,13 @@ from leonervis_code.tools.git_diff import (
     git_diff_tool_snapshot,
 )
 from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, git_status_tool_snapshot
+from leonervis_code.tools.git_log import (
+    GIT_LOG_TOOL_NAME,
+    MAX_GIT_LOG_LIMIT,
+    git_log_tool_snapshot,
+)
+from leonervis_code.tools.git_repository import GIT_OBJECT_ID_PATTERN
+from leonervis_code.tools.git_show import GIT_SHOW_TOOL_NAME, git_show_tool_snapshot
 from leonervis_code.tools.list_directory import (
     LIST_DIRECTORY_TOOL_NAME,
     list_directory_tool_snapshot,
@@ -88,6 +95,8 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     patch_file_tool_snapshot(),
     git_status_tool_snapshot(),
     git_diff_tool_snapshot(),
+    git_log_tool_snapshot(),
+    git_show_tool_snapshot(),
 )
 
 
@@ -167,6 +176,10 @@ def _expected_keys(name: str) -> set[str]:
         return set()
     if name == GIT_DIFF_TOOL_NAME:
         return {"scope", "path"}
+    if name == GIT_LOG_TOOL_NAME:
+        return {"limit", "path"}
+    if name == GIT_SHOW_TOOL_NAME:
+        return {"commit_id", "path"}
     raise ValueError(f"unsupported tool: {name}")
 
 
@@ -266,6 +279,20 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
         }:
             raise ValueError("git_diff scope is invalid")
         _validate_input_string(tool_input["path"], label="git_diff path")
+        return
+
+    if name == GIT_LOG_TOOL_NAME:
+        limit = tool_input["limit"]
+        if type(limit) is not int or not 1 <= limit <= MAX_GIT_LOG_LIMIT:
+            raise ValueError("git_log limit is invalid")
+        _validate_input_string(tool_input["path"], label="git_log path")
+        return
+
+    if name == GIT_SHOW_TOOL_NAME:
+        commit_id = tool_input["commit_id"]
+        if not isinstance(commit_id, str) or not GIT_OBJECT_ID_PATTERN.fullmatch(commit_id):
+            raise ValueError("git_show commit_id is invalid")
+        _validate_input_string(tool_input["path"], label="git_show path")
         return
 
     for key in expected:

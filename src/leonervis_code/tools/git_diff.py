@@ -71,7 +71,7 @@ class GitDiffTool:
             selected_scope = GitDiffScope(scope)
         except ValueError:
             raise GitObservationError("git_diff scope must be staged or unstaged") from None
-        relative_path = _validate_path(path)
+        relative_path = validate_git_literal_path(path, tool_name=GIT_DIFF_TOOL_NAME)
         common = (
             "diff",
             "--no-ext-diff",
@@ -117,11 +117,11 @@ class GitDiffTool:
         )
 
 
-def _validate_path(value: str) -> str:
+def validate_git_literal_path(value: str, *, tool_name: str) -> str:
     try:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError:
-        raise GitObservationError("git_diff path must be valid UTF-8") from None
+        raise GitObservationError(f"{tool_name} path must be valid UTF-8") from None
     parts = value.split("/")
     if (
         not value
@@ -138,7 +138,7 @@ def _validate_path(value: str) -> str:
         or len(encoded) > MAX_GIT_DIFF_PATH_BYTES
     ):
         raise GitObservationError(
-            "git_diff path must be '.' or a portable workspace-relative literal path"
+            f"{tool_name} path must be '.' or a portable workspace-relative literal path"
         )
     return value
 

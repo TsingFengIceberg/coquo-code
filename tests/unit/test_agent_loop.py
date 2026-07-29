@@ -105,6 +105,8 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "patch_file",
         "git_status",
         "git_diff",
+        "git_log",
+        "git_show",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)

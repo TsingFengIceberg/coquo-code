@@ -31,6 +31,8 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "patch_file",
         "git_status",
         "git_diff",
+        "git_log",
+        "git_show",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -265,6 +267,13 @@ def test_catalog_validates_new_navigation_regex_and_patch_inputs() -> None:
     assert tool_input_from_use(
         tool_use_from_input("diff-1", "git_diff", {"scope": "staged", "path": "src/app.py"})
     ) == {"scope": "staged", "path": "src/app.py"}
+    assert tool_input_from_use(
+        tool_use_from_input("log-1", "git_log", {"limit": 12, "path": "."})
+    ) == {"limit": 12, "path": "."}
+    commit_id = "a" * 40
+    assert tool_input_from_use(
+        tool_use_from_input("show-1", "git_show", {"commit_id": commit_id, "path": "src/app.py"})
+    ) == {"commit_id": commit_id, "path": "src/app.py"}
 
 
 @pytest.mark.parametrize(
@@ -279,6 +288,10 @@ def test_catalog_validates_new_navigation_regex_and_patch_inputs() -> None:
         ("git_status", {"extra": "x"}),
         ("git_diff", {"scope": "both", "path": "."}),
         ("git_diff", {"scope": "staged"}),
+        ("git_log", {"limit": 0, "path": "."}),
+        ("git_log", {"limit": True, "path": "."}),
+        ("git_show", {"commit_id": "abc123", "path": "."}),
+        ("git_show", {"commit_id": "A" * 40, "path": "."}),
     ],
 )
 def test_catalog_rejects_malformed_new_tool_inputs(

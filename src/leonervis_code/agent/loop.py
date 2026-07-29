@@ -63,6 +63,8 @@ from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
 from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
 from leonervis_code.tools.git_diff import GIT_DIFF_TOOL_NAME, GitDiffTool
+from leonervis_code.tools.git_log import GIT_LOG_TOOL_NAME, GitLogTool
+from leonervis_code.tools.git_show import GIT_SHOW_TOOL_NAME, GitShowTool
 from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, GitStatusTool
 from leonervis_code.tools.list_directory import LIST_DIRECTORY_TOOL_NAME, ListDirectoryTool
 from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
@@ -127,6 +129,8 @@ class AgentLoop:
         *,
         git_status: GitStatusTool | None = None,
         git_diff: GitDiffTool | None = None,
+        git_log: GitLogTool | None = None,
+        git_show: GitShowTool | None = None,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
         initial_effective_summary: EffectiveContextSummary | None = None,
@@ -147,6 +151,8 @@ class AgentLoop:
         self._grep_regex = grep_regex
         self._git_status = git_status
         self._git_diff = git_diff
+        self._git_log = git_log
+        self._git_show = git_show
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -547,6 +553,10 @@ class AgentLoop:
             result = self._git_status.execute(request)
         elif request.name == GIT_DIFF_TOOL_NAME and self._git_diff is not None:
             result = self._git_diff.execute(request)
+        elif request.name == GIT_LOG_TOOL_NAME and self._git_log is not None:
+            result = self._git_log.execute(request)
+        elif request.name == GIT_SHOW_TOOL_NAME and self._git_show is not None:
+            result = self._git_show.execute(request)
         else:
             result = ToolResult(
                 tool_use_id=request.tool_use_id,

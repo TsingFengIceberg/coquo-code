@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v20-ceb57dd3c3e664b6bb5fb92d04c84ee99a8d79204ba39752f2a3722ec85f9f52"
+EXPECTED_FINGERPRINT = "v21-c5cc71da1e01c230a50bd6d29a7cf087e86ba3517e3ef00123cc1f2c44543707"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 20
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 21
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -26,6 +26,9 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "when `tool_requests_closed=true`" in prompt.text
     assert "do not emit tool-call syntax as text" in prompt.text
     assert "`git_status` returns bounded deterministic JSON Lines" in prompt.text
+    assert "`git_log` returns bounded deterministic JSON Lines" in prompt.text
+    assert "only after the Host verifies that commit is reachable" in prompt.text
+    assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text
     assert build_system_prompt() == prompt
 

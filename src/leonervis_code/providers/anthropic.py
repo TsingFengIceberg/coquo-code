@@ -461,6 +461,14 @@ def git_diff_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[18]
 
 
+def git_log_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[19]
+
+
+def git_show_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[20]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,

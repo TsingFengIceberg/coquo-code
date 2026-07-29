@@ -177,6 +177,46 @@ class Session:
             },
         )()
 
+    def git_log(self, limit, path):
+        assert 1 <= limit <= 50
+        return type(
+            "GitLog",
+            (),
+            {
+                "entries": (
+                    type(
+                        "Entry",
+                        (),
+                        {
+                            "commit_id": "a" * 40,
+                            "parent_ids": (),
+                            "committed_at": "2026-07-29T01:02:03+08:00",
+                            "subject": "initial",
+                            "subject_truncated": False,
+                        },
+                    )(),
+                ),
+                "path": path,
+                "truncated": False,
+            },
+        )()
+
+    def git_show(self, commit_id, path):
+        return type(
+            "GitShow",
+            (),
+            {
+                "commit_id": commit_id,
+                "parent_ids": (),
+                "committed_at": "2026-07-29T01:02:03+08:00",
+                "path": path,
+                "message": "initial\n",
+                "message_truncated": False,
+                "patch": "+created\n",
+                "patch_truncated": False,
+            },
+        )()
+
     def usage(self):
         return RuntimeUsageTracker().snapshot()
 
@@ -259,6 +299,13 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     )
     assert dispatch_slash("/changes staged", session).message == ("Git diff (staged):\n+change\n")
     assert dispatch_slash("/changes both", session).message == ("Usage: /changes [unstaged|staged]")
+    commit_id = "a" * 40
+    assert commit_id in dispatch_slash("/commits", session).message
+    assert "path=src/app.py" in dispatch_slash("/commits 5 src/app.py", session).message
+    assert dispatch_slash("/commits 0", session).message == "Usage: /commits [1-50] [path]"
+    assert f"Git commit: {commit_id}" in dispatch_slash(f"/commit {commit_id}", session).message
+    assert "Path: src/app.py" in dispatch_slash(f"/commit {commit_id} src/app.py", session).message
+    assert dispatch_slash("/commit", session).message == ("Usage: /commit <full-commit-id> [path]")
     assert "real provider runtime" in dispatch_slash("/output", session).message
     compact = dispatch_slash("/compact", session)
     assert compact.kind == "success"

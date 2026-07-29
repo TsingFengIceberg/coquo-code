@@ -50,7 +50,8 @@ CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, /session, "
+    "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, "
+    "/commits, /commit, /session, "
     "/provider, /status, "
     "/context, /usage [session|turns], /output [tokens|reset], /compact, "
     "/compactions [count], "
@@ -187,6 +188,31 @@ class GitDiffSnapshotView(Protocol):
     truncated: bool
 
 
+class GitLogEntryView(Protocol):
+    commit_id: str
+    parent_ids: tuple[str, ...]
+    committed_at: str
+    subject: str
+    subject_truncated: bool
+
+
+class GitLogSnapshotView(Protocol):
+    entries: tuple[GitLogEntryView, ...]
+    path: str
+    truncated: bool
+
+
+class GitShowSnapshotView(Protocol):
+    commit_id: str
+    parent_ids: tuple[str, ...]
+    committed_at: str
+    path: str
+    message: str
+    message_truncated: bool
+    patch: str
+    patch_truncated: bool
+
+
 class ToolLedgerQueryResultView(Protocol):
     total_turns: int
     turns: tuple[TurnToolLedgerView, ...]
@@ -287,6 +313,44 @@ def render_git_diff(snapshot: GitDiffSnapshotView) -> str:
         return f"Git diff ({scope}): no tracked changes."
     suffix = " · truncated" if snapshot.truncated else ""
     return f"Git diff ({scope}{suffix}):\n{_escape_terminal_text(snapshot.content)}"
+
+
+def render_git_log(snapshot: GitLogSnapshotView) -> str:
+    """Render bounded current-HEAD history with copyable complete object IDs."""
+    path = _safe_inline(snapshot.path)
+    if not snapshot.entries:
+        return f"Git history: no commits matched path={path}."
+    qualifier = " (truncated)" if snapshot.truncated else ""
+    lines = [f"Git history: {len(snapshot.entries)} visible commits for path={path}{qualifier}."]
+    for entry in snapshot.entries:
+        subject = _safe_inline(entry.subject)
+        subject_suffix = " [subject truncated]" if entry.subject_truncated else ""
+        lines.append(f"  {entry.commit_id} {entry.committed_at} {subject}{subject_suffix}")
+    return "\n".join(lines)
+
+
+def render_git_show(snapshot: GitShowSnapshotView) -> str:
+    """Render one reachable commit while neutralizing terminal control characters."""
+    parents = " ".join(snapshot.parent_ids) if snapshot.parent_ids else "<root>"
+    message_suffix = " (truncated)" if snapshot.message_truncated else ""
+    patch_suffix = " (truncated)" if snapshot.patch_truncated else ""
+    patch = (
+        _escape_terminal_text(snapshot.patch)
+        if snapshot.patch
+        else "No tracked changes for the selected path."
+    )
+    return "\n".join(
+        (
+            f"Git commit: {snapshot.commit_id}",
+            f"Parents: {parents}",
+            f"Committed: {snapshot.committed_at}",
+            f"Path: {_safe_inline(snapshot.path)}",
+            f"Message{message_suffix}:",
+            _escape_terminal_text(snapshot.message),
+            f"Patch{patch_suffix}:",
+            patch,
+        )
+    )
 
 
 def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str:

@@ -89,6 +89,12 @@ def request(name: str, arguments: dict[str, object]) -> ToolUse:
             {"scope": "staged", "path": "src/app.py"},
             "scope='staged' path='src/app.py'",
         ),
+        ("git_log", {"limit": 10, "path": "src"}, "limit=10 path='src'"),
+        (
+            "git_show",
+            {"commit_id": "a" * 40, "path": "src/app.py"},
+            f"commit='{'a' * 40}' path='src/app.py'",
+        ),
     ],
 )
 def test_safe_summaries_cover_the_complete_tool_surface_without_content(

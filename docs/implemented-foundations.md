@@ -70,7 +70,7 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 20。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。当前19个model-visible tools包含有界`git_status`与`git_diff`；PermissionGate、approval、Action Audit及各工具hard bounds继续由Host强制，多call response不获得并行执行许可。
+Canonical model system prompt当前为version 21。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。当前21个model-visible tools包含有界`git_status`、`git_diff`、`git_log`与`git_show`；PermissionGate、approval、Action Audit及各工具hard bounds继续由Host强制，多call response不获得并行执行许可。
 
 它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
 
@@ -661,6 +661,14 @@ Provider实际Token用量现在不仅保留在进程内tracker，也附着到严
 
 模型工具继续按`workspace-read`经过PermissionGate、Action Audit与共享8/32/24预算。REPL新增`/changes`、`/changes unstaged`和`/changes staged`，直接显示status或经过terminal-control转义的root patch，不调用provider、不消耗tool budget、不写Session或Action Audit。Canonical system prompt升级为v20，provider adapter contract升级为v23，19-tool catalog使empty full-context identity变为`ctx-v3-cb7ce2ad36fc600b23c66362f02e4e139beee17e721a06eb490b82a7ae302a9e`；ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas与`ctx-v3`/`ctx-v4`representation不升级，旧Session不重写。完整决策见[0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)。
 
+## Bounded Reachable Git History Observation
+
+模型可见工具面在19个工具之后追加`git_log(limit, path)`与`git_show(commit_id, path)`。`git_log`只遍历当前`HEAD`可达历史，接受1–50条与`.`或一个literal workspace-relative path，返回包含完整commit/parent ID、committer ISO时间、最多1024 bytes subject及其截断标记的稳定JSONL；raw结果最多1 MiB，模型结果最多32 KiB。它不枚举`--all`、refs、reflog、signature、notes、author/email或任意revision。
+
+`git_show`只接受完整40/64位小写十六进制ID，并先通过固定`merge-base --is-ancestor`确认它是当前`HEAD`可达commit，再返回一行JSON metadata、最多8 KiB commit message和有界tracked patch；总输出最多64 KiB，message与patch分别标记截断。External diff、textconv、rename detection、signature、color、submodule recursion与replacement objects均被关闭。缩写/大写ID、不可达或非commit object、unborn HEAD、非法path、非UTF-8或malformed输出全部安全失败。
+
+两个工具继续按`workspace-read`经过PermissionGate、Action Audit与共享8/32/24预算，不需要approval。REPL新增`/commits [count] [path]`与`/commit <full-id> [path]`，直接展示完整ID并转义subject/message/patch中的terminal controls；它们不调用provider、不消耗model tool budget、不写Session或Action Audit。Canonical system prompt升级为v21，provider adapter contract升级为v24，21-tool catalog使empty full-context identity变为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas与`ctx-v3`/`ctx-v4`representation不升级，旧Session不重写。完整决策见[0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -890,3 +898,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 61. [0061：Process-local Runtime Output Budget Control](./decisions/0061-process-local-runtime-output-budget-control.md)
 62. [0062：Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)
 63. [0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)
+64. [0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
