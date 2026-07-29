@@ -75,12 +75,80 @@ class RunCommandOutcome(StrEnum):
     PARTIAL = "partial"
 
 
+class RunCommandExecutionStatus(StrEnum):
+    """Trusted Host observation of the command process lifecycle."""
+
+    SPAWN_REJECTED = "spawn-rejected"
+    SPAWN_FAILED = "spawn-failed"
+    EXITED = "exited"
+    SIGNALED = "signaled"
+    TIMED_OUT = "timed-out"
+    CANCELLED = "cancelled"
+    CLEANUP_INCOMPLETE = "cleanup-incomplete"
+
+
+@dataclass(frozen=True)
+class RunCommandStreamObservation:
+    """Byte accounting for one bounded captured command stream."""
+
+    bytes_captured: int
+    bytes_total: int
+    truncated: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.bytes_captured) is not int
+            or type(self.bytes_total) is not int
+            or self.bytes_captured < 0
+            or self.bytes_total < self.bytes_captured
+        ):
+            raise ValueError("command stream observation byte counts are invalid")
+        if type(self.truncated) is not bool or self.truncated != (
+            self.bytes_total > self.bytes_captured
+        ):
+            raise ValueError("command stream observation truncation is invalid")
+
+
+@dataclass(frozen=True)
+class RunCommandExecutionObservation:
+    """Content-free process metadata produced directly by the command executor."""
+
+    status: RunCommandExecutionStatus
+    exit_code: int | None
+    signal: int | None
+    duration_ms: int | None
+    stdout: RunCommandStreamObservation
+    stderr: RunCommandStreamObservation
+    cleanup_complete: bool
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not RunCommandExecutionStatus:
+            raise ValueError("command execution observation status is invalid")
+        if self.exit_code is not None and (type(self.exit_code) is not int or self.exit_code < 0):
+            raise ValueError("command execution observation exit code is invalid")
+        if self.signal is not None and (type(self.signal) is not int or self.signal <= 0):
+            raise ValueError("command execution observation signal is invalid")
+        if self.exit_code is not None and self.signal is not None:
+            raise ValueError("command execution observation cannot have exit code and signal")
+        if self.duration_ms is not None and (
+            type(self.duration_ms) is not int or self.duration_ms < 0
+        ):
+            raise ValueError("command execution observation duration is invalid")
+        if type(self.stdout) is not RunCommandStreamObservation:
+            raise ValueError("command stdout observation is invalid")
+        if type(self.stderr) is not RunCommandStreamObservation:
+            raise ValueError("command stderr observation is invalid")
+        if type(self.cleanup_complete) is not bool:
+            raise ValueError("command cleanup observation is invalid")
+
+
 @dataclass(frozen=True)
 class RunCommandExecutionResult:
     tool_result: ToolResult
     outcome: RunCommandOutcome
     result_code: str
     audit_message: str
+    observation: RunCommandExecutionObservation
 
 
 class RunCommandPreparationError(ValueError):
@@ -166,22 +234,29 @@ class RunCommandTool:
         except RunCommandPreparationError:
             empty_stdout = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
             empty_stderr = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
+            observation = _execution_observation(
+                status=RunCommandExecutionStatus.SPAWN_REJECTED,
+                returncode=None,
+                duration_ms=None,
+                stdout=empty_stdout,
+                stderr=empty_stderr,
+                cleanup_complete=True,
+            )
             return RunCommandExecutionResult(
                 ToolResult(
                     request.tool_use_id,
                     self._payload(
                         prepared,
-                        status="spawn-rejected",
-                        returncode=None,
+                        observation=observation,
                         stdout=empty_stdout,
                         stderr=empty_stderr,
-                        cleanup_complete=True,
                     ),
                     is_error=True,
                 ),
                 RunCommandOutcome.FAILED,
                 "command_cwd_invalid",
                 "run_command cwd no longer satisfies the prepared boundary",
+                observation,
             )
         cwd = (
             self._workspace
@@ -197,6 +272,7 @@ class RunCommandTool:
         stdout_capture = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
         stderr_capture = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
 
+        started = time.monotonic()
         try:
             process = subprocess.Popen(
                 prepared.argv,
@@ -209,19 +285,26 @@ class RunCommandTool:
                 start_new_session=True,
             )
         except (OSError, ValueError):
-            payload = self._payload(
-                prepared,
-                status="spawn-failed",
+            observation = _execution_observation(
+                status=RunCommandExecutionStatus.SPAWN_FAILED,
                 returncode=None,
+                duration_ms=_elapsed_milliseconds(started),
                 stdout=stdout_capture,
                 stderr=stderr_capture,
                 cleanup_complete=True,
+            )
+            payload = self._payload(
+                prepared,
+                observation=observation,
+                stdout=stdout_capture,
+                stderr=stderr_capture,
             )
             return RunCommandExecutionResult(
                 ToolResult(request.tool_use_id, payload, is_error=True),
                 RunCommandOutcome.FAILED,
                 "command_spawn_failed",
                 "run_command could not start the requested executable",
+                observation,
             )
 
         assert process.stdout is not None and process.stderr is not None
@@ -232,16 +315,16 @@ class RunCommandTool:
         for reader in readers:
             reader.start()
 
-        status = "exited"
+        status = RunCommandExecutionStatus.EXITED
         cleanup_complete = True
         interrupted = False
         try:
             process.wait(timeout=prepared.timeout_seconds)
         except subprocess.TimeoutExpired:
-            status = "timed-out"
+            status = RunCommandExecutionStatus.TIMED_OUT
             cleanup_complete = self._terminate_process_group(process)
         except KeyboardInterrupt:
-            status = "cancelled"
+            status = RunCommandExecutionStatus.CANCELLED
             interrupted = True
             cleanup_complete = self._terminate_process_group(process)
 
@@ -268,37 +351,43 @@ class RunCommandTool:
                 "command_cancelled" if cleanup_complete else "command_cancel_cleanup_incomplete"
             )
             outcome = RunCommandOutcome.PARTIAL
-        elif status == "timed-out":
+        elif status == RunCommandExecutionStatus.TIMED_OUT:
             result_code = (
                 "command_timed_out" if cleanup_complete else "command_timeout_cleanup_incomplete"
             )
             outcome = RunCommandOutcome.PARTIAL
         elif not cleanup_complete:
-            status = "cleanup-incomplete"
+            status = RunCommandExecutionStatus.CLEANUP_INCOMPLETE
             result_code = "command_cleanup_incomplete"
             outcome = RunCommandOutcome.PARTIAL
         elif returncode < 0:
-            status = "signaled"
+            status = RunCommandExecutionStatus.SIGNALED
             result_code = "command_signaled"
             outcome = RunCommandOutcome.PARTIAL
         elif returncode == 0 and cleanup_complete:
             result_code = "command_succeeded"
             outcome = RunCommandOutcome.SUCCEEDED
         elif returncode == 0:
-            status = "cleanup-incomplete"
+            status = RunCommandExecutionStatus.CLEANUP_INCOMPLETE
             result_code = "command_cleanup_incomplete"
             outcome = RunCommandOutcome.PARTIAL
         else:
             result_code = "command_exited_nonzero"
             outcome = RunCommandOutcome.FAILED
 
-        payload = self._payload(
-            prepared,
+        observation = _execution_observation(
             status=status,
             returncode=returncode,
+            duration_ms=_elapsed_milliseconds(started),
             stdout=stdout_capture,
             stderr=stderr_capture,
             cleanup_complete=cleanup_complete,
+        )
+        payload = self._payload(
+            prepared,
+            observation=observation,
+            stdout=stdout_capture,
+            stderr=stderr_capture,
         )
         is_error = outcome != RunCommandOutcome.SUCCEEDED
         audit_message = {
@@ -325,6 +414,7 @@ class RunCommandTool:
             outcome,
             result_code,
             audit_message,
+            observation,
         )
 
     @staticmethod
@@ -342,22 +432,18 @@ class RunCommandTool:
     def _payload(
         prepared: PreparedRunCommand,
         *,
-        status: str,
-        returncode: int | None,
+        observation: RunCommandExecutionObservation,
         stdout: _BoundedCapture,
         stderr: _BoundedCapture,
-        cleanup_complete: bool,
     ) -> str:
-        exit_code = returncode if returncode is not None and returncode >= 0 else None
-        signal_number = -returncode if returncode is not None and returncode < 0 else None
         return (
             json.dumps(
                 {
-                    "cleanup_complete": cleanup_complete,
+                    "cleanup_complete": observation.cleanup_complete,
                     "cwd": prepared.relative_cwd,
-                    "exit_code": exit_code,
-                    "signal": signal_number,
-                    "status": status,
+                    "exit_code": observation.exit_code,
+                    "signal": observation.signal,
+                    "status": observation.status,
                     "stderr": _capture_payload(stderr),
                     "stdout": _capture_payload(stdout),
                 },
@@ -519,6 +605,39 @@ def _join_readers(readers: tuple[Thread, Thread], timeout: float) -> bool:
     for reader in readers:
         reader.join(max(0.0, deadline - time.monotonic()))
     return all(not reader.is_alive() for reader in readers)
+
+
+def _elapsed_milliseconds(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _execution_observation(
+    *,
+    status: RunCommandExecutionStatus,
+    returncode: int | None,
+    duration_ms: int | None,
+    stdout: _BoundedCapture,
+    stderr: _BoundedCapture,
+    cleanup_complete: bool,
+) -> RunCommandExecutionObservation:
+    return RunCommandExecutionObservation(
+        status=status,
+        exit_code=returncode if returncode is not None and returncode >= 0 else None,
+        signal=-returncode if returncode is not None and returncode < 0 else None,
+        duration_ms=duration_ms,
+        stdout=_stream_observation(stdout),
+        stderr=_stream_observation(stderr),
+        cleanup_complete=cleanup_complete,
+    )
+
+
+def _stream_observation(capture: _BoundedCapture) -> RunCommandStreamObservation:
+    captured = len(capture.captured)
+    return RunCommandStreamObservation(
+        bytes_captured=captured,
+        bytes_total=capture.total,
+        truncated=capture.total > captured,
+    )
 
 
 def _capture_payload(capture: _BoundedCapture) -> dict[str, object]:

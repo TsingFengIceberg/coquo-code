@@ -49,6 +49,7 @@
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
 - [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
 - [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
+- [Trusted Command Result Observability](#trusted-command-result-observability)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -679,6 +680,14 @@ Command详情不会把direct argv伪装成shell source：普通请求明确显�
 
 只有full显式请求时AgentLoop才从immutable ToolArguments生成详情；compact与one-shot事件本身不携带argv详情，TerminalEventSink再渲染所选形式。事件仍是best-effort临时观察，不能改变permission、approval、execution、Action Audit、turn commit或provider failure；full也不提供PTY、retained shell、stdin forwarding或更高命令权限。本slice审阅system prompt与所有模型可见合同后确认无行为变化，因此canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog及empty Effective Context identity不变，所有Session/context schema也不升级。完整决策见[0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)。
 
+## Trusted Command Result Observability
+
+`run_command`现在除既有model-visible ToolResult外，还由执行器直接产生content-free typed observation，记录process status、exit code或signal、monotonic duration、stdout/stderr captured与total bytes、各自truncation及cleanup completeness。Terminal绝不通过解析ToolResult JSON获取这些事实；同一observation同时生成既有JSON字段与Host事件元数据，避免provider-facing serialization成为可信UI事实来源。
+
+Compact完成行会追加exit或lifecycle status、duration及两路输出byte count；截断与cleanup不完整会明确显示。`/tool-details full`把这些字段展开为最多6行/2 KiB。两种模式都不显示stdout/stderr原文或base64，也不增加argv、credential、absolute path、raw ToolResult或provider payload暴露。Denied、approval rejected/cancelled、preparation failure和executor exception没有execution details；若Action Audit finish持久化失败，仍只报告`outcome-unknown`，不能用process metadata伪装durable action完成。
+
+Observation与result details只在当前live event链路存在，不写Session、Action Audit schema、provider history、profile或Effective Context。本slice审阅全部模型可见合同后确认无变化，因此canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog、tool schema/order、empty Effective Context identity及所有Session/context schema均不升级。完整决策见[0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -910,3 +919,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 63. [0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)
 64. [0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
 65. [0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
+66. [0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)

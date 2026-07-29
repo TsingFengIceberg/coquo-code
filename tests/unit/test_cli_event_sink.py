@@ -10,6 +10,7 @@ from leonervis_code.agent.tool_events import (
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
+    ToolResultDetails,
 )
 from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
@@ -65,6 +66,44 @@ def test_terminal_event_sink_full_mode_renders_structured_command_details() -> N
         '  argv: ["uv","run","pytest"]\n'
         "  cwd: '.'\n"
         "  timeout_seconds: 30\n"
+    )
+    assert stream.flush_count == 1
+
+
+def test_terminal_event_sink_full_mode_renders_command_result_metadata_only() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(stream, color=False, tool_detail_mode=ToolDetailMode.FULL)
+    details = ToolResultDetails(
+        "exit=7 duration=4ms stdout=6B stderr=10B",
+        (
+            "status: exited",
+            "exit_code: 7",
+            "duration_ms: 4",
+            "stdout: captured=6 total=6 truncated=false",
+            "stderr: captured=10 total=10 truncated=false",
+            "cleanup_complete: true",
+        ),
+    )
+
+    sink(
+        ToolRequestFinished(
+            "run_command",
+            1,
+            32,
+            ToolEventStatus.FAILED,
+            "command_exited_nonzero",
+            result_details=details,
+        )
+    )
+
+    assert stream.getvalue() == (
+        "[tool 1/32] failed code=command_exited_nonzero\n"
+        "  status: exited\n"
+        "  exit_code: 7\n"
+        "  duration_ms: 4\n"
+        "  stdout: captured=6 total=6 truncated=false\n"
+        "  stderr: captured=10 total=10 truncated=false\n"
+        "  cleanup_complete: true\n"
     )
     assert stream.flush_count == 1
 

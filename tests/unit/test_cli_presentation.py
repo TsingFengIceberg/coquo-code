@@ -16,6 +16,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestLimited,
     ToolRequestSkipped,
     ToolRequestStarted,
+    ToolResultDetails,
     ToolTurnSummaryCommitted,
 )
 from leonervis_code.cli.presentation import (
@@ -1078,6 +1079,44 @@ def test_prompt_event_full_mode_expands_bounded_details_without_changing_default
         "  execution: shell interpreter 'bash'; shell source is argv[2]",
         "info",
     )
+
+
+def test_command_result_metadata_renders_compact_or_full_without_output_content() -> None:
+    details = ToolResultDetails(
+        "exit=0 duration=23ms stdout=12B stderr=0B",
+        (
+            "status: exited",
+            "exit_code: 0",
+            "duration_ms: 23",
+            "stdout: captured=12 total=12 truncated=false",
+            "stderr: captured=0 total=0 truncated=false",
+            "cleanup_complete: true",
+        ),
+    )
+    event = ToolRequestFinished(
+        "run_command",
+        1,
+        32,
+        ToolEventStatus.SUCCEEDED,
+        "command_succeeded",
+        result_details=details,
+    )
+
+    assert render_prompt_event(event) == (
+        "[tool 1/32] succeeded code=command_succeeded exit=0 duration=23ms stdout=12B stderr=0B",
+        "success",
+    )
+    assert render_prompt_event(event, tool_detail_mode=ToolDetailMode.FULL) == (
+        "[tool 1/32] succeeded code=command_succeeded\n"
+        "  status: exited\n"
+        "  exit_code: 0\n"
+        "  duration_ms: 23\n"
+        "  stdout: captured=12 total=12 truncated=false\n"
+        "  stderr: captured=0 total=0 truncated=false\n"
+        "  cleanup_complete: true",
+        "success",
+    )
+    assert "TOP_SECRET" not in render_prompt_event(event)[0]
 
 
 def test_colored_readline_prompt_marks_only_nonprinting_sequences() -> None:

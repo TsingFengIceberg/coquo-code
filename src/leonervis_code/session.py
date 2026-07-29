@@ -15,6 +15,7 @@ from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
     ToolDispatchResult,
     ToolEventStatus,
+    ToolResultDetails,
 )
 from leonervis_code.core.action_coordinator import (
     ActionCoordinator,
@@ -194,8 +195,10 @@ from leonervis_code.tools.grep import GREP_TOOL_NAME
 from leonervis_code.tools.run_command import (
     RUN_COMMAND_TOOL_NAME,
     PreparedRunCommand,
+    RunCommandExecutionObservation,
     RunCommandOutcome,
     RunCommandPreparationError,
+    RunCommandStreamObservation,
     RunCommandTool,
 )
 from leonervis_code.tools.write_file import (
@@ -1725,6 +1728,7 @@ class ProjectSession:
             approval_handler=self._approval_handler,
             uuid_factory=self._action_uuid_factory,
         )
+        command_observation: RunCommandExecutionObservation | None = None
 
         def revalidate(current: ActionIdentity) -> ActionIdentity:
             self._assert_action_lease(lease)
@@ -1758,6 +1762,7 @@ class ProjectSession:
             return current
 
         def execute(current: ActionIdentity) -> ActionExecutionResult:
+            nonlocal command_observation
             self._assert_action_lease(lease)
             if request.name == READ_FILE_TOOL_NAME:
                 result = self._read_file.execute(request)
@@ -1811,6 +1816,7 @@ class ProjectSession:
                 )
             elif request.name == RUN_COMMAND_TOOL_NAME and prepared_command is not None:
                 command_result = self._run_command.execute_detailed(prepared_command)
+                command_observation = command_result.observation
                 outcome = {
                     RunCommandOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
                     RunCommandOutcome.FAILED: ActionExecutionOutcome.FAILED,
@@ -1946,7 +1952,17 @@ class ProjectSession:
                 ActionExecutionOutcome.PARTIAL: ToolEventStatus.PARTIAL,
             }[coordinated.execution_outcome]
             result_code = coordinated.result_code
-        return ToolDispatchResult(coordinated.tool_result, status, result_code)
+        result_details = (
+            _command_result_details(command_observation)
+            if coordinated.executed and command_observation is not None
+            else None
+        )
+        return ToolDispatchResult(
+            coordinated.tool_result,
+            status,
+            result_code,
+            result_details,
+        )
 
     def _assert_action_lease(self, lease: ActionLease) -> None:
         active = self._active_action_lease
@@ -2161,6 +2177,63 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
         generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
+    )
+
+
+def _command_result_details(
+    observation: RunCommandExecutionObservation,
+) -> ToolResultDetails:
+    compact: list[str] = []
+    if observation.status.value == "exited" and observation.exit_code is not None:
+        compact.append(f"exit={observation.exit_code}")
+    else:
+        compact.append(f"status={observation.status.value}")
+        if observation.signal is not None:
+            compact.append(f"signal={observation.signal}")
+        elif observation.exit_code is not None:
+            compact.append(f"exit={observation.exit_code}")
+    compact.append(
+        "duration=unavailable"
+        if observation.duration_ms is None
+        else f"duration={observation.duration_ms}ms"
+    )
+    compact.extend(
+        (
+            f"stdout={_compact_stream_bytes(observation.stdout)}",
+            f"stderr={_compact_stream_bytes(observation.stderr)}",
+        )
+    )
+    if not observation.cleanup_complete:
+        compact.append("cleanup=false")
+
+    details = [f"status: {observation.status.value}"]
+    if observation.exit_code is not None:
+        details.append(f"exit_code: {observation.exit_code}")
+    elif observation.signal is not None:
+        details.append(f"signal: {observation.signal}")
+    details.extend(
+        (
+            "duration_ms: unavailable"
+            if observation.duration_ms is None
+            else f"duration_ms: {observation.duration_ms}",
+            _full_stream_details("stdout", observation.stdout),
+            _full_stream_details("stderr", observation.stderr),
+            f"cleanup_complete: {str(observation.cleanup_complete).lower()}",
+        )
+    )
+    return ToolResultDetails(" ".join(compact), tuple(details))
+
+
+def _compact_stream_bytes(stream: RunCommandStreamObservation) -> str:
+    if stream.truncated:
+        return f"{stream.bytes_captured}/{stream.bytes_total}B(truncated)"
+    return f"{stream.bytes_captured}B"
+
+
+def _full_stream_details(name: str, stream: RunCommandStreamObservation) -> str:
+    return (
+        f"{name}: captured={stream.bytes_captured} total={stream.bytes_total} "
+        f"truncated={str(stream.truncated).lower()}"
     )
 
 

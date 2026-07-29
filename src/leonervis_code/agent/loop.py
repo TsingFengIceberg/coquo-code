@@ -428,6 +428,7 @@ class AgentLoop:
                         dispatch.status,
                         safe_result_code(dispatch.result_code),
                         dispatch.tool_result.truncated,
+                        dispatch.result_details,
                     ),
                 )
                 pending += (dispatch.tool_result,)

@@ -24,6 +24,8 @@ MAX_TOOL_EVENT_VALUE_CHARACTERS = 160
 MAX_TOOL_EVENT_DETAIL_LINES = 4
 MAX_TOOL_EVENT_DETAIL_BYTES = 8 * 1024
 MAX_TOOL_EVENT_ARGV_LINE_BYTES = 7 * 1024
+MAX_TOOL_RESULT_DETAIL_LINES = 6
+MAX_TOOL_RESULT_DETAIL_BYTES = 2 * 1024
 
 
 class ToolEventStatus(StrEnum):
@@ -108,6 +110,24 @@ class ToolRequestStarted:
 
 
 @dataclass(frozen=True)
+class ToolResultDetails:
+    """Bounded content-free Host metadata for one completed tool execution."""
+
+    compact_summary: str
+    full_details: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.compact_summary or not self.full_details:
+            raise ValueError("tool result details must not be empty")
+        _validate_safe_text(self.compact_summary, "tool result summary")
+        _validate_safe_details(
+            self.full_details,
+            max_lines=MAX_TOOL_RESULT_DETAIL_LINES,
+            max_bytes=MAX_TOOL_RESULT_DETAIL_BYTES,
+        )
+
+
+@dataclass(frozen=True)
 class ToolRequestFinished:
     tool_name: str
     call_index: int
@@ -115,6 +135,7 @@ class ToolRequestFinished:
     status: ToolEventStatus
     result_code: str | None = None
     truncated: bool = False
+    result_details: ToolResultDetails | None = None
 
     def __post_init__(self) -> None:
         _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
@@ -124,6 +145,8 @@ class ToolRequestFinished:
             _validate_safe_text(self.result_code, "tool event result code")
         if type(self.truncated) is not bool:
             raise ValueError("tool event truncated flag is invalid")
+        if self.result_details is not None and type(self.result_details) is not ToolResultDetails:
+            raise ValueError("tool event result details are invalid")
 
 
 @dataclass(frozen=True)
@@ -220,6 +243,7 @@ class ToolDispatchResult:
     tool_result: ToolResult
     status: ToolEventStatus
     result_code: str | None = None
+    result_details: ToolResultDetails | None = None
 
     def __post_init__(self) -> None:
         if type(self.tool_result) is not ToolResult:
@@ -234,6 +258,8 @@ class ToolDispatchResult:
             not isinstance(self.result_code, str) or not self.result_code
         ):
             raise ValueError("tool dispatch result code is invalid")
+        if self.result_details is not None and type(self.result_details) is not ToolResultDetails:
+            raise ValueError("tool dispatch result details are invalid")
 
 
 def infer_tool_dispatch_result(result: ToolResult) -> ToolDispatchResult:
@@ -471,12 +497,21 @@ def _validate_event_identity(tool_name: str, call_index: int, call_limit: int) -
 def _validate_safe_text(value: str, label: str) -> None:
     if not isinstance(value, str) or len(value) > MAX_TOOL_EVENT_SUMMARY_CHARACTERS:
         raise ValueError(f"{label} is invalid")
-    if any(character in value for character in ("\x00", "\r", "\n", "\x1b")):
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value):
         raise ValueError(f"{label} contains terminal control characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{label} is not valid UTF-8") from None
 
 
-def _validate_safe_details(details: tuple[str, ...]) -> None:
-    if type(details) is not tuple or len(details) > MAX_TOOL_EVENT_DETAIL_LINES:
+def _validate_safe_details(
+    details: tuple[str, ...],
+    *,
+    max_lines: int = MAX_TOOL_EVENT_DETAIL_LINES,
+    max_bytes: int = MAX_TOOL_EVENT_DETAIL_BYTES,
+) -> None:
+    if type(details) is not tuple or len(details) > max_lines:
         raise ValueError("tool event details are invalid")
     total_bytes = 0
     for detail in details:
@@ -488,5 +523,5 @@ def _validate_safe_details(details: tuple[str, ...]) -> None:
             total_bytes += len(detail.encode("utf-8"))
         except UnicodeEncodeError:
             raise ValueError("tool event detail is not valid UTF-8") from None
-    if total_bytes > MAX_TOOL_EVENT_DETAIL_BYTES:
+    if total_bytes > max_bytes:
         raise ValueError("tool event details exceed the supported size")

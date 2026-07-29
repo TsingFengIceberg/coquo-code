@@ -9,6 +9,7 @@ import leonervis_code.tools.run_command as run_command_module
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.tools.run_command import (
     MAX_COMMAND_STDOUT_BYTES,
+    RunCommandExecutionStatus,
     RunCommandOutcome,
     RunCommandTool,
 )
@@ -50,6 +51,14 @@ def test_direct_execution_captures_stdout_stderr_and_literal_metacharacters(
     assert data["exit_code"] == 0
     assert data["stdout"]["text"] == "$(touch should-not-exist) | *\n"
     assert data["stderr"]["text"] == "err\n"
+    assert result.observation.status == RunCommandExecutionStatus.EXITED
+    assert result.observation.exit_code == 0
+    assert result.observation.signal is None
+    assert result.observation.duration_ms is not None
+    assert result.observation.duration_ms >= 0
+    assert result.observation.stdout.bytes_total == len("$(touch should-not-exist) | *\n".encode())
+    assert result.observation.stderr.bytes_total == 4
+    assert result.observation.cleanup_complete is True
     assert not (tmp_path / "should-not-exist").exists()
 
 
@@ -82,9 +91,13 @@ def test_nonzero_and_missing_executable_are_structured_failures(tmp_path: Path) 
     assert nonzero.outcome == RunCommandOutcome.FAILED
     assert nonzero.result_code == "command_exited_nonzero"
     assert payload(nonzero)["exit_code"] == 7
+    assert nonzero.observation.status == RunCommandExecutionStatus.EXITED
+    assert nonzero.observation.exit_code == 7
     assert missing.outcome == RunCommandOutcome.FAILED
     assert missing.result_code == "command_spawn_failed"
     assert payload(missing)["status"] == "spawn-failed"
+    assert missing.observation.status == RunCommandExecutionStatus.SPAWN_FAILED
+    assert missing.observation.duration_ms is not None
 
 
 def test_execute_rechecks_cwd_at_the_spawn_boundary(tmp_path: Path) -> None:
@@ -110,6 +123,8 @@ def test_execute_rechecks_cwd_at_the_spawn_boundary(tmp_path: Path) -> None:
     assert result.result_code == "command_cwd_invalid"
     assert data["status"] == "spawn-rejected"
     assert data["cleanup_complete"] is True
+    assert result.observation.status == RunCommandExecutionStatus.SPAWN_REJECTED
+    assert result.observation.duration_ms is None
     assert not marker.exists()
 
 
@@ -132,6 +147,9 @@ def test_nonzero_exit_with_cleanup_uncertainty_is_partial(tmp_path: Path, monkey
     assert data["status"] == "cleanup-incomplete"
     assert data["exit_code"] == 7
     assert data["cleanup_complete"] is False
+    assert result.observation.status == RunCommandExecutionStatus.CLEANUP_INCOMPLETE
+    assert result.observation.exit_code == 7
+    assert result.observation.cleanup_complete is False
 
 
 def test_output_is_bounded_and_invalid_utf8_uses_base64(tmp_path: Path) -> None:
@@ -149,6 +167,25 @@ def test_output_is_bounded_and_invalid_utf8_uses_base64(tmp_path: Path) -> None:
     assert data["stdout"]["truncated"] is True
     assert data["stderr"]["encoding"] == "base64"
     assert data["stderr"]["base64"] == "/2JhZA=="
+    assert result.observation.stdout.bytes_captured == MAX_COMMAND_STDOUT_BYTES
+    assert result.observation.stdout.bytes_total == MAX_COMMAND_STDOUT_BYTES + 100
+    assert result.observation.stdout.truncated is True
+    assert result.observation.stderr.bytes_captured == 4
+    assert result.observation.stderr.truncated is False
+
+
+def test_signal_exit_is_preserved_as_typed_content_free_observation(tmp_path: Path) -> None:
+    tool = RunCommandTool(tmp_path)
+    code = "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"
+
+    result = tool.execute_detailed(tool.prepare(command([sys.executable, "-c", code])))
+
+    assert result.outcome == RunCommandOutcome.PARTIAL
+    assert result.result_code == "command_signaled"
+    assert result.observation.status == RunCommandExecutionStatus.SIGNALED
+    assert result.observation.exit_code is None
+    assert result.observation.signal == 15
+    assert result.observation.cleanup_complete is True
 
 
 def test_timeout_terminates_process_group_and_prevents_child_late_effect(tmp_path: Path) -> None:
@@ -168,6 +205,9 @@ def test_timeout_terminates_process_group_and_prevents_child_late_effect(tmp_pat
     assert result.result_code == "command_timed_out"
     assert data["status"] == "timed-out"
     assert data["cleanup_complete"] is True
+    assert result.observation.status == RunCommandExecutionStatus.TIMED_OUT
+    assert result.observation.duration_ms is not None
+    assert result.observation.duration_ms >= 1000
     time.sleep(1.5)
     assert not marker.exists()
 
@@ -226,3 +266,4 @@ def test_keyboard_interrupt_cancels_and_cleans_process_group(tmp_path: Path, mon
     assert result.result_code == "command_cancelled"
     assert data["status"] == "cancelled"
     assert data["cleanup_complete"] is True
+    assert result.observation.status == RunCommandExecutionStatus.CANCELLED

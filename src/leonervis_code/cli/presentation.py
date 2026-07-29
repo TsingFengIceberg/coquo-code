@@ -789,6 +789,13 @@ def render_prompt_event(
         detail = f" code={event.result_code}" if event.result_code is not None else ""
         if event.truncated:
             detail += " truncated=true"
+        if event.result_details is not None:
+            if tool_detail_mode == ToolDetailMode.FULL:
+                detail += "\n" + "\n".join(
+                    f"  {line}" for line in event.result_details.full_details
+                )
+            else:
+                detail += f" {event.result_details.compact_summary}"
         kind: MessageKind
         if event.status == ToolEventStatus.SUCCEEDED:
             kind = "success"

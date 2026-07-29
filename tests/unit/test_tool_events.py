@@ -7,11 +7,13 @@ from leonervis_code.agent.tool_events import (
     MAX_TOOL_EVENT_ARGV_LINE_BYTES,
     MAX_TOOL_EVENT_DETAIL_BYTES,
     MAX_TOOL_EVENT_SUMMARY_CHARACTERS,
+    MAX_TOOL_RESULT_DETAIL_LINES,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
     ToolRequestStarted,
+    ToolResultDetails,
     safe_result_code,
     safe_tool_request_details,
     safe_tool_request_summary,
@@ -220,6 +222,17 @@ def test_event_models_reject_invalid_identity_status_and_controls() -> None:
         ToolRequestLimited("read_file", 6, 6, "path='a.txt'")
     with pytest.raises(ValueError, match="status"):
         ToolRequestFinished("read_file", 1, 6, "succeeded")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must not be empty"):
+        ToolResultDetails("", ())
+    with pytest.raises(ValueError, match="control"):
+        ToolResultDetails("stdout=0B\u202e", ("stdout: captured=0",))
+    with pytest.raises(ValueError, match="control"):
+        ToolResultDetails("stdout=0B", ("stdout: secret\nvalue",))
+    with pytest.raises(ValueError, match="details"):
+        ToolResultDetails(
+            "stdout=0B",
+            tuple(f"line-{index}" for index in range(MAX_TOOL_RESULT_DETAIL_LINES + 1)),
+        )
 
 
 def test_assistant_tool_text_event_preserves_exact_bounded_text() -> None:
@@ -235,7 +248,23 @@ def test_assistant_tool_text_event_preserves_exact_bounded_text() -> None:
 
 
 def test_dispatch_result_requires_status_to_match_model_visible_error_flag() -> None:
-    ToolDispatchResult(ToolResult("tool-1", "ok"), ToolEventStatus.SUCCEEDED, "ok")
+    details = ToolResultDetails(
+        "exit=0 duration=1ms stdout=0B stderr=0B",
+        (
+            "status: exited",
+            "exit_code: 0",
+            "duration_ms: 1",
+            "stdout: captured=0 total=0 truncated=false",
+            "stderr: captured=0 total=0 truncated=false",
+            "cleanup_complete: true",
+        ),
+    )
+    ToolDispatchResult(
+        ToolResult("tool-1", "ok"),
+        ToolEventStatus.SUCCEEDED,
+        "ok",
+        details,
+    )
     with pytest.raises(ValueError, match="successful"):
         ToolDispatchResult(
             ToolResult("tool-1", "failed", is_error=True),

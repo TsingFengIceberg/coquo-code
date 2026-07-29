@@ -688,6 +688,16 @@ def test_model_visible_command_auto_runs_and_commits_exact_causality(tmp_path: P
             "timeout_seconds: 10",
             "execution: direct argv; Host shell parsing disabled",
         )
+        finished = next(event for event in events if isinstance(event, ToolRequestFinished))
+        assert finished.status == ToolEventStatus.SUCCEEDED
+        assert finished.result_details is not None
+        assert finished.result_details.compact_summary.startswith("exit=0 duration=")
+        assert "stdout=9B stderr=0B" in finished.result_details.compact_summary
+        assert finished.result_details.full_details[0:2] == (
+            "status: exited",
+            "exit_code: 0",
+        )
+        assert "verified" not in repr(finished.result_details)
     finally:
         session.close()
 
@@ -719,6 +729,9 @@ def test_model_visible_command_workspace_write_denial_never_spawns(tmp_path: Pat
         assert session.action_audits()[-1].status == ActionAuditStatus.DENIED
         started = next(event for event in events if isinstance(event, ToolRequestStarted))
         assert started.safe_details == ()
+        finished = next(event for event in events if isinstance(event, ToolRequestFinished))
+        assert finished.status == ToolEventStatus.DENIED
+        assert finished.result_details is None
     finally:
         session.close()
 
@@ -747,6 +760,71 @@ def test_model_visible_command_ask_accept_binds_exact_request(tmp_path: Path) ->
         assert approvals[0].identity.tool_name == "run_command"
         assert approvals[0].identity.arguments == call.arguments
         assert session.action_audits()[-1].approval_outcome.value == "accepted"
+    finally:
+        session.close()
+
+
+def test_model_visible_command_approval_rejection_has_no_execution_metadata(
+    tmp_path: Path,
+) -> None:
+    import sys
+
+    call = command_call([sys.executable, "-c", "print('must not run')"])
+    provider = ToolProvider([call, AssistantText("rejected")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=lambda _request: ApprovalResolution.REJECT,
+    )
+    try:
+        events: list[object] = []
+        assert session.prompt("run command", event_sink=events.append) == "rejected"
+
+        finished = next(event for event in events if isinstance(event, ToolRequestFinished))
+        assert finished.status == ToolEventStatus.REJECTED
+        assert finished.result_code == "approval_rejected"
+        assert finished.result_details is None
+    finally:
+        session.close()
+
+
+def test_model_visible_command_final_audit_failure_emits_only_outcome_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import sys
+
+    call = command_call([sys.executable, "-c", "print('process completed')"])
+    provider = ToolProvider([call, AssistantText("must not be reached")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    original_append_audit = session._writer.append_audit
+
+    def fail_final_audit(record):
+        if isinstance(record, ActionExecutionFinished):
+            raise SessionStoreError("injected final audit failure")
+        return original_append_audit(record)
+
+    monkeypatch.setattr(session._writer, "append_audit", fail_final_audit)
+    try:
+        events: list[object] = []
+        with pytest.raises(ActionOutcomeAuditError):
+            session.prompt("run command", event_sink=events.append)
+
+        finished = [event for event in events if isinstance(event, ToolRequestFinished)]
+        assert len(finished) == 1
+        assert finished[0].status == ToolEventStatus.OUTCOME_UNKNOWN
+        assert finished[0].result_code is None
+        assert finished[0].result_details is None
+        assert session.history == ()
+        assert session.action_audits()[-1].status == ActionAuditStatus.OUTCOME_UNKNOWN
+        assert len(provider.requests) == 1
     finally:
         session.close()
 

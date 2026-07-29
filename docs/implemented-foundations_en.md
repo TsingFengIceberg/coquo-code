@@ -49,6 +49,7 @@
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
 - [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
 - [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
+- [Trusted Command Result Observability](#trusted-command-result-observability)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -679,6 +680,14 @@ Command details do not misrepresent direct argv as shell source. Ordinary reques
 
 Only an explicit full-mode request makes AgentLoop derive details from immutable ToolArguments; compact and one-shot events carry no argv details, and TerminalEventSink then renders the selected form. Events remain best-effort ephemeral observation and cannot change permission, approval, execution, Action Audit, turn commit, or provider failure. Full mode provides no PTY, retained shell, stdin forwarding, or additional command authority. Review confirms no model-visible behavior change, so canonical system prompt remains v21, provider adapter contract remains v24, the 21-tool catalog and empty Effective Context identity are unchanged, and no Session/context schema advances. See [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md).
 
+## Trusted Command Result Observability
+
+In addition to the existing model-visible ToolResult, `run_command` now emits a content-free typed observation directly from the executor. It records process status, exit code or signal, monotonic duration, stdout/stderr captured and total bytes, per-stream truncation, and cleanup completeness. The terminal never obtains these facts by parsing ToolResult JSON. The same observation generates both the existing JSON fields and Host event metadata, so provider-facing serialization does not become the trusted UI source.
+
+Compact completion lines append exit or lifecycle status, duration, and both output byte counts; truncation and incomplete cleanup are explicit. `/tool-details full` expands the fields to at most six lines/2 KiB. Neither mode displays raw stdout/stderr text or base64, nor does it add exposure of argv, credentials, absolute paths, raw ToolResult, or provider payloads. Denial, approval rejection/cancellation, preparation failure, and executor exception carry no execution details. If Action Audit finish persistence fails, the terminal still reports only `outcome-unknown`; process metadata cannot masquerade as durable action completion.
+
+Observations and result details exist only in the current live-event path and are stored in neither Sessions, Action Audit schemas, provider history, profiles, nor Effective Context. Review confirms no model-visible contract change, so canonical system prompt remains v21, provider adapter contract remains v24, the 21-tool catalog, tool schemas/order, empty Effective Context identity, and all Session/context schemas remain unchanged. See [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -910,3 +919,4 @@ This slice establishes capacity facts only. It does not count current request to
 63. [0063: Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)
 64. [0064: Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
 65. [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
+66. [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
