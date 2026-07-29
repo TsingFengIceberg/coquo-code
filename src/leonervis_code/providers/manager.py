@@ -18,6 +18,10 @@ from leonervis_code.core.contracts import (
     ProviderResponse,
 )
 from leonervis_code.core.effective_context import EffectiveContextSnapshot
+from leonervis_code.core.session_title import (
+    SessionTitleRequest,
+    SessionTitleUnavailableError,
+)
 from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.factory import create_provider
@@ -314,6 +318,36 @@ class TurnRuntimeSnapshot:
         self.usage_tracker.record(ProviderInvocationKind.COMPACTION, usage)
         return response
 
+    def generate_session_title(self, request: SessionTitleRequest) -> ProviderResponse:
+        """Generate one bounded no-tools title through an optional adapter operation."""
+        operation = getattr(self.provider, "generate_session_title_outcome", None)
+        if not callable(operation):
+            raise SessionTitleUnavailableError(
+                "current provider does not support Session title generation"
+            )
+        if self.route is not None:
+            report = _assess_session_title_request(
+                provider=self.provider,
+                capability=self.capability,
+                request=request,
+            )
+            raise_for_context_fit(report)
+        try:
+            outcome = operation(request)
+            if not isinstance(outcome, ProviderResponseOutcome):
+                raise ValueError("provider returned an invalid Session-title outcome")
+        except ProviderAdapterError as error:
+            if self.route is not None:
+                self.usage_tracker.record(ProviderInvocationKind.TURN, error.usage)
+            raise
+        except BaseException:
+            if self.route is not None:
+                self.usage_tracker.record(ProviderInvocationKind.TURN, None)
+            raise
+        if self.route is not None:
+            self.usage_tracker.record(ProviderInvocationKind.TURN, outcome.usage)
+        return outcome.response
+
     def respond(self, request: ConversationRequest) -> ProviderResponse:
         return self.respond_with_observation(
             request,
@@ -413,6 +447,39 @@ def _assess_summary_request(
             input_count = counter(request)
         except Exception:
             input_count = RequestTokenCount.unknown("provider compact input counting failed safely")
+    return evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=request.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
+
+
+def _assess_session_title_request(
+    *,
+    provider: ConversationProvider,
+    capability: ModelContextCapability,
+    request: SessionTitleRequest,
+) -> ContextFitReport:
+    counter = getattr(provider, "count_session_title_input_tokens", None)
+    input_count = RequestTokenCount.unknown("provider does not expose Session-title input counting")
+    preliminary = evaluate_context_fit(
+        target=capability.target,
+        input_count=input_count,
+        requested_output_tokens=request.max_output_tokens,
+        context_window_limit=capability.context_window_tokens,
+        model_output_limit=capability.model_max_output_tokens,
+    )
+    if preliminary.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+        return preliminary
+    if capability.context_window_tokens is not None and callable(counter):
+        try:
+            input_count = counter(request)
+        except Exception:
+            input_count = RequestTokenCount.unknown(
+                "provider Session-title input counting failed safely"
+            )
     return evaluate_context_fit(
         target=capability.target,
         input_count=input_count,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from collections.abc import Callable
 from typing import Protocol
@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.session_title import SessionTitleRequest
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
     adapter_error,
@@ -213,6 +214,49 @@ class AnthropicConversationProvider:
                 requested_output_tokens=request_snapshot.max_output_tokens,
                 usage=usage,
             ),
+            False,
+            usage,
+        )
+
+    def count_session_title_input_tokens(
+        self, request_snapshot: SessionTitleRequest
+    ) -> RequestTokenCount:
+        """Count the exact no-tools Session-title projection."""
+        config = replace(self._config, max_output_tokens=request_snapshot.max_output_tokens)
+        projection = build_input_projection(
+            config,
+            request_snapshot.conversation_request,
+            committed_context=True,
+        )
+        if config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL:
+            return estimate_serialized_input_tokens(projection)
+        try:
+            result = self._client.count_tokens(**projection)
+            input_tokens = getattr(result, "input_tokens", None)
+            if type(input_tokens) is not int or not (0 <= input_tokens <= MAX_REQUEST_INPUT_TOKENS):
+                raise ValueError
+            return RequestTokenCount(input_tokens, RequestTokenCountMethod.EXACT)
+        except Exception:
+            estimated = estimate_serialized_input_tokens(projection)
+            return RequestTokenCount(
+                estimated.input_tokens,
+                RequestTokenCountMethod.ESTIMATED,
+                "Anthropic Session-title token counting failed safely; used serialized estimate",
+            )
+
+    def generate_session_title_outcome(
+        self, request_snapshot: SessionTitleRequest
+    ) -> ProviderResponseOutcome:
+        """Generate one no-tools Session title and retain provider usage."""
+        config = replace(self._config, max_output_tokens=request_snapshot.max_output_tokens)
+        request = build_request(config, request_snapshot.conversation_request)
+        try:
+            response = self._client.create(**request)
+        except anthropic.APIError as error:
+            raise normalize_sdk_error(error, config=config) from None
+        usage = _parse_anthropic_usage(getattr(response, "usage", None))
+        return ProviderResponseOutcome(
+            parse_session_title_response(response, config=config, usage=usage),
             False,
             usage,
         )
@@ -661,6 +705,48 @@ def parse_compact_summary_response(
     text = "".join(text_parts).strip()
     if not text:
         raise _invalid_response(config, "Anthropic compact summary was empty")
+    return AssistantText(text)
+
+
+def parse_session_title_response(
+    response: object,
+    *,
+    config: AnthropicProviderConfig,
+    usage: ProviderTokenUsage | None = None,
+) -> AssistantText:
+    """Decode only one normally completed text-only Session title."""
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "refusal":
+        raise _adapter_error(
+            config,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="Anthropic refused the Session title request",
+        )
+    if stop_reason == "max_tokens":
+        raise _output_limit_response(
+            config,
+            "Anthropic Session title reached the configured output-token limit",
+            requested_output_tokens=config.max_output_tokens,
+            usage=usage,
+            partial_response_observed=_message_has_partial_response(response),
+        )
+    if stop_reason != "end_turn":
+        raise _invalid_response(config, "Anthropic Session title used an unsupported stop reason")
+    content = getattr(response, "content", None)
+    if not isinstance(content, list) or not content:
+        raise _invalid_response(config, "Anthropic Session title contained no content blocks")
+    text_parts: list[str] = []
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            raise _invalid_response(config, "Anthropic Session title contained a non-text block")
+        text = getattr(block, "text", None)
+        if not isinstance(text, str):
+            raise _invalid_response(config, "Anthropic Session title text was malformed")
+        text_parts.append(text)
+    text = "".join(text_parts).strip()
+    if not text:
+        raise _invalid_response(config, "Anthropic Session title was empty")
     return AssistantText(text)
 
 

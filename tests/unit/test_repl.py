@@ -43,7 +43,7 @@ from leonervis_code.providers.manager import (
 from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.session_records import BindingSnapshot, SessionNameSource
 from leonervis_code.session_store import SessionInfo, ToolLedgerQueryResult
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -169,6 +169,8 @@ def test_render_session_summary_marks_pointers_state_and_turn_plurality(tmp_path
         turn_count=1,
         closed=True,
         binding=BindingSnapshot.fake(),
+        name="Review provider adapters",
+        name_source=SessionNameSource.AUTO,
     )
 
     assert render_session_summary(
@@ -176,7 +178,7 @@ def test_render_session_summary_marks_pointers_state_and_turn_plurality(tmp_path
         current_session_id=session_id,
         latest_session_id=session_id,
     ) == (
-        f"{session_id} [current] [latest]: 1 turn, closed, "
+        f"'Review provider adapters' [current] [latest] ({session_id}): 1 turn, closed, "
         "created 2026-07-17T12:00:00.000000Z, runtime fake/<none>"
     )
     assert render_session_summary(
@@ -744,6 +746,10 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
             self.latest = "22345678-1234-4234-9234-123456789abc"
             self.switched = []
             self.created = 0
+            self.names = {
+                self.current: ("Current work", SessionNameSource.MANUAL),
+                self.latest: ("Latest work", SessionNameSource.AUTO),
+            }
 
         def session_info(self):
             return self._info(self.current)
@@ -767,6 +773,15 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
             self.created += 1
             self.current = "32345678-1234-4234-9234-123456789abc"
             self.latest = self.current
+            self.names[self.current] = ("New session 3", SessionNameSource.DEFAULT)
+            return self.session_info()
+
+        def rename_session(self, name=None):
+            self.names[self.current] = (
+                (name, SessionNameSource.MANUAL)
+                if name is not None
+                else ("Automatic title", SessionNameSource.AUTO)
+            )
             return self.session_info()
 
         def switch_session(self, selector):
@@ -790,6 +805,8 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
                 turn_count=0,
                 closed=False,
                 binding=BindingSnapshot.fake(),
+                name=self.names[session_id][0],
+                name_source=self.names[session_id][1],
             )
 
     session = RecordingSession()
@@ -798,7 +815,8 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     run_repl(
         session,
         stdin=io.StringIO(
-            "/session show\n/session list\n/actions\n/tools details\n/session new\n/session show\n"
+            "/session show\n/session list\n/actions\n/tools details\n/session new\n"
+            "/session rename Sprint notes\n/session rename --auto\n/session show\n"
             "/resume 22345678-1234-4234-9234-123456789abc\nHello\n/exit\n"
         ),
         stdout=output,
@@ -812,12 +830,14 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     assert session.switched == ["22345678-1234-4234-9234-123456789abc"]
     assert session.prompts == ["Hello"]
     assert "Auto-save: enabled" in rendered
-    assert "Started new session 32345678-1234-4234-9234-123456789abc" in rendered
+    assert "Started 'New session 3'" in rendered
+    assert "Session name: Sprint notes (manual)" in rendered
+    assert "Session name: Automatic title (auto)" in rendered
     assert "runtime provider unchanged" in rendered
     assert "No action audits yet." in rendered
     assert "No committed turns yet." in rendered
-    assert "12345678-1234-4234-9234-123456789abc [current]" in rendered
-    assert "22345678-1234-4234-9234-123456789abc [latest]" in rendered
+    assert "'Current work' [current]" in rendered
+    assert "'Latest work' [latest]" in rendered
 
 
 def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:

@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.session_records import (
+    SESSION_HEADER_SCHEMA_VERSION,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
@@ -28,6 +29,7 @@ from leonervis_code.session_records import (
     TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
     SessionHeader,
+    SessionNameSource,
     TurnCommitted,
     encode_record,
     replay_records,
@@ -36,6 +38,7 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import (
     AtomicJsonWriteError,
     SessionLockedError,
+    SessionNameConflictError,
     SessionResumeStaleError,
     SessionStore,
     SessionStoreError,
@@ -117,6 +120,151 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert resumed_after_clean_close.state.closed is False
     assert resumed_after_clean_close.state.history == committed_items()
     resumed_after_clean_close.release()
+
+
+def test_new_sessions_receive_monotonic_default_names_under_directory_lock(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+
+    first = session_store.create(BindingSnapshot.fake())
+    assert first.info.name == "New session 1"
+    assert first.info.name_source == SessionNameSource.DEFAULT
+    assert first.state.header.schema_version == SESSION_HEADER_SCHEMA_VERSION
+    first.release()
+
+    second = session_store.create(BindingSnapshot.fake())
+    assert second.info.name == "New session 2"
+    assert second.info.name_source == SessionNameSource.DEFAULT
+    second.release()
+
+
+def test_first_committed_prompt_auto_names_but_failed_turn_does_not(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+
+    writer.turn_failed(binding=binding, failure_kind="provider", message="failed")
+    assert writer.info.name == "New session 1"
+    assert writer.info.name_source == SessionNameSource.DEFAULT
+
+    writer.append_turn(
+        (
+            UserMessage("  Review the provider adapter\nwith a second line"),
+            AssistantText("done"),
+        ),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+
+    assert writer.info.name == "Review the provider adapter"
+    assert writer.info.name_source == SessionNameSource.AUTO
+    writer.release()
+
+    assert session_store.show(SESSION_ONE).name == "Review the provider adapter"
+
+
+def test_first_turn_model_name_conflict_is_checked_atomically_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    first = session_store.create(BindingSnapshot.fake())
+    first.append_turn(
+        (UserMessage("first"), AssistantText("done")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+        session_name="Adapter Review",
+        session_name_source=SessionNameSource.MODEL,
+    )
+    first.release()
+    second = session_store.create(BindingSnapshot.fake())
+
+    with pytest.raises(SessionNameConflictError, match="adapter review"):
+        second.append_turn(
+            (UserMessage("second"), AssistantText("done")),
+            binding=BindingSnapshot.fake(),
+            tool_ledger=ToolTurnLedger(),
+            session_name="adapter review",
+            session_name_source=SessionNameSource.MODEL,
+        )
+
+    assert second.info.turn_count == 0
+    assert second.info.name == "New session 2"
+    second.release()
+
+
+def test_manual_rename_is_append_only_and_auto_restore_keeps_history_unchanged(
+    tmp_path: Path,
+) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    writer.append_turn(
+        (UserMessage("Automatic title source"), AssistantText("done")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    original_history = writer.state.history
+
+    manual = writer.rename("  Release   review  ")
+    assert manual.name == "Release review"
+    assert manual.name_source == SessionNameSource.MANUAL
+    assert writer.state.history == original_history
+
+    writer.append_turn(
+        (UserMessage("Later prompt"), AssistantText("later reply")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    assert writer.info.name == "Release review"
+    assert writer.info.name_source == SessionNameSource.MANUAL
+    renamed_history = writer.state.history
+
+    automatic = writer.rename()
+    assert automatic.name == "Automatic title source"
+    assert automatic.name_source == SessionNameSource.AUTO
+    assert writer.state.history == renamed_history
+    writer.release()
+
+    reopened = session_store.open(SESSION_ONE)
+    assert reopened.info.name == "Automatic title source"
+    assert reopened.info.name_source == SessionNameSource.AUTO
+    assert reopened.state.history == renamed_history
+    reopened.release()
+
+
+def test_legacy_empty_session_uses_stable_short_id_fallback_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.release()
+    legacy_header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ONE,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+    )
+    legacy_bytes = encode_record(legacy_header)
+    writer.path.write_bytes(legacy_bytes)
+
+    info = session_store.show(SESSION_ONE)
+
+    assert info.name == "New session 12345678"
+    assert info.name_source == SessionNameSource.DEFAULT
+    assert writer.path.read_bytes() == legacy_bytes
 
 
 def test_tool_ledger_query_is_recent_bounded_and_distinguishes_empty_v5(tmp_path: Path) -> None:

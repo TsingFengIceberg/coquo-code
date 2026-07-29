@@ -29,6 +29,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.definitions import OPENAI
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.openai_compat import (
@@ -982,6 +983,29 @@ def test_compact_provider_counts_and_parses_text_only() -> None:
         parse_compact_summary_response(
             completion(content="partial", finish_reason="length"), route=route()
         )
+
+
+def test_session_title_count_and_create_use_no_tools_and_512_token_reserve() -> None:
+    client = RecordingChatClient([completion(content=" Adapter review ")])
+    provider = OpenAICompatibleConversationProvider(route(), client)
+    title_request = build_session_title_request("Review adapters")
+
+    counted = provider.count_session_title_input_tokens(title_request)
+    outcome = provider.generate_session_title_outcome(title_request)
+
+    assert counted.method == RequestTokenCountMethod.ESTIMATED
+    assert set(client.requests[0]) == {"model", "messages", "stream", "max_tokens"}
+    assert client.requests[0]["max_tokens"] == 512
+    assert outcome.response == AssistantText("Adapter review")
+    assert outcome.usage is None
+
+
+def test_session_title_adapter_rejects_tool_response() -> None:
+    client = RecordingChatClient([completion(finish_reason="tool_calls", tool_calls=[tool_call()])])
+    provider = OpenAICompatibleConversationProvider(route(), client)
+
+    with pytest.raises(ProviderAdapterError, match="finish reason"):
+        provider.generate_session_title_outcome(build_session_title_request("Review adapters"))
 
 
 def test_effective_summary_is_projected_before_retained_history() -> None:

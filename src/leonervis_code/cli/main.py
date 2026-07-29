@@ -603,6 +603,8 @@ def handle_provider_command(
 
 def render_session_info(info, stdout: TextIO) -> None:
     """Render durable Session metadata without transcript content."""
+    stdout.write(f"session name: {info.name}\n")
+    stdout.write(f"name source: {info.name_source.value}\n")
     stdout.write(f"session ID: {info.session_id}\n")
     stdout.write(f"workspace: {info.workspace}\n")
     stdout.write(f"transcript: {info.path}\n")

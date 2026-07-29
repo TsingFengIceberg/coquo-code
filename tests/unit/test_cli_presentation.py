@@ -635,6 +635,31 @@ def test_toolbar_sanitizes_and_bounds_model_fields() -> None:
     )
 
 
+def test_toolbar_shows_bounded_session_name_between_model_and_context() -> None:
+    session = SimpleNamespace(name="Review provider adapters")
+
+    assert (
+        render_prompt_toolbar(
+            status(mode="real", provider="custom", model="model-one"),
+            Path("/workspace"),
+            color=False,
+            session=session,
+        )
+        == "  model-one · Review provider adapters · /workspace"
+    )
+
+    unsafe = SimpleNamespace(name="session\x1b[31m\nname" + "x" * 40)
+    rendered = render_prompt_toolbar(
+        status(),
+        Path("/workspace"),
+        color=False,
+        session=unsafe,
+    )
+    assert rendered.startswith("  fake · session?[31m?namexxxxxxxxxxxx... · ")
+    assert "\x1b" not in rendered
+    assert "\n" not in rendered
+
+
 def test_prompt_and_toolbar_have_safe_fallbacks() -> None:
     assert render_prompt(None, None, color=False) == "› "
     assert render_prompt_toolbar(None, Path("/workspace"), color=False) == "  /workspace"

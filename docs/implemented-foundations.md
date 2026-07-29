@@ -52,6 +52,7 @@
 - [Trusted Command Result Observability](#trusted-command-result-observability)
 - [Host Workbench Navigation 与 Failure Guidance](#host-workbench-navigation-与-failure-guidance)
 - [Assistant Turn Execution Trace Grouping](#assistant-turn-execution-trace-grouping)
+- [Durable Session Naming 与 Terminal Identity](#durable-session-naming-与-terminal-identity)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -722,13 +723,21 @@ Assistant正文、Host轨迹和后续assistant continuation之间不再插入con
 
 这是纯Host terminal presentation变化。Canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog、ToolArguments v1、ActionIdentity v1、Effective Context identity及全部Session/compaction/Action Audit schema不变。完整决策见[0070：Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)。
 
+## Durable Session Naming 与 Terminal Identity
+
+新Session以`session_header` v2持久保存`New session N`默认名。首个普通assistant回复成功后、turn落盘前，固定标题prompt v1可通过同一pinned provider发起最多3次无工具请求；source最多4096 UTF-8 bytes，output reserve固定512 tokens以容纳provider可能计入输出额度的隐藏推理，最终接受的标题仍最多48 characters和160 UTF-8 bytes。Workspace内自动标题按casefold检查重名，冲突会进入下一次请求的rejected set；三次后或provider失败时，Host使用有界fallback和稳定编号。标题与正文共享每turn最多24次provider invocation，普通循环已用满预算时不会再调用标题模型。
+
+新`turn_committed` v7把首轮`session_name + source(model|fallback)`、正文和全部provider usage写在同一条record中；失败、取消或未提交turn不会留下名称。旧`turn_committed` v1-v6和`session_header` v1继续原样replay，旧无标题turn使用Host确定性兼容显示名而不重写transcript。`/session rename <name>`通过append-only `session_named` v1设置manual名称，`--auto`恢复首轮自动标题；完整UUID仍是精确resume identity。
+
+`/session show`、`/session list`和TTY底栏显示名称并在turn/new/resume/rename后刷新。Slash Host命令现在回显自身`›`输入，并把输入、Host结果和一次短分隔线写成完整块。名称不进入普通provider history、canonical Agent system prompt、tool contract、Action Audit、compaction或Effective Context；system prompt保持v21，独立标题projection使adapter contract升级到v25。完整决策见[0071：Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
 
 Grep具有明确hard bounds：最多1,000个candidates、每file 1 MiB、aggregate 16 MiB、200个matching lines和32 KiB model-visible output，并继续受selector的entry/directory/depth bounds约束。Unreadable、oversized、NUL或invalid-UTF-8 selected file均为whole-call safe error；只有match/output cap返回complete JSON records的stable prefix与`{"truncated":true}` sentinel。No-match仅在bounded candidate set被完整搜索时为空成功。读取时再次执行regular/non-symlink与descriptor identity检查，同时保留local single-user TOCTOU边界。
 
-为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text、multi-tool batch与tool outcome ledger曾依次把writer升级到v3/v4/v5，当前provider usage audit再升级到v6，同时保留v1-v5 reader。`turn_failed`新写v2，`context_compacted`新写v4并继续兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
+为表达grep的两个参数，in-memory `ToolUse`改用immutable `ToolArguments` v1 canonical JSON object。Foundation 1D当时让新`turn_committed`使用record-local schema v2保存`arguments_version + arguments`；legacy schema-v1 read/glob records在replay时转换为同一generic representation，旧JSONL不重写，resume当时只append v2。后续assistant tool text、multi-tool batch与tool outcome ledger曾依次把writer升级到v3/v4/v5，provider usage audit升级到v6，当前首轮原子Session标题再升级到v7，同时保留v1-v6 reader。`turn_failed`新写v2，`context_compacted`新写v4并继续兼容v2/v3；current Effective Context representation为ctx-v3/v4，并继续replay旧ctx-v1/v2 checkpoint。
 
 三个工具继续共享每user turn三次顺序execution预算，AgentLoop和ProjectSession仍显式composition/dispatch而非dynamic registry。Anthropic与OpenAI-compatible ordinary count/create按相同catalog投影exact three schemas，compact summary仍no-tools，parallel calls仍关闭。Adapter contract升级为v5；canonical model system prompt升级为v4并声明literal grep、no-match/truncation解释及仍不可用的write/Bash/regex能力。Generic arguments、prompt与catalog会按设计改变current-binary context IDs，但不重写历史checkpoint。
 
@@ -958,3 +967,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 68. [0068：Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)
 69. [0069：Host Workbench Navigation and Failure Guidance](./decisions/0069-host-workbench-navigation-and-guidance.md)
 70. [0070：Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)
+71. [0071：Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)

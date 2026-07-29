@@ -52,12 +52,16 @@ from leonervis_code.session_records import (
     RuntimeChanged,
     SessionClosed,
     SessionHeader,
+    SESSION_HEADER_SCHEMA_VERSION,
+    SessionNamed,
+    SessionNameSource,
     SessionRecord,
     SessionRecordError,
     SessionResumed,
     TurnCommitted,
     TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
     TurnFailed,
+    canonical_session_name,
     canonical_session_id,
     decode_record,
     encode_record,
@@ -125,6 +129,14 @@ def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
 
 class SessionLockedError(SessionStoreError):
     """Raised when another writer already owns a session."""
+
+
+class SessionNameConflictError(SessionStoreError):
+    """Raised when an automatic title conflicts with another workspace Session."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(f"Session name already exists: {name}")
 
 
 class AtomicJsonWriteError(SessionStoreError):
@@ -201,6 +213,8 @@ class SessionInfo:
     turn_count: int
     closed: bool
     binding: BindingSnapshot
+    name: str = "New session"
+    name_source: SessionNameSource = SessionNameSource.DEFAULT
 
 
 @dataclass(frozen=True)
@@ -292,6 +306,8 @@ class SessionStore:
                     workspace_fingerprint=self.workspace_fingerprint,
                     created_at=self._clock(),
                     binding=binding,
+                    name=_next_default_session_name(self.root),
+                    schema_version=SESSION_HEADER_SCHEMA_VERSION,
                 )
                 _create_transcript(transcript_path, encode_record(header))
                 self._write_latest(session_id)
@@ -866,6 +882,8 @@ class SessionWriter:
         binding: BindingSnapshot,
         tool_ledger: ToolTurnLedger,
         provider_usage: tuple[ProviderInvocationUsage, ...] = (),
+        session_name: str | None = None,
+        session_name_source: SessionNameSource | None = None,
         committed_at: str | None = None,
     ) -> TurnCommitted:
         """Durably commit one complete turn as exactly one JSONL record."""
@@ -877,8 +895,20 @@ class SessionWriter:
             items=tuple(items),
             tool_ledger=tool_ledger,
             provider_usage=provider_usage,
+            session_name=session_name,
+            session_name_source=session_name_source,
         )
-        self._append(record)
+        if session_name is None:
+            self._append(record)
+        else:
+            with self._store._directory_lock(existing_only=True):
+                if _session_name_exists(
+                    self._store,
+                    session_name,
+                    exclude_session_id=self.session_id,
+                ):
+                    raise SessionNameConflictError(session_name)
+                self._append(record)
         return record
 
     def append_context_compacted(self, record: ContextCompacted) -> ContextCompacted:
@@ -919,6 +949,24 @@ class SessionWriter:
         )
         self.append_audit(record)
         return record
+
+    def rename(self, name: str | None = None) -> SessionInfo:
+        """Durably set a manual name or restore the deterministic automatic name."""
+        self._ensure_writable()
+        if name is None:
+            resolved, source = _automatic_session_identity(self._state)
+        else:
+            resolved = canonical_session_name(name)
+            source = SessionNameSource.MANUAL
+        self.append_audit(
+            SessionNamed(
+                sequence=self._state.next_sequence,
+                occurred_at=self._store._clock(),
+                name=resolved,
+                source=source,
+            )
+        )
+        return self.info
 
     def turn_failed(
         self,
@@ -1607,6 +1655,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _info(path: Path, state: ReplayState) -> SessionInfo:
+    name, name_source = _session_name(state)
     return SessionInfo(
         session_id=state.header.session_id,
         path=path,
@@ -1617,4 +1666,86 @@ def _info(path: Path, state: ReplayState) -> SessionInfo:
         turn_count=len(state.turns),
         closed=state.closed,
         binding=state.binding,
+        name=name,
+        name_source=name_source,
+    )
+
+
+def _session_name(state: ReplayState) -> tuple[str, SessionNameSource]:
+    if state.latest_name is not None:
+        return state.latest_name.name, state.latest_name.source
+    committed = _committed_session_name(state)
+    if committed is not None:
+        return committed
+    if state.turns:
+        return _automatic_session_name(state), SessionNameSource.AUTO
+    if state.header.name is not None:
+        return state.header.name, SessionNameSource.DEFAULT
+    return f"New session {state.header.session_id[:8]}", SessionNameSource.DEFAULT
+
+
+def _automatic_session_name(state: ReplayState) -> str:
+    if not state.turns:
+        if state.header.name is not None:
+            return state.header.name
+        return f"New session {state.header.session_id[:8]}"
+    text = state.turns[0].user.text
+    candidate = next((line for line in text.splitlines() if line.strip()), text)
+    candidate = " ".join(
+        "".join(character if character.isprintable() else " " for character in candidate).split()
+    )
+    if not candidate:
+        return "Untitled session"
+    return _truncate_session_name(candidate, 48, 160)
+
+
+def _automatic_session_identity(state: ReplayState) -> tuple[str, SessionNameSource]:
+    committed = _committed_session_name(state)
+    if committed is not None:
+        return committed
+    return _automatic_session_name(state), SessionNameSource.AUTO
+
+
+def _committed_session_name(
+    state: ReplayState,
+) -> tuple[str, SessionNameSource] | None:
+    for record in state.records:
+        if isinstance(record, TurnCommitted):
+            if record.session_name is None or record.session_name_source is None:
+                return None
+            return record.session_name, record.session_name_source
+    return None
+
+
+def _truncate_session_name(value: str, max_characters: int, max_bytes: int) -> str:
+    if len(value) <= max_characters and len(value.encode("utf-8")) <= max_bytes:
+        return canonical_session_name(value)
+    suffix = "..."
+    kept: list[str] = []
+    for character in value:
+        candidate = "".join(kept) + character + suffix
+        if len(candidate) > max_characters or len(candidate.encode("utf-8")) > max_bytes:
+            break
+        kept.append(character)
+    return canonical_session_name("".join(kept).rstrip() + suffix)
+
+
+def _next_default_session_name(root: Path) -> str:
+    try:
+        count = sum(1 for path in root.iterdir() if path.name.endswith(".jsonl"))
+    except OSError:
+        raise SessionStoreError(f"could not allocate session name in: {root}") from None
+    return f"New session {count + 1}"
+
+
+def _session_name_exists(
+    store: SessionStore,
+    name: str,
+    *,
+    exclude_session_id: str,
+) -> bool:
+    key = name.casefold()
+    return any(
+        info.session_id != exclude_session_id and info.name.casefold() == key
+        for info in store.list()
     )

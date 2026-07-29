@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 from typing import TypeAlias, TypeVar
+import unicodedata
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -64,12 +65,14 @@ from leonervis_code.providers.usage import (
 )
 
 SCHEMA_VERSION = 1
+SESSION_HEADER_SCHEMA_VERSION = 2
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
 TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
 TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION = 3
 TURN_COMMITTED_BATCH_SCHEMA_VERSION = 4
 TURN_COMMITTED_LEDGER_SCHEMA_VERSION = 5
-TURN_COMMITTED_SCHEMA_VERSION = 6
+TURN_COMMITTED_USAGE_SCHEMA_VERSION = 6
+TURN_COMMITTED_SCHEMA_VERSION = 7
 TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
 TURN_FAILED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
@@ -80,6 +83,10 @@ MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
 MAX_TEXT_BYTES = 512 * 1024
 MAX_STRING_LENGTH = 4096
+MAX_SESSION_NAME_CHARACTERS = 80
+MAX_SESSION_NAME_BYTES = 256
+MAX_GENERATED_SESSION_NAME_CHARACTERS = 48
+MAX_GENERATED_SESSION_NAME_BYTES = 160
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -90,6 +97,16 @@ _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 class SessionRecordError(ValueError):
     """Raised when a session record or replay chain is invalid."""
+
+
+class SessionNameSource(StrEnum):
+    """Trusted origin of one current Session display name."""
+
+    DEFAULT = "default"
+    AUTO = "auto"
+    MODEL = "model"
+    FALLBACK = "fallback"
+    MANUAL = "manual"
 
 
 @dataclass(frozen=True)
@@ -195,6 +212,7 @@ class SessionHeader:
     workspace_fingerprint: str
     created_at: str
     binding: BindingSnapshot
+    name: str | None = None
     record_type: str = "session_header"
     schema_version: int = SCHEMA_VERSION
 
@@ -207,6 +225,8 @@ class TurnCommitted:
     items: tuple[ConversationItem, ...]
     tool_ledger: ToolTurnLedger = ToolTurnLedger()
     provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
+    session_name: str | None = None
+    session_name_source: SessionNameSource | None = None
     record_type: str = "turn_committed"
     schema_version: int = TURN_COMMITTED_SCHEMA_VERSION
 
@@ -218,6 +238,16 @@ class RuntimeChanged:
     binding: BindingSnapshot
     reason: str
     record_type: str = "runtime_changed"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class SessionNamed:
+    sequence: int
+    occurred_at: str
+    name: str
+    source: SessionNameSource
+    record_type: str = "session_named"
     schema_version: int = SCHEMA_VERSION
 
 
@@ -419,6 +449,7 @@ SessionRecord: TypeAlias = (
     SessionHeader
     | TurnCommitted
     | RuntimeChanged
+    | SessionNamed
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -433,6 +464,7 @@ SessionRecord: TypeAlias = (
 )
 AuditRecord: TypeAlias = (
     RuntimeChanged
+    | SessionNamed
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -459,6 +491,7 @@ class ReplayState:
     latest_checkpoint: ContextCompacted | None
     action_audits: tuple[ActionAuditState, ...]
     turns: tuple[ConversationTurn, ...]
+    latest_name: SessionNamed | None
     binding: BindingSnapshot
     next_sequence: int
     closed: bool
@@ -475,6 +508,40 @@ def canonical_session_id(value: object) -> str:
     if parsed.version != 4 or str(parsed) != value:
         raise SessionRecordError("session ID must be a canonical UUID4")
     return value
+
+
+def canonical_session_name(value: object) -> str:
+    """Normalize one bounded single-line display name or fail closed."""
+    if not isinstance(value, str):
+        raise SessionRecordError("session name must be text")
+    if any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in value
+    ):
+        raise SessionRecordError("session name must not contain control or format characters")
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise SessionRecordError("session name must not be empty")
+    if len(normalized) > MAX_SESSION_NAME_CHARACTERS:
+        raise SessionRecordError(f"session name exceeds {MAX_SESSION_NAME_CHARACTERS} characters")
+    if len(normalized.encode("utf-8")) > MAX_SESSION_NAME_BYTES:
+        raise SessionRecordError(f"session name exceeds {MAX_SESSION_NAME_BYTES} UTF-8 bytes")
+    return normalized
+
+
+def canonical_generated_session_name(value: object) -> str:
+    """Validate the stricter title bound used by model and Host fallback naming."""
+    normalized = canonical_session_name(value)
+    if len(normalized) > MAX_GENERATED_SESSION_NAME_CHARACTERS:
+        raise SessionRecordError(
+            f"generated session name exceeds {MAX_GENERATED_SESSION_NAME_CHARACTERS} characters"
+        )
+    if len(normalized.encode("utf-8")) > MAX_GENERATED_SESSION_NAME_BYTES:
+        raise SessionRecordError(
+            f"generated session name exceeds {MAX_GENERATED_SESSION_NAME_BYTES} UTF-8 bytes"
+        )
+    return normalized
 
 
 def workspace_fingerprint(workspace: Path) -> str:
@@ -559,6 +626,7 @@ def replay_records(
     effective_source = EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY
     latest_checkpoint: ContextCompacted | None = None
     turns: list[ConversationTurn] = []
+    latest_name: SessionNamed | None = None
     binding = header.binding
     closed = False
     seen_tool_ids: set[str] = set()
@@ -584,6 +652,11 @@ def replay_records(
             _validate_timestamp(record.committed_at, "turn committed_at")
             _validate_turn(record.items, seen_tool_ids)
             _validate_turn_ledger(record)
+            _validate_turn_session_name(record)
+            if record.session_name is not None and (turns or latest_name is not None):
+                raise SessionRecordError(
+                    "turn_committed Session name is only valid on an unnamed first turn"
+                )
             history.extend(record.items)
             effective_history.extend(record.items)
             turns.append(ConversationTurn(user=record.items[0], assistant=record.items[-1]))  # type: ignore[arg-type]
@@ -593,6 +666,19 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
             _required_text(record.reason, "runtime_changed reason", allow_empty=True)
             binding = record.binding
+        elif isinstance(record, SessionNamed):
+            _require_no_live_action(live_action_request_id, "session_named")
+            _validate_timestamp(record.occurred_at, "session_named occurred_at")
+            if canonical_session_name(record.name) != record.name:
+                raise SessionRecordError("session name must use canonical whitespace")
+            if record.source not in {
+                SessionNameSource.AUTO,
+                SessionNameSource.MODEL,
+                SessionNameSource.FALLBACK,
+                SessionNameSource.MANUAL,
+            }:
+                raise SessionRecordError("session_named source is invalid")
+            latest_name = record
         elif isinstance(record, TurnFailed):
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -767,6 +853,7 @@ def replay_records(
         latest_checkpoint=latest_checkpoint,
         action_audits=tuple(action_states[request_id] for request_id in action_order),
         turns=tuple(turns),
+        latest_name=latest_name,
         binding=binding,
         next_sequence=len(validated),
         closed=closed,
@@ -920,10 +1007,13 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             created_at=record.created_at,
             binding=_binding_to_dict(record.binding),
         )
+        if record.schema_version == SESSION_HEADER_SCHEMA_VERSION:
+            common["name"] = record.name
     elif isinstance(record, TurnCommitted):
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
         _validate_turn_ledger(record)
+        _validate_turn_session_name(record)
         common.update(
             committed_at=record.committed_at,
             binding=_binding_to_dict(record.binding),
@@ -933,11 +1023,16 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         )
         if record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
             common["tool_ledger"] = _tool_ledger_to_dict(record.tool_ledger)
-        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if record.schema_version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION:
             common["provider_usage"] = _provider_usage_to_value(
                 record.provider_usage,
                 expected_kind=ProviderInvocationKind.TURN,
                 label="turn_committed",
+            )
+        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            common["session_name"] = record.session_name
+            common["session_name_source"] = (
+                record.session_name_source.value if record.session_name_source is not None else None
             )
     elif isinstance(record, RuntimeChanged):
         _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
@@ -946,6 +1041,22 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             occurred_at=record.occurred_at,
             binding=_binding_to_dict(record.binding),
             reason=record.reason,
+        )
+    elif isinstance(record, SessionNamed):
+        _validate_timestamp(record.occurred_at, "session_named occurred_at")
+        if canonical_session_name(record.name) != record.name:
+            raise SessionRecordError("session name must use canonical whitespace")
+        if record.source not in {
+            SessionNameSource.AUTO,
+            SessionNameSource.MODEL,
+            SessionNameSource.FALLBACK,
+            SessionNameSource.MANUAL,
+        }:
+            raise SessionRecordError("session_named source is invalid")
+        common.update(
+            occurred_at=record.occurred_at,
+            name=record.name,
+            source=record.source.value,
         )
     elif isinstance(record, TurnFailed):
         _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
@@ -1072,7 +1183,9 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
 def _record_from_dict(value: dict[str, object]) -> SessionRecord:
     record_type = _required_field_text(value, "record_type", "session record")
     version = value.get("schema_version")
-    if record_type == "context_compacted":
+    if record_type == "session_header":
+        allowed_versions = {SCHEMA_VERSION, SESSION_HEADER_SCHEMA_VERSION}
+    elif record_type == "context_compacted":
         allowed_versions = {
             CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION,
             CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION,
@@ -1085,6 +1198,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     elif record_type == "turn_failed":
@@ -1098,18 +1212,21 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         raise SessionRecordError("session record sequence must be a non-negative integer")
 
     if record_type == "session_header":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "session_id",
+            "workspace",
+            "workspace_fingerprint",
+            "created_at",
+            "binding",
+        }
+        if version == SESSION_HEADER_SCHEMA_VERSION:
+            fields.add("name")
         _closed_fields(
             value,
-            {
-                "record_type",
-                "schema_version",
-                "sequence",
-                "session_id",
-                "workspace",
-                "workspace_fingerprint",
-                "created_at",
-                "binding",
-            },
+            fields,
             record_type,
         )
         record = SessionHeader(
@@ -1119,6 +1236,12 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             workspace_fingerprint=_required_field_text(value, "workspace_fingerprint", record_type),
             created_at=_required_field_text(value, "created_at", record_type),
             binding=_binding_from_value(value.get("binding")),
+            name=(
+                canonical_session_name(value.get("name"))
+                if version == SESSION_HEADER_SCHEMA_VERSION
+                else None
+            ),
+            schema_version=version,
         )
         _validate_header(record)
         return record
@@ -1133,8 +1256,10 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         }
         if version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
             fields.add("tool_ledger")
-        if version == TURN_COMMITTED_SCHEMA_VERSION:
+        if version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION:
             fields.add("provider_usage")
+        if version == TURN_COMMITTED_SCHEMA_VERSION:
+            fields.update({"session_name", "session_name_source"})
         _closed_fields(
             value,
             fields,
@@ -1160,14 +1285,25 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
                     expected_kind=ProviderInvocationKind.TURN,
                     label=record_type,
                 )
-                if version == TURN_COMMITTED_SCHEMA_VERSION
+                if version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION
                 else ()
+            ),
+            session_name=(
+                _nullable_field_text(value, "session_name", record_type)
+                if version == TURN_COMMITTED_SCHEMA_VERSION
+                else None
+            ),
+            session_name_source=(
+                _session_name_source_from_value(value.get("session_name_source"))
+                if version == TURN_COMMITTED_SCHEMA_VERSION
+                else None
             ),
             schema_version=version,
         )
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
         _validate_turn_ledger(record)
+        _validate_turn_session_name(record)
         return record
     if record_type == "runtime_changed":
         fields = {
@@ -1184,6 +1320,33 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             binding=_binding_from_value(value.get("binding")),
             reason=_required_field_text(value, "reason", record_type, allow_empty=True),
+        )
+    if record_type == "session_named":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "name",
+            "source",
+        }
+        _closed_fields(value, fields, record_type)
+        try:
+            source = SessionNameSource(_required_field_text(value, "source", record_type))
+        except ValueError:
+            raise SessionRecordError("session_named source is invalid") from None
+        if source not in {
+            SessionNameSource.AUTO,
+            SessionNameSource.MODEL,
+            SessionNameSource.FALLBACK,
+            SessionNameSource.MANUAL,
+        }:
+            raise SessionRecordError("session_named source is invalid")
+        return SessionNamed(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            name=canonical_session_name(value.get("name")),
+            source=source,
         )
     if record_type == "turn_failed":
         fields = {
@@ -1551,6 +1714,7 @@ def _item_to_dict(
         TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
         TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
         TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+        TURN_COMMITTED_USAGE_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -1566,6 +1730,7 @@ def _item_to_dict(
         supports_assistant_text = schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
         if item.assistant_text is not None and not supports_assistant_text:
@@ -1615,6 +1780,7 @@ def _item_to_dict(
     if isinstance(item, AssistantToolBatch):
         if schema_version not in {
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError(
@@ -1684,6 +1850,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         if schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             fields.add("assistant_text")
@@ -1705,6 +1872,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         if schema_version in {
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raw_assistant_text = value.get("assistant_text")
@@ -1729,6 +1897,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
     if item_type == "assistant_tool_batch":
         if schema_version not in {
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError(
@@ -1965,7 +2134,7 @@ def _validate_turn_ledger(record: TurnCommitted) -> None:
         result = results[request.tool_use_id]
         if (entry.outcome == ToolRequestOutcome.SUCCEEDED) == result.is_error:
             raise SessionRecordError("turn_committed tool ledger outcome contradicts tool result")
-    if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+    if record.schema_version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION:
         _validate_provider_usage(
             record.provider_usage,
             expected_kind=ProviderInvocationKind.TURN,
@@ -1973,6 +2142,24 @@ def _validate_turn_ledger(record: TurnCommitted) -> None:
         )
     elif record.provider_usage not in (None, ()):
         raise SessionRecordError("legacy turn_committed cannot contain provider usage")
+
+
+def _validate_turn_session_name(record: TurnCommitted) -> None:
+    if record.schema_version != TURN_COMMITTED_SCHEMA_VERSION:
+        if record.session_name is not None or record.session_name_source is not None:
+            raise SessionRecordError("legacy turn_committed cannot contain a Session name")
+        return
+    if (record.session_name is None) != (record.session_name_source is None):
+        raise SessionRecordError("turn_committed Session name fields must both be null or present")
+    if record.session_name is None:
+        return
+    if canonical_generated_session_name(record.session_name) != record.session_name:
+        raise SessionRecordError("generated Session name must use canonical whitespace")
+    if record.session_name_source not in {
+        SessionNameSource.MODEL,
+        SessionNameSource.FALLBACK,
+    }:
+        raise SessionRecordError("turn_committed Session name source is invalid")
 
 
 def _validate_header(header: SessionHeader) -> None:
@@ -1986,6 +2173,11 @@ def _validate_header(header: SessionHeader) -> None:
         raise SessionRecordError("session workspace fingerprint is invalid")
     _validate_timestamp(header.created_at, "session created_at")
     header.binding.__post_init__()
+    if header.schema_version == SESSION_HEADER_SCHEMA_VERSION:
+        if canonical_session_name(header.name) != header.name:
+            raise SessionRecordError("session header name must use canonical whitespace")
+    elif header.name is not None:
+        raise SessionRecordError("legacy session_header cannot contain a name")
 
 
 def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str]) -> None:
@@ -2004,6 +2196,10 @@ def _validate_turn(items: tuple[ConversationItem, ...], seen_tool_ids: set[str])
 
 
 def _validate_record_version(record: SessionRecord) -> None:
+    if isinstance(record, SessionHeader):
+        if record.schema_version not in {SCHEMA_VERSION, SESSION_HEADER_SCHEMA_VERSION}:
+            raise SessionRecordError("unsupported session record schema version")
+        return
     if isinstance(record, TurnCommitted):
         if record.schema_version not in {
             TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
@@ -2011,6 +2207,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
+            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -2215,6 +2412,17 @@ def _enum_field(
         return enum_type(raw)
     except ValueError:
         raise SessionRecordError(f"{label} {field} is invalid") from None
+
+
+def _session_name_source_from_value(value: object) -> SessionNameSource | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SessionRecordError("turn_committed session_name_source must be text or null")
+    try:
+        return SessionNameSource(value)
+    except ValueError:
+        raise SessionRecordError("turn_committed session_name_source is invalid") from None
 
 
 def _nullable_field_number(value: dict[str, object], field: str, label: str) -> float | None:

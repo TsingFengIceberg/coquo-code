@@ -24,6 +24,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
@@ -1205,6 +1206,44 @@ def test_compact_summary_count_and_create_omit_tools_and_parse_text_only() -> No
     assert result == AssistantText("summary")
     assert "tools" not in client.requests[0]
     assert client.requests[0]["max_tokens"] == 32
+
+
+def test_session_title_count_and_create_use_no_tools_and_512_token_reserve() -> None:
+    client = RecordingMessagesClient(
+        [message(TextBlock(text=" Adapter review ", type="text"))],
+        counts=[SimpleNamespace(input_tokens=9)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+    title_request = build_session_title_request("Review adapters")
+
+    counted = provider.count_session_title_input_tokens(title_request)
+    outcome = provider.generate_session_title_outcome(title_request)
+
+    assert counted.input_tokens == 9
+    assert set(client.count_requests[0]) == {"model", "system", "messages"}
+    assert "tools" not in client.requests[0]
+    assert client.requests[0]["max_tokens"] == 512
+    assert outcome.response == AssistantText("Adapter review")
+    assert outcome.usage == ProviderTokenUsage(1, 1)
+
+
+def test_session_title_adapter_rejects_tool_response() -> None:
+    client = RecordingMessagesClient(
+        [
+            message(
+                ToolUseBlock(
+                    id="toolu_1",
+                    name="read_file",
+                    input={"path": "README.md"},
+                    type="tool_use",
+                )
+            )
+        ]
+    )
+    provider = AnthropicConversationProvider(config(), client)
+
+    with pytest.raises(ProviderAdapterError, match="unsupported stop reason"):
+        provider.generate_session_title_outcome(build_session_title_request("Review adapters"))
 
 
 def test_compact_summary_parser_rejects_tools_refusal_and_truncation() -> None:

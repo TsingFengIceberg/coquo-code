@@ -30,16 +30,21 @@ from leonervis_code.session_records import (
     RuntimeChanged,
     SessionClosed,
     SessionHeader,
+    SESSION_HEADER_SCHEMA_VERSION,
+    SessionNamed,
+    SessionNameSource,
     SessionRecordError,
     SessionResumed,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
+    TURN_COMMITTED_USAGE_SCHEMA_VERSION,
     TURN_FAILED_LEGACY_SCHEMA_VERSION,
     TURN_FAILED_SCHEMA_VERSION,
     TurnCommitted,
     TurnFailed,
+    canonical_session_name,
     decode_record,
     encode_record,
     replay_records,
@@ -124,6 +129,70 @@ def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> No
     assert state.next_sequence == 3
 
 
+def test_session_header_v2_and_session_named_round_trip_with_latest_name(tmp_path: Path) -> None:
+    workspace = tmp_path.resolve()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+        name="New session 1",
+        schema_version=SESSION_HEADER_SCHEMA_VERSION,
+    )
+    first = SessionNamed(1, NOW, "Provider review", SessionNameSource.MANUAL)
+    latest = SessionNamed(2, NOW, "Automatic title", SessionNameSource.AUTO)
+
+    decoded = [decode_record(encode_record(record)) for record in (header, first, latest)]
+    state = replay_records(decoded)
+
+    assert decoded == [header, first, latest]
+    assert state.header.name == "New session 1"
+    assert state.latest_name == latest
+    assert state.history == ()
+
+
+def test_legacy_session_header_v1_round_trip_remains_byte_identical(tmp_path: Path) -> None:
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+    )
+    encoded = encode_record(header)
+
+    decoded = decode_record(encoded)
+
+    assert decoded == header
+    assert decoded.name is None
+    assert encode_record(decoded) == encoded
+    assert b'"name"' not in encoded
+
+
+@pytest.mark.parametrize(
+    "name,match",
+    [
+        ("", "empty"),
+        ("line\nbreak", "control or format"),
+        ("hidden\u200bvalue", "control or format"),
+        ("x" * 81, "80 characters"),
+        ("\U0001f600" * 70, "256 UTF-8 bytes"),
+    ],
+)
+def test_session_name_validation_fails_closed(name: str, match: str) -> None:
+    with pytest.raises(SessionRecordError, match=match):
+        canonical_session_name(name)
+
+
+def test_session_name_normalizes_bounded_visible_whitespace() -> None:
+    assert canonical_session_name("  Review   provider\u00a0adapters  ") == (
+        "Review provider adapters"
+    )
+
+
 def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Path) -> None:
     binding = BindingSnapshot.fake()
     turn_usage = (
@@ -180,6 +249,90 @@ def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Pat
                 ),
             )
         )
+
+
+def test_turn_v7_round_trips_first_turn_model_name_and_v6_remains_readable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        created_at=NOW,
+        binding=binding,
+        name="New session 1",
+        schema_version=SESSION_HEADER_SCHEMA_VERSION,
+    )
+    current = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=(UserMessage("review adapters"), AssistantText("done")),
+        session_name="Provider adapter review",
+        session_name_source=SessionNameSource.MODEL,
+    )
+
+    decoded = decode_record(encode_record(current))
+    state = replay_records((header, decoded))
+
+    assert decoded == current
+    assert state.turns[0].user.text == "review adapters"
+    assert b'"session_name":"Provider adapter review"' in encode_record(current)
+    assert b'"session_name_source":"model"' in encode_record(current)
+
+    legacy = replace(
+        current,
+        schema_version=TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+        session_name=None,
+        session_name_source=None,
+    )
+    legacy_encoded = encode_record(legacy)
+    assert decode_record(legacy_encoded) == legacy
+    assert b'"schema_version":6' in legacy_encoded
+    assert b'"session_name"' not in legacy_encoded
+
+
+def test_turn_v7_rejects_partial_invalid_or_late_session_name(tmp_path: Path) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        created_at=NOW,
+        binding=binding,
+    )
+    first = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=(UserMessage("first"), AssistantText("done")),
+    )
+    named_late = TurnCommitted(
+        sequence=2,
+        committed_at=NOW,
+        binding=binding,
+        items=(UserMessage("second"), AssistantText("done")),
+        session_name="Late title",
+        session_name_source=SessionNameSource.MODEL,
+    )
+
+    with pytest.raises(SessionRecordError, match="both be null or present"):
+        encode_record(replace(first, session_name="Partial"))
+    with pytest.raises(SessionRecordError, match="source is invalid"):
+        encode_record(
+            replace(
+                first,
+                session_name="Manual title",
+                session_name_source=SessionNameSource.MANUAL,
+            )
+        )
+    with pytest.raises(SessionRecordError, match="unnamed first turn"):
+        replay_records((header, first, named_late))
 
 
 def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:
@@ -505,7 +658,7 @@ def test_canonical_codec_is_compact_sorted_and_contains_no_secret_value(tmp_path
     "mutate,match",
     [
         (lambda value: value.update(secret="x"), "unknown field"),
-        (lambda value: value.update(schema_version=2), "unsupported"),
+        (lambda value: value.update(schema_version=3), "unsupported"),
         (lambda value: value.update(sequence=True), "sequence"),
         (lambda value: value["binding"].update(secret="x"), "unknown field"),
     ],

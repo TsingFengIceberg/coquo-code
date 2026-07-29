@@ -46,6 +46,7 @@ from leonervis_code.cli.markdown_renderer import (
 )
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
+    MessageKind,
     ToolDetailMode,
     render_host_message,
     render_message_separator,
@@ -57,7 +58,7 @@ from leonervis_code.cli.prompt_editor import SlashCommandCompleter, validate_pro
 from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.turn_runner import TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
-from leonervis_code.session import TurnCommitStarted
+from leonervis_code.session import SessionTitleGenerationStarted, TurnCommitStarted
 
 
 def supports_terminal_application(stdin: TextIO, stdout: TextIO) -> bool:
@@ -263,7 +264,7 @@ class TerminalApplication:
                 + "\n"
             )
         elif isinstance(event, PromptActivity):
-            if isinstance(event.event, TurnCommitStarted):
+            if isinstance(event.event, (SessionTitleGenerationStarted, TurnCommitStarted)):
                 return
             rendered = self._renderer.render(event.event)
             if rendered:
@@ -364,21 +365,38 @@ class TerminalApplication:
             result = dispatch_slash(text, self._session, tool_details=self._tool_details)
             if result.clear_screen:
                 self._schedule_write(CLEAR_SCREEN)
-            if result.message is not None:
-                self._schedule_write(
-                    render_host_message(result.message, result.kind, color=self._color) + "\n"
-                )
+            elif result.message is not None:
+                self._schedule_write(self._render_slash_block(text, result.message, result.kind))
             if result.exit:
                 self._application.exit(result=None)
             self._refresh_snapshots()
             self._replace_history()
         except BaseException as error:
             self._schedule_write(
-                render_host_message(
-                    f"Operation failed: {type(error).__name__}: {error}", "error", color=self._color
+                self._render_slash_block(
+                    text,
+                    f"Operation failed: {type(error).__name__}: {error}",
+                    "error",
                 )
-                + "\n"
             )
+
+    def _render_slash_block(self, text: str, message: str, kind: MessageKind) -> str:
+        width = self._current_width()
+        prompt = render_plain_document(
+            text,
+            width=width,
+            first_prefix=render_prompt(
+                self._status,
+                self._session_info,
+                color=self._color,
+                readline=False,
+            ),
+            continuation_prefix="  ",
+            prefix_width=2,
+        )
+        result = render_host_message(message, kind, color=self._color)
+        separator = render_message_separator(width, color=self._color)
+        return f"\n{prompt}\n\n{result}\n\n{separator}\n"
 
     def _bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -470,6 +488,7 @@ class TerminalApplication:
             self._cwd,
             color=self._color,
             usage=self._usage,
+            session=self._session_info,
         )
         return ANSI(f"{self._state.status} · {base.strip()}")
 

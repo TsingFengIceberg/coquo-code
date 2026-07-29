@@ -26,7 +26,7 @@ from leonervis_code.session import (
 )
 from leonervis_code.core.contracts import ToolArguments
 from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot
+from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo, ToolLedgerQueryResult
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -61,6 +61,8 @@ class Session:
         self.prompts = []
         self.audits = ()
         self.sessions = None
+        self.name = "Current work"
+        self.name_source = SessionNameSource.AUTO
 
     def status(self):
         return RuntimeStatus(
@@ -139,6 +141,8 @@ class Session:
             turn_count=1,
             closed=False,
             binding=BindingSnapshot.fake(),
+            name=self.name,
+            name_source=self.name_source,
         )
 
     def session_info(self):
@@ -242,6 +246,13 @@ class Session:
     def new_session(self):
         self.current = "22345678-1234-4234-9234-123456789abc"
         self.latest = self.current
+        self.name = "New session 2"
+        self.name_source = SessionNameSource.DEFAULT
+        return self.session_info()
+
+    def rename_session(self, name=None):
+        self.name = " ".join(name.split()) if name is not None else "Automatic title"
+        self.name_source = SessionNameSource.MANUAL if name is not None else SessionNameSource.AUTO
         return self.session_info()
 
     def switch_session(self, selector):
@@ -291,8 +302,18 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
-    assert unknown.message == ("Unknown session command: wat\nUsage: /session <show|list|new>")
+    assert unknown.message == (
+        "Unknown session command: wat\nUsage: /session <show|list|new|rename>"
+    )
     assert dispatch_slash("/session show extra", session).message == "Usage: /session show"
+    assert dispatch_slash("/session rename", session).message == (
+        "Usage: /session rename <name> | /session rename --auto"
+    )
+    renamed = dispatch_slash("/session rename  Release   review ", session)
+    assert renamed.kind == "success"
+    assert renamed.message == "Session name: Release review (manual)"
+    restored = dispatch_slash("/session rename --auto", session)
+    assert restored.message == "Session name: Automatic title (auto)"
     assert dispatch_slash("/provider use", session).message == "Usage: /provider use <name>"
     assert dispatch_slash("/status extra", session).message == "Usage: /status"
     context = dispatch_slash("/context", session)

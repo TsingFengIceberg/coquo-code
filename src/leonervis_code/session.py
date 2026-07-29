@@ -47,7 +47,16 @@ from leonervis_code.core.compaction import (
     plan_compaction,
 )
 from leonervis_code.core.cancellation import TurnCancellation
+from leonervis_code.core.session_title import (
+    SESSION_TITLE_MAX_ATTEMPTS,
+    build_session_title_request,
+    fallback_session_title,
+    numbered_session_title,
+    parse_session_title_response,
+)
 from leonervis_code.core.contracts import (
+    AssistantText,
+    AssistantToolBatch,
     CommittedTurn,
     ConversationItem,
     ConversationProvider,
@@ -94,6 +103,8 @@ from leonervis_code.session_records import (
     CompactionFailed,
     ContextCompacted,
     CONTEXT_COMPACTED_SCHEMA_VERSION,
+    MAX_RECORDS,
+    SessionNameSource,
     SessionRecord,
     TurnCommitted,
     TURN_COMMITTED_SCHEMA_VERSION,
@@ -103,6 +114,7 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionInfo,
+    SessionNameConflictError,
     SessionResumeStaleError,
     SessionStore,
     ToolLedgerQueryResult,
@@ -210,6 +222,7 @@ from leonervis_code.tools.write_file import (
     WriteFileTool,
 )
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
+from leonervis_code.tools.catalog import MAX_PROVIDER_INVOCATIONS_PER_TURN
 
 
 class ResumeEffect(StrEnum):
@@ -346,6 +359,20 @@ class TurnCommitStarted:
 
 
 @dataclass(frozen=True)
+class SessionTitleGenerationStarted:
+    """Signal one content-free automatic Session-title attempt."""
+
+    attempt: int
+    limit: int
+
+    def __post_init__(self) -> None:
+        if type(self.attempt) is not int or type(self.limit) is not int:
+            raise ValueError("Session title attempt values must be integers")
+        if not 1 <= self.attempt <= self.limit <= SESSION_TITLE_MAX_ATTEMPTS:
+            raise ValueError("Session title attempt is outside its bound")
+
+
+@dataclass(frozen=True)
 class DurableUsageOperation:
     record_sequence: int
     occurred_at: str
@@ -376,6 +403,7 @@ PromptEvent = (
     AutoCompactionStarted
     | AutoCompactionCommitted
     | AutoCompactionNotApplied
+    | SessionTitleGenerationStarted
     | TurnCommitStarted
     | TurnUsageCompleted
     | AgentPromptEvent
@@ -554,6 +582,7 @@ class ProjectSession:
         self._active_action_lease: ActionLease | None = None
         self._active_action_binding: BindingSnapshot | None = None
         self._active_usage_cursor: int | None = None
+        self._active_turn_runtime: TurnRuntimeSnapshot | None = None
         self._active_cancellation: TurnCancellation | None = None
         self._active_event_sink: PromptEventSink | None = None
         self._lock = RLock()
@@ -868,6 +897,13 @@ class ProjectSession:
             old.release()
             return candidate.info
 
+    def rename_session(self, name: str | None = None) -> SessionInfo:
+        """Rename the current Session or restore its deterministic automatic name."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._writer.rename(name)
+
     def switch_session(self, selector: str | Path) -> SessionResumeResult:
         """Screen and atomically swap durable history without changing runtime."""
         with self._lock:
@@ -968,6 +1004,7 @@ class ProjectSession:
                 if cancellation is not None:
                     cancellation.check()
                 with self._manager.provider_for_turn() as runtime:
+                    self._active_turn_runtime = runtime
                     binding = binding_from_status(runtime.status)
                     assessment = runtime.assess_context(prepared.initial_request)
                     if cancellation is not None:
@@ -1025,6 +1062,7 @@ class ProjectSession:
                 self._active_action_lease = None
                 self._active_action_binding = None
                 self._active_usage_cursor = None
+                self._active_turn_runtime = None
                 self._active_cancellation = None
                 self._active_event_sink = None
 
@@ -2021,8 +2059,91 @@ class ProjectSession:
         if writer is not self._writer:
             raise SessionStoreError("conversation session changed before turn commit")
         usage_cursor = self._active_usage_cursor
-        if usage_cursor is None:
+        runtime = self._active_turn_runtime
+        if usage_cursor is None or runtime is None:
             raise SessionStoreError("provider usage cursor is unavailable before turn commit")
+        if not writer.state.turns and writer.state.latest_name is None:
+            self._commit_first_turn_with_title(writer, turn, runtime, usage_cursor)
+            return
+        self._append_committed_turn(writer, turn, usage_cursor)
+
+    def _commit_first_turn_with_title(
+        self,
+        writer: SessionWriter,
+        turn: CommittedTurn,
+        runtime: TurnRuntimeSnapshot,
+        usage_cursor: int,
+    ) -> None:
+        rejected: list[str] = []
+        fallback_base: str | None = None
+        completed_invocations = _committed_turn_provider_invocations(turn)
+        for attempt in range(1, SESSION_TITLE_MAX_ATTEMPTS + 1):
+            accounted_invocations = len(
+                self._manager.usage_since(usage_cursor, kind=ProviderInvocationKind.TURN)
+            )
+            used = max(completed_invocations + attempt - 1, accounted_invocations)
+            if used >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
+                break
+            if self._active_cancellation is not None:
+                self._active_cancellation.check()
+            self._emit_prompt_event(
+                self._active_event_sink,
+                SessionTitleGenerationStarted(attempt, SESSION_TITLE_MAX_ATTEMPTS),
+            )
+            try:
+                response = runtime.generate_session_title(
+                    build_session_title_request(
+                        turn.user.text,
+                        rejected_titles=tuple(rejected),
+                    )
+                )
+            except Exception:
+                break
+            if self._active_cancellation is not None:
+                self._active_cancellation.check()
+            try:
+                candidate = parse_session_title_response(response)
+            except Exception:
+                continue
+            fallback_base = candidate
+            try:
+                self._append_committed_turn(
+                    writer,
+                    turn,
+                    usage_cursor,
+                    session_name=candidate,
+                    session_name_source=SessionNameSource.MODEL,
+                )
+                return
+            except SessionNameConflictError:
+                if candidate not in rejected:
+                    rejected.append(candidate)
+
+        base = fallback_base or fallback_session_title(turn.user.text)
+        for number in range(1, MAX_RECORDS + 2):
+            candidate = base if number == 1 else numbered_session_title(base, number)
+            try:
+                self._append_committed_turn(
+                    writer,
+                    turn,
+                    usage_cursor,
+                    session_name=candidate,
+                    session_name_source=SessionNameSource.FALLBACK,
+                )
+                return
+            except SessionNameConflictError:
+                continue
+        raise SessionStoreError("could not allocate a unique Session name")
+
+    def _append_committed_turn(
+        self,
+        writer: SessionWriter,
+        turn: CommittedTurn,
+        usage_cursor: int,
+        *,
+        session_name: str | None = None,
+        session_name_source: SessionNameSource | None = None,
+    ) -> None:
         self._emit_prompt_event(self._active_event_sink, TurnCommitStarted())
         writer.append_turn(
             turn.items,
@@ -2032,6 +2153,8 @@ class ProjectSession:
                 usage_cursor,
                 kind=ProviderInvocationKind.TURN,
             ),
+            session_name=session_name,
+            session_name_source=session_name_source,
         )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
@@ -2285,6 +2408,13 @@ def _invalid_tool_request(request: ToolUse, error: Exception) -> ToolDispatchRes
         ToolResult(request.tool_use_id, str(error), is_error=True),
         ToolEventStatus.ERROR,
         "invalid_request",
+    )
+
+
+def _committed_turn_provider_invocations(turn: CommittedTurn) -> int:
+    """Count provider responses represented by one complete neutral turn."""
+    return sum(
+        isinstance(item, (AssistantText, AssistantToolBatch, ToolUse)) for item in turn.items
     )
 
 

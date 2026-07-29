@@ -77,6 +77,7 @@ SESSION_HELP = (
     "  /session show\n"
     "  /session list [1-100] [open|closed] [model=<name>]\n"
     "  /session new\n"
+    "  /session rename <name> | /session rename --auto\n"
     "  /resume <latest|session-id>\n"
     "  /history <count>"
 )
@@ -202,6 +203,8 @@ class SessionInfoView(Protocol):
     created_at: str
     closed: bool
     binding: object
+    name: str
+    name_source: object
 
 
 class ConversationTurnView(Protocol):
@@ -322,12 +325,15 @@ def render_prompt_toolbar(
     *,
     color: bool,
     usage: RuntimeUsageSnapshot | None = None,
+    session: SessionInfoView | None = None,
 ) -> str:
     """Render a bounded model and workspace status line below the TTY editor."""
     fields = []
     runtime_label = _toolbar_runtime_label(status)
     if runtime_label is not None:
         fields.append(runtime_label)
+    if session is not None:
+        fields.append(_toolbar_session_label(session))
     if usage is not None and usage.latest_context is not None:
         fields.append(_toolbar_context_label(usage.latest_context))
     fields.append(_toolbar_workspace_label(cwd))
@@ -596,8 +602,9 @@ def render_session_summary(
     binding = getattr(info, "binding", None)
     model = _safe_inline(getattr(binding, "selected_model", None) or "<none>")
     provider = _safe_inline(getattr(binding, "provider_id", None) or "<unknown>")
+    name = _safe_inline(getattr(info, "name", "New session"))
     return (
-        f"{info.session_id}{marker_text}: {turns}, {state}, created {info.created_at}, "
+        f"{name!r}{marker_text} ({info.session_id}): {turns}, {state}, created {info.created_at}, "
         f"runtime {provider}/{model}"
     )
 
@@ -1116,7 +1123,9 @@ def render_switch_rejection(report: ContextFitReport) -> str:
 def render_session_info(info: SessionInfoView) -> str:
     """Render one durable Session without exposing transcript contents."""
     return (
-        f"Session: {info.session_id}\n"
+        f"Session: {info.name}\n"
+        f"Name source: {info.name_source.value}\n"
+        f"Session ID: {info.session_id}\n"
         f"Transcript: {info.path}\n"
         f"Turns: {info.turn_count}\n"
         f"Created: {info.created_at}"
@@ -1307,6 +1316,10 @@ def _toolbar_runtime_label(status: RuntimeStatusView | None) -> str | None:
     else:
         raw = status.selected_model or status.profile or status.provider_id or "unknown"
     return _truncate(_safe_toolbar_text(raw), _TOOLBAR_MODEL_WIDTH)
+
+
+def _toolbar_session_label(session: SessionInfoView) -> str:
+    return _truncate(_safe_toolbar_text(session.name), 32)
 
 
 def _toolbar_context_label(report: ContextFitReport) -> str:

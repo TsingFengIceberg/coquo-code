@@ -17,6 +17,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
 from leonervis_code.providers.manager import (
@@ -39,7 +40,7 @@ from leonervis_code.providers.request_context import (
     RequestTokenCountMethod,
 )
 from leonervis_code.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
-from leonervis_code.providers.usage import ProviderTokenUsage
+from leonervis_code.providers.usage import ProviderInvocationKind, ProviderTokenUsage
 from leonervis_code.session import ProjectSession
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.glob import GlobTool
@@ -265,6 +266,38 @@ def test_runtime_accounts_actual_and_unknown_usage_and_resets_after_switch(tmp_p
 
     manager.use_profile("two")
     assert manager.usage_snapshot().latest_invocation is None
+
+
+def test_turn_runtime_preflights_and_accounts_session_title_as_turn_usage(tmp_path) -> None:
+    class TitleProvider(RecordingProvider):
+        def count_session_title_input_tokens(self, request):
+            assert request.conversation_request.allow_tools is False
+            return RequestTokenCount(12, RequestTokenCountMethod.ESTIMATED)
+
+        def generate_session_title_outcome(self, request):
+            return ProviderResponseOutcome(
+                AssistantText("Provider runtime review"),
+                False,
+                ProviderTokenUsage(12, 4),
+            )
+
+    provider = TitleProvider("one")
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+    )
+    cursor = manager.begin_turn_usage()
+
+    with manager.provider_for_turn() as runtime:
+        response = runtime.generate_session_title(build_session_title_request("Review runtime"))
+    usage = manager.finish_turn_usage(cursor)
+
+    assert response == AssistantText("Provider runtime review")
+    assert len(usage.latest_turn) == 1
+    assert usage.latest_turn[0].kind == ProviderInvocationKind.TURN
+    assert usage.latest_turn[0].usage == ProviderTokenUsage(12, 4)
 
 
 def test_runtime_usage_retains_known_usage_from_output_limit_failure(tmp_path) -> None:

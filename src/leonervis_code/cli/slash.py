@@ -134,6 +134,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session show", "Show the current Session"),
     SlashCompletionSpec("/session list", "Browse and filter workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
+    SlashCompletionSpec("/session rename", "Rename the current Session"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
     SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
@@ -180,6 +181,8 @@ class ReplSession(Protocol):
     def latest_session_info(self): ...
 
     def list_sessions(self): ...
+
+    def rename_session(self, name: str | None = None): ...
 
     def new_session(self): ...
 
@@ -327,9 +330,13 @@ def dispatch_slash(
         if command != "/session new":
             return _usage("Usage: /session new")
         return _new_session(session)
+    if command == "/session rename" or command.startswith("/session rename "):
+        return _rename_session(command, session)
     if command.startswith("/session "):
         subcommand = command.split(maxsplit=2)[1]
-        return _usage(f"Unknown session command: {subcommand}\nUsage: /session <show|list|new>")
+        return _usage(
+            f"Unknown session command: {subcommand}\nUsage: /session <show|list|new|rename>"
+        )
     if command == "/resume" or command.startswith("/resume "):
         return _resume(command, session)
     if command == "/provider list" or command.startswith("/provider list "):
@@ -592,12 +599,22 @@ def _session_list_usage() -> SlashResult:
 
 def _new_session(session: ReplSession) -> SlashResult:
     return _call(
-        lambda: (
-            f"Started new session {session.new_session().session_id}; runtime provider unchanged."
-        ),
+        lambda: f"Started {session.new_session().name!r}; runtime provider unchanged.",
         kind="success",
         failure_prefix="Session creation failed",
     )
+
+
+def _rename_session(command: str, session: ReplSession) -> SlashResult:
+    argument = command.removeprefix("/session rename").strip()
+    if not argument:
+        return _usage("Usage: /session rename <name> | /session rename --auto")
+
+    def rename() -> str:
+        info = session.rename_session(None if argument == "--auto" else argument)
+        return f"Session name: {info.name} ({info.name_source.value})"
+
+    return _call(rename, kind="success", failure_prefix="Session rename failed")
 
 
 def _resume(command: str, session: ReplSession) -> SlashResult:

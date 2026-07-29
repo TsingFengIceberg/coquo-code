@@ -17,10 +17,12 @@ from leonervis_code.core.contracts import (
     ToolArguments,
     AssistantText,
     ToolResult,
+    ToolTurnLedger,
     ToolUse,
     UserMessage,
 )
 from leonervis_code.core.compaction import CompactionCandidateError
+from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
@@ -32,7 +34,7 @@ from leonervis_code.providers.request_context import (
     RequestTokenCountMethod,
 )
 from leonervis_code.providers.streaming import ProviderResponseOutcome
-from leonervis_code.providers.usage import ProviderTokenUsage
+from leonervis_code.providers.usage import ProviderInvocationKind, ProviderTokenUsage
 from leonervis_code.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
@@ -42,7 +44,12 @@ from leonervis_code.session import (
     SessionResumeContextError,
     TurnCommitStarted,
 )
-from leonervis_code.session_records import CompactionFailed
+from leonervis_code.session_records import (
+    BindingSnapshot,
+    CompactionFailed,
+    SessionNameSource,
+    TurnCommitted,
+)
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
 
@@ -121,6 +128,325 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert resumed_ledgers.turns[0].turn_number == 2
     assert second.transcript_path == transcript
     second.close()
+
+
+def test_project_session_names_after_commit_and_renames_without_changing_context(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    assert session.session_info().name == "New session 1"
+    assert session.session_info().name_source == SessionNameSource.DEFAULT
+
+    session.prompt("Review provider adapters")
+    assert session.session_info().name == "Review provider adapters"
+    assert session.session_info().name_source == SessionNameSource.MODEL
+    history = session.history
+    context_id = session.inspect_context().context_id
+
+    renamed = session.rename_session("Release review")
+    assert renamed.name == "Release review"
+    assert renamed.name_source == SessionNameSource.MANUAL
+    assert session.history == history
+    assert session.inspect_context().context_id == context_id
+
+    restored = session.rename_session()
+    assert restored.name == "Review provider adapters"
+    assert restored.name_source == SessionNameSource.MODEL
+    assert session.history == history
+    assert session.inspect_context().context_id == context_id
+    session.close()
+
+
+def test_project_session_retries_conflicting_model_title_then_commits_unique_title(
+    tmp_path: Path,
+) -> None:
+    profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    profile_store.add_profile(
+        ProviderProfileSpec(
+            name="titles",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="title-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    seed_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: UUID(SESSION_ONE),
+        clock=lambda: NOW,
+    )
+    seed = seed_store.create(BindingSnapshot.fake())
+    seed.append_turn(
+        (UserMessage("seed"), AssistantText("done")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+        session_name="Adapter review",
+        session_name_source=SessionNameSource.MODEL,
+    )
+    seed.release()
+
+    class TitleProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_requests = []
+            self.titles = ["Adapter review", "Unique adapter review"]
+
+        def respond_outcome(self, request):
+            self.requests.append(request)
+            return ProviderResponseOutcome(
+                AssistantText("done"), False, ProviderTokenUsage(100, 10)
+            )
+
+        def count_session_title_input_tokens(self, request):
+            return RequestTokenCount(20, RequestTokenCountMethod.ESTIMATED)
+
+        def generate_session_title_outcome(self, request):
+            self.title_requests.append(request)
+            return ProviderResponseOutcome(
+                AssistantText(self.titles.pop(0)), False, ProviderTokenUsage(20, 4)
+            )
+
+    provider = TitleProvider("title-model")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="titles",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    session.prompt("Review provider adapters")
+
+    assert session.session_info().name == "Unique adapter review"
+    assert session.session_info().name_source == SessionNameSource.MODEL
+    assert len(provider.title_requests) == 2
+    assert provider.title_requests[0].rejected_titles == ()
+    assert provider.title_requests[1].rejected_titles == ("Adapter review",)
+    committed = next(
+        record for record in session._writer.state.records if isinstance(record, TurnCommitted)
+    )
+    assert len(committed.provider_usage) == 3
+    assert all(item.kind == ProviderInvocationKind.TURN for item in committed.provider_usage)
+    session.close()
+
+
+def test_project_session_uses_numbered_fallback_after_three_title_collisions(
+    tmp_path: Path,
+) -> None:
+    profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    profile_store.add_profile(
+        ProviderProfileSpec(
+            name="titles",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="title-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    seed_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: UUID(SESSION_ONE),
+        clock=lambda: NOW,
+    )
+    seed = seed_store.create(BindingSnapshot.fake())
+    seed.append_turn(
+        (UserMessage("seed"), AssistantText("done")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+        session_name="Repeated title",
+        session_name_source=SessionNameSource.MODEL,
+    )
+    seed.release()
+
+    class RepeatingTitleProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_requests = []
+
+        def respond(self, request):
+            self.requests.append(request)
+            return AssistantText("done")
+
+        def count_session_title_input_tokens(self, request):
+            return RequestTokenCount(20, RequestTokenCountMethod.ESTIMATED)
+
+        def generate_session_title_outcome(self, request):
+            self.title_requests.append(request)
+            return ProviderResponseOutcome(AssistantText("Repeated title"), False, None)
+
+    provider = RepeatingTitleProvider("title-model")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="titles",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    session.prompt("Repeated title")
+
+    assert len(provider.title_requests) == 3
+    assert session.session_info().name == "Repeated title (2)"
+    assert session.session_info().name_source == SessionNameSource.FALLBACK
+    session.close()
+
+
+def test_project_session_does_not_exceed_24_provider_invocations_for_title(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+    profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    profile_store.add_profile(
+        ProviderProfileSpec(
+            name="budget",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="budget-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+
+    class BudgetProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_requests = []
+
+        def respond(self, request):
+            self.requests.append(request)
+            index = len(self.requests)
+            if index < 24:
+                return ToolUse(
+                    f"read-{index}",
+                    "read_file",
+                    ToolArguments.from_mapping({"path": "seed.txt"}),
+                )
+            return AssistantText("done")
+
+        def generate_session_title_outcome(self, request):
+            self.title_requests.append(request)
+            raise AssertionError("title request exceeded the provider invocation budget")
+
+    provider = BudgetProvider("budget-model")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="budget",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    session.prompt("Read repeatedly")
+
+    assert len(provider.requests) == 24
+    assert provider.title_requests == []
+    assert session.session_info().name == "Read repeatedly"
+    assert session.session_info().name_source == SessionNameSource.FALLBACK
+    committed = next(
+        record for record in session._writer.state.records if isinstance(record, TurnCommitted)
+    )
+    assert len(committed.provider_usage) == 24
+    session.close()
+
+
+def test_project_session_falls_back_after_one_title_provider_failure(tmp_path: Path) -> None:
+    profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    profile_store.add_profile(
+        ProviderProfileSpec(
+            name="titles",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="title-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+
+    class FailingTitleProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_calls = 0
+
+        def generate_session_title_outcome(self, request):
+            self.title_calls += 1
+            raise RuntimeError("title endpoint unavailable")
+
+    provider = FailingTitleProvider("title-model")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="titles",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    session.prompt("Review title fallback")
+
+    assert provider.title_calls == 1
+    assert session.session_info().name == "Review title fallback"
+    assert session.session_info().name_source == SessionNameSource.FALLBACK
+    assert len(session.history) == 2
+    session.close()
+
+
+def test_project_session_cancellation_after_title_response_commits_neither_turn_nor_name(
+    tmp_path: Path,
+) -> None:
+    profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    profile_store.add_profile(
+        ProviderProfileSpec(
+            name="titles",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="title-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    cancellation = TurnCancellation()
+
+    class CancellingTitleProvider(RecordingProvider):
+        def generate_session_title_outcome(self, request):
+            cancellation.request()
+            return ProviderResponseOutcome(AssistantText("Should not commit"), False, None)
+
+    session = ProjectSession.open(
+        tmp_path,
+        profile="titles",
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        provider_factory=lambda route, *, environment: CancellingTitleProvider("title-model"),
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    with pytest.raises(TurnCancelled):
+        session.prompt("Cancel during naming", cancellation=cancellation)
+
+    assert session.history == ()
+    assert session.session_info().turn_count == 0
+    assert session.session_info().name == "New session 1"
+    assert session.session_info().name_source == SessionNameSource.DEFAULT
+    session.close()
 
 
 def test_project_session_persists_known_turn_usage_across_resume(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 from threading import Event, Thread
 import time
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
@@ -191,6 +192,32 @@ class _CommitEventSession:
         return "saved reply"
 
 
+class _NamedSession:
+    def __init__(self) -> None:
+        self.name = "New session 1"
+
+    @property
+    def turns(self):
+        return ()
+
+    def session_info(self):
+        return SimpleNamespace(name=self.name)
+
+    def rename_session(self, name=None):
+        self.name = name or "Automatic title"
+        return SimpleNamespace(
+            name=self.name,
+            name_source=SimpleNamespace(value="manual" if name is not None else "auto"),
+        )
+
+    def prompt(self, text, *, event_sink, include_tool_details, cancellation):
+        del include_tool_details, cancellation
+        self.name = text
+        event_sink(AssistantResponseTextDeltaReceived("named reply"))
+        event_sink(AssistantFinalTextStreamCommitted("named reply"))
+        return "named reply"
+
+
 class _FailingSession:
     @property
     def turns(self):
@@ -232,6 +259,52 @@ def test_persistent_application_commit_status_does_not_split_or_duplicate_stream
     assert not thread.is_alive()
     assert stdout.getvalue().count("saved reply") == 1
     assert "\n• saved reply\n" in stdout.getvalue()
+
+
+def test_persistent_application_refreshes_session_name_after_turn_and_rename(
+    tmp_path: Path,
+) -> None:
+    session = _NamedSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        assert "New session 1" in terminal._toolbar().value
+        thread = Thread(target=terminal.run)
+        thread.start()
+
+        pipe.send_text("Review provider adapters\r")
+        _wait_until(lambda: not terminal.state.busy and session.name == "Review provider adapters")
+        _wait_until(lambda: terminal._session_info.name == "Review provider adapters")
+        assert "Review provider adapters" in terminal._toolbar().value
+
+        pipe.send_text("/session rename Release review\r")
+        _wait_until(lambda: terminal._session_info.name == "Release review")
+        _wait_until(lambda: "Session name: Release review (manual)" in stdout.getvalue())
+        assert "Release review" in terminal._toolbar().value
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    rendered = stdout.getvalue()
+    slash_input = rendered.index("› /session rename Release review")
+    slash_result = rendered.index("  Session name: Release review (manual)")
+    slash_separator = rendered.index(f"  {'─' * 24}", slash_result)
+    assert slash_input < slash_result < slash_separator
+    assert rendered[slash_input:slash_separator].count("› /session rename") == 1
 
 
 def test_persistent_application_keeps_failure_inside_turn_trace(tmp_path: Path) -> None:

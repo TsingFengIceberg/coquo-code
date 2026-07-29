@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from collections.abc import Callable
 from typing import Protocol
@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.session_title import SessionTitleRequest
 from leonervis_code.providers.definitions import RuntimeProviderRoute
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
@@ -118,6 +119,36 @@ class OpenAICompatibleConversationProvider:
                 requested_output_tokens=request_snapshot.max_output_tokens,
                 usage=usage,
             ),
+            False,
+            usage,
+        )
+
+    def count_session_title_input_tokens(
+        self, request_snapshot: SessionTitleRequest
+    ) -> RequestTokenCount:
+        """Estimate the exact no-tools Session-title projection."""
+        route = replace(self._route, max_output_tokens=request_snapshot.max_output_tokens)
+        return estimate_serialized_input_tokens(
+            build_input_projection(
+                route,
+                request_snapshot.conversation_request,
+                committed_context=True,
+            )
+        )
+
+    def generate_session_title_outcome(
+        self, request_snapshot: SessionTitleRequest
+    ) -> ProviderResponseOutcome:
+        """Generate one no-tools Session title and retain provider usage."""
+        route = replace(self._route, max_output_tokens=request_snapshot.max_output_tokens)
+        request = build_request(route, request_snapshot.conversation_request)
+        try:
+            response = self._client.create(**request)
+        except openai.APIError as error:
+            raise normalize_sdk_error(error, route=route) from None
+        usage = _parse_compatible_usage(getattr(response, "usage", None))
+        return ProviderResponseOutcome(
+            parse_session_title_response(response, route=route, usage=usage),
             False,
             usage,
         )
@@ -588,6 +619,55 @@ def parse_compact_summary_response(
     content = getattr(message, "content", None)
     if not isinstance(content, str) or not content.strip():
         raise _invalid_response(route, "compact summary text was empty or malformed")
+    return AssistantText(content.strip())
+
+
+def parse_session_title_response(
+    response: object,
+    *,
+    route: RuntimeProviderRoute,
+    usage: ProviderTokenUsage | None = None,
+) -> AssistantText:
+    """Decode only one normally completed text-only Session title."""
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise _invalid_response(route, "Session title response must contain exactly one choice")
+    choice = choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason in {"length", "max_tokens"}:
+        raise _output_limit_response(
+            route,
+            "Session title reached the configured output-token limit",
+            requested_output_tokens=route.max_output_tokens,
+            usage=usage,
+            partial_response_observed=_choice_has_partial_response(choice),
+        )
+    if finish_reason in {"content_filter", "refusal"}:
+        raise adapter_error(
+            provider_id=route.definition.provider_id,
+            model_id=route.selected_model,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="provider refused or filtered the Session title request",
+        )
+    if finish_reason != "stop":
+        raise _invalid_response(route, "Session title used an unsupported finish reason")
+    message = getattr(choice, "message", None)
+    if message is None:
+        raise _invalid_response(route, "Session title choice contained no message")
+    if getattr(message, "refusal", None):
+        raise adapter_error(
+            provider_id=route.definition.provider_id,
+            model_id=route.selected_model,
+            kind=ProviderFailureKind.CONTENT_REFUSAL,
+            code="content_refusal",
+            message="provider refused the Session title request",
+        )
+    if getattr(message, "tool_calls", None):
+        raise _invalid_response(route, "Session title unexpectedly contained tool calls")
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise _invalid_response(route, "Session title text was empty or malformed")
     return AssistantText(content.strip())
 
 

@@ -10,6 +10,11 @@ from leonervis_code.core.contracts import (
     ProviderResponse,
     UserMessage,
 )
+from leonervis_code.core.session_title import (
+    SessionTitleRequest,
+    fallback_session_title,
+)
+from leonervis_code.providers.streaming import ProviderResponseOutcome
 
 
 class ScriptedFakeProvider:
@@ -20,11 +25,27 @@ class ScriptedFakeProvider:
         self._script = tuple(script) if script is not None else None
         self._next_outcome = 0
         self._received_requests: list[ConversationRequest] = []
+        self._received_title_requests: list[SessionTitleRequest] = []
 
     @property
     def received_requests(self) -> tuple[ConversationRequest, ...]:
         """Return immutable snapshots of every provider request."""
         return tuple(self._received_requests)
+
+    @property
+    def received_title_requests(self) -> tuple[SessionTitleRequest, ...]:
+        return tuple(self._received_title_requests)
+
+    def generate_session_title_outcome(
+        self, request: SessionTitleRequest
+    ) -> ProviderResponseOutcome:
+        """Simulate a separate no-tools title generation without consuming the turn script."""
+        self._received_title_requests.append(request)
+        return ProviderResponseOutcome(
+            AssistantText(fallback_session_title(request.source_text)),
+            False,
+            None,
+        )
 
     def respond(self, request: ConversationRequest) -> ProviderResponse:
         """Record ``request`` and return its next deterministic outcome."""

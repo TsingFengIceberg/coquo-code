@@ -324,6 +324,8 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
         for line in shown.getvalue().splitlines()
         if line.startswith("session ID: ")
     )
+    assert "session name: first" in shown.getvalue()
+    assert "name source: model" in shown.getvalue()
 
     assert main(["prompt", "second"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
     shown = io.StringIO()
@@ -347,8 +349,8 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
     assert main(["session", "list"], stdout=output, stderr=io.StringIO(), **common) == 0
 
     lines = output.getvalue().splitlines()
-    assert lines[0].startswith(f"{second_id}: 1 turn, closed, created ")
-    assert lines[1].startswith(f"{first_id} [latest]: 2 turns, closed, created ")
+    assert lines[0].startswith(f"'second' ({second_id}): 1 turn, closed, created ")
+    assert lines[1].startswith(f"'first' [latest] ({first_id}): 2 turns, closed, created ")
 
 
 def test_session_actions_replays_recent_redacted_action_audits(tmp_path) -> None:

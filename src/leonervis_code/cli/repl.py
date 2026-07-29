@@ -100,7 +100,13 @@ def run_repl(
             readline=False,
         )
         usage = _snapshot(session, "usage")
-        prompt_toolbar = render_prompt_toolbar(status, cwd, color=color, usage=usage)
+        prompt_toolbar = render_prompt_toolbar(
+            status,
+            cwd,
+            color=color,
+            usage=usage,
+            session=session_info,
+        )
         try:
             editor.set_history(_session_prompt_history(session))
             prompt_read = editor.read(prompt_text, bottom_toolbar=prompt_toolbar)

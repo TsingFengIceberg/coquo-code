@@ -201,6 +201,8 @@ def _activity_status(event: object) -> str:
         return "Continuing without compaction"
     if name == "TurnUsageCompleted":
         return "Recording provider usage"
+    if name == "SessionTitleGenerationStarted":
+        return "Naming Session"
     if name == "TurnCommitStarted":
         return "Saving Session"
     return "Working"
