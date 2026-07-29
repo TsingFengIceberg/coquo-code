@@ -50,11 +50,13 @@ from leonervis_code.session_records import (
     Recovery,
     ReplayState,
     RuntimeChanged,
+    SessionArchiveChanged,
     SessionClosed,
     SessionHeader,
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
     SessionNameSource,
+    SessionTitleFallbackReason,
     SessionRecord,
     SessionRecordError,
     SessionResumed,
@@ -215,6 +217,8 @@ class SessionInfo:
     binding: BindingSnapshot
     name: str = "New session"
     name_source: SessionNameSource = SessionNameSource.DEFAULT
+    archived: bool = False
+    title_fallback_reason: SessionTitleFallbackReason | None = None
 
 
 @dataclass(frozen=True)
@@ -884,6 +888,7 @@ class SessionWriter:
         provider_usage: tuple[ProviderInvocationUsage, ...] = (),
         session_name: str | None = None,
         session_name_source: SessionNameSource | None = None,
+        session_title_fallback_reason: SessionTitleFallbackReason | None = None,
         committed_at: str | None = None,
     ) -> TurnCommitted:
         """Durably commit one complete turn as exactly one JSONL record."""
@@ -897,6 +902,7 @@ class SessionWriter:
             provider_usage=provider_usage,
             session_name=session_name,
             session_name_source=session_name_source,
+            session_title_fallback_reason=session_title_fallback_reason,
         )
         if session_name is None:
             self._append(record)
@@ -964,6 +970,22 @@ class SessionWriter:
                 occurred_at=self._store._clock(),
                 name=resolved,
                 source=source,
+            )
+        )
+        return self.info
+
+    def set_archived(self, archived: bool) -> SessionInfo:
+        """Durably change reversible Session archive metadata when needed."""
+        self._ensure_writable()
+        if type(archived) is not bool:
+            raise SessionStoreError("Session archived state must be boolean")
+        if self._state.archived == archived:
+            return self.info
+        self.append_audit(
+            SessionArchiveChanged(
+                sequence=self._state.next_sequence,
+                occurred_at=self._store._clock(),
+                archived=archived,
             )
         )
         return self.info
@@ -1668,6 +1690,8 @@ def _info(path: Path, state: ReplayState) -> SessionInfo:
         binding=state.binding,
         name=name,
         name_source=name_source,
+        archived=state.archived,
+        title_fallback_reason=_committed_title_fallback_reason(state),
     )
 
 
@@ -1714,6 +1738,15 @@ def _committed_session_name(
             if record.session_name is None or record.session_name_source is None:
                 return None
             return record.session_name, record.session_name_source
+    return None
+
+
+def _committed_title_fallback_reason(
+    state: ReplayState,
+) -> SessionTitleFallbackReason | None:
+    for record in state.records:
+        if isinstance(record, TurnCommitted) and record.session_name is not None:
+            return record.session_title_fallback_reason
     return None
 
 

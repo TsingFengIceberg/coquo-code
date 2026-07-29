@@ -135,6 +135,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session list", "Browse and filter workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/session rename", "Rename the current Session"),
+    SlashCompletionSpec("/session archive", "Archive the current Session"),
+    SlashCompletionSpec("/session unarchive", "Unarchive the current Session"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
     SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
@@ -183,6 +185,8 @@ class ReplSession(Protocol):
     def list_sessions(self): ...
 
     def rename_session(self, name: str | None = None): ...
+
+    def set_session_archived(self, archived: bool): ...
 
     def new_session(self): ...
 
@@ -332,10 +336,15 @@ def dispatch_slash(
         return _new_session(session)
     if command == "/session rename" or command.startswith("/session rename "):
         return _rename_session(command, session)
+    if command in {"/session archive", "/session unarchive"}:
+        return _archive_session(session, archived=command == "/session archive")
+    if command.startswith("/session archive ") or command.startswith("/session unarchive "):
+        return _usage("Usage: /session archive | /session unarchive")
     if command.startswith("/session "):
         subcommand = command.split(maxsplit=2)[1]
         return _usage(
-            f"Unknown session command: {subcommand}\nUsage: /session <show|list|new|rename>"
+            "Unknown session command: "
+            f"{subcommand}\nUsage: /session <show|list|new|rename|archive|unarchive>"
         )
     if command == "/resume" or command.startswith("/resume "):
         return _resume(command, session)
@@ -542,7 +551,9 @@ def _session_list(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     count = DEFAULT_SESSION_LIST_COUNT
     state_filter: str | None = None
+    archive_filter: str | None = None
     model_filter: str | None = None
+    name_filter: str | None = None
     count_seen = False
     for argument in parts[2:]:
         if argument.isascii() and argument.isdigit() and not count_seen:
@@ -550,13 +561,19 @@ def _session_list(command: str, session: ReplSession) -> SlashResult:
             count_seen = True
         elif argument in {"open", "closed"} and state_filter is None:
             state_filter = argument
+        elif argument in {"active", "archived"} and archive_filter is None:
+            archive_filter = argument
         elif argument.startswith("model=") and model_filter is None:
             model_filter = argument.removeprefix("model=")
+        elif argument.startswith("name=") and name_filter is None:
+            name_filter = argument.removeprefix("name=")
         else:
             return _session_list_usage()
     if not 1 <= count <= MAX_SESSION_LIST_COUNT:
         return _session_list_usage()
     if model_filter is not None and (not model_filter or len(model_filter) > 256):
+        return _session_list_usage()
+    if name_filter is not None and not _valid_session_name_filter(name_filter):
         return _session_list_usage()
 
     def render() -> str:
@@ -566,12 +583,18 @@ def _session_list(command: str, session: ReplSession) -> SlashResult:
         if state_filter is not None:
             closed = state_filter == "closed"
             sessions = tuple(info for info in sessions if info.closed is closed)
+        if archive_filter is not None:
+            archived = archive_filter == "archived"
+            sessions = tuple(info for info in sessions if info.archived is archived)
         if model_filter is not None:
             sessions = tuple(
                 info
                 for info in sessions
                 if getattr(info.binding, "selected_model", None) == model_filter
             )
+        if name_filter is not None:
+            needle = name_filter.casefold()
+            sessions = tuple(info for info in sessions if needle in info.name.casefold())
         total = len(sessions)
         sessions = sessions[:count]
         if not sessions:
@@ -594,7 +617,10 @@ def _session_list(command: str, session: ReplSession) -> SlashResult:
 
 
 def _session_list_usage() -> SlashResult:
-    return _usage(f"Usage: /session list [1-{MAX_SESSION_LIST_COUNT}] [open|closed] [model=<name>]")
+    return _usage(
+        f"Usage: /session list [1-{MAX_SESSION_LIST_COUNT}] [open|closed] "
+        "[active|archived] [model=<name>] [name=<text>]"
+    )
 
 
 def _new_session(session: ReplSession) -> SlashResult:
@@ -615,6 +641,32 @@ def _rename_session(command: str, session: ReplSession) -> SlashResult:
         return f"Session name: {info.name} ({info.name_source.value})"
 
     return _call(rename, kind="success", failure_prefix="Session rename failed")
+
+
+def _archive_session(session: ReplSession, *, archived: bool) -> SlashResult:
+    def change() -> str:
+        before = session.session_info()
+        info = session.set_session_archived(archived)
+        state = "archived" if archived else "active"
+        if before.archived == archived:
+            return f"Session is already {state}: {info.name}"
+        return (
+            f"Session marked {state}: {info.name}. History, runtime, latest, and resume "
+            "identity are unchanged."
+        )
+
+    operation = "archive" if archived else "unarchive"
+    return _call(
+        change,
+        kind="success",
+        failure_prefix=f"Session {operation} failed",
+    )
+
+
+def _valid_session_name_filter(value: str) -> bool:
+    if not value or len(value) > 80 or len(value.encode("utf-8")) > 256:
+        return False
+    return all(character.isprintable() and not character.isspace() for character in value)
 
 
 def _resume(command: str, session: ReplSession) -> SlashResult:

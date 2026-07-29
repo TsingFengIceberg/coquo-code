@@ -31,6 +31,7 @@ from leonervis_code.cli.presentation import (
     render_resume_rejection,
     render_session_resume,
     render_session_summary,
+    render_session_title_fallback_reason,
     render_tool_ledgers,
 )
 from leonervis_code.cli.repl import run_repl
@@ -605,6 +606,11 @@ def render_session_info(info, stdout: TextIO) -> None:
     """Render durable Session metadata without transcript content."""
     stdout.write(f"session name: {info.name}\n")
     stdout.write(f"name source: {info.name_source.value}\n")
+    if info.title_fallback_reason is not None:
+        stdout.write(
+            f"title fallback: {render_session_title_fallback_reason(info.title_fallback_reason)}\n"
+        )
+    stdout.write(f"archived: {'yes' if info.archived else 'no'}\n")
     stdout.write(f"session ID: {info.session_id}\n")
     stdout.write(f"workspace: {info.workspace}\n")
     stdout.write(f"transcript: {info.path}\n")

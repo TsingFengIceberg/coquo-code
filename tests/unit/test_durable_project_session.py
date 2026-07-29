@@ -42,12 +42,14 @@ from leonervis_code.session import (
     ProjectSession,
     ResumeEffect,
     SessionResumeContextError,
+    SessionTitleFallbackApplied,
     TurnCommitStarted,
 )
 from leonervis_code.session_records import (
     BindingSnapshot,
     CompactionFailed,
     SessionNameSource,
+    SessionTitleFallbackReason,
     TurnCommitted,
 )
 from leonervis_code.session_store import SessionStore, SessionStoreError
@@ -300,6 +302,9 @@ def test_project_session_uses_numbered_fallback_after_three_title_collisions(
     assert len(provider.title_requests) == 3
     assert session.session_info().name == "Repeated title (2)"
     assert session.session_info().name_source == SessionNameSource.FALLBACK
+    assert (
+        session.session_info().title_fallback_reason == SessionTitleFallbackReason.DUPLICATE_TITLE
+    )
     session.close()
 
 
@@ -357,6 +362,9 @@ def test_project_session_does_not_exceed_24_provider_invocations_for_title(
     assert provider.title_requests == []
     assert session.session_info().name == "Read repeatedly"
     assert session.session_info().name_source == SessionNameSource.FALLBACK
+    assert (
+        session.session_info().title_fallback_reason == SessionTitleFallbackReason.INVOCATION_BUDGET
+    )
     committed = next(
         record for record in session._writer.state.records if isinstance(record, TurnCommitted)
     )
@@ -364,7 +372,20 @@ def test_project_session_does_not_exceed_24_provider_invocations_for_title(
     session.close()
 
 
-def test_project_session_falls_back_after_one_title_provider_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_reason", "expected_calls"),
+    (
+        ("output_limit", SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT, 1),
+        ("provider_failure", SessionTitleFallbackReason.PROVIDER_FAILURE, 1),
+        ("invalid_candidate", SessionTitleFallbackReason.INVALID_CANDIDATE, 3),
+    ),
+)
+def test_project_session_records_title_fallback_reason(
+    tmp_path: Path,
+    failure_mode: str,
+    expected_reason: SessionTitleFallbackReason,
+    expected_calls: int,
+) -> None:
     profile_store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
     profile_store.add_profile(
         ProviderProfileSpec(
@@ -385,7 +406,21 @@ def test_project_session_falls_back_after_one_title_provider_failure(tmp_path: P
 
         def generate_session_title_outcome(self, request):
             self.title_calls += 1
-            raise RuntimeError("title endpoint unavailable")
+            if failure_mode == "output_limit":
+                raise output_limit_error(
+                    provider_id="custom",
+                    model_id="title-model",
+                    message="title output limit",
+                    requested_output_tokens=512,
+                    usage=ProviderTokenUsage(20, 512),
+                )
+            if failure_mode == "provider_failure":
+                raise RuntimeError("title endpoint unavailable")
+            return ProviderResponseOutcome(
+                AssistantText("invalid\nmultiline title"),
+                False,
+                ProviderTokenUsage(20, 4),
+            )
 
     provider = FailingTitleProvider("title-model")
     session = ProjectSession.open(
@@ -398,12 +433,38 @@ def test_project_session_falls_back_after_one_title_provider_failure(tmp_path: P
         session_store_factory=session_store_factory(SESSION_ONE),
     )
 
-    session.prompt("Review title fallback")
+    events = []
+    session.prompt("Review title fallback", event_sink=events.append)
 
-    assert provider.title_calls == 1
+    assert provider.title_calls == expected_calls
     assert session.session_info().name == "Review title fallback"
     assert session.session_info().name_source == SessionNameSource.FALLBACK
+    assert session.session_info().title_fallback_reason == expected_reason
+    assert SessionTitleFallbackApplied(expected_reason) in events
     assert len(session.history) == 2
+    session.close()
+
+
+def test_project_session_archive_toggle_preserves_latest_runtime_and_history(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    session.prompt("first")
+    history = session.history
+    status = session.status()
+    latest = session.latest_session_info().session_id
+
+    archived = session.set_session_archived(True)
+    assert archived.archived is True
+    assert session.history == history
+    assert session.status() == status
+    assert session.latest_session_info().session_id == latest
+    assert session.set_session_archived(False).archived is False
+    assert session.history == history
     session.close()
 
 

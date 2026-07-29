@@ -49,6 +49,7 @@ from leonervis_code.core.compaction import (
 from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.session_title import (
     SESSION_TITLE_MAX_ATTEMPTS,
+    SessionTitleCandidateError,
     build_session_title_request,
     fallback_session_title,
     numbered_session_title,
@@ -65,6 +66,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
@@ -105,6 +107,7 @@ from leonervis_code.session_records import (
     CONTEXT_COMPACTED_SCHEMA_VERSION,
     MAX_RECORDS,
     SessionNameSource,
+    SessionTitleFallbackReason,
     SessionRecord,
     TurnCommitted,
     TURN_COMMITTED_SCHEMA_VERSION,
@@ -373,6 +376,17 @@ class SessionTitleGenerationStarted:
 
 
 @dataclass(frozen=True)
+class SessionTitleFallbackApplied:
+    """Signal one durably committed bounded Host title fallback reason."""
+
+    reason: SessionTitleFallbackReason
+
+    def __post_init__(self) -> None:
+        if type(self.reason) is not SessionTitleFallbackReason:
+            raise ValueError("Session title fallback reason is invalid")
+
+
+@dataclass(frozen=True)
 class DurableUsageOperation:
     record_sequence: int
     occurred_at: str
@@ -404,6 +418,7 @@ PromptEvent = (
     | AutoCompactionCommitted
     | AutoCompactionNotApplied
     | SessionTitleGenerationStarted
+    | SessionTitleFallbackApplied
     | TurnCommitStarted
     | TurnUsageCompleted
     | AgentPromptEvent
@@ -903,6 +918,13 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             return self._writer.rename(name)
+
+    def set_session_archived(self, archived: bool) -> SessionInfo:
+        """Set reversible archive metadata without changing history, runtime, or latest."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._writer.set_archived(archived)
 
     def switch_session(self, selector: str | Path) -> SessionResumeResult:
         """Screen and atomically swap durable history without changing runtime."""
@@ -2076,6 +2098,7 @@ class ProjectSession:
     ) -> None:
         rejected: list[str] = []
         fallback_base: str | None = None
+        fallback_reason = SessionTitleFallbackReason.INVOCATION_BUDGET
         completed_invocations = _committed_turn_provider_invocations(turn)
         for attempt in range(1, SESSION_TITLE_MAX_ATTEMPTS + 1):
             accounted_invocations = len(
@@ -2097,13 +2120,22 @@ class ProjectSession:
                         rejected_titles=tuple(rejected),
                     )
                 )
+            except ProviderAdapterError as error:
+                fallback_reason = (
+                    SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT
+                    if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
+                    else SessionTitleFallbackReason.PROVIDER_FAILURE
+                )
+                break
             except Exception:
+                fallback_reason = SessionTitleFallbackReason.PROVIDER_FAILURE
                 break
             if self._active_cancellation is not None:
                 self._active_cancellation.check()
             try:
                 candidate = parse_session_title_response(response)
-            except Exception:
+            except SessionTitleCandidateError:
+                fallback_reason = SessionTitleFallbackReason.INVALID_CANDIDATE
                 continue
             fallback_base = candidate
             try:
@@ -2116,6 +2148,7 @@ class ProjectSession:
                 )
                 return
             except SessionNameConflictError:
+                fallback_reason = SessionTitleFallbackReason.DUPLICATE_TITLE
                 if candidate not in rejected:
                     rejected.append(candidate)
 
@@ -2129,6 +2162,11 @@ class ProjectSession:
                     usage_cursor,
                     session_name=candidate,
                     session_name_source=SessionNameSource.FALLBACK,
+                    session_title_fallback_reason=fallback_reason,
+                )
+                self._emit_prompt_event(
+                    self._active_event_sink,
+                    SessionTitleFallbackApplied(fallback_reason),
                 )
                 return
             except SessionNameConflictError:
@@ -2143,6 +2181,7 @@ class ProjectSession:
         *,
         session_name: str | None = None,
         session_name_source: SessionNameSource | None = None,
+        session_title_fallback_reason: SessionTitleFallbackReason | None = None,
     ) -> None:
         self._emit_prompt_event(self._active_event_sink, TurnCommitStarted())
         writer.append_turn(
@@ -2155,6 +2194,7 @@ class ProjectSession:
             ),
             session_name=session_name,
             session_name_source=session_name_source,
+            session_title_fallback_reason=session_title_fallback_reason,
         )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:

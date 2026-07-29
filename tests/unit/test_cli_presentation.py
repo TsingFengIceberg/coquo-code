@@ -49,6 +49,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_status,
     render_runtime_switch,
     render_session_resume,
+    render_session_info,
     render_switch_rejection,
     render_tool_ledgers,
     render_durable_usage_summary,
@@ -94,6 +95,7 @@ from leonervis_code.session import (
     EffectiveContextInspection,
     ResumeEffect,
     SessionResumeResult,
+    SessionTitleFallbackApplied,
     TurnUsageCompleted,
 )
 from leonervis_code.providers.usage import (
@@ -107,6 +109,8 @@ from leonervis_code.session_records import (
     ActionAuditStatus,
     ApprovalAuditOutcome,
     BindingSnapshot,
+    SessionNameSource,
+    SessionTitleFallbackReason,
 )
 from leonervis_code.session_store import (
     LatestUpdateStatus,
@@ -658,6 +662,41 @@ def test_toolbar_shows_bounded_session_name_between_model_and_context() -> None:
     assert rendered.startswith("  fake · session?[31m?namexxxxxxxxxxxx... · ")
     assert "\x1b" not in rendered
     assert "\n" not in rendered
+
+    archived = render_prompt_toolbar(
+        status(),
+        Path("/workspace"),
+        color=False,
+        session=SimpleNamespace(name="Old review", archived=True),
+    )
+    assert "Old review [archived]" in archived
+
+
+def test_session_info_and_title_event_render_safe_fallback_reason(tmp_path: Path) -> None:
+    info = SessionInfo(
+        session_id="12345678-1234-4234-9234-123456789abc",
+        path=tmp_path / "session.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-18T00:00:00.000000Z",
+        record_count=2,
+        turn_count=1,
+        closed=False,
+        binding=BindingSnapshot.fake(),
+        name="Fallback title",
+        name_source=SessionNameSource.FALLBACK,
+        archived=True,
+        title_fallback_reason=SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT,
+    )
+
+    rendered = render_session_info(info)
+    assert "Archived: yes" in rendered
+    assert "Title fallback: provider output limit" in rendered
+    message, kind = render_prompt_event(
+        SessionTitleFallbackApplied(SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT)
+    )
+    assert message == "Session naming used a Host fallback: provider output limit."
+    assert kind == "warning"
 
 
 def test_prompt_and_toolbar_have_safe_fallbacks() -> None:

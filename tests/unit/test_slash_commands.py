@@ -63,6 +63,7 @@ class Session:
         self.sessions = None
         self.name = "Current work"
         self.name_source = SessionNameSource.AUTO
+        self.archived = False
 
     def status(self):
         return RuntimeStatus(
@@ -143,6 +144,7 @@ class Session:
             binding=BindingSnapshot.fake(),
             name=self.name,
             name_source=self.name_source,
+            archived=self.archived,
         )
 
     def session_info(self):
@@ -255,6 +257,10 @@ class Session:
         self.name_source = SessionNameSource.MANUAL if name is not None else SessionNameSource.AUTO
         return self.session_info()
 
+    def set_session_archived(self, archived):
+        self.archived = archived
+        return self.session_info()
+
     def switch_session(self, selector):
         self.current = selector
         self.latest = selector
@@ -303,7 +309,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
     assert unknown.message == (
-        "Unknown session command: wat\nUsage: /session <show|list|new|rename>"
+        "Unknown session command: wat\nUsage: /session <show|list|new|rename|archive|unarchive>"
     )
     assert dispatch_slash("/session show extra", session).message == "Usage: /session show"
     assert dispatch_slash("/session rename", session).message == (
@@ -400,6 +406,8 @@ def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
             "session_id": "22345678-1234-4234-9234-123456789abc",
             "created_at": "2026-07-17T00:00:00.000000Z",
             "closed": True,
+            "archived": True,
+            "name": "Adapter Review",
             "binding": replace(BindingSnapshot.fake(), selected_model="model-a"),
         }
     )
@@ -427,8 +435,36 @@ def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
     assert dispatch_slash("/session list open model=model-a", session).message == (
         "No durable sessions match the selected filters."
     )
+    archived = dispatch_slash("/session list archived name=adapter", session).message
+    assert second.session_id in archived
+    assert "archived" in archived
+    assert first.session_id not in archived
+    assert dispatch_slash("/session list active name=adapter", session).message == (
+        "No durable sessions match the selected filters."
+    )
     assert dispatch_slash("/session list 0", session).message == (
-        "Usage: /session list [1-100] [open|closed] [model=<name>]"
+        "Usage: /session list [1-100] [open|closed] [active|archived] [model=<name>] [name=<text>]"
+    )
+
+
+def test_session_archive_commands_are_idempotent_and_preserve_identity(tmp_path) -> None:
+    session = Session(tmp_path)
+    session_id = session.current
+    latest_id = session.latest
+
+    archived = dispatch_slash("/session archive", session)
+    assert archived.kind == "success"
+    assert "marked archived" in archived.message
+    assert session.archived is True
+    assert session.current == session_id
+    assert session.latest == latest_id
+    assert "already archived" in dispatch_slash("/session archive", session).message
+
+    active = dispatch_slash("/session unarchive", session)
+    assert "marked active" in active.message
+    assert session.archived is False
+    assert dispatch_slash("/session archive extra", session).message == (
+        "Usage: /session archive | /session unarchive"
     )
 
 

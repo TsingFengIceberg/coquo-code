@@ -28,16 +28,19 @@ from leonervis_code.session_records import (
     ContextCompacted,
     Recovery,
     RuntimeChanged,
+    SessionArchiveChanged,
     SessionClosed,
     SessionHeader,
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
     SessionNameSource,
+    SessionTitleFallbackReason,
     SessionRecordError,
     SessionResumed,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
+    TURN_COMMITTED_NAMING_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     TURN_COMMITTED_USAGE_SCHEMA_VERSION,
     TURN_FAILED_LEGACY_SCHEMA_VERSION,
@@ -251,7 +254,7 @@ def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Pat
         )
 
 
-def test_turn_v7_round_trips_first_turn_model_name_and_v6_remains_readable(
+def test_turn_v8_round_trips_first_turn_model_name_and_v6_remains_readable(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path.resolve()
@@ -282,6 +285,7 @@ def test_turn_v7_round_trips_first_turn_model_name_and_v6_remains_readable(
     assert state.turns[0].user.text == "review adapters"
     assert b'"session_name":"Provider adapter review"' in encode_record(current)
     assert b'"session_name_source":"model"' in encode_record(current)
+    assert b'"session_title_fallback_reason":null' in encode_record(current)
 
     legacy = replace(
         current,
@@ -294,8 +298,17 @@ def test_turn_v7_round_trips_first_turn_model_name_and_v6_remains_readable(
     assert b'"schema_version":6' in legacy_encoded
     assert b'"session_name"' not in legacy_encoded
 
+    legacy_named = replace(
+        current,
+        schema_version=TURN_COMMITTED_NAMING_SCHEMA_VERSION,
+    )
+    legacy_named_encoded = encode_record(legacy_named)
+    assert decode_record(legacy_named_encoded) == legacy_named
+    assert b'"schema_version":7' in legacy_named_encoded
+    assert b'"session_title_fallback_reason"' not in legacy_named_encoded
 
-def test_turn_v7_rejects_partial_invalid_or_late_session_name(tmp_path: Path) -> None:
+
+def test_turn_v8_rejects_partial_invalid_or_late_session_name(tmp_path: Path) -> None:
     workspace = tmp_path.resolve()
     binding = BindingSnapshot.fake()
     header = SessionHeader(
@@ -333,6 +346,74 @@ def test_turn_v7_rejects_partial_invalid_or_late_session_name(tmp_path: Path) ->
         )
     with pytest.raises(SessionRecordError, match="unnamed first turn"):
         replay_records((header, first, named_late))
+
+
+def test_turn_v8_requires_bounded_reason_only_for_fallback_title(tmp_path: Path) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        created_at=NOW,
+        binding=binding,
+    )
+    fallback = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=(UserMessage("first"), AssistantText("done")),
+        session_name="Fallback title",
+        session_name_source=SessionNameSource.FALLBACK,
+        session_title_fallback_reason=SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT,
+    )
+
+    decoded = decode_record(encode_record(fallback))
+    assert decoded == fallback
+    assert replay_records((header, decoded)).turns[0].user.text == "first"
+
+    with pytest.raises(SessionRecordError, match="requires a bounded reason"):
+        encode_record(replace(fallback, session_title_fallback_reason=None))
+    with pytest.raises(SessionRecordError, match="model Session name"):
+        encode_record(
+            replace(
+                fallback,
+                session_name_source=SessionNameSource.MODEL,
+            )
+        )
+
+
+def test_session_archive_records_are_reversible_and_do_not_change_history(tmp_path: Path) -> None:
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=binding,
+    )
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=(UserMessage("first"), AssistantText("done")),
+    )
+    archived = SessionArchiveChanged(2, NOW, True)
+    active = SessionArchiveChanged(3, NOW, False)
+
+    decoded = tuple(
+        decode_record(encode_record(record)) for record in (header, turn, archived, active)
+    )
+    state = replay_records(decoded)
+
+    assert decoded == (header, turn, archived, active)
+    assert state.archived is False
+    assert state.history == turn.items
+
+    with pytest.raises(SessionRecordError, match="archived must be boolean"):
+        decode_record(encode_record(archived).replace(b'"archived":true', b'"archived":1'))
 
 
 def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:

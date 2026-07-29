@@ -72,7 +72,8 @@ TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION = 3
 TURN_COMMITTED_BATCH_SCHEMA_VERSION = 4
 TURN_COMMITTED_LEDGER_SCHEMA_VERSION = 5
 TURN_COMMITTED_USAGE_SCHEMA_VERSION = 6
-TURN_COMMITTED_SCHEMA_VERSION = 7
+TURN_COMMITTED_NAMING_SCHEMA_VERSION = 7
+TURN_COMMITTED_SCHEMA_VERSION = 8
 TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
 TURN_FAILED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
@@ -107,6 +108,16 @@ class SessionNameSource(StrEnum):
     MODEL = "model"
     FALLBACK = "fallback"
     MANUAL = "manual"
+
+
+class SessionTitleFallbackReason(StrEnum):
+    """Bounded Host reason for using a deterministic first-turn title."""
+
+    PROVIDER_OUTPUT_LIMIT = "provider_output_limit"
+    PROVIDER_FAILURE = "provider_failure"
+    INVALID_CANDIDATE = "invalid_candidate"
+    DUPLICATE_TITLE = "duplicate_title"
+    INVOCATION_BUDGET = "invocation_budget"
 
 
 @dataclass(frozen=True)
@@ -227,6 +238,7 @@ class TurnCommitted:
     provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
     session_name: str | None = None
     session_name_source: SessionNameSource | None = None
+    session_title_fallback_reason: SessionTitleFallbackReason | None = None
     record_type: str = "turn_committed"
     schema_version: int = TURN_COMMITTED_SCHEMA_VERSION
 
@@ -248,6 +260,15 @@ class SessionNamed:
     name: str
     source: SessionNameSource
     record_type: str = "session_named"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class SessionArchiveChanged:
+    sequence: int
+    occurred_at: str
+    archived: bool
+    record_type: str = "session_archive_changed"
     schema_version: int = SCHEMA_VERSION
 
 
@@ -450,6 +471,7 @@ SessionRecord: TypeAlias = (
     | TurnCommitted
     | RuntimeChanged
     | SessionNamed
+    | SessionArchiveChanged
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -465,6 +487,7 @@ SessionRecord: TypeAlias = (
 AuditRecord: TypeAlias = (
     RuntimeChanged
     | SessionNamed
+    | SessionArchiveChanged
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -492,6 +515,7 @@ class ReplayState:
     action_audits: tuple[ActionAuditState, ...]
     turns: tuple[ConversationTurn, ...]
     latest_name: SessionNamed | None
+    archived: bool
     binding: BindingSnapshot
     next_sequence: int
     closed: bool
@@ -627,6 +651,7 @@ def replay_records(
     latest_checkpoint: ContextCompacted | None = None
     turns: list[ConversationTurn] = []
     latest_name: SessionNamed | None = None
+    archived = False
     binding = header.binding
     closed = False
     seen_tool_ids: set[str] = set()
@@ -679,6 +704,12 @@ def replay_records(
             }:
                 raise SessionRecordError("session_named source is invalid")
             latest_name = record
+        elif isinstance(record, SessionArchiveChanged):
+            _require_no_live_action(live_action_request_id, "session_archive_changed")
+            _validate_timestamp(record.occurred_at, "session_archive_changed occurred_at")
+            if type(record.archived) is not bool:
+                raise SessionRecordError("session_archive_changed archived must be boolean")
+            archived = record.archived
         elif isinstance(record, TurnFailed):
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -854,6 +885,7 @@ def replay_records(
         action_audits=tuple(action_states[request_id] for request_id in action_order),
         turns=tuple(turns),
         latest_name=latest_name,
+        archived=archived,
         binding=binding,
         next_sequence=len(validated),
         closed=closed,
@@ -1029,10 +1061,16 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
                 expected_kind=ProviderInvocationKind.TURN,
                 label="turn_committed",
             )
-        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if record.schema_version >= TURN_COMMITTED_NAMING_SCHEMA_VERSION:
             common["session_name"] = record.session_name
             common["session_name_source"] = (
                 record.session_name_source.value if record.session_name_source is not None else None
+            )
+        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+            common["session_title_fallback_reason"] = (
+                record.session_title_fallback_reason.value
+                if record.session_title_fallback_reason is not None
+                else None
             )
     elif isinstance(record, RuntimeChanged):
         _validate_timestamp(record.occurred_at, "runtime_changed occurred_at")
@@ -1058,6 +1096,11 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             name=record.name,
             source=record.source.value,
         )
+    elif isinstance(record, SessionArchiveChanged):
+        _validate_timestamp(record.occurred_at, "session_archive_changed occurred_at")
+        if type(record.archived) is not bool:
+            raise SessionRecordError("session_archive_changed archived must be boolean")
+        common.update(occurred_at=record.occurred_at, archived=record.archived)
     elif isinstance(record, TurnFailed):
         _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
         _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -1199,6 +1242,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     elif record_type == "turn_failed":
@@ -1258,8 +1302,10 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             fields.add("tool_ledger")
         if version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION:
             fields.add("provider_usage")
-        if version == TURN_COMMITTED_SCHEMA_VERSION:
+        if version >= TURN_COMMITTED_NAMING_SCHEMA_VERSION:
             fields.update({"session_name", "session_name_source"})
+        if version == TURN_COMMITTED_SCHEMA_VERSION:
+            fields.add("session_title_fallback_reason")
         _closed_fields(
             value,
             fields,
@@ -1290,11 +1336,18 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             ),
             session_name=(
                 _nullable_field_text(value, "session_name", record_type)
-                if version == TURN_COMMITTED_SCHEMA_VERSION
+                if version >= TURN_COMMITTED_NAMING_SCHEMA_VERSION
                 else None
             ),
             session_name_source=(
                 _session_name_source_from_value(value.get("session_name_source"))
+                if version >= TURN_COMMITTED_NAMING_SCHEMA_VERSION
+                else None
+            ),
+            session_title_fallback_reason=(
+                _session_title_fallback_reason_from_value(
+                    value.get("session_title_fallback_reason")
+                )
                 if version == TURN_COMMITTED_SCHEMA_VERSION
                 else None
             ),
@@ -1347,6 +1400,23 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             name=canonical_session_name(value.get("name")),
             source=source,
+        )
+    if record_type == "session_archive_changed":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "archived",
+        }
+        _closed_fields(value, fields, record_type)
+        archived = value.get("archived")
+        if type(archived) is not bool:
+            raise SessionRecordError("session_archive_changed archived must be boolean")
+        return SessionArchiveChanged(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            archived=archived,
         )
     if record_type == "turn_failed":
         fields = {
@@ -1715,6 +1785,7 @@ def _item_to_dict(
         TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
         TURN_COMMITTED_BATCH_SCHEMA_VERSION,
         TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+        TURN_COMMITTED_NAMING_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -1731,6 +1802,7 @@ def _item_to_dict(
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
         if item.assistant_text is not None and not supports_assistant_text:
@@ -1781,6 +1853,7 @@ def _item_to_dict(
         if schema_version not in {
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError(
@@ -1851,6 +1924,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             fields.add("assistant_text")
@@ -1873,6 +1947,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raw_assistant_text = value.get("assistant_text")
@@ -1898,6 +1973,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         if schema_version not in {
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError(
@@ -2145,13 +2221,24 @@ def _validate_turn_ledger(record: TurnCommitted) -> None:
 
 
 def _validate_turn_session_name(record: TurnCommitted) -> None:
-    if record.schema_version != TURN_COMMITTED_SCHEMA_VERSION:
-        if record.session_name is not None or record.session_name_source is not None:
+    if record.schema_version < TURN_COMMITTED_NAMING_SCHEMA_VERSION:
+        if (
+            record.session_name is not None
+            or record.session_name_source is not None
+            or record.session_title_fallback_reason is not None
+        ):
             raise SessionRecordError("legacy turn_committed cannot contain a Session name")
         return
+    if (
+        record.schema_version == TURN_COMMITTED_NAMING_SCHEMA_VERSION
+        and record.session_title_fallback_reason is not None
+    ):
+        raise SessionRecordError("turn_committed v7 cannot contain a title fallback reason")
     if (record.session_name is None) != (record.session_name_source is None):
         raise SessionRecordError("turn_committed Session name fields must both be null or present")
     if record.session_name is None:
+        if record.session_title_fallback_reason is not None:
+            raise SessionRecordError("unnamed turn_committed cannot contain a fallback reason")
         return
     if canonical_generated_session_name(record.session_name) != record.session_name:
         raise SessionRecordError("generated Session name must use canonical whitespace")
@@ -2160,6 +2247,17 @@ def _validate_turn_session_name(record: TurnCommitted) -> None:
         SessionNameSource.FALLBACK,
     }:
         raise SessionRecordError("turn_committed Session name source is invalid")
+    if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if (
+            record.session_name_source == SessionNameSource.FALLBACK
+            and record.session_title_fallback_reason is None
+        ):
+            raise SessionRecordError("fallback Session name requires a bounded reason")
+        if (
+            record.session_name_source != SessionNameSource.FALLBACK
+            and record.session_title_fallback_reason is not None
+        ):
+            raise SessionRecordError("model Session name cannot contain a fallback reason")
 
 
 def _validate_header(header: SessionHeader) -> None:
@@ -2208,6 +2306,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_BATCH_SCHEMA_VERSION,
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
+            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -2423,6 +2522,23 @@ def _session_name_source_from_value(value: object) -> SessionNameSource | None:
         return SessionNameSource(value)
     except ValueError:
         raise SessionRecordError("turn_committed session_name_source is invalid") from None
+
+
+def _session_title_fallback_reason_from_value(
+    value: object,
+) -> SessionTitleFallbackReason | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SessionRecordError(
+            "turn_committed session_title_fallback_reason must be text or null"
+        )
+    try:
+        return SessionTitleFallbackReason(value)
+    except ValueError:
+        raise SessionRecordError(
+            "turn_committed session_title_fallback_reason is invalid"
+        ) from None
 
 
 def _nullable_field_number(value: dict[str, object], field: str, label: str) -> float | None:

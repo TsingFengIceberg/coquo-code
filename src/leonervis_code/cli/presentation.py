@@ -26,8 +26,10 @@ from leonervis_code.session import (
     AutoCompactionNotApplied,
     AutoCompactionStarted,
     DurableUsageSnapshot,
+    SessionTitleFallbackApplied,
     TurnUsageCompleted,
 )
+from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
 
@@ -75,9 +77,10 @@ HELP_TEXT = (
 SESSION_HELP = (
     "Session commands:\n"
     "  /session show\n"
-    "  /session list [1-100] [open|closed] [model=<name>]\n"
+    "  /session list [1-100] [open|closed] [active|archived] [model=<name>] [name=<text>]\n"
     "  /session new\n"
     "  /session rename <name> | /session rename --auto\n"
+    "  /session archive | /session unarchive\n"
     "  /resume <latest|session-id>\n"
     "  /history <count>"
 )
@@ -205,6 +208,8 @@ class SessionInfoView(Protocol):
     binding: object
     name: str
     name_source: object
+    archived: bool
+    title_fallback_reason: object | None
 
 
 class ConversationTurnView(Protocol):
@@ -599,6 +604,8 @@ def render_session_summary(
     marker_text = f" {' '.join(markers)}" if markers else ""
     turns = f"{info.turn_count} {'turn' if info.turn_count == 1 else 'turns'}"
     state = "closed" if info.closed else "open"
+    if info.archived:
+        state = f"{state}, archived"
     binding = getattr(info, "binding", None)
     model = _safe_inline(getattr(binding, "selected_model", None) or "<none>")
     provider = _safe_inline(getattr(binding, "provider_id", None) or "<unknown>")
@@ -951,6 +958,12 @@ def render_prompt_event(
         )
     if isinstance(event, TurnUsageCompleted):
         return render_usage_summary(event.usage, compact=True), "info"
+    if isinstance(event, SessionTitleFallbackApplied):
+        return (
+            "Session naming used a Host fallback: "
+            f"{render_session_title_fallback_reason(event.reason)}.",
+            "warning",
+        )
 
     if not isinstance(
         event,
@@ -1122,14 +1135,21 @@ def render_switch_rejection(report: ContextFitReport) -> str:
 
 def render_session_info(info: SessionInfoView) -> str:
     """Render one durable Session without exposing transcript contents."""
-    return (
-        f"Session: {info.name}\n"
-        f"Name source: {info.name_source.value}\n"
-        f"Session ID: {info.session_id}\n"
-        f"Transcript: {info.path}\n"
-        f"Turns: {info.turn_count}\n"
-        f"Created: {info.created_at}"
+    lines = [f"Session: {info.name}", f"Name source: {info.name_source.value}"]
+    if info.title_fallback_reason is not None:
+        lines.append(
+            f"Title fallback: {render_session_title_fallback_reason(info.title_fallback_reason)}"
+        )
+    lines.extend(
+        (
+            f"Archived: {'yes' if info.archived else 'no'}",
+            f"Session ID: {info.session_id}",
+            f"Transcript: {info.path}",
+            f"Turns: {info.turn_count}",
+            f"Created: {info.created_at}",
+        )
     )
+    return "\n".join(lines)
 
 
 def render_context_meter(
@@ -1319,7 +1339,18 @@ def _toolbar_runtime_label(status: RuntimeStatusView | None) -> str | None:
 
 
 def _toolbar_session_label(session: SessionInfoView) -> str:
-    return _truncate(_safe_toolbar_text(session.name), 32)
+    suffix = " [archived]" if getattr(session, "archived", False) else ""
+    return _truncate(_safe_toolbar_text(f"{session.name}{suffix}"), 32)
+
+
+def render_session_title_fallback_reason(reason: SessionTitleFallbackReason) -> str:
+    return {
+        SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT: "provider output limit",
+        SessionTitleFallbackReason.PROVIDER_FAILURE: "provider failure",
+        SessionTitleFallbackReason.INVALID_CANDIDATE: "invalid model title",
+        SessionTitleFallbackReason.DUPLICATE_TITLE: "duplicate model titles",
+        SessionTitleFallbackReason.INVOCATION_BUDGET: "provider invocation budget exhausted",
+    }[reason]
 
 
 def _toolbar_context_label(report: ContextFitReport) -> str:

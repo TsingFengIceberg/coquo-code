@@ -30,6 +30,7 @@ from leonervis_code.session_records import (
     BindingSnapshot,
     SessionHeader,
     SessionNameSource,
+    SessionTitleFallbackReason,
     TurnCommitted,
     encode_record,
     replay_records,
@@ -241,6 +242,47 @@ def test_manual_rename_is_append_only_and_auto_restore_keeps_history_unchanged(
     assert reopened.info.name_source == SessionNameSource.AUTO
     assert reopened.state.history == renamed_history
     reopened.release()
+
+
+def test_archive_toggle_is_idempotent_append_only_and_survives_resume(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    initial_records = writer.info.record_count
+
+    archived = writer.set_archived(True)
+    assert archived.archived is True
+    assert archived.record_count == initial_records + 1
+    assert writer.set_archived(True).record_count == archived.record_count
+
+    writer.release()
+    resumed = session_store.open(SESSION_ONE)
+    assert resumed.info.archived is True
+    assert resumed.state.history == ()
+
+    active = resumed.set_archived(False)
+    assert active.archived is False
+    assert active.record_count == archived.record_count + 2
+    assert resumed.set_archived(False).record_count == active.record_count
+    resumed.release()
+
+
+def test_fallback_title_reason_is_exposed_without_changing_name_identity(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.append_turn(
+        (UserMessage("first"), AssistantText("done")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+        session_name="Fallback title",
+        session_name_source=SessionNameSource.FALLBACK,
+        session_title_fallback_reason=SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT,
+    )
+
+    info = writer.info
+    assert info.name == "Fallback title"
+    assert info.name_source == SessionNameSource.FALLBACK
+    assert info.title_fallback_reason == SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT
+    writer.release()
 
 
 def test_legacy_empty_session_uses_stable_short_id_fallback_without_rewrite(

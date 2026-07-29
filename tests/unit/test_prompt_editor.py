@@ -133,7 +133,14 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
     ]
     assert [
         completion.text for completion in completer.get_completions(Document("/session "), event)
-    ] == ["/session show", "/session list", "/session new", "/session rename"]
+    ] == [
+        "/session show",
+        "/session list",
+        "/session new",
+        "/session rename",
+        "/session archive",
+        "/session unarchive",
+    ]
     assert [
         completion.text for completion in completer.get_completions(Document("/provider c"), event)
     ] == ["/provider current"]
