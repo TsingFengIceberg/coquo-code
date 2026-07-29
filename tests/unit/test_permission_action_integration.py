@@ -9,6 +9,7 @@ import pytest
 from leonervis_code.agent.tool_events import (
     ToolEventStatus,
     ToolRequestFinished,
+    ToolRequestStarted,
     ToolTurnSummaryCommitted,
 )
 from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
@@ -653,7 +654,15 @@ def test_model_visible_command_auto_runs_and_commits_exact_causality(tmp_path: P
         approval_mode=ApprovalMode.AUTO,
     )
     try:
-        assert session.prompt("run verification") == "tests passed"
+        events: list[object] = []
+        assert (
+            session.prompt(
+                "run verification",
+                event_sink=events.append,
+                include_tool_details=True,
+            )
+            == "tests passed"
+        )
 
         result = provider.requests[1].history[-1]
         assert isinstance(result, ToolResult)
@@ -671,6 +680,14 @@ def test_model_visible_command_auto_runs_and_commits_exact_causality(tmp_path: P
         assert audit.execution_outcome == ActionExecutionOutcome.SUCCEEDED
         assert audit.result_code == "command_succeeded"
         assert audit.identity.action.value == "dangerous"
+        started = next(event for event in events if isinstance(event, ToolRequestStarted))
+        assert started.safe_details[0].startswith("argv: [")
+        assert str(sys.executable) in started.safe_details[0]
+        assert started.safe_details[1:] == (
+            "cwd: '.'",
+            "timeout_seconds: 10",
+            "execution: direct argv; Host shell parsing disabled",
+        )
     finally:
         session.close()
 
@@ -690,7 +707,8 @@ def test_model_visible_command_workspace_write_denial_never_spawns(tmp_path: Pat
         approval_mode=ApprovalMode.AUTO,
     )
     try:
-        assert session.prompt("run command") == "denied"
+        events: list[object] = []
+        assert session.prompt("run command", event_sink=events.append) == "denied"
         denied = ToolResult(
             "command-1",
             "permission denied: denied_workspace_write_mode",
@@ -699,6 +717,8 @@ def test_model_visible_command_workspace_write_denial_never_spawns(tmp_path: Pat
         assert provider.requests[1].history[-2:] == (call, denied)
         assert not marker.exists()
         assert session.action_audits()[-1].status == ActionAuditStatus.DENIED
+        started = next(event for event in events if isinstance(event, ToolRequestStarted))
+        assert started.safe_details == ()
     finally:
         session.close()
 

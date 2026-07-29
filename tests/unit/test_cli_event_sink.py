@@ -9,10 +9,11 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
     ToolEventStatus,
     ToolRequestFinished,
+    ToolRequestStarted,
 )
 from leonervis_code.cli.event_sink import TerminalEventSink
 from leonervis_code.cli.markdown_renderer import write_markdown_document
-from leonervis_code.cli.presentation import GREEN, RESET
+from leonervis_code.cli.presentation import GREEN, RESET, ToolDetailMode
 
 
 class FlushingStream(io.StringIO):
@@ -43,6 +44,29 @@ def test_terminal_event_sink_uses_existing_semantic_colors() -> None:
     )
 
     assert stream.getvalue() == f"{GREEN}[tool 1/6] succeeded{RESET}\n"
+
+
+def test_terminal_event_sink_full_mode_renders_structured_command_details() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(stream, color=False, tool_detail_mode=ToolDetailMode.FULL)
+
+    sink(
+        ToolRequestStarted(
+            "run_command",
+            1,
+            32,
+            "command='uv' args=2 cwd='.' timeout=30s",
+            ('argv: ["uv","run","pytest"]', "cwd: '.'", "timeout_seconds: 30"),
+        )
+    )
+
+    assert stream.getvalue() == (
+        "[tool 1/32] run_command\n"
+        '  argv: ["uv","run","pytest"]\n'
+        "  cwd: '.'\n"
+        "  timeout_seconds: 30\n"
+    )
+    assert stream.flush_count == 1
 
 
 def test_terminal_event_sink_preserves_companion_text_with_one_terminating_newline() -> None:

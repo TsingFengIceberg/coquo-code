@@ -4,6 +4,8 @@ import pytest
 
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    MAX_TOOL_EVENT_ARGV_LINE_BYTES,
+    MAX_TOOL_EVENT_DETAIL_BYTES,
     MAX_TOOL_EVENT_SUMMARY_CHARACTERS,
     ToolDispatchResult,
     ToolEventStatus,
@@ -11,6 +13,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestLimited,
     ToolRequestStarted,
     safe_result_code,
+    safe_tool_request_details,
     safe_tool_request_summary,
 )
 from leonervis_code.core.contracts import ToolArguments, ToolResult, ToolUse
@@ -134,11 +137,85 @@ def test_terminal_controls_are_escaped_and_unknown_arguments_are_redacted() -> N
     assert safe_result_code("bad\n\x1b[31m") == r"bad\n\x1b[31m"
 
 
+def test_full_command_details_preserve_structured_argv_and_identify_shell_source() -> None:
+    direct = safe_tool_request_details(
+        request(
+            "run_command",
+            {
+                "argv": ["uv", "run", "pytest", "tests/unit"],
+                "cwd": ".",
+                "timeout_seconds": 300,
+            },
+        )
+    )
+    shell = safe_tool_request_details(
+        request(
+            "run_command",
+            {
+                "argv": ["/bin/bash", "-lc", "printf 'ok\\n' && uv run pytest"],
+                "cwd": "src",
+                "timeout_seconds": 30,
+            },
+        )
+    )
+
+    assert direct == (
+        'argv: ["uv","run","pytest","tests/unit"]',
+        "cwd: '.'",
+        "timeout_seconds: 300",
+        "execution: direct argv; Host shell parsing disabled",
+    )
+    assert shell[0] == 'argv: ["/bin/bash","-lc","printf \'ok\\\\n\' && uv run pytest"]'
+    assert shell[1:3] == ("cwd: 'src'", "timeout_seconds: 30")
+    assert shell[3] == "execution: shell interpreter 'bash'; shell source is argv[2]"
+
+    long_option = safe_tool_request_details(
+        request(
+            "run_command",
+            {
+                "argv": ["bash", "--norc", "script.sh"],
+                "cwd": ".",
+                "timeout_seconds": 30,
+            },
+        )
+    )
+    assert long_option[3] == "execution: direct argv; Host shell parsing disabled"
+
+
+def test_full_command_details_escape_controls_and_bound_long_argv() -> None:
+    details = safe_tool_request_details(
+        request(
+            "run_command",
+            {
+                "argv": ["bash", "-lc", "\u202e\x1b" + "x" * 8000],
+                "cwd": ".",
+                "timeout_seconds": 30,
+            },
+        )
+    )
+
+    assert "\\u202e" in details[0]
+    assert "\\u001b" in details[0]
+    assert "\u202e" not in details[0]
+    assert "\x1b" not in details[0]
+    assert "<truncated; rendered_bytes=" in details[0]
+    assert len(details[0].encode("utf-8")) <= MAX_TOOL_EVENT_ARGV_LINE_BYTES
+    assert sum(len(line.encode("utf-8")) for line in details) <= MAX_TOOL_EVENT_DETAIL_BYTES
+    assert (
+        safe_tool_request_details(
+            request("write_file", {"path": "note.txt", "content": "TOP_SECRET"})
+        )
+        == ()
+    )
+
+
 def test_event_models_reject_invalid_identity_status_and_controls() -> None:
     with pytest.raises(ValueError, match="call index"):
         ToolRequestStarted("read_file", 0, 6, "path='a.txt'")
     with pytest.raises(ValueError, match="control"):
         ToolRequestStarted("read_file", 1, 6, "bad\nsummary")
+    with pytest.raises(ValueError, match="control"):
+        ToolRequestStarted("run_command", 1, 6, "command='bash'", ("argv: bad\u202e",))
     with pytest.raises(ValueError, match="exceed"):
         ToolRequestLimited("read_file", 6, 6, "path='a.txt'")
     with pytest.raises(ValueError, match="status"):

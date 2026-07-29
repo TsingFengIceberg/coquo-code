@@ -16,6 +16,7 @@ from leonervis_code.cli.presentation import (
     PROVIDER_HELP,
     SESSION_HELP,
     MessageKind,
+    ToolDetailMode,
     render_compact_result,
     render_action_audits,
     render_context_inspection,
@@ -61,6 +62,7 @@ TOP_LEVEL_COMMANDS = (
     "/history",
     "/actions",
     "/tools",
+    "/tool-details",
     "/changes",
     "/commit",
     "/commits",
@@ -121,6 +123,9 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session list", "List workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
+    SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
+    SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
+    SlashCompletionSpec("/tool-details full", "Show bounded structured tool details"),
     SlashCompletionSpec("/compact preview", "Preview fixed compaction selection"),
 )
 
@@ -189,7 +194,19 @@ class SlashResult:
 _NOT_HANDLED = SlashResult(handled=False)
 
 
-def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
+@dataclass
+class ToolDetailSettings:
+    """Mutable process-local REPL presentation state."""
+
+    mode: ToolDetailMode = ToolDetailMode.COMPACT
+
+
+def dispatch_slash(
+    command: str,
+    session: ReplSession,
+    *,
+    tool_details: ToolDetailSettings | None = None,
+) -> SlashResult:
     """Dispatch one exact slash command without writing terminal output."""
     if not command.startswith("/") or "\n" in command or "\r" in command:
         return _NOT_HANDLED
@@ -239,6 +256,8 @@ def dispatch_slash(command: str, session: ReplSession) -> SlashResult:
         )
     if command.startswith("/usage "):
         return _usage("Usage: /usage [session|turns]")
+    if command == "/tool-details" or command.startswith("/tool-details "):
+        return _tool_details(command, tool_details)
     if command == "/changes":
         return _call(lambda: render_git_status(session.git_status()), kind="info")
     if command in {"/changes unstaged", "/changes staged"}:
@@ -401,6 +420,30 @@ def _tools(command: str, session: ReplSession) -> SlashResult:
         lambda: render_tool_ledgers(session.tool_ledgers(count), details=details),
         kind="info",
     )
+
+
+def _tool_details(command: str, settings: ToolDetailSettings | None) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 1:
+        if settings is None:
+            return _usage("Usage: /tool-details <compact|full>")
+        return _info(f"Live tool details: {settings.mode.value} (process-local).")
+    if len(parts) != 2 or parts[1] not in {"compact", "full"}:
+        return _usage("Usage: /tool-details <compact|full>")
+    if settings is None:
+        return _usage("Usage: /tool-details <compact|full>")
+    settings.mode = ToolDetailMode(parts[1])
+    if settings.mode == ToolDetailMode.FULL:
+        return SlashResult(
+            handled=True,
+            message=(
+                "Live tool details: full (process-local). Future command starts show bounded "
+                "structured argv, which may contain sensitive values; file, edit, patch, and "
+                "search contents remain redacted."
+            ),
+            kind="warning",
+        )
+    return _info("Live tool details: compact (process-local).")
 
 
 def _compactions(command: str, session: ReplSession) -> SlashResult:

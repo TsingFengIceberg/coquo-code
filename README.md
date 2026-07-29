@@ -187,6 +187,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/actions [count]` | 显示当前 Session 最近的脱敏 Action Audit，默认20条、最多100条 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
+| `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
 | `/changes` | 不调用模型，显示当前Git仓库的staged、unstaged和untracked路径状态 |
 | `/changes unstaged` | 不调用模型，显示工作树相对index的有界tracked patch |
 | `/changes staged` | 不调用模型，显示index相对HEAD的有界tracked patch |
@@ -224,6 +225,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /usage turns
 /actions
 /tools details 3
+/tool-details full
 /changes
 /changes unstaged
 /changes staged
@@ -234,7 +236,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /history 5
 ```
 
-真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。`/changes`系列直接运行固定的只读Git观察，不调用provider、不消耗模型tool budget、不写Session或Action Audit；untracked只显示路径，不显示内容。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。`/usage session`与`/usage turns`从严格replay的Session终局记录读取跨重启用量；旧记录显示legacy unavailable，缺失usage metadata明确计为unknown而不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变，同时持久保存失败调用的usage audit。进程内统计仍在成功`/provider use`或`/model`切换后清零；Session统计持久保留，但不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。Live工具行默认保持脱敏compact；`/tool-details full`会在当前进程内展开有界结构化command argv、cwd、timeout及direct/shell解释提示，并警告argv可能包含敏感值，文件/edit/patch/search内容仍不显示。`/changes`系列直接运行固定的只读Git观察，不调用provider、不消耗模型tool budget、不写Session或Action Audit；untracked只显示路径，不显示内容。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。`/usage session`与`/usage turns`从严格replay的Session终局记录读取跨重启用量；旧记录显示legacy unavailable，缺失usage metadata明确计为unknown而不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变，同时持久保存失败调用的usage audit。进程内统计仍在成功`/provider use`或`/model`切换后清零；Session统计持久保留，但不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 `/commits`与`/commit`复用同一固定只读Git runner：只遍历当前`HEAD`可达历史，`git_show`只接受完整40/64位小写十六进制commit ID；subject、message和patch均有界并显式标记截断，终端控制字符会被转义。
 
@@ -290,6 +292,7 @@ git diff --check
 - [Durable Session Provider Usage Audit](./docs/decisions/0062-durable-session-provider-usage-audit.md)：成功/失败终局usage、跨resume统计、legacy unavailable与Host-only边界。
 - [Bounded Read-only Git Change Observation](./docs/decisions/0063-bounded-read-only-git-change-observation.md)：固定Git status/diff、仓库metadata边界、`/changes`与19工具契约。
 - [Bounded Reachable Git History Observation](./docs/decisions/0064-bounded-reachable-git-history-observation.md)：当前HEAD历史、完整可达commit ID、`/commits`、`/commit`与21工具契约。
+- [Opt-in Bounded Live Tool Details](./docs/decisions/0065-opt-in-bounded-live-tool-details.md)：process-local compact/full切换、有界结构化command argv、shell解释提示与terminal安全边界。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -327,4 +330,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有模型工具仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、结构化tool outcome ledger及持久查看、脱敏live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session级provider usage audit与Git只读变更/历史观察现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v21、provider adapter contract v24、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v6、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前Git历史设计见[ADR 0064](./docs/decisions/0064-bounded-reachable-git-history-observation.md)。
+Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session级provider usage audit与Git只读变更/历史观察现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v21、provider adapter contract v24、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v6、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动retry/fallback、并行工具、多Agent与远程服务仍不可用。当前live详情与Git历史设计见[ADR 0065](./docs/decisions/0065-opt-in-bounded-live-tool-details.md)和[ADR 0064](./docs/decisions/0064-bounded-reachable-git-history-observation.md)。

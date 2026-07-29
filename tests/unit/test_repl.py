@@ -105,23 +105,24 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 1) == "/history"
     assert complete_command("/", 2) == "/actions"
     assert complete_command("/", 3) == "/tools"
-    assert complete_command("/", 4) == "/changes"
-    assert complete_command("/", 5) == "/commit"
-    assert complete_command("/", 6) == "/commits"
-    assert complete_command("/", 7) == "/exit"
-    assert complete_command("/", 8) == "/quit"
-    assert complete_command("/", 9) == "/status"
-    assert complete_command("/", 10) == "/context"
-    assert complete_command("/", 11) == "/usage"
-    assert complete_command("/", 12) == "/output"
-    assert complete_command("/", 13) == "/compact"
-    assert complete_command("/", 14) == "/compactions"
-    assert complete_command("/", 15) == "/provider"
-    assert complete_command("/", 16) == "/model"
-    assert complete_command("/", 17) == "/session"
-    assert complete_command("/", 18) == "/resume"
-    assert complete_command("/", 19) == "/clear"
-    assert complete_command("/", 20) is None
+    assert complete_command("/", 4) == "/tool-details"
+    assert complete_command("/", 5) == "/changes"
+    assert complete_command("/", 6) == "/commit"
+    assert complete_command("/", 7) == "/commits"
+    assert complete_command("/", 8) == "/exit"
+    assert complete_command("/", 9) == "/quit"
+    assert complete_command("/", 10) == "/status"
+    assert complete_command("/", 11) == "/context"
+    assert complete_command("/", 12) == "/usage"
+    assert complete_command("/", 13) == "/output"
+    assert complete_command("/", 14) == "/compact"
+    assert complete_command("/", 15) == "/compactions"
+    assert complete_command("/", 16) == "/provider"
+    assert complete_command("/", 17) == "/model"
+    assert complete_command("/", 18) == "/session"
+    assert complete_command("/", 19) == "/resume"
+    assert complete_command("/", 20) == "/clear"
+    assert complete_command("/", 21) is None
     assert complete_command("/commit", 0) == "/commit"
     assert complete_command("ordinary prompt", 0) is None
 
@@ -491,8 +492,8 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
     rendered = output.getvalue()
     assert loop.prompts == []
     assert (
-        "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, "
-        "/commits, /commit, /session" in rendered
+        "Commands: /help, /history <count>, /actions [count], /tools [count], /tool-details, "
+        "/changes, /commits, /commit, /session" in rendered
     )
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
@@ -608,7 +609,8 @@ def test_invalid_prefix_commands_are_not_treated_as_switches(tmp_path) -> None:
 
 def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
     class EventSession:
-        def prompt(self, prompt, *, event_sink=None):
+        def prompt(self, prompt, *, event_sink=None, include_tool_details=False):
+            assert include_tool_details is True
             event_sink(AssistantToolTextReceived("I will search first."))
             event_sink(ToolRequestStarted("grep", 1, 6, "include='*.py' query_bytes=6"))
             event_sink(ToolRequestFinished("grep", 1, 6, ToolEventStatus.SUCCEEDED, "ok"))
@@ -618,7 +620,7 @@ def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
 
     run_repl(
         EventSession(),
-        stdin=io.StringIO("search\n/exit\n"),
+        stdin=io.StringIO("/tool-details full\nsearch\n/exit\n"),
         stdout=output,
         version="0.1.0",
         cwd=tmp_path,
@@ -626,7 +628,8 @@ def test_repl_renders_tool_events_before_the_final_response(tmp_path) -> None:
     )
 
     rendered = output.getvalue()
-    assert "I will search first.\n[tool 1/6] grep include='*.py' query_bytes=6\n" in rendered
+    assert "Live tool details: full" in rendered
+    assert "I will search first.\n[tool 1/6] grep\n  include='*.py' query_bytes=6\n" in rendered
     assert "[tool 1/6] succeeded code=ok\nreply: search\n" in rendered
 
 

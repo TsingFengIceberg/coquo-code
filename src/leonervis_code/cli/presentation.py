@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -49,8 +50,17 @@ MAX_COMPACTION_HISTORY_COUNT = 20
 CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MessageKind = Literal["plain", "info", "success", "warning", "error"]
 
+
+class ToolDetailMode(StrEnum):
+    """Process-local terminal detail level for ephemeral tool start events."""
+
+    COMPACT = "compact"
+    FULL = "full"
+
+
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /actions [count], /tools [count], /changes, "
+    "Commands: /help, /history <count>, /actions [count], /tools [count], /tool-details, "
+    "/changes, "
     "/commits, /commit, /session, "
     "/provider, /status, "
     "/context, /usage [session|turns], /output [tokens|reset], /compact, "
@@ -752,11 +762,24 @@ def render_resume_rejection(report: ContextFitReport, *, startup: bool = False) 
     return f"Session resume rejected: {detail}. {state}"
 
 
-def render_prompt_event(event: object) -> tuple[str, MessageKind]:
+def render_prompt_event(
+    event: object,
+    *,
+    tool_detail_mode: ToolDetailMode = ToolDetailMode.COMPACT,
+) -> tuple[str, MessageKind]:
     """Render one safe ephemeral prompt lifecycle event."""
+    if type(tool_detail_mode) is not ToolDetailMode:
+        raise ValueError("tool detail mode is invalid")
     if isinstance(event, AssistantToolTextReceived):
         return event.text, "plain"
     if isinstance(event, ToolRequestStarted):
+        if tool_detail_mode == ToolDetailMode.FULL:
+            details = event.safe_details or ((event.safe_summary,) if event.safe_summary else ())
+            suffix = "" if not details else "\n" + "\n".join(f"  {detail}" for detail in details)
+            return (
+                f"[tool {event.call_index}/{event.call_limit}] {event.tool_name}{suffix}",
+                "info",
+            )
         detail = f" {event.safe_summary}" if event.safe_summary else ""
         return (
             f"[tool {event.call_index}/{event.call_limit}] {event.tool_name}{detail}",

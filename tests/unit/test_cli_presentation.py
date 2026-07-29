@@ -25,6 +25,7 @@ from leonervis_code.cli.presentation import (
     RESET,
     YELLOW,
     MAX_TOOL_LEDGER_RENDER_BYTES,
+    ToolDetailMode,
     render_compact_preview,
     render_compaction_history,
     render_context_inspection,
@@ -1047,6 +1048,36 @@ def test_tool_prompt_events_render_stable_safe_lines_and_semantic_kinds() -> Non
 def test_unknown_prompt_event_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported prompt event"):
         render_prompt_event(object())
+    with pytest.raises(ValueError, match="detail mode"):
+        render_prompt_event(object(), tool_detail_mode="full")  # type: ignore[arg-type]
+
+
+def test_prompt_event_full_mode_expands_bounded_details_without_changing_default() -> None:
+    event = ToolRequestStarted(
+        "run_command",
+        2,
+        32,
+        "command='bash' args=2 cwd='.' timeout=30s",
+        (
+            'argv: ["bash","-lc","uv run pytest"]',
+            "cwd: '.'",
+            "timeout_seconds: 30",
+            "execution: shell interpreter 'bash'; shell source is argv[2]",
+        ),
+    )
+
+    assert render_prompt_event(event) == (
+        "[tool 2/32] run_command command='bash' args=2 cwd='.' timeout=30s",
+        "info",
+    )
+    assert render_prompt_event(event, tool_detail_mode=ToolDetailMode.FULL) == (
+        "[tool 2/32] run_command\n"
+        '  argv: ["bash","-lc","uv run pytest"]\n'
+        "  cwd: '.'\n"
+        "  timeout_seconds: 30\n"
+        "  execution: shell interpreter 'bash'; shell source is argv[2]",
+        "info",
+    )
 
 
 def test_colored_readline_prompt_marks_only_nonprinting_sequences() -> None:

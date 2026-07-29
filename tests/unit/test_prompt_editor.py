@@ -137,6 +137,10 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
     assert [
         completion.text for completion in completer.get_completions(Document("/provider c"), event)
     ] == ["/provider current"]
+    assert [
+        completion.text
+        for completion in completer.get_completions(Document("/tool-details "), event)
+    ] == ["/tool-details compact", "/tool-details full"]
     assert list(completer.get_completions(Document("/h\ntext"), event)) == []
     assert list(completer.get_completions(Document("ordinary"), event)) == []
 

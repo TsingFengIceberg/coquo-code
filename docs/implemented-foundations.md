@@ -47,6 +47,8 @@
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
+- [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
+- [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -493,7 +495,7 @@ Canonical system prompt升级到v15；工具schema、顺序及provider projectio
 
 该slice让AgentLoop为每次正常工具dispatch发出typed started/finished事件，并复用当时共享六次预算的index。第七次请求只发limited事件且不进入dispatch；若dispatch异常后effect不能可靠判断，结束状态明确为`outcome-unknown`。ProjectSession从结构化PermissionGate、approval resolution和ActionCoordinator execution metadata映射`error | denied | rejected | cancelled | succeeded | failed | partial`，不解析ToolResult文本。
 
-摘要按工具类型最小化：显示workspace-relative path、include、byte/edit/argument count、command basename、cwd和timeout；不显示file/edit/query内容、完整argv、absolute path、digest、lease、内部ID或raw result。参数执行校验前出现的absolute path会隐藏为`<absolute>`，控制字符被转义，摘要长度有界。One-shot通过可复用`TerminalEventSink`把事件写到stderr并保持stdout只有最终回答；REPL写到自身stdout。Sink异常被隔离，不能改变工具执行、Action Audit、turn commit或Session state。
+默认compact摘要按工具类型最小化：显示workspace-relative path、include、byte/edit/argument count、command basename、cwd和timeout；不显示file/edit/query内容、完整argv、absolute path、digest、lease、内部ID或raw result。参数执行校验前出现的absolute path会隐藏为`<absolute>`，控制字符被转义，摘要长度有界。One-shot通过可复用`TerminalEventSink`把事件写到stderr并保持stdout只有最终回答；REPL写到自身stdout。Sink异常被隔离，不能改变工具执行、Action Audit、turn commit或Session state。后续[0065](./decisions/0065-opt-in-bounded-live-tool-details.md)只为REPL增加显式process-local full模式；compact与one-shot边界保持不变。
 
 Live events不写append-only transcript、不参与resume/compaction、不进入model history，也不能替代durable Action Audit。该Host-only slice不改变工具schema/order、system prompt v15、provider adapter v15、empty Effective Context identity或任何Session/Action Audit/context representation version。完整决策见[0041：Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md)。
 
@@ -668,6 +670,14 @@ Provider实际Token用量现在不仅保留在进程内tracker，也附着到严
 `git_show`只接受完整40/64位小写十六进制ID，并先通过固定`merge-base --is-ancestor`确认它是当前`HEAD`可达commit，再返回一行JSON metadata、最多8 KiB commit message和有界tracked patch；总输出最多64 KiB，message与patch分别标记截断。External diff、textconv、rename detection、signature、color、submodule recursion与replacement objects均被关闭。缩写/大写ID、不可达或非commit object、unborn HEAD、非法path、非UTF-8或malformed输出全部安全失败。
 
 两个工具继续按`workspace-read`经过PermissionGate、Action Audit与共享8/32/24预算，不需要approval。REPL新增`/commits [count] [path]`与`/commit <full-id> [path]`，直接展示完整ID并转义subject/message/patch中的terminal controls；它们不调用provider、不消耗model tool budget、不写Session或Action Audit。Canonical system prompt升级为v21，provider adapter contract升级为v24，21-tool catalog使empty full-context identity变为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。ToolArguments v1、ActionIdentity v1、Session/Action Audit schemas与`ctx-v3`/`ctx-v4`representation不升级，旧Session不重写。完整决策见[0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)。
+
+## Opt-in Bounded Live Tool Details
+
+REPL新增进程内`/tool-details`、`/tool-details compact`与`/tool-details full`。每次启动固定从compact开始，one-shot也继续使用compact；设置不写profile、Session、transcript、Action Audit或Effective Context。Compact完全保留既有脱敏单行。Full把tool start改为多行，但file/edit/patch/search content继续隐藏；普通工具只展开原safe summary，`run_command`额外显示结构化JSON argv、cwd、timeout及执行解释。
+
+Command详情不会把direct argv伪装成shell source：普通请求明确显示Host关闭shell parsing；模型显式请求常见shell并提供`-c`类option时，终端标明shell interpreter及source所在argv位置。Argv行最多7 KiB，全部详情最多4行/8 KiB，截断携带rendered byte count；C0/C1、Unicode format及line/paragraph separator controls在写终端前转义。启用full时会警告argv可能包含敏感值。
+
+只有full显式请求时AgentLoop才从immutable ToolArguments生成详情；compact与one-shot事件本身不携带argv详情，TerminalEventSink再渲染所选形式。事件仍是best-effort临时观察，不能改变permission、approval、execution、Action Audit、turn commit或provider failure；full也不提供PTY、retained shell、stdin forwarding或更高命令权限。本slice审阅system prompt与所有模型可见合同后确认无行为变化，因此canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog及empty Effective Context identity不变，所有Session/context schema也不升级。完整决策见[0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)。
 
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
@@ -899,3 +909,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 62. [0062：Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)
 63. [0063：Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)
 64. [0064：Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
+65. [0065：Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)

@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.cli.slash import dispatch_slash
+from leonervis_code.cli.presentation import ToolDetailMode
+from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.manager import (
     CurrentTargetContextAssessment,
@@ -272,6 +273,7 @@ class Session:
 
 def test_group_help_and_targeted_usage(tmp_path) -> None:
     session = Session(tmp_path)
+    tool_details = ToolDetailSettings()
 
     assert "Session commands:" in dispatch_slash("/session", session).message
     assert "Provider commands:" in dispatch_slash("/provider", session).message
@@ -293,6 +295,20 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
         "No committed or failed turn usage is available in this Session."
     )
     assert dispatch_slash("/usage extra", session).message == "Usage: /usage [session|turns]"
+    assert dispatch_slash("/tool-details", session, tool_details=tool_details).message == (
+        "Live tool details: compact (process-local)."
+    )
+    enabled = dispatch_slash("/tool-details full", session, tool_details=tool_details)
+    assert enabled.kind == "warning"
+    assert "structured argv" in enabled.message
+    assert "sensitive values" in enabled.message
+    assert tool_details.mode == ToolDetailMode.FULL
+    disabled = dispatch_slash("/tool-details compact", session, tool_details=tool_details)
+    assert disabled.kind == "info"
+    assert tool_details.mode == ToolDetailMode.COMPACT
+    assert dispatch_slash("/tool-details verbose", session, tool_details=tool_details).message == (
+        "Usage: /tool-details <compact|full>"
+    )
     assert "path=note.txt" in dispatch_slash("/changes", session).message
     assert dispatch_slash("/changes unstaged", session).message == (
         "Git diff (unstaged):\n+change\n"

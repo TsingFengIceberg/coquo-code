@@ -14,7 +14,7 @@ from leonervis_code.cli.markdown_renderer import (
     TerminalMarkdownRenderer,
     write_markdown_document,
 )
-from leonervis_code.cli.presentation import render_message, render_prompt_event
+from leonervis_code.cli.presentation import ToolDetailMode, render_message, render_prompt_event
 
 
 class TerminalEventSink:
@@ -29,6 +29,7 @@ class TerminalEventSink:
         render_markdown: bool = False,
         show_role_markers: bool = False,
         show_waiting: bool = False,
+        tool_detail_mode: ToolDetailMode = ToolDetailMode.COMPACT,
     ) -> None:
         self._stream = stream
         self._color = color
@@ -41,6 +42,9 @@ class TerminalEventSink:
         self._show_waiting = show_waiting
         self._waiting_visible = False
         self._assistant_output_active = False
+        if type(tool_detail_mode) is not ToolDetailMode:
+            raise ValueError("tool detail mode is invalid")
+        self._tool_detail_mode = tool_detail_mode
 
     @property
     def final_text_was_streamed(self) -> bool:
@@ -92,7 +96,7 @@ class TerminalEventSink:
             self._final_text_was_streamed = True
             return
         self._clear_waiting()
-        message, kind = render_prompt_event(event)
+        message, kind = render_prompt_event(event, tool_detail_mode=self._tool_detail_mode)
         self._stream.write(render_message(message, kind, color=self._color))
         if not message.endswith("\n"):
             self._stream.write("\n")

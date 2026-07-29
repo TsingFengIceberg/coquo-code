@@ -21,6 +21,7 @@ from leonervis_code.agent.tool_events import (
     ToolTurnSummaryCommitted,
     infer_tool_dispatch_result,
     safe_result_code,
+    safe_tool_request_details,
     safe_tool_request_summary,
 )
 from leonervis_code.core.actions import ActionLease
@@ -242,10 +243,14 @@ class AgentLoop:
         *,
         provider: ConversationProvider | None = None,
         event_sink: AgentEventSink | None = None,
+        include_tool_details: bool = False,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
-            self.prepare_turn(prompt), provider=provider, event_sink=event_sink
+            self.prepare_turn(prompt),
+            provider=provider,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
         )
 
     def run_prepared(
@@ -254,8 +259,11 @@ class AgentLoop:
         *,
         provider: ConversationProvider | None = None,
         event_sink: AgentEventSink | None = None,
+        include_tool_details: bool = False,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
+        if type(include_tool_details) is not bool:
+            raise ValueError("tool detail event option is invalid")
         turn_provider = provider or self._provider
         if turn_provider is None:
             raise RuntimeError("conversation provider is required for this turn")
@@ -395,6 +403,7 @@ class AgentLoop:
                         call_index,
                         MAX_TOOL_REQUESTS_PER_TURN,
                         safe_tool_request_summary(request),
+                        safe_tool_request_details(request) if include_tool_details else (),
                     ),
                 )
                 try:

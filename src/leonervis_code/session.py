@@ -929,8 +929,16 @@ class ProjectSession:
             finally:
                 prepared.abort()
 
-    def prompt(self, text: str, *, event_sink: PromptEventSink | None = None) -> str:
+    def prompt(
+        self,
+        text: str,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+    ) -> str:
         """Run one serialized preflighted turn with one exact prepared-action lease."""
+        if type(include_tool_details) is not bool:
+            raise ValueError("tool detail event option is invalid")
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
@@ -973,6 +981,7 @@ class ProjectSession:
                         prepared,
                         provider=runtime,
                         event_sink=event_sink,
+                        include_tool_details=include_tool_details,
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:

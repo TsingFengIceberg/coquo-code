@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from pathlib import PurePosixPath, PureWindowsPath
+import unicodedata
 
 from leonervis_code.core.contracts import (
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
@@ -19,6 +21,9 @@ from leonervis_code.providers.usage import ProviderTokenUsage
 
 MAX_TOOL_EVENT_SUMMARY_CHARACTERS = 512
 MAX_TOOL_EVENT_VALUE_CHARACTERS = 160
+MAX_TOOL_EVENT_DETAIL_LINES = 4
+MAX_TOOL_EVENT_DETAIL_BYTES = 8 * 1024
+MAX_TOOL_EVENT_ARGV_LINE_BYTES = 7 * 1024
 
 
 class ToolEventStatus(StrEnum):
@@ -94,10 +99,12 @@ class ToolRequestStarted:
     call_index: int
     call_limit: int
     safe_summary: str
+    safe_details: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_event_identity(self.tool_name, self.call_index, self.call_limit)
         _validate_safe_text(self.safe_summary, "tool event summary")
+        _validate_safe_details(self.safe_details)
 
 
 @dataclass(frozen=True)
@@ -327,6 +334,42 @@ def safe_tool_request_summary(request: ToolUse) -> str:
     return summary[:MAX_TOOL_EVENT_SUMMARY_CHARACTERS]
 
 
+def safe_tool_request_details(request: ToolUse) -> tuple[str, ...]:
+    """Return opt-in bounded details without exposing file or search contents."""
+    if request.name != "run_command":
+        return ()
+    try:
+        arguments = request.arguments.as_mapping()
+    except Exception:
+        return ("argv: <invalid>",)
+
+    argv = arguments.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+        argv_line = "argv: <invalid>"
+        execution = "execution: unavailable"
+    else:
+        rendered_argv = json.dumps(
+            argv,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        rendered_argv = _escape_terminal_controls(rendered_argv)
+        argv_line = _bounded_detail_line("argv: ", rendered_argv, MAX_TOOL_EVENT_ARGV_LINE_BYTES)
+        executable = _safe_executable(argv[0])
+        shell_source_index = _shell_source_index(argv)
+        if shell_source_index is None:
+            execution = "execution: direct argv; Host shell parsing disabled"
+        else:
+            execution = (
+                f"execution: shell interpreter {executable}; "
+                f"shell source is argv[{shell_source_index}]"
+            )
+    cwd = f"cwd: {_safe_path(arguments.get('cwd'))}"
+    timeout = f"timeout_seconds: {_safe_number(arguments.get('timeout_seconds'))}"
+    return (argv_line, cwd, timeout, execution)
+
+
 def safe_result_code(value: str | None) -> str | None:
     """Escape one stable Host result code before placing it in a terminal event."""
     if value is None:
@@ -358,6 +401,44 @@ def _safe_executable(value: object) -> str:
         return "<invalid>"
     name = PureWindowsPath(value).name if "\\" in value else PurePosixPath(value).name
     return _safe_argument(name)
+
+
+def _shell_source_index(argv: list[str]) -> int | None:
+    executable = PureWindowsPath(argv[0]).name if "\\" in argv[0] else PurePosixPath(argv[0]).name
+    if executable not in {"bash", "dash", "ksh", "sh", "zsh"}:
+        return None
+    for index, argument in enumerate(argv[1:], start=1):
+        if not argument.startswith("-") or argument == "-":
+            break
+        if argument == "--":
+            break
+        if argument.startswith("--"):
+            continue
+        if "c" in argument[1:] and index + 1 < len(argv):
+            return index + 1
+    return None
+
+
+def _bounded_detail_line(prefix: str, value: str, limit: int) -> str:
+    rendered = f"{prefix}{value}"
+    encoded = rendered.encode("utf-8")
+    if len(encoded) <= limit:
+        return rendered
+    suffix = f"... <truncated; rendered_bytes={len(encoded)}>"
+    available = limit - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+    clipped = value.encode("utf-8")[: max(0, available)].decode("utf-8", errors="ignore")
+    return f"{prefix}{clipped}{suffix}"
+
+
+def _escape_terminal_controls(value: str) -> str:
+    rendered: list[str] = []
+    for character in value:
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            codepoint = ord(character)
+            rendered.append(f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
 
 
 def _safe_inline(value: str) -> str:
@@ -392,3 +473,20 @@ def _validate_safe_text(value: str, label: str) -> None:
         raise ValueError(f"{label} is invalid")
     if any(character in value for character in ("\x00", "\r", "\n", "\x1b")):
         raise ValueError(f"{label} contains terminal control characters")
+
+
+def _validate_safe_details(details: tuple[str, ...]) -> None:
+    if type(details) is not tuple or len(details) > MAX_TOOL_EVENT_DETAIL_LINES:
+        raise ValueError("tool event details are invalid")
+    total_bytes = 0
+    for detail in details:
+        if not isinstance(detail, str) or not detail:
+            raise ValueError("tool event detail is invalid")
+        if any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in detail):
+            raise ValueError("tool event detail contains terminal control characters")
+        try:
+            total_bytes += len(detail.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("tool event detail is not valid UTF-8") from None
+    if total_bytes > MAX_TOOL_EVENT_DETAIL_BYTES:
+        raise ValueError("tool event details exceed the supported size")

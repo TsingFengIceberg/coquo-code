@@ -24,6 +24,7 @@ from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
+    ToolDetailMode,
     render_message,
     render_provider_adapter_error,
     render_prompt,
@@ -31,7 +32,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_status,
     render_session_info,
 )
-from leonervis_code.cli.slash import dispatch_slash
+from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import RuntimeProviderStateError
 from leonervis_code.providers.profile import ProviderProfileError
@@ -76,6 +77,7 @@ def run_repl(
         stdout.write(f"\n{render_session_info(session_info)}\nAuto-save: enabled\n")
     stdout.write("\n")
     stdout.flush()
+    tool_details = ToolDetailSettings()
 
     while True:
         status = _snapshot(session, "status")
@@ -110,7 +112,7 @@ def run_repl(
             continue
 
         try:
-            result = dispatch_slash(prompt, session)
+            result = dispatch_slash(prompt, session, tool_details=tool_details)
         except KeyboardInterrupt:
             stdout.write(
                 f"{render_message('Operation cancelled; no uncommitted state was installed.', 'warning', color=color)}\n"
@@ -136,13 +138,18 @@ def run_repl(
                 render_markdown=render_markdown,
                 show_role_markers=terminal_ui,
                 show_waiting=terminal_ui,
+                tool_detail_mode=tool_details.mode,
             )
             event_sink.start_waiting()
             if callable(prompt_method):
-                response = prompt_method(
-                    prompt,
-                    event_sink=event_sink,
-                )
+                if tool_details.mode == ToolDetailMode.FULL:
+                    response = prompt_method(
+                        prompt,
+                        event_sink=event_sink,
+                        include_tool_details=True,
+                    )
+                else:
+                    response = prompt_method(prompt, event_sink=event_sink)
             else:
                 response = getattr(session, "run")(prompt)
             if not event_sink.final_text_was_streamed:

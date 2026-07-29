@@ -47,6 +47,8 @@
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
+- [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
+- [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -493,7 +495,7 @@ The canonical system prompt advances to v15. Tool schemas, order, and provider p
 
 This slice made AgentLoop emit typed started/finished events around every normal tool dispatch using the then-current shared six-call budget index. A seventh request emitted only a limited event and did not enter dispatch. If dispatch raises after the effect can no longer be stated reliably, the terminal status is explicitly `outcome-unknown`. ProjectSession maps `error | denied | rejected | cancelled | succeeded | failed | partial` from structured PermissionGate, approval-resolution, and ActionCoordinator execution metadata rather than parsing ToolResult text.
 
-Summaries are minimized per tool: workspace-relative paths, includes, byte/edit/argument counts, command basename, cwd, and timeout may appear; file/edit/query content, full argv, absolute paths, digests, leases, internal IDs, and raw results may not. Absolute paths observed before execution validation become `<absolute>`, control characters are escaped, and summary lengths are bounded. A reusable `TerminalEventSink` writes one-shot events to stderr while leaving stdout final-answer-only; the REPL writes them to its own stdout. Sink exceptions are isolated and cannot change tool execution, Action Audit, turn commit, or Session state.
+Default compact summaries are minimized per tool: workspace-relative paths, includes, byte/edit/argument counts, command basename, cwd, and timeout may appear; file/edit/query content, full argv, absolute paths, digests, leases, internal IDs, and raw results may not. Absolute paths observed before execution validation become `<absolute>`, control characters are escaped, and summary lengths are bounded. A reusable `TerminalEventSink` writes one-shot events to stderr while leaving stdout final-answer-only; the REPL writes them to its own stdout. Sink exceptions are isolated and cannot change tool execution, Action Audit, turn commit, or Session state. Later [0065](./decisions/0065-opt-in-bounded-live-tool-details.md) adds only an explicit process-local full mode to the REPL; compact and one-shot boundaries remain unchanged.
 
 Live events are not written to the append-only transcript, do not participate in resume or compaction, never enter model history, and cannot replace durable Action Audit. This Host-only slice leaves tool schemas/order, system prompt v15, provider adapter v15, the empty Effective Context identity, and all Session/Action Audit/context representation versions unchanged. See [0041: Live Redacted Tool Activity Events](./decisions/0041-live-redacted-tool-activity-events.md).
 
@@ -668,6 +670,14 @@ The model-visible surface appends `git_log(limit, path)` and `git_show(commit_id
 `git_show` accepts only a complete lowercase 40/64-hex ID and first uses fixed `merge-base --is-ancestor` behavior to prove that it is a commit reachable from current `HEAD`. It then returns one JSON metadata line, a commit message capped at 8 KiB, and a bounded tracked patch; total output is capped at 64 KiB with separate message and patch truncation. External diff, textconv, rename detection, signatures, color, submodule recursion, and replacement objects are disabled. Abbreviated/uppercase IDs, unreachable or non-commit objects, unborn HEAD, invalid paths, and non-UTF-8 or malformed output fail safely.
 
 Both tools remain `workspace-read` actions passing through PermissionGate, Action Audit, and the shared 8/32/24 budget without approval. The REPL adds `/commits [count] [path]` and `/commit <full-id> [path]`, rendering complete IDs while escaping terminal controls in subjects, messages, and patches. They invoke no provider, consume no model-tool budget, and write neither Session nor Action Audit. Canonical system prompt advances to v21, provider adapter contract advances to v24, and the 21-tool catalog changes the empty full-context identity to `ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`. ToolArguments v1, ActionIdentity v1, Session/Action Audit schemas, and `ctx-v3`/`ctx-v4` representations do not advance, and old Sessions are not rewritten. See [0064: Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md).
+
+## Opt-in Bounded Live Tool Details
+
+The REPL adds process-local `/tool-details`, `/tool-details compact`, and `/tool-details full`. Every launch starts in compact and one-shot remains compact; the setting is stored in neither profiles, Sessions, transcripts, Action Audit, nor Effective Context. Compact exactly preserves the existing redacted single line. Full makes tool starts multiline while still hiding file/edit/patch/search content. Ordinary tools expand only their existing safe summary, while `run_command` additionally shows structured JSON argv, cwd, timeout, and an execution annotation.
+
+Command details do not misrepresent direct argv as shell source. Ordinary requests state that Host shell parsing is disabled. When the model explicitly requests a common shell with a `-c`-style option, the terminal identifies the shell interpreter and the argv position containing source. The argv line is limited to 7 KiB and all details to four lines/8 KiB with rendered-byte truncation. C0/C1 controls, Unicode format controls, and line/paragraph separators are escaped before terminal output. Enabling full warns that argv may contain sensitive values.
+
+Only an explicit full-mode request makes AgentLoop derive details from immutable ToolArguments; compact and one-shot events carry no argv details, and TerminalEventSink then renders the selected form. Events remain best-effort ephemeral observation and cannot change permission, approval, execution, Action Audit, turn commit, or provider failure. Full mode provides no PTY, retained shell, stdin forwarding, or additional command authority. Review confirms no model-visible behavior change, so canonical system prompt remains v21, provider adapter contract remains v24, the 21-tool catalog and empty Effective Context identity are unchanged, and no Session/context schema advances. See [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md).
 
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
@@ -899,3 +909,4 @@ This slice establishes capacity facts only. It does not count current request to
 62. [0062: Durable Session Provider Usage Audit](./decisions/0062-durable-session-provider-usage-audit.md)
 63. [0063: Bounded Read-only Git Change Observation](./decisions/0063-bounded-read-only-git-change-observation.md)
 64. [0064: Bounded Reachable Git History Observation](./decisions/0064-bounded-reachable-git-history-observation.md)
+65. [0065: Opt-in Bounded Live Tool Details](./decisions/0065-opt-in-bounded-live-tool-details.md)
