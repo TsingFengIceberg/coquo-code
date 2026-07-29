@@ -20,6 +20,7 @@ from leonervis_code.cli.frontend import ApprovalPending, FrontendEventQueue
 from leonervis_code.cli.terminal_app import supports_terminal_application
 from leonervis_code.cli.brand import color_enabled
 from leonervis_code.cli.event_sink import TerminalEventSink
+from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
@@ -27,7 +28,6 @@ from leonervis_code.cli.presentation import (
     MAX_ACTION_AUDIT_COUNT,
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
-    render_provider_adapter_error,
     render_resume_rejection,
     render_session_resume,
     render_session_summary,
@@ -41,7 +41,6 @@ from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.core.orchestration import (
     GenerationOptions,
     OrchestrationError,
-    ProviderFailureKind,
     RouteRequest,
     RouteRequirements,
 )
@@ -429,13 +428,7 @@ def render_runtime_route(
 
 def render_provider_failure(error: ProviderAdapterError, stderr: TextIO) -> int:
     """Render one normalized provider failure without exposing raw SDK data."""
-    print(render_provider_adapter_error(error, prefix="provider error"), file=stderr)
-    if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
-        print(
-            "No turn was committed. Any tool side effects completed earlier in this "
-            "attempt were not rolled back and remain in Action Audit.",
-            file=stderr,
-        )
+    print(render_turn_failure(error, provider_prefix="provider error"), file=stderr)
     return 2
 
 

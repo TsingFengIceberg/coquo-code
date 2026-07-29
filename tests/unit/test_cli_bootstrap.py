@@ -115,7 +115,8 @@ def test_prompt_command_explains_output_limit_without_committing_turn(
         "provider error [output_limit]: provider response reached the configured output-token limit",
         "Output limit: requested 4096 tokens; provider reported 4096 output tokens and 4900 input tokens.",
         "The provider response was incomplete with partial content and was rejected.",
-        "No turn was committed. Any tool side effects completed earlier in this attempt were not rolled back and remain in Action Audit.",
+        "No turn was committed. Tool side effects completed earlier remain in Action Audit.",
+        "Next: increase /output in the REPL or --max-output-tokens for one-shot only if the model supports it, or submit a narrower request.",
     ]
 
 
@@ -689,6 +690,8 @@ def test_real_prompt_reports_missing_key_without_constructing_a_client(
     assert output.getvalue() == ""
     assert errors.getvalue() == (
         "provider error [authentication]: ANTHROPIC_API_KEY is not configured\n"
+        "No turn was committed. Tool side effects completed earlier remain in Action Audit.\n"
+        "Next: verify the selected profile credential outside the transcript, then run /status.\n"
     )
 
 

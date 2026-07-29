@@ -47,16 +47,17 @@ from leonervis_code.cli.markdown_renderer import (
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     ToolDetailMode,
-    indent_terminal_block,
     render_host_message,
     render_message_separator,
     render_prompt,
     render_prompt_toolbar,
+    render_turn_trace,
 )
 from leonervis_code.cli.prompt_editor import SlashCommandCompleter, validate_prompt_text
 from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.turn_runner import TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
+from leonervis_code.session import TurnCommitStarted
 
 
 def supports_terminal_application(stdin: TextIO, stdout: TextIO) -> bool:
@@ -174,7 +175,7 @@ class TerminalApplication:
         self._approval_draft: tuple[str, int] | None = None
         self._turn_starting = False
         self._cancel_pending_start = False
-        self._conversation_output_started = False
+        self._turn_output_started = False
         self._history = InMemoryHistory(_session_prompt_history(session))
         self._buffer = Buffer(
             multiline=True,
@@ -253,20 +254,26 @@ class TerminalApplication:
                 return
             self._approval_draft = (self._buffer.text, self._buffer.cursor_position)
             self._buffer.set_document(self._buffer.document.__class__("", 0), bypass_readonly=True)
-            await self._write(
-                indent_terminal_block(render_approval_request(event.request, color=self._color))
+            await self._write_turn_output(
+                render_turn_trace(
+                    render_approval_request(event.request, color=self._color),
+                    "plain",
+                    color=self._color,
+                )
                 + "\n"
             )
         elif isinstance(event, PromptActivity):
+            if isinstance(event.event, TurnCommitStarted):
+                return
             rendered = self._renderer.render(event.event)
             if rendered:
-                await self._write(rendered)
+                await self._write_turn_output(rendered)
         elif isinstance(event, TurnFailed):
             _, trailing = self._renderer.abort()
             if trailing:
-                await self._write(trailing)
-            await self._write(
-                render_host_message(
+                await self._write_turn_output(trailing)
+            await self._write_turn_output(
+                render_turn_trace(
                     escape_terminal_controls(event.message),
                     "warning" if event.cancelled else "error",
                     color=self._color,
@@ -275,9 +282,13 @@ class TerminalApplication:
             )
         elif isinstance(event, TurnFinished):
             if event.response and not self._renderer.final_text_was_streamed:
-                await self._write(self._renderer.render_final(event.response))
+                await self._write_turn_output(self._renderer.render_final(event.response))
+            await self._write(
+                f"\n{render_message_separator(self._current_width(), color=self._color)}\n"
+            )
             should_exit = previous.exit_after_turn
             self._renderer.reset()
+            self._turn_output_started = False
             self._refresh_snapshots()
             self._replace_history()
             if should_exit:
@@ -311,9 +322,10 @@ class TerminalApplication:
             return False
         include_details = self._tool_details.mode == ToolDetailMode.FULL
         self._renderer.configure(self._tool_details.mode, width=self._current_width())
+        self._turn_output_started = False
         self._turn_starting = True
         self._cancel_pending_start = False
-        self._state = replace(self._state, status="Working")
+        self._state = replace(self._state, status="Preparing turn")
         self._application.create_background_task(
             self._start_turn_after_echo(text, include_tool_details=include_details)
         )
@@ -334,13 +346,7 @@ class TerminalApplication:
             continuation_prefix="  ",
             prefix_width=2,
         )
-        separator = (
-            f"{render_message_separator(width, color=self._color)}\n"
-            if self._conversation_output_started
-            else ""
-        )
-        await self._write(f"\n{separator}{rendered}")
-        self._conversation_output_started = True
+        await self._write(f"\n{rendered}")
         if self._cancel_pending_start:
             self._turn_starting = False
             self._cancel_pending_start = False
@@ -481,6 +487,16 @@ class TerminalApplication:
             await run_in_terminal(lambda: self._safe_write(text), in_executor=False)
         except Exception:
             return
+
+    async def _write_turn_output(self, text: str) -> None:
+        """Open one visual turn boundary before its first visible output."""
+        if not text:
+            return
+        if not self._turn_output_started:
+            self._turn_output_started = True
+            if not text.startswith("\n"):
+                text = f"\n{text}"
+        await self._write(text)
 
     def _schedule_write(self, text: str) -> None:
         self._application.create_background_task(self._write(text))

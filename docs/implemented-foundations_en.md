@@ -50,6 +50,8 @@
 - [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
 - [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
 - [Trusted Command Result Observability](#trusted-command-result-observability)
+- [Host Workbench Navigation and Failure Guidance](#host-workbench-navigation-and-failure-guidance)
+- [Assistant Turn Execution Trace Grouping](#assistant-turn-execution-trace-grouping)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -704,6 +706,22 @@ Markdown streams no longer write `• ` by itself. Deltas without a safe renderi
 
 Terminal protocols cannot portably select a smaller font for one line, so this slice does not claim font-size control or introduce an alternate-screen TUI. One-shot output, redirects, injected streams without the role UI, Sessions, Action Audit, and every model-visible contract remain unchanged. Canonical system prompt remains v21 and provider adapter contract remains v24. See [0068: Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md).
 
+## Host Workbench Navigation and Failure Guidance
+
+The REPL Host workbench now provides grouped `/help <session|tools|git|context|provider|input>`, `/session list [count] [open|closed] [model=<name>]`, and `/actions [count] [status=<status>] [tool=<name>]`. Session filtering reads only validated workspace-bound metadata, remains newest-first, and shows current/latest markers plus durable provider/model provenance; resume still requires `latest` or a complete Session ID. Audit filtering uses only strictly replayed lifecycle status and canonical tool name, without parsing result prose or adding repair, retry, or export behavior.
+
+Known context, provider, runtime, authorization, and Session failures share one Host formatter that appends conservative `Next:` guidance. It never retries automatically, claims rollback, or conflates an uncommitted turn with completed side effects retained in Action Audit. The persistent terminal maps typed events to provider preparation, a specific running tool, result processing, compaction, usage, approval, and finalization phases. `ProjectSession` emits the content-free `TurnCommitStarted` only immediately before `SessionWriter.append_turn`, so `Saving Session` identifies the real durable append rather than a post-hoc guess.
+
+Every change is limited to Host queries, ephemeral events, and terminal text. No new Session record is written and nothing enters provider history. The canonical system prompt remains v21, provider adapter contract remains v24, and the 21-tool catalog, Effective Context identities, and all Session and Action Audit schemas remain unchanged. See [0069: Host Workbench Navigation and Failure Guidance](./decisions/0069-host-workbench-navigation-and-guidance.md).
+
+## Assistant Turn Execution Trace Grouping
+
+The real TTY now presents the complete AgentLoop execution triggered by one user submission as one Assistant Turn, with one blank line between the user message and the turn's first visible output. Provider-authored companion and final text retains the `• ` marker. Host facts such as context preflight, tool lifecycle, approval and its diff, usage, ledger, compaction, and failure output use a `  │ ` rail on every logical line. If the model requests a tool without companion text, presentation starts with the rail rather than inventing an empty `•`. They visually belong to the same turn without being misrepresented as model speech, while existing colors, risk emphasis, and redaction boundaries remain intact.
+
+Conversation separators no longer appear between assistant text, Host traces, and later assistant continuations. The persistent frontend writes one low-intensity short rule only after `TurnFinished`, placing it after final text or failure output and before the next live `›`; slash-command results remain Host blocks outside a model turn. One-shot, redirected, injected streams without the role UI, Sessions, Action Audit, and provider history are unchanged.
+
+This is a Host-only terminal presentation change. Canonical system prompt remains v21, provider adapter contract remains v24, and the 21-tool catalog, ToolArguments v1, ActionIdentity v1, Effective Context identities, and every Session, compaction, and Action Audit schema remain unchanged. See [0070: Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -938,3 +956,5 @@ This slice establishes capacity facts only. It does not count current request to
 66. [0066: Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
 67. [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)
 68. [0068: Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)
+69. [0069: Host Workbench Navigation and Failure Guidance](./decisions/0069-host-workbench-navigation-and-guidance.md)
+70. [0070: Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)

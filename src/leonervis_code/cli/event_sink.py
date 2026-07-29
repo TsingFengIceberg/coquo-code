@@ -21,9 +21,9 @@ from leonervis_code.cli.presentation import (
     ToolDetailMode,
     render_assistant_prefix,
     render_host_message,
-    render_message_separator,
     render_message,
     render_prompt_event,
+    render_turn_trace,
 )
 
 
@@ -50,11 +50,7 @@ class TerminalEventSink:
         self._visible_response = False
         self._final_text_was_streamed = False
         if show_role_markers:
-            resolved_width = DEFAULT_TERMINAL_WIDTH if markdown_width is None else markdown_width
-            self._assistant_prefix = (
-                f"\n{render_message_separator(resolved_width, color=color)}\n"
-                f"{render_assistant_prefix(color=color)}"
-            )
+            self._assistant_prefix = f"\n{render_assistant_prefix(color=color)}"
         else:
             self._assistant_prefix = ""
         self._continuation_prefix = "  " if show_role_markers else ""
@@ -139,7 +135,7 @@ class TerminalEventSink:
         self._clear_waiting()
         message, kind = render_prompt_event(event, tool_detail_mode=self._tool_detail_mode)
         self._stream.write(
-            render_host_message(message, kind, color=self._color)
+            render_turn_trace(message, kind, color=self._color)
             if self._show_role_markers
             else render_message(message, kind, color=self._color)
         )

@@ -40,6 +40,7 @@ from leonervis_code.session import (
     ProjectSession,
     ResumeEffect,
     SessionResumeContextError,
+    TurnCommitStarted,
 )
 from leonervis_code.session_records import CompactionFailed
 from leonervis_code.session_store import SessionStore, SessionStoreError
@@ -355,6 +356,8 @@ def test_project_session_executes_displays_persists_and_resumes_mixed_tool_respo
         ToolRequestFinished("read_file", 1, 32, ToolEventStatus.SUCCEEDED, "ok"),
     ]
     ledger_event = next(event for event in events if isinstance(event, ToolTurnSummaryCommitted))
+    commit_event = next(event for event in events if isinstance(event, TurnCommitStarted))
+    assert events.index(commit_event) < events.index(ledger_event)
     assert ledger_event.ledger.requested == 1
     assert first_provider.requests[1].history[-2:] == (call, result)
     assert first.history == (

@@ -43,6 +43,8 @@ _TOOLBAR_MODEL_WIDTH = 36
 _TOOLBAR_WORKSPACE_WIDTH = 64
 DEFAULT_ACTION_AUDIT_COUNT = 20
 MAX_ACTION_AUDIT_COUNT = 100
+DEFAULT_SESSION_LIST_COUNT = 20
+MAX_SESSION_LIST_COUNT = 100
 DEFAULT_TOOL_LEDGER_COUNT = 5
 MAX_TOOL_LEDGER_COUNT = MAX_TOOL_LEDGER_QUERY_TURNS
 MAX_TOOL_LEDGER_RENDER_BYTES = 32 * 1024
@@ -59,23 +61,47 @@ class ToolDetailMode(StrEnum):
     FULL = "full"
 
 
+HELP_TOPICS = ("session", "tools", "git", "context", "provider", "input")
 HELP_TEXT = (
-    "Commands: /help, /history <count>, /actions [count], /tools [count], /tool-details, "
-    "/changes, "
-    "/commits, /commit, /session, "
-    "/provider, /status, "
-    "/context, /usage [session|turns], /output [tokens|reset], /compact, "
-    "/compactions [count], "
-    "/model <model>, /resume <latest|id>, /clear, /exit, /quit. Enter submits; "
-    "Alt+Enter inserts a newline (press Esc then Enter if Alt is intercepted). Ctrl-C "
-    "cancels a draft or exits when empty; Ctrl-D exits when empty."
+    "Host command groups:\n"
+    "  /help session   Session history, browsing, and resume\n"
+    "  /help tools     Action Audit and durable tool outcomes\n"
+    "  /help git       Read-only Git changes and history\n"
+    "  /help context   Context, usage, output budget, and compaction\n"
+    "  /help provider  Provider and model selection\n"
+    "  /help input     Prompt editing, cancellation, and exit\n"
+    "Use /help <group> for commands. Slash commands are Host-only and do not call the model."
 )
 SESSION_HELP = (
     "Session commands:\n"
     "  /session show\n"
-    "  /session list\n"
+    "  /session list [1-100] [open|closed] [model=<name>]\n"
     "  /session new\n"
-    "  /resume <latest|session-id>"
+    "  /resume <latest|session-id>\n"
+    "  /history <count>"
+)
+TOOLS_HELP = (
+    "Tool and audit commands:\n"
+    "  /actions [1-100] [status=<status>] [tool=<name>]\n"
+    "  /tools [1-20]\n"
+    "  /tools details [1-20]\n"
+    "  /tool-details [compact|full]\n"
+    "Action status values: requested, awaiting-approval, authorized, approved, executing, "
+    "succeeded, failed, partial, denied, rejected, cancelled, abandoned, outcome-unknown"
+)
+GIT_HELP = (
+    "Read-only Git commands:\n"
+    "  /changes [unstaged|staged]\n"
+    "  /commits [1-50] [path]\n"
+    "  /commit <full-commit-id> [path]"
+)
+CONTEXT_HELP = (
+    "Context commands:\n"
+    "  /context\n"
+    "  /usage [session|turns]\n"
+    "  /output [tokens|reset]\n"
+    "  /compact | /compact preview\n"
+    "  /compactions [1-20]"
 )
 PROVIDER_HELP = (
     "Provider commands:\n"
@@ -86,6 +112,24 @@ PROVIDER_HELP = (
     "  /output [tokens|reset]\n"
     "  /model <model>"
 )
+INPUT_HELP = (
+    "Input controls:\n"
+    "  Enter submits the current prompt\n"
+    "  Alt+Enter inserts a newline; use Esc then Enter if Alt is intercepted\n"
+    "  Ctrl-C clears a draft, cancels an active turn, or exits when idle and empty\n"
+    "  Ctrl-D deletes ahead of the cursor or exits when the input is empty\n"
+    "  /clear clears terminal output\n"
+    "  /exit or /quit exits the REPL"
+)
+
+HELP_BY_TOPIC = {
+    "session": SESSION_HELP,
+    "tools": TOOLS_HELP,
+    "git": GIT_HELP,
+    "context": CONTEXT_HELP,
+    "provider": PROVIDER_HELP,
+    "input": INPUT_HELP,
+}
 
 
 def render_provider_adapter_error(
@@ -157,6 +201,7 @@ class SessionInfoView(Protocol):
     turn_count: int
     created_at: str
     closed: bool
+    binding: object
 
 
 class ConversationTurnView(Protocol):
@@ -320,6 +365,18 @@ def render_host_message(text: str, kind: MessageKind, *, color: bool) -> str:
     if kind == "success":
         return f"{DIM}{GREEN}{indented}{RESET}"
     return render_message(indented, kind, color=color)
+
+
+def render_turn_trace(text: str, kind: MessageKind, *, color: bool) -> str:
+    """Render Host-owned execution facts inside one assistant turn."""
+    traced = indent_terminal_block(text, "  │ ")
+    if not color or kind == "plain":
+        return traced
+    if kind == "info":
+        return f"{DIM}{traced}{RESET}"
+    if kind == "success":
+        return f"{DIM}{GREEN}{traced}{RESET}"
+    return render_message(traced, kind, color=color)
 
 
 def render_recent_history(turns: tuple[ConversationTurnView, ...], count: int) -> str:
@@ -536,7 +593,13 @@ def render_session_summary(
     marker_text = f" {' '.join(markers)}" if markers else ""
     turns = f"{info.turn_count} {'turn' if info.turn_count == 1 else 'turns'}"
     state = "closed" if info.closed else "open"
-    return f"{info.session_id}{marker_text}: {turns}, {state}, created {info.created_at}"
+    binding = getattr(info, "binding", None)
+    model = _safe_inline(getattr(binding, "selected_model", None) or "<none>")
+    provider = _safe_inline(getattr(binding, "provider_id", None) or "<unknown>")
+    return (
+        f"{info.session_id}{marker_text}: {turns}, {state}, created {info.created_at}, "
+        f"runtime {provider}/{model}"
+    )
 
 
 def render_runtime_status(status: RuntimeStatusView) -> str:

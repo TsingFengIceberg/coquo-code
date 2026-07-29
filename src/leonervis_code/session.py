@@ -341,6 +341,11 @@ class TurnUsageCompleted:
 
 
 @dataclass(frozen=True)
+class TurnCommitStarted:
+    """Signal the exact start of durable turn append without exposing turn content."""
+
+
+@dataclass(frozen=True)
 class DurableUsageOperation:
     record_sequence: int
     occurred_at: str
@@ -371,6 +376,7 @@ PromptEvent = (
     AutoCompactionStarted
     | AutoCompactionCommitted
     | AutoCompactionNotApplied
+    | TurnCommitStarted
     | TurnUsageCompleted
     | AgentPromptEvent
 )
@@ -549,6 +555,7 @@ class ProjectSession:
         self._active_action_binding: BindingSnapshot | None = None
         self._active_usage_cursor: int | None = None
         self._active_cancellation: TurnCancellation | None = None
+        self._active_event_sink: PromptEventSink | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -956,6 +963,7 @@ class ProjectSession:
             usage_cursor = self._manager.begin_turn_usage()
             self._active_usage_cursor = usage_cursor
             self._active_cancellation = cancellation
+            self._active_event_sink = event_sink
             try:
                 if cancellation is not None:
                     cancellation.check()
@@ -1018,6 +1026,7 @@ class ProjectSession:
                 self._active_action_binding = None
                 self._active_usage_cursor = None
                 self._active_cancellation = None
+                self._active_event_sink = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -2014,6 +2023,7 @@ class ProjectSession:
         usage_cursor = self._active_usage_cursor
         if usage_cursor is None:
             raise SessionStoreError("provider usage cursor is unavailable before turn commit")
+        self._emit_prompt_event(self._active_event_sink, TurnCommitStarted())
         writer.append_turn(
             turn.items,
             binding=binding_from_status(self._manager.status()),

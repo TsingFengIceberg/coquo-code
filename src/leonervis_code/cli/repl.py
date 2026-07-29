@@ -18,25 +18,17 @@ from leonervis_code.cli.prompt_editor import (
     TerminalPromptEditor,
     create_prompt_editor,
 )
-from leonervis_code.core.action_coordinator import ActionIdentityChangedError
-from leonervis_code.core.approvals import ApprovalGrantError
-from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     ToolDetailMode,
     render_message,
-    render_provider_adapter_error,
     render_prompt,
     render_prompt_toolbar,
     render_runtime_status,
     render_session_info,
 )
 from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
-from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.manager import RuntimeProviderStateError
-from leonervis_code.providers.profile import ProviderProfileError
-from leonervis_code.providers.request_context import ContextPreflightError
-from leonervis_code.session_store import SessionStoreError
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import FrontendEventQueue
 from leonervis_code.cli.terminal_app import TerminalApplication, supports_terminal_application
@@ -184,31 +176,9 @@ def run_repl(
                 )
             stdout.flush()
             continue
-        except ContextPreflightError as error:
+        except Exception as error:
             _report_aborted_stream(event_sink, stdout, color=color)
-            message = f"Context preflight error: {error}"
-            stdout.write(f"{render_message(message, 'error', color=color)}\n")
-        except ProviderAdapterError as error:
-            _report_aborted_stream(event_sink, stdout, color=color)
-            message = render_provider_adapter_error(error, prefix="Provider error")
-            stdout.write(f"{render_message(message, 'error', color=color)}\n")
-            if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
-                note = (
-                    "No turn was committed. Any tool side effects completed earlier in this "
-                    "attempt were not rolled back and remain in Action Audit."
-                )
-                stdout.write(f"{render_message(note, 'warning', color=color)}\n")
-        except (ProviderProfileError, RuntimeProviderStateError) as error:
-            _report_aborted_stream(event_sink, stdout, color=color)
-            stdout.write(f"{render_message(f'Runtime error: {error}', 'error', color=color)}\n")
-        except (ApprovalGrantError, ActionIdentityChangedError) as error:
-            _report_aborted_stream(event_sink, stdout, color=color)
-            stdout.write(
-                f"{render_message(f'Action authorization error: {error}', 'error', color=color)}\n"
-            )
-        except SessionStoreError as error:
-            _report_aborted_stream(event_sink, stdout, color=color)
-            stdout.write(f"{render_message(f'Session error: {error}', 'error', color=color)}\n")
+            stdout.write(f"{render_message(render_turn_failure(error), 'error', color=color)}\n")
         stdout.flush()
 
 

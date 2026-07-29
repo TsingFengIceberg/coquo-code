@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.presentation import ToolDetailMode
@@ -23,7 +24,9 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeResult,
 )
-from leonervis_code.session_records import BindingSnapshot
+from leonervis_code.core.contracts import ToolArguments
+from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot
 from leonervis_code.session_store import LatestUpdateStatus, SessionInfo, ToolLedgerQueryResult
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -56,6 +59,8 @@ class Session:
         self.current = "12345678-1234-4234-9234-123456789abc"
         self.latest = self.current
         self.prompts = []
+        self.audits = ()
+        self.sessions = None
 
     def status(self):
         return RuntimeStatus(
@@ -140,7 +145,7 @@ class Session:
         return self._info(self.current)
 
     def action_audits(self):
-        return ()
+        return self.audits
 
     def tool_ledgers(self, limit):
         assert 1 <= limit <= 20
@@ -232,7 +237,7 @@ class Session:
         return self._info(self.latest)
 
     def list_sessions(self):
-        return (self.session_info(),)
+        return self.sessions if self.sessions is not None else (self.session_info(),)
 
     def new_session(self):
         self.current = "22345678-1234-4234-9234-123456789abc"
@@ -277,6 +282,13 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
 
     assert "Session commands:" in dispatch_slash("/session", session).message
     assert "Provider commands:" in dispatch_slash("/provider", session).message
+    assert "Host command groups:" in dispatch_slash("/help", session).message
+    assert "Tool and audit commands:" in dispatch_slash("/help tools", session).message
+    assert "Read-only Git commands:" in dispatch_slash("/help git", session).message
+    assert "Input controls:" in dispatch_slash("/help input", session).message
+    assert dispatch_slash("/help unknown", session).message == (
+        "Usage: /help [session|tools|git|context|provider|input]"
+    )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
     assert unknown.message == ("Unknown session command: wat\nUsage: /session <show|list|new>")
@@ -341,9 +353,11 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/compactions 21", session).message == "Usage: /compactions [1-20]"
     assert dispatch_slash("/actions", session).message == "No action audits yet."
     assert dispatch_slash("/actions 10", session).message == "No action audits yet."
-    assert dispatch_slash("/actions 0", session).message == "Usage: /actions [1-100]"
-    assert dispatch_slash("/actions 101", session).message == "Usage: /actions [1-100]"
-    assert dispatch_slash("/actions two", session).message == "Usage: /actions [1-100]"
+    actions_usage = "Usage: /actions [1-100] [status=<status>] [tool=<name>]"
+    assert dispatch_slash("/actions 0", session).message == actions_usage
+    assert dispatch_slash("/actions 101", session).message == actions_usage
+    assert dispatch_slash("/actions two", session).message == actions_usage
+    assert dispatch_slash("/actions status=unknown", session).message == actions_usage
     assert dispatch_slash("/tools", session).message == "No committed turns yet."
     assert dispatch_slash("/tools 10", session).message == "No committed turns yet."
     assert dispatch_slash("/tools details", session).message == "No committed turns yet."
@@ -353,6 +367,79 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     )
     assert dispatch_slash("/tools details 21", session).message == (
         "Usage: /tools [1-20] | /tools details [1-20]"
+    )
+
+
+def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
+    session = Session(tmp_path)
+    first = session._info(session.current)
+    second = SessionInfo(
+        **{
+            **first.__dict__,
+            "session_id": "22345678-1234-4234-9234-123456789abc",
+            "created_at": "2026-07-17T00:00:00.000000Z",
+            "closed": True,
+            "binding": replace(BindingSnapshot.fake(), selected_model="model-a"),
+        }
+    )
+    third = SessionInfo(
+        **{
+            **first.__dict__,
+            "session_id": "32345678-1234-4234-9234-123456789abc",
+            "created_at": "2026-07-16T00:00:00.000000Z",
+            "closed": True,
+            "binding": replace(BindingSnapshot.fake(), selected_model="model-b"),
+        }
+    )
+    session.sessions = (first, second, third)
+
+    limited = dispatch_slash("/session list 2", session).message
+    assert "Showing 2 most recent of 3 matching Sessions." in limited
+    assert first.session_id in limited
+    assert second.session_id in limited
+    assert third.session_id not in limited
+
+    filtered = dispatch_slash("/session list closed model=model-a", session).message
+    assert second.session_id in filtered
+    assert "runtime fake/model-a" in filtered
+    assert first.session_id not in filtered
+    assert dispatch_slash("/session list open model=model-a", session).message == (
+        "No durable sessions match the selected filters."
+    )
+    assert dispatch_slash("/session list 0", session).message == (
+        "Usage: /session list [1-100] [open|closed] [model=<name>]"
+    )
+
+
+def test_action_audit_filters_use_replayed_status_and_tool_name(tmp_path) -> None:
+    session = Session(tmp_path)
+
+    def audit(sequence, tool_name, status):
+        return SimpleNamespace(
+            identity=SimpleNamespace(
+                tool_name=tool_name,
+                action=PermissionAction.WORKSPACE_READ,
+                arguments=ToolArguments.from_mapping({"path": f"file-{sequence}.txt"}),
+            ),
+            permission_result=None,
+            approval_outcome=None,
+            status=status,
+            result_code="ok" if status == ActionAuditStatus.SUCCEEDED else "invalid_request",
+            requested_sequence=sequence,
+        )
+
+    session.audits = (
+        audit(1, "read_file", ActionAuditStatus.SUCCEEDED),
+        audit(2, "write_file", ActionAuditStatus.FAILED),
+        audit(3, "read_file", ActionAuditStatus.FAILED),
+    )
+
+    rendered = dispatch_slash("/actions 10 status=failed tool=read_file", session).message
+    assert "Action #3: read_file" in rendered
+    assert "Action #1" not in rendered
+    assert "Action #2" not in rendered
+    assert dispatch_slash("/actions status=denied", session).message == (
+        "No action audits match the selected filters."
     )
 
 

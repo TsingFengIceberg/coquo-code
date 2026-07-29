@@ -50,6 +50,8 @@
 - [Bounded Reachable Git History Observation](#bounded-reachable-git-history-observation)
 - [Opt-in Bounded Live Tool Details](#opt-in-bounded-live-tool-details)
 - [Trusted Command Result Observability](#trusted-command-result-observability)
+- [Host Workbench Navigation 与 Failure Guidance](#host-workbench-navigation-与-failure-guidance)
+- [Assistant Turn Execution Trace Grouping](#assistant-turn-execution-trace-grouping)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -704,6 +706,22 @@ Markdown stream不再先单独写出`• `。未形成安全render boundary的de
 
 终端协议无法portable地为单独一行选择更小字号，因此本slice不伪造字号能力，也不引入alternate-screen TUI。One-shot、redirect、无role UI的injected stream、Session、Action Audit及全部模型可见合同保持不变；canonical system prompt仍为v21，provider adapter contract仍为v24。完整决策见[0068：Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)。
 
+## Host Workbench Navigation 与 Failure Guidance
+
+REPL的Host工作台现在支持分组`/help <session|tools|git|context|provider|input>`、`/session list [count] [open|closed] [model=<name>]`及`/actions [count] [status=<status>] [tool=<name>]`。Session筛选只读取已验证的workspace-bound metadata，结果保持newest-first并显示current/latest及持久provider/model；resume仍要求`latest`或完整Session ID。Audit筛选只使用严格replay的lifecycle status和canonical tool name，不解析result prose，不执行repair、retry或export。
+
+已知context/provider/runtime/authorization/Session失败由共享Host formatter追加保守`Next:`建议；它不会自动retry、声称rollback或把未提交turn与已完成Action Audit副作用混为一谈。常驻终端把typed events映射为准备provider请求、运行具体工具、处理结果、compaction、usage、approval与finalization阶段；`ProjectSession`只在`SessionWriter.append_turn`前发出content-free `TurnCommitStarted`，因此`Saving Session`对应真实durable append，而不是事后猜测。
+
+全部变化只影响Host查询、临时事件和terminal text，不写新Session record，也不进入provider history。Canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog、Effective Context identity及全部Session/Action Audit schema不变。完整决策见[0069：Host Workbench Navigation and Failure Guidance](./decisions/0069-host-workbench-navigation-and-guidance.md)。
+
+## Assistant Turn Execution Trace Grouping
+
+真实TTY现在把一次用户提交触发的完整AgentLoop执行呈现为一个Assistant Turn，并在用户消息与本轮首个可见输出之间固定留一行。Provider产生的companion/final正文继续以`• `标记；context preflight、tool lifecycle、approval及其diff、usage、ledger、compaction和failure等Host事实则在每个logical line前使用`  │ `轨迹线。若模型没有阶段性正文而直接请求工具，界面从轨迹线开始，不伪造空`•`。两者视觉归属同一turn，但轨迹不会被伪装为模型原话，已有颜色、风险强调与脱敏边界保持不变。
+
+Assistant正文、Host轨迹和后续assistant continuation之间不再插入conversation分隔线。常驻frontend只在`TurnFinished`后画一次低强度短线，因此该线位于最终正文或失败说明之后、下一个live `›`之前；slash command结果仍是turn外Host block。One-shot、redirect、无role UI的injected stream、Session、Action Audit和provider history不变。
+
+这是纯Host terminal presentation变化。Canonical system prompt保持v21、provider adapter contract保持v24、21-tool catalog、ToolArguments v1、ActionIdentity v1、Effective Context identity及全部Session/compaction/Action Audit schema不变。完整决策见[0070：Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -938,3 +956,5 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 66. [0066：Trusted Command Result Observability](./decisions/0066-trusted-command-result-observability.md)
 67. [0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)
 68. [0068：Terminal Message Hierarchy and Hanging Indent](./decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)
+69. [0069：Host Workbench Navigation and Failure Guidance](./decisions/0069-host-workbench-navigation-and-guidance.md)
+70. [0070：Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)

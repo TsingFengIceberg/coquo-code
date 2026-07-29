@@ -175,10 +175,13 @@ def test_render_session_summary_marks_pointers_state_and_turn_plurality(tmp_path
         info,
         current_session_id=session_id,
         latest_session_id=session_id,
-    ) == (f"{session_id} [current] [latest]: 1 turn, closed, created 2026-07-17T12:00:00.000000Z")
+    ) == (
+        f"{session_id} [current] [latest]: 1 turn, closed, "
+        "created 2026-07-17T12:00:00.000000Z, runtime fake/<none>"
+    )
     assert render_session_summary(
         SessionInfo(**{**info.__dict__, "turn_count": 0, "closed": False})
-    ).endswith("0 turns, open, created 2026-07-17T12:00:00.000000Z")
+    ).endswith("0 turns, open, created 2026-07-17T12:00:00.000000Z, runtime fake/<none>")
 
 
 def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
@@ -491,10 +494,8 @@ def test_repl_keeps_history_for_its_single_loop_lifetime(tmp_path) -> None:
 
     rendered = output.getvalue()
     assert loop.prompts == []
-    assert (
-        "Commands: /help, /history <count>, /actions [count], /tools [count], /tool-details, "
-        "/changes, /commits, /commit, /session" in rendered
-    )
+    assert "Host command groups:" in rendered
+    assert "/help session   Session history, browsing, and resume" in rendered
     assert "Unknown command: /unknown. Type /help for controls." in rendered
 
 

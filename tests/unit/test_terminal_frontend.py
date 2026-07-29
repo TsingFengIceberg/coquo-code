@@ -9,7 +9,14 @@ import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from leonervis_code.agent.tool_events import AssistantResponseTextDeltaReceived
+from leonervis_code.agent.tool_events import (
+    AssistantFinalTextStreamCommitted,
+    AssistantResponseTextDeltaReceived,
+    ProviderInvocationPreflighted,
+    ToolEventStatus,
+    ToolRequestFinished,
+    ToolRequestStarted,
+)
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import (
     ApprovalPending,
@@ -27,6 +34,7 @@ from leonervis_code.core.action_coordinator import (
     ApprovalResolution,
     HumanApprovalRequest,
 )
+from leonervis_code.core.approval_preview import build_file_change_preview
 from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 from leonervis_code.core.contracts import ToolArguments
@@ -36,11 +44,19 @@ from leonervis_code.core.permissions import (
     PermissionReason,
     PermissionResult,
 )
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
+from leonervis_code.session import TurnCommitStarted
 
 
 def test_terminal_reducer_accepts_only_one_matching_active_turn() -> None:
     state = reduce_terminal_state(TerminalViewState(), TurnSubmitted(1))
     assert state.phase == TerminalPhase.GENERATING
+    assert state.status == "Preparing turn"
     assert state.active_turn == 1
 
     state = reduce_terminal_state(
@@ -60,6 +76,46 @@ def test_terminal_reducer_accepts_only_one_matching_active_turn() -> None:
     state = reduce_terminal_state(state, TurnFinished(1, ""))
     assert state.phase == TerminalPhase.IDLE
     assert state.exit_after_turn is True
+
+
+def test_terminal_reducer_exposes_provider_tool_and_result_phases() -> None:
+    state = reduce_terminal_state(TerminalViewState(), TurnSubmitted(1))
+    report = ContextFitReport(
+        None,
+        RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED),
+        20,
+        100,
+        None,
+        ContextFitDecision.FITS,
+    )
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(1, ProviderInvocationPreflighted(1, 24, report)),
+    )
+    assert state.status == "Preparing provider request"
+
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(1, ToolRequestStarted("read_file", 1, 32, "path='README.md'")),
+    )
+    assert state.phase == TerminalPhase.TOOL
+    assert state.status == "Running read_file"
+
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(
+            1,
+            ToolRequestFinished("read_file", 1, 32, ToolEventStatus.SUCCEEDED, "ok"),
+        ),
+    )
+    assert state.phase == TerminalPhase.GENERATING
+    assert state.status == "Processing tool result"
+
+    state = reduce_terminal_state(state, PromptActivity(1, TurnCommitStarted()))
+    assert state.status == "Saving Session"
+    state = reduce_terminal_state(state, TurnFinished(1, ""))
+    assert state.phase == TerminalPhase.IDLE
+    assert state.exit_after_turn is False
 
 
 def test_frontend_queue_coalesces_only_consecutive_text_deltas() -> None:
@@ -118,7 +174,95 @@ class _InteractiveSession:
         while not self.release.wait(0.01):
             cancellation.check()
         event_sink(AssistantResponseTextDeltaReceived("reply"))
+        event_sink(AssistantFinalTextStreamCommitted("reply"))
         return "reply"
+
+
+class _CommitEventSession:
+    @property
+    def turns(self):
+        return ()
+
+    def prompt(self, _text, *, event_sink, include_tool_details, cancellation):
+        del include_tool_details, cancellation
+        event_sink(AssistantResponseTextDeltaReceived("saved reply"))
+        event_sink(TurnCommitStarted())
+        event_sink(AssistantFinalTextStreamCommitted("saved reply"))
+        return "saved reply"
+
+
+class _FailingSession:
+    @property
+    def turns(self):
+        return ()
+
+    def prompt(self, _text, *, event_sink, include_tool_details, cancellation):
+        del event_sink, include_tool_details, cancellation
+        raise RuntimeError("provider unavailable")
+
+
+def test_persistent_application_commit_status_does_not_split_or_duplicate_stream(
+    tmp_path: Path,
+) -> None:
+    session = _CommitEventSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("save\r")
+        _wait_until(lambda: not terminal.state.busy and "saved reply" in stdout.getvalue())
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert stdout.getvalue().count("saved reply") == 1
+    assert "\n• saved reply\n" in stdout.getvalue()
+
+
+def test_persistent_application_keeps_failure_inside_turn_trace(tmp_path: Path) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _FailingSession(),
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("fail\r")
+        _wait_until(lambda: f"  {'─' * 24}" in stdout.getvalue())
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    rendered = stdout.getvalue()
+    assert "  │ Turn failed: RuntimeError: provider unavailable" in rendered
+    assert rendered.index("  │ Turn failed") < rendered.index(f"  {'─' * 24}")
 
 
 def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: Path) -> None:
@@ -158,14 +302,16 @@ def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: P
         assert terminal.draft == "next draft"
         pipe.send_text("\r")
         _wait_until(lambda: session.prompts == ["hello", "next draft"])
-        _wait_until(lambda: not terminal.state.busy)
+        _wait_until(lambda: stdout.getvalue().count(f"  {'─' * 24}") == 2)
+        assert not terminal.state.busy
         pipe.send_text("\x04")
         thread.join(2)
 
     assert not thread.is_alive()
     assert "› hello" in stdout.getvalue()
     assert "› next draft" in stdout.getvalue()
-    assert stdout.getvalue().count(f"  {'─' * 24}") == 3
+    assert stdout.getvalue().count(f"  {'─' * 24}") == 2
+    assert stdout.getvalue().count("• reply") == 2
     assert "\n• reply" in stdout.getvalue()
     assert stdout.getvalue().index("› hello") < stdout.getvalue().index("reply")
 
@@ -211,10 +357,22 @@ class _ApprovalSession:
         return ()
 
     def prompt(self, _text, *, event_sink, include_tool_details, cancellation):
-        del event_sink, include_tool_details, cancellation
+        del include_tool_details, cancellation
         self.started.set()
         self.request_approval.wait(1)
+        event_sink(ToolRequestStarted("write_file", 1, 32, "path='note.txt' content_bytes=6"))
         self.resolution = self.broker(_approval_request())
+        event_sink(
+            ToolRequestFinished(
+                "write_file",
+                1,
+                32,
+                ToolEventStatus.SUCCEEDED,
+                "overwritten",
+            )
+        )
+        event_sink(AssistantResponseTextDeltaReceived("approval complete"))
+        event_sink(AssistantFinalTextStreamCommitted("approval complete"))
         return "approval complete"
 
 
@@ -258,7 +416,17 @@ def test_persistent_application_approval_temporarily_owns_input_and_restores_dra
         thread.join(2)
 
     assert not thread.is_alive()
-    assert "Approval required" in stdout.getvalue()
+    rendered = stdout.getvalue()
+    assert "\n› do work\n\n  │ [tool 1/32] write_file" in rendered
+    assert "  │ [tool 1/32] write_file path='note.txt' content_bytes=6" in rendered
+    assert "  │ Approval required" in rendered
+    assert "  │ Prepared candidate (6 bytes):" in rendered
+    assert "  │ --- a/note.txt" in rendered
+    assert "  │ [tool 1/32] succeeded code=overwritten" in rendered
+    assert "\n• approval complete\n" in rendered
+    assert rendered.count(f"  {'─' * 24}") == 1
+    assert rendered.index("[tool 1/32] write_file") < rendered.index("• approval complete")
+    assert rendered.index("• approval complete") < rendered.index(f"  {'─' * 24}")
 
 
 def _approval_request() -> HumanApprovalRequest:
@@ -267,7 +435,7 @@ def _approval_request() -> HumanApprovalRequest:
         tool_use_id="write-1",
         tool_name="write_file",
         arguments=ToolArguments.from_mapping({"path": "note.txt", "content": "value\n"}),
-        action=PermissionAction.WORKSPACE_CREATE,
+        action=PermissionAction.WORKSPACE_OVERWRITE,
         workspace_fingerprint=f"v1-{'1' * 64}",
         lease=ActionLease(
             "22345678-1234-4234-9234-123456789abc",
@@ -275,14 +443,21 @@ def _approval_request() -> HumanApprovalRequest:
             0,
             f"ctx-v1-{'2' * 64}",
         ),
-        precondition=ActionPrecondition.path_absent(),
+        precondition=ActionPrecondition.expected_state("3" * 64),
+    )
+    preview = build_file_change_preview(
+        action_digest=identity.digest,
+        path="note.txt",
+        before=b"old\n",
+        after=b"value\n",
     )
     return HumanApprovalRequest(
         identity,
         PermissionResult(
             PermissionDecision.ASK,
-            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE,
+            PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE,
         ),
+        preview,
     )
 
 

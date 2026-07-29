@@ -8,10 +8,14 @@ from typing import Protocol
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
     DEFAULT_COMPACTION_HISTORY_COUNT,
+    DEFAULT_SESSION_LIST_COUNT,
     DEFAULT_TOOL_LEDGER_COUNT,
     HELP_TEXT,
+    HELP_BY_TOPIC,
+    HELP_TOPICS,
     MAX_ACTION_AUDIT_COUNT,
     MAX_COMPACTION_HISTORY_COUNT,
+    MAX_SESSION_LIST_COUNT,
     MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
@@ -43,6 +47,7 @@ from leonervis_code.cli.presentation import (
     render_usage_summary,
 )
 from leonervis_code.core.compaction import CompactionError
+from leonervis_code.cli.failure_guidance import command_failure_guidance
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import (
     RuntimeProviderStateError,
@@ -54,6 +59,7 @@ from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS
 from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
+from leonervis_code.session_records import ActionAuditStatus
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 
@@ -93,6 +99,12 @@ class SlashCompletionSpec:
 
 SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help", "Show Host commands", True),
+    SlashCompletionSpec("/help session", "Session history, browsing, and resume"),
+    SlashCompletionSpec("/help tools", "Action Audit and tool outcomes"),
+    SlashCompletionSpec("/help git", "Read-only Git observation"),
+    SlashCompletionSpec("/help context", "Context, usage, and compaction"),
+    SlashCompletionSpec("/help provider", "Provider and model selection"),
+    SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
     SlashCompletionSpec("/actions", "Show recent Action Audit", True),
     SlashCompletionSpec("/tools", "Show durable tool ledgers", True),
@@ -120,7 +132,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider current", "Show the current provider"),
     SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
     SlashCompletionSpec("/session show", "Show the current Session"),
-    SlashCompletionSpec("/session list", "List workspace Sessions"),
+    SlashCompletionSpec("/session list", "Browse and filter workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
@@ -218,7 +230,10 @@ def dispatch_slash(
     if command == "/help":
         return _info(HELP_TEXT)
     if command.startswith("/help "):
-        return _usage("Usage: /help")
+        topic = command.removeprefix("/help ")
+        if topic in HELP_BY_TOPIC:
+            return _info(HELP_BY_TOPIC[topic])
+        return _usage(f"Usage: /help [{'|'.join(HELP_TOPICS)}]")
     if command == "/clear":
         return SlashResult(handled=True, clear_screen=True)
     if command.startswith("/clear "):
@@ -307,9 +322,7 @@ def dispatch_slash(
             return _usage("Usage: /session show")
         return _call(lambda: render_session_info(session.session_info()), kind="info")
     if command == "/session list" or command.startswith("/session list "):
-        if command != "/session list":
-            return _usage("Usage: /session list")
-        return _session_list(session)
+        return _session_list(command, session)
     if command == "/session new" or command.startswith("/session new "):
         if command != "/session new":
             return _usage("Usage: /session new")
@@ -374,18 +387,43 @@ def _commit(command: str, session: ReplSession) -> SlashResult:
 
 def _actions(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
-    if len(parts) == 1:
-        count = DEFAULT_ACTION_AUDIT_COUNT
-    elif (
-        len(parts) == 2
-        and parts[1].isascii()
-        and parts[1].isdigit()
-        and 1 <= int(parts[1]) <= MAX_ACTION_AUDIT_COUNT
-    ):
-        count = int(parts[1])
-    else:
-        return _usage(f"Usage: /actions [1-{MAX_ACTION_AUDIT_COUNT}]")
-    return _call(lambda: render_action_audits(session.action_audits(), count), kind="info")
+    count = DEFAULT_ACTION_AUDIT_COUNT
+    status_filter: str | None = None
+    tool_filter: str | None = None
+    count_seen = False
+    valid_statuses = {status.value for status in ActionAuditStatus}
+    for argument in parts[1:]:
+        if argument.isascii() and argument.isdigit() and not count_seen:
+            count = int(argument)
+            count_seen = True
+        elif argument.startswith("status=") and status_filter is None:
+            status_filter = argument.removeprefix("status=")
+        elif argument.startswith("tool=") and tool_filter is None:
+            tool_filter = argument.removeprefix("tool=")
+        else:
+            return _actions_usage()
+    if not 1 <= count <= MAX_ACTION_AUDIT_COUNT:
+        return _actions_usage()
+    if status_filter is not None and status_filter not in valid_statuses:
+        return _actions_usage()
+    if tool_filter is not None and (not tool_filter or len(tool_filter) > 64):
+        return _actions_usage()
+
+    def render() -> str:
+        audits = session.action_audits()
+        if status_filter is not None:
+            audits = tuple(audit for audit in audits if audit.status.value == status_filter)
+        if tool_filter is not None:
+            audits = tuple(audit for audit in audits if audit.identity.tool_name == tool_filter)
+        if not audits and (status_filter is not None or tool_filter is not None):
+            return "No action audits match the selected filters."
+        return render_action_audits(audits, count)
+
+    return _call(render, kind="info")
+
+
+def _actions_usage() -> SlashResult:
+    return _usage(f"Usage: /actions [1-{MAX_ACTION_AUDIT_COUNT}] [status=<status>] [tool=<name>]")
 
 
 def _tools(command: str, session: ReplSession) -> SlashResult:
@@ -493,14 +531,47 @@ def _output(command: str, session: ReplSession) -> SlashResult:
         return _command_error(error, failure_prefix="Output budget change failed")
 
 
-def _session_list(session: ReplSession) -> SlashResult:
+def _session_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    count = DEFAULT_SESSION_LIST_COUNT
+    state_filter: str | None = None
+    model_filter: str | None = None
+    count_seen = False
+    for argument in parts[2:]:
+        if argument.isascii() and argument.isdigit() and not count_seen:
+            count = int(argument)
+            count_seen = True
+        elif argument in {"open", "closed"} and state_filter is None:
+            state_filter = argument
+        elif argument.startswith("model=") and model_filter is None:
+            model_filter = argument.removeprefix("model=")
+        else:
+            return _session_list_usage()
+    if not 1 <= count <= MAX_SESSION_LIST_COUNT:
+        return _session_list_usage()
+    if model_filter is not None and (not model_filter or len(model_filter) > 256):
+        return _session_list_usage()
+
     def render() -> str:
         sessions = session.list_sessions()
         if not sessions:
             return "No durable sessions found."
+        if state_filter is not None:
+            closed = state_filter == "closed"
+            sessions = tuple(info for info in sessions if info.closed is closed)
+        if model_filter is not None:
+            sessions = tuple(
+                info
+                for info in sessions
+                if getattr(info.binding, "selected_model", None) == model_filter
+            )
+        total = len(sessions)
+        sessions = sessions[:count]
+        if not sessions:
+            return "No durable sessions match the selected filters."
         current_id = session.session_info().session_id
         latest_id = session.latest_session_info().session_id
-        return "\n".join(
+        body = "\n".join(
             render_session_summary(
                 info,
                 current_session_id=current_id,
@@ -508,8 +579,15 @@ def _session_list(session: ReplSession) -> SlashResult:
             )
             for info in sessions
         )
+        if len(sessions) < total:
+            return f"Showing {len(sessions)} most recent of {total} matching Sessions.\n{body}"
+        return body
 
     return _call(render, kind="info")
+
+
+def _session_list_usage() -> SlashResult:
+    return _usage(f"Usage: /session list [1-{MAX_SESSION_LIST_COUNT}] [open|closed] [model=<name>]")
 
 
 def _new_session(session: ReplSession) -> SlashResult:
@@ -634,11 +712,7 @@ def _model(command: str, session: ReplSession) -> SlashResult:
 
 def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
     if isinstance(error, ProviderAdapterError):
-        return SlashResult(
-            handled=True,
-            message=render_provider_adapter_error(error, prefix=failure_prefix),
-            kind="error",
-        )
+        message = render_provider_adapter_error(error, prefix=failure_prefix)
     elif isinstance(
         error,
         (
@@ -650,12 +724,15 @@ def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
             SessionStoreError,
         ),
     ):
-        message = str(error)
+        message = f"{failure_prefix}: {error}"
     else:
-        message = "unexpected internal error"
+        message = f"{failure_prefix}: unexpected internal error"
+    guidance = command_failure_guidance(error)
+    if guidance is not None:
+        message = f"{message}\n{guidance}"
     return SlashResult(
         handled=True,
-        message=f"{failure_prefix}: {message}",
+        message=message,
         kind="error",
     )
 

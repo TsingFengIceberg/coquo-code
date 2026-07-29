@@ -1,0 +1,74 @@
+from leonervis_code.cli.failure_guidance import render_turn_failure
+from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.providers.errors import adapter_error, output_limit_error
+from leonervis_code.providers.request_context import (
+    ContextFitDecision,
+    ContextFitReport,
+    ContextPreflightError,
+    ContextPreflightErrorKind,
+    RequestTokenCount,
+    RequestTokenCountMethod,
+)
+
+
+def test_output_limit_guidance_preserves_commit_and_audit_truth() -> None:
+    error = output_limit_error(
+        provider_id="compatible",
+        model_id="model",
+        message="output limit reached",
+        requested_output_tokens=4096,
+    )
+
+    rendered = render_turn_failure(error)
+
+    assert "Provider error [output_limit]: output limit reached" in rendered
+    assert "No turn was committed" in rendered
+    assert "Tool side effects completed earlier remain in Action Audit" in rendered
+    assert "increase /output in the REPL or --max-output-tokens for one-shot" in rendered
+
+
+def test_retryable_provider_guidance_never_claims_automatic_retry() -> None:
+    error = adapter_error(
+        provider_id="compatible",
+        model_id="model",
+        kind=ProviderFailureKind.RATE_LIMITED,
+        code="rate_limit",
+        message="try later",
+        retryable=True,
+        retry_after_seconds=30,
+    )
+
+    rendered = render_turn_failure(error)
+
+    assert "retry the same prompt after at least 30s" in rendered
+    assert "will not retry automatically" in rendered
+
+
+def test_context_failure_guidance_distinguishes_output_and_context_limits() -> None:
+    output_report = ContextFitReport(
+        None,
+        RequestTokenCount(10, RequestTokenCountMethod.ESTIMATED),
+        200,
+        1000,
+        100,
+        ContextFitDecision.MODEL_OUTPUT_EXCEEDED,
+    )
+    context_report = ContextFitReport(
+        None,
+        RequestTokenCount(990, RequestTokenCountMethod.ESTIMATED),
+        20,
+        1000,
+        None,
+        ContextFitDecision.CONTEXT_EXCEEDED,
+    )
+
+    output = render_turn_failure(
+        ContextPreflightError(ContextPreflightErrorKind.MODEL_OUTPUT_EXCEEDED, output_report)
+    )
+    context = render_turn_failure(
+        ContextPreflightError(ContextPreflightErrorKind.CONTEXT_WINDOW_EXCEEDED, context_report)
+    )
+
+    assert "lower the output reserve with /output" in output
+    assert "run /context" in context
+    assert "/compact preview" in context

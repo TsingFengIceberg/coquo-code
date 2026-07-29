@@ -97,7 +97,7 @@ def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> Ter
     if isinstance(event, TurnSubmitted):
         if state.busy or event.turn_id < 1:
             raise ValueError("turn submission is invalid for the current terminal state")
-        return TerminalViewState(TerminalPhase.GENERATING, "Working", event.turn_id)
+        return TerminalViewState(TerminalPhase.GENERATING, "Preparing turn", event.turn_id)
 
     if state.active_turn != event.turn_id:
         raise ValueError("frontend event does not match the active turn")
@@ -107,14 +107,26 @@ def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> Ter
             raise ValueError("prompt activity arrived after terminal completion")
         if state.phase == TerminalPhase.CANCELLING:
             return state
-        name = type(event.event).__name__
+        activity = event.event
+        name = type(activity).__name__
         phase = state.phase
-        if state.phase not in {
-            TerminalPhase.CANCELLING,
-            TerminalPhase.APPROVAL,
-        } and name.startswith("ToolRequest"):
+        if (
+            state.phase
+            not in {
+                TerminalPhase.CANCELLING,
+                TerminalPhase.APPROVAL,
+            }
+            and name == "ToolRequestStarted"
+        ):
             phase = TerminalPhase.TOOL
-        return replace(state, phase=phase, status=_activity_status(name))
+        elif name in {
+            "ToolRequestFinished",
+            "ToolRequestLimited",
+            "ToolRequestSkipped",
+            "ToolTurnSummaryCommitted",
+        }:
+            phase = TerminalPhase.GENERATING
+        return replace(state, phase=phase, status=_activity_status(activity))
     if isinstance(event, ApprovalPending):
         if state.phase in {TerminalPhase.COMPLETING, TerminalPhase.FAILED}:
             raise ValueError("approval arrived after terminal completion")
@@ -132,7 +144,7 @@ def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> Ter
         return replace(
             state,
             phase=TerminalPhase.GENERATING,
-            status="Working",
+            status="Continuing turn",
             approval_request=None,
         )
     if isinstance(event, CancellationRequested):
@@ -149,7 +161,7 @@ def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> Ter
         return replace(
             state,
             phase=TerminalPhase.COMPLETING,
-            status="Completing",
+            status="Finalizing turn",
             approval_request=None,
         )
     if isinstance(event, TurnFailed):
@@ -164,13 +176,33 @@ def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> Ter
     raise TypeError("unsupported frontend event")
 
 
-def _activity_status(name: str) -> str:
+def _activity_status(event: object) -> str:
+    name = type(event).__name__
     if name == "AssistantResponseTextDeltaReceived":
         return "Responding"
-    if name.startswith("ToolRequest"):
-        return "Running tool"
-    if "Compaction" in name:
-        return "Compacting"
+    if name in {"AssistantToolTextReceived", "AssistantToolTextStreamCompleted"}:
+        return "Planning actions"
+    if name == "ProviderInvocationPreflighted":
+        return "Preparing provider request"
+    if name == "ProviderInvocationUsageReceived":
+        return "Processing provider response"
+    if name == "ToolRequestStarted":
+        tool_name = getattr(event, "tool_name", "tool")
+        return f"Running {tool_name}"
+    if name in {"ToolRequestFinished", "ToolRequestLimited", "ToolRequestSkipped"}:
+        return "Processing tool result"
+    if name == "ToolTurnSummaryCommitted":
+        return "Recording tool outcomes"
+    if name == "AutoCompactionStarted":
+        return "Compacting context"
+    if name == "AutoCompactionCommitted":
+        return "Saving compacted context"
+    if name == "AutoCompactionNotApplied":
+        return "Continuing without compaction"
+    if name == "TurnUsageCompleted":
+        return "Recording provider usage"
+    if name == "TurnCommitStarted":
+        return "Saving Session"
     return "Working"
 
 

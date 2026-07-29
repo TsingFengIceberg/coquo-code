@@ -182,9 +182,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help` | 查看控制命令 |
+| `/help [session\|tools\|git\|context\|provider\|input]` | 按类别查看Host控制命令；不调用模型 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
-| `/actions [count]` | 显示当前 Session 最近的脱敏 Action Audit，默认20条、最多100条 |
+| `/actions [count] [status=<状态>] [tool=<名称>]` | 按状态和工具名筛选当前Session的脱敏Action Audit，默认20条、最多100条 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -207,7 +207,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/provider use <name>` | 为当前 workspace 原子切换 active profile |
 | `/model <model>` | 仅覆盖当前进程 model，不修改 profile |
 | `/session show` | 显示当前 Session |
-| `/session list` | 列出 workspace Session |
+| `/session list [count] [open\|closed] [model=<名称>]` | 按数量、开闭状态和精确model筛选workspace Session，并显示持久runtime来源 |
 | `/session new` | 保持当前 runtime，开始空白 Session |
 | `/resume <latest\|id>` | 保持当前 runtime，切换 Session |
 | `/clear` | 只清空当前终端画面，不修改 Session 或 history |
@@ -238,7 +238,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。
 
-已提交用户消息固定以`› `开头，assistant正文固定以`• `开头；显式换行和终端自动换行都从标记后的正文列继续，不同conversation message block之间使用缩进的低强度短分隔线。Tool、context、usage及slash结果等Host信息向内缩进，并在支持颜色时使用较低强度样式；warning、approval和error继续保持醒目。终端协议不能可靠设置局部小字号，`NO_COLOR=1`会关闭颜色与dim但保留角色、分隔线、缩进和布局。
+底栏阶段由typed Host事件驱动，可区分准备turn/provider请求、规划动作、运行具体工具、处理工具结果、等待审批、compaction、记录provider usage、真实Session持久提交、最终收尾与取消。已知context、provider、runtime、authorization及Session失败会给出保守的`Next:`建议，但不会自动retry、声称rollback或掩盖已完成工具副作用；`/help`、`/session list`和`/actions`的新分类/过滤都只读Host状态，不进入模型历史。
+
+已提交用户消息固定以`› `开头，assistant正文固定以`• `开头；显式换行和终端自动换行都从标记后的正文列继续。用户消息与本轮首个可见输出之间固定留一行；若模型直接请求工具而没有阶段性正文，界面会从`  │ `Host轨迹开始，不伪造空`•`。同一user turn内的context、tool、approval、usage和failure等Host执行事实使用`  │ `轨迹线归入该Assistant Turn，但不会冒充模型原话；slash结果仍是turn外Host block。模型正文与Host轨迹切换时不再插入分隔线，完整turn结束后才在下一个`›`前显示一次低强度短线。Warning、approval和error继续保持醒目；`NO_COLOR=1`会关闭颜色与dim但保留角色、轨迹、分隔线、缩进和布局。
 
 真实TTY使用`›`输入标记和`model · context · workspace`状态栏。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。Live工具行默认保持脱敏compact；`/tool-details full`会在当前进程内展开有界结构化command argv、cwd、timeout及direct/shell解释提示，并警告argv可能包含敏感值，文件/edit/patch/search内容仍不显示。Command完成行会显示可信的exit/status、duration和stdout/stderr byte统计；full模式再展开signal、各路truncation与cleanup completeness，但任何模式都不显示stdout/stderr原文。`/changes`系列直接运行固定的只读Git观察，不调用provider、不消耗模型tool budget、不写Session或Action Audit；untracked只显示路径，不显示内容。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。`/usage session`与`/usage turns`从严格replay的Session终局记录读取跨重启用量；旧记录显示legacy unavailable，缺失usage metadata明确计为unknown而不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变，同时持久保存失败调用的usage audit。进程内统计仍在成功`/provider use`或`/model`切换后清零；Session统计持久保留，但不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
@@ -300,6 +302,8 @@ git diff --check
 - [Trusted Command Result Observability](./docs/decisions/0066-trusted-command-result-observability.md)：可信content-free命令结果、compact/full完成展示与raw stdout/stderr非披露边界。
 - [Persistent Inline Terminal Frontend](./docs/decisions/0067-persistent-inline-terminal-frontend.md)：常驻inline输入区、单worker、UI审批broker、协作取消与plain路径兼容。
 - [Terminal Message Hierarchy and Hanging Indent](./docs/decisions/0068-terminal-message-hierarchy-and-hanging-indent.md)：稳定角色标记、正文列续行、低强度Host信息与高风险强调。
+- [Host Workbench Navigation and Failure Guidance](./docs/decisions/0069-host-workbench-navigation-and-guidance.md)：Session/Audit过滤、分类帮助、已知失败下一步与真实持久化阶段。
+- [Assistant Turn Execution Trace Grouping](./docs/decisions/0070-assistant-turn-execution-trace-grouping.md)：同轮模型正文与Host执行轨迹归组、权威边界及turn末分隔。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

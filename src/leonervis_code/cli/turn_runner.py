@@ -13,16 +13,8 @@ from leonervis_code.cli.frontend import (
     TurnFinished,
     TurnSubmitted,
 )
-from leonervis_code.cli.presentation import render_provider_adapter_error
-from leonervis_code.core.action_coordinator import ActionIdentityChangedError
-from leonervis_code.core.approvals import ApprovalGrantError
+from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
-from leonervis_code.core.orchestration import ProviderFailureKind
-from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.manager import RuntimeProviderStateError
-from leonervis_code.providers.profile import ProviderProfileError
-from leonervis_code.providers.request_context import ContextPreflightError
-from leonervis_code.session_store import SessionStoreError
 
 
 class TurnRunner:
@@ -107,7 +99,7 @@ class TurnRunner:
             )
             self._queue.put(TurnFinished(turn_id, ""))
         except BaseException as error:
-            self._queue.put(TurnFailed(turn_id, _turn_failure_message(error)))
+            self._queue.put(TurnFailed(turn_id, render_turn_failure(error)))
             self._queue.put(TurnFinished(turn_id, ""))
         finally:
             self._approval_broker.deactivate(turn_id)
@@ -115,20 +107,3 @@ class TurnRunner:
                 if self._thread is current_thread():
                     self._thread = None
                     self._cancellation = None
-
-
-def _turn_failure_message(error: BaseException) -> str:
-    if isinstance(error, ContextPreflightError):
-        return f"Context preflight error: {error}"
-    if isinstance(error, ProviderAdapterError):
-        message = render_provider_adapter_error(error, prefix="Provider error")
-        if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
-            message += "\nNo turn was committed. Tool side effects completed earlier remain in Action Audit."
-        return message
-    if isinstance(error, (ProviderProfileError, RuntimeProviderStateError)):
-        return f"Runtime error: {error}"
-    if isinstance(error, (ApprovalGrantError, ActionIdentityChangedError)):
-        return f"Action authorization error: {error}"
-    if isinstance(error, SessionStoreError):
-        return f"Session error: {error}"
-    return f"Turn failed: {type(error).__name__}: {error}"
