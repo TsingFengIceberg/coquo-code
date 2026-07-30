@@ -48,6 +48,13 @@ from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.evals import (
+    EvalError,
+    builtin_eval_cases,
+    render_eval_result_json,
+    render_eval_result_text,
+    run_eval_suite,
+)
 from leonervis_code.core.orchestration import (
     GenerationOptions,
     OrchestrationError,
@@ -253,6 +260,17 @@ def build_parser() -> argparse.ArgumentParser:
     route_parser.add_argument("--require-streaming", action="store_true")
     route_parser.add_argument("--max-output-tokens", type=int)
     route_parser.add_argument("--temperature", type=float)
+
+    eval_parser = subcommands.add_parser(
+        "eval", help="run the deterministic offline Host evaluation baseline"
+    )
+    eval_commands = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_commands.add_parser("list", help="list built-in deterministic Eval cases")
+    eval_run_parser = eval_commands.add_parser(
+        "run", help="run one case or the complete isolated baseline"
+    )
+    eval_run_parser.add_argument("selector", nargs="?", default="all")
+    eval_run_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     provider_parser = subcommands.add_parser("provider", help="manage named provider profiles")
     provider_commands = provider_parser.add_subparsers(dest="provider_command", required=True)
@@ -770,6 +788,22 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
+def handle_eval_command(arguments: argparse.Namespace, stdout: TextIO) -> int:
+    """Run the built-in no-network Eval surface outside the selected user workspace."""
+    if arguments.eval_command == "list":
+        for case in builtin_eval_cases():
+            stdout.write(f"{case.case_id}: {case.summary}\n")
+        return 0
+    result = run_eval_suite(arguments.selector)
+    rendered = (
+        render_eval_result_json(result)
+        if arguments.format == "json"
+        else render_eval_result_text(result)
+    )
+    stdout.write(f"{rendered}\n")
+    return 0 if result.passed else 1
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -802,6 +836,28 @@ def main(
         )
     )
     try:
+        if arguments.command == "eval":
+            if arguments.workspace is not None:
+                raise EvalError(
+                    "eval uses isolated temporary workspaces and does not accept -C/--cwd"
+                )
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        arguments.resume,
+                        arguments.profile,
+                        arguments.invocation_profile_id,
+                        arguments.invocation_model,
+                        arguments.invocation_max_output_tokens,
+                    )
+                )
+                or custom_requested
+            ):
+                raise EvalError(
+                    "eval is offline and does not accept runtime or provider selection options"
+                )
+            return handle_eval_command(arguments, output)
         if arguments.resume is not None and arguments.command not in {None, "prompt"}:
             raise ProviderProfileError("--resume is only valid with prompt or interactive mode")
         if arguments.invocation_max_output_tokens is not None and arguments.command not in {
@@ -1016,6 +1072,9 @@ def main(
         return render_provider_failure(error, errors)
     except ProviderProfileError as error:
         print(f"provider profile error: {error}", file=errors)
+        return 2
+    except EvalError as error:
+        print(f"eval error: {error}", file=errors)
         return 2
     except SessionResumeContextError as error:
         print(render_resume_rejection(error.report, startup=True), file=errors)

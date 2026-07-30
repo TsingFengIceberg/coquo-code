@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、确定性离线Eval基线，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
 
 ## 目录
 
@@ -318,14 +318,18 @@ uv run ruff check .
 uv run ruff format --check .
 uv lock --check
 git diff --check
+uv run leonervis-code eval list
+uv run leonervis-code eval run all
+uv run leonervis-code eval run all --format json
 ```
 
-依赖变化后先执行 `uv lock`，再检查锁文件。Leonervis Code 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
+`pytest`验证函数、模块和协议边界；`eval run`则把固定任务交给真实`ProjectSession -> AgentLoop -> PermissionGate -> tool -> Session`路径，再以最终workspace、持久tool ledger、Action Audit和turn提交事实评分。Eval始终使用脚本化fake provider和临时workspace，不读取credential、不访问网络，也不把结果当作真实模型质量排行榜。依赖变化后先执行 `uv lock`，再检查锁文件。Leonervis Code 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
 
 ## 详细文档
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
+- [确定性离线 Host Eval 基线](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md)：固定任务、隔离执行、Host事实评分及与pytest/真实模型评测的边界。
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
@@ -399,4 +403,4 @@ git diff --check
 
 Foundation 5A只读取workspace根目录唯一规范名称`AGENTS.md`：missing表示无项目指令；现有文件必须是non-symlink、strict UTF-8普通文件，不含NUL且最多32 KiB。Host在每个user turn准备时读取并冻结一次，工具continuation始终复用该快照，下一turn才重载；不搜索parent或subdirectory，也不自动加载`CLAUDE.md`或`LEONERVIS.md`。项目指令作为独立provider block参与token计量和Effective Context identity，但不写Session transcript；它从属于canonical Host策略与当前直接user request，不能放宽permission、approval、workspace、symlink、budget、audit、sandbox或durability边界。`/instructions`只显示元数据且不调用provider或修改Session。
 
-Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit、Git只读变更/历史观察、fail-closed Linux command sandbox与Foundation 5A项目指令加载现已完成。当前版本为canonical system prompt v23、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v5`/`ctx-v6`representation；旧Session与`ctx-v1`至`ctx-v4`identity/checkpoint继续兼容，缺失项目指令时的empty full-context identity为`ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、递归项目指令继承、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、network allowlist、resource quota、Host sandbox bypass、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent与远程服务仍不可用。项目指令设计见[ADR 0083](./docs/decisions/0083-foundation-5a-root-agents-project-instructions.md)。
+Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit、Git只读变更/历史观察、fail-closed Linux command sandbox、Foundation 5A项目指令加载与`host-baseline-v1`确定性离线Eval现已完成。当前版本为canonical system prompt v23、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v5`/`ctx-v6`representation；旧Session与`ctx-v1`至`ctx-v4`identity/checkpoint继续兼容，缺失项目指令时的empty full-context identity为`ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、递归项目指令继承、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、network allowlist、resource quota、Host sandbox bypass、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent、真实模型Eval排行榜与远程服务仍不可用。项目指令设计见[ADR 0083](./docs/decisions/0083-foundation-5a-root-agents-project-instructions.md)，Eval边界见[ADR 0084](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md)。

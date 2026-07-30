@@ -24,6 +24,7 @@
 - [Host Workbench Diagnostics 与 Prompt History Search](#host-workbench-diagnostics-与-prompt-history-search)
 - [Host Policy 与 Tool Discoverability](#host-policy-与-tool-discoverability)
 - [Foundation 5A：根 AGENTS.md 项目指令](#foundation-5a根-agentsmd-项目指令)
+- [确定性离线 Host Eval 基线](#确定性离线-host-eval-基线)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -438,6 +439,14 @@ AgentLoop在每个user turn准备时读取一次`ProjectInstructionsSnapshot`，
 Provider-neutral `ConversationRequest`保留独立project-instructions字段。Anthropic将其投影为canonical system prompt后的第二个system text block，OpenAI-compatible投影为第二条system message；count/create/stream共享相同构造，因此内容准确参与preflight与token计量。Compact-summary与Session-title专用请求不暴露项目指令。Canonical prompt明确项目指导从属于Host policy、工具硬边界与当前直接user request，不能授权、放宽permission/approval、把普通file/tool output提升为指令或证明执行。`/instructions`只显示presence、相对path、UTF-8 byte count、representation与fingerprint，不显示正文、不调用provider、不消耗工具预算或修改Session。
 
 该模型可见变化把system prompt升级到v23，fingerprint为`v23-3858281d3354288e15dd51569d896fe22c6e4842d8c8b5192dc4a2e296792a55`；provider wire projection使adapter contract升级到v26。Effective Context current full/compacted representation升级为`ctx-v5`/`ctx-v6`并把exact指令snapshot或明确absent纳入identity；无项目指令时empty full-context identity为`ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`。旧`ctx-v1`至`ctx-v4`仍可校验与replay，Session与Action Audit schema均不升级，也不重写旧JSONL。完整决策见[0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)。
+
+## 确定性离线 Host Eval 基线
+
+`leonervis-code eval`提供首个版本化考试集`host-baseline-v1`。四个内置案例分别覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
+
+评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、逐请求durable tool ledger和Action Audit lifecycle。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
+
+这是Host correctness baseline，不是pytest替代品，也不是对真实模型规划质量、随机性或泛化能力的评估。它不运行credential、网络、API费用、command sandbox、性能benchmark、排行榜或外部fixture；scripted trajectory通过只说明固定Harness路径仍符合已声明不变量。该Host-only入口没有改变model-visible tool、system prompt v23、adapter contract v26、Effective Context、Session或Action Audit schema。详见[0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1060,3 +1069,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 81. [0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)
 82. [0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)
 83. [0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
+84. [0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)

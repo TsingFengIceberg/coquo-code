@@ -662,6 +662,7 @@ class ProjectSession:
         user_profile_path: Path | None = None,
         project_profile_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
+        fake_provider_factory: Callable[[], ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
@@ -714,6 +715,8 @@ class ProjectSession:
         }
         if provider_factory is not None:
             manager_arguments["provider_factory"] = provider_factory
+        if fake_provider_factory is not None:
+            manager_arguments["fake_factory"] = fake_provider_factory
         manager = RuntimeProviderManager(store, **manager_arguments)  # type: ignore[arg-type]
         writer: SessionWriter | None = None
         try:

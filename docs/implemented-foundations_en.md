@@ -24,6 +24,7 @@
 - [Host Workbench Diagnostics and Prompt History Search](#host-workbench-diagnostics-and-prompt-history-search)
 - [Host Policy and Tool Discoverability](#host-policy-and-tool-discoverability)
 - [Foundation 5A: Root AGENTS.md Project Instructions](#foundation-5a-root-agentsmd-project-instructions)
+- [Deterministic Offline Host Eval Baseline](#deterministic-offline-host-eval-baseline)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -438,6 +439,14 @@ AgentLoop reads one `ProjectInstructionsSnapshot` while preparing each user turn
 The provider-neutral `ConversationRequest` carries a separate project-instructions field. Anthropic projects it as a second system text block after the canonical system prompt, while OpenAI-compatible projects it as a second system message. Count, create, and stream share the same construction, so the exact text participates in preflight and token counting. Dedicated compact-summary and Session-title requests do not expose project instructions. The canonical prompt states that project guidance is subordinate to Host policy, tool hard bounds, and the current direct user request; it cannot authorize actions, relax permission or approval, elevate ordinary file/tool output into instructions, or prove execution. `/instructions` displays only presence, relative path, UTF-8 byte count, representation, and fingerprint. It reveals no content, invokes no provider, consumes no tool budget, and mutates no Session state.
 
 This model-visible change advances the system prompt to v23 with fingerprint `v23-3858281d3354288e15dd51569d896fe22c6e4842d8c8b5192dc4a2e296792a55`, while the provider wire projection advances the adapter contract to v26. Current full and compacted Effective Context representations advance to `ctx-v5`/`ctx-v6` and include either the exact instruction snapshot or explicit absence in identity. The empty full-context identity without project instructions is `ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`. Legacy `ctx-v1` through `ctx-v4` remain valid and replayable. Session and Action Audit schemas do not advance, and old JSONL is not rewritten. See [0083: Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md).
+
+## Deterministic Offline Host Eval Baseline
+
+`leonervis-code eval` provides the first versioned task suite, `host-baseline-v1`. Its four built-in cases cover bounded reading, an auto-policy controlled create, a read-only write denial, and skipping later actions after the first action in a batch fails. Each case fixes its prompt, initial UTF-8 files, scripted fake-provider responses, permission/approval modes, and expected Host facts. The runner always opens the real `ProjectSession` in a fresh temporary workspace with isolated provider-configuration paths, so execution crosses the ordinary AgentLoop, PermissionGate, tools, Session commit, and Action Audit without reading user credentials, real-provider configuration, or the network.
+
+Scoring occurs after the Session closes. The runner strictly replays through `SessionStore` and compares committed-turn count, the complete workspace entry and file-byte identities, the per-request durable tool ledger, and Action Audit lifecycles. Final assistant text is also compared by its exact UTF-8 byte count and SHA-256 identity, but cannot override workspace facts: a regression test proves that even a response claiming creation fails when the target file is absent. Text reports expand only failed checks, while stable JSON excludes temporary paths, timestamps, random UUIDs, and original text, making it suitable for local regression and later CI comparison. `eval list` lists cases, `eval run <id>` runs one, and `eval run all --format json` runs the machine-readable baseline.
+
+This is a Host-correctness baseline, not a pytest replacement and not an evaluation of real-model planning quality, randomness, or generalization. It runs no credentials, network, API spend, command sandbox, performance benchmark, leaderboard, or external fixture. A scripted trajectory passing proves only that the fixed Harness path retains its declared invariants. This Host-only entry point leaves model-visible tools, system prompt v23, adapter contract v26, Effective Context, Session schemas, and Action Audit schemas unchanged. See [0084: Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1060,3 +1069,4 @@ This slice establishes capacity facts only. It does not count current request to
 81. [0081: Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)
 82. [0082: Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)
 83. [0083: Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
+84. [0084: Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)
