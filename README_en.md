@@ -178,11 +178,23 @@ uv run leonervis-code --resume <session-uuid>
 
 A Session is workspace-bound and stores successful turns in append-only JSONL. New turns also persist a per-request Host tool ledger for actual successes, errors, skips, and budget rejections without relying on model self-reporting. Use the `session` and `--resume` commands above to inspect, audit, and restore it; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete replay, screening, and durability semantics.
 
+### Manage Tasks
+
+```bash
+uv run leonervis-code task create "Implement resumable multi-stage work" \
+  --accept "Each Stage uses an ordinary Turn budget" \
+  --accept "Every Action retains permission and audit"
+uv run leonervis-code task list
+uv run leonervis-code task show <task-uuid>
+```
+
+A Task is a durable objective above an ordinary Turn, stored separately in the workspace and owned by one existing Session. The Host can now strictly record Stage start/commit/failure, hold an exclusive writer, and link real Session Turn evidence, but user entry points remain create, list, and show only. There is no `/task continue` yet, so they do not invoke a provider, execute a Stage, or grant permission for future Actions.
+
 ### REPL commands
 
 | Command | Purpose |
 | --- | --- |
-| `/help [session\|tools\|git\|context\|provider\|policy\|input]` | Show Host controls by category; `policy` consolidates permission, approval, and command-sandbox guidance |
+| `/help [session\|task\|tools\|git\|context\|provider\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and availability for all 21 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -224,6 +236,9 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | `/session rename <name>` | Durably rename the current Session; use `--auto` to restore the title derived from its first successful turn |
 | `/session archive`, `/session unarchive` | Reversibly archive or unarchive the current Session without changing history, runtime, latest, or resume identity |
 | `/session pin`, `/session unpin` | Reversibly pin or unpin the current Session without changing history, runtime, latest, or resume identity |
+| `/task start <objective>` | Create a durable Task owned by the current Session without invoking the model or executing a Stage |
+| `/task list` | Read-only list durable Tasks in the current workspace |
+| `/task show <task-id>` | Strictly replay and show one Task's objective, owner, and acceptance criteria |
 | `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
 | `/clear` | Clear only the current terminal screen without changing Session or history |
 | `/exit`, `/quit` | Exit normally |
@@ -306,6 +321,7 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles and active selection |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
+| `<workspace>/.leonervis-code/tasks/.../*.jsonl` | independent Task transcripts |
 | `${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json` | private context-capability discovery cache |
 
 `.leonervis-code/` can contain user input, model responses, source excerpts, and tool results. Add it to the target project's `.gitignore`; do not commit, synchronize, or publish it. Configuration and the capability cache do not store known credential values, but the system cannot detect an unknown secret that appears in user text or source code.
@@ -335,6 +351,8 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
 - [Deterministic Offline Host Eval Baseline](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md): fixed tasks, isolated execution, Host-fact scoring, and the boundary from pytest and real-model evaluation.
 - [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md): actual code outcomes, protected files, Host-private tests, explicit real-provider opt-in, and command-sandbox boundaries.
+- [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md): the Task/Stage/Turn/Action hierarchy, independent durable identity, and Host-only management boundary.
+- [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md): the Stage start/terminal state machine, exclusive writer, restart interruption semantics, and Session Turn evidence.
 - [AgentLoop and Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md): mixed-response execution order, live presentation, failure atomicity, and Session recovery.
 - [AgentLoop, Runtime, and Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md): stream preflight, complete tool assembly, live REPL display, and durable final confirmation.
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md): safe-block streaming, TTY layout, raw redirects, and terminal-control boundaries.

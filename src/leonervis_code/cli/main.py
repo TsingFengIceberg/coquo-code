@@ -42,6 +42,8 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_session_turn_range,
     render_session_title_fallback_reason,
+    render_task_info,
+    render_task_summary,
     render_tool_ledgers,
 )
 from leonervis_code.cli.repl import run_repl
@@ -101,6 +103,7 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from leonervis_code.task_store import TaskStore, TaskStoreError
 from leonervis_code.tools.delete_directory import DeleteDirectoryTool
 from leonervis_code.tools.delete_file import DeleteFileTool
 from leonervis_code.tools.glob import GlobTool
@@ -441,6 +444,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show bounded per-request tool names, outcomes, and safe result codes",
     )
+    task_parser = subcommands.add_parser("task", help="create and inspect durable workspace Tasks")
+    task_commands = task_parser.add_subparsers(dest="task_command", required=True)
+    task_create = task_commands.add_parser("create", help="create one ready Task")
+    task_create.add_argument("objective", type=nonblank_prompt)
+    task_create.add_argument(
+        "--session",
+        dest="owner_session",
+        default="latest",
+        help="owner Session UUID (default: latest)",
+    )
+    task_create.add_argument(
+        "--accept",
+        dest="acceptance_criteria",
+        action="append",
+        default=[],
+        help="acceptance criterion; repeat for multiple criteria",
+    )
+    task_commands.add_parser("list", help="list durable Tasks")
+    task_show = task_commands.add_parser("show", help="show one durable Task")
+    task_show.add_argument("task_id")
     return parser
 
 
@@ -819,6 +842,29 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
+def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Create or inspect durable Tasks without invoking a provider."""
+    store = TaskStore(workspace)
+    if arguments.task_command == "create":
+        info = store.create(
+            arguments.objective,
+            owner_session=arguments.owner_session,
+            acceptance_criteria=tuple(arguments.acceptance_criteria),
+        )
+        stdout.write(f"{render_task_info(info)}\n")
+        return 0
+    if arguments.task_command == "show":
+        stdout.write(f"{render_task_info(store.inspect(arguments.task_id))}\n")
+        return 0
+    tasks = store.list()
+    if not tasks:
+        stdout.write("No durable Tasks found.\n")
+        return 0
+    for info in tasks:
+        stdout.write(f"{render_task_summary(info)}\n")
+    return 0
+
+
 def _eval_path(value: str, invocation_workspace: Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else invocation_workspace / path
@@ -1057,6 +1103,16 @@ def main(
                     "provider selection options cannot be combined with session inspection"
                 )
             return handle_session_command(arguments, workspace, output)
+        if arguments.command == "task":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with task management"
+                )
+            return handle_task_command(arguments, workspace, output)
         if arguments.command == "demo-read":
             if (
                 arguments.profile is not None
@@ -1243,4 +1299,7 @@ def main(
         return 2
     except SessionStoreError as error:
         print(f"session error: {error}", file=errors)
+        return 2
+    except TaskStoreError as error:
+        print(f"task error: {error}", file=errors)
         return 2

@@ -50,6 +50,7 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
 from leonervis_code.tools.run_command import CommandSandboxInspection
 from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.task_records import TaskScope, TaskStatus
 
 
 @dataclass
@@ -83,6 +84,7 @@ class Session:
         self.name_source = SessionNameSource.AUTO
         self.archived = False
         self.pinned = False
+        self.tasks = []
 
     def status(self):
         return RuntimeStatus(
@@ -350,6 +352,33 @@ class Session:
     def list_sessions(self):
         return self.sessions if self.sessions is not None else (self.session_info(),)
 
+    def create_task(self, objective, acceptance_criteria=()):
+        info = SimpleNamespace(
+            task_id="42345678-1234-4234-9234-123456789abc",
+            path=self.tmp_path / "task.jsonl",
+            workspace=str(self.tmp_path),
+            workspace_fingerprint="v1-" + "a" * 64,
+            owner_session_id=self.current,
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            created_at="2026-07-31T01:02:03.000004Z",
+            scope=TaskScope.WORKSPACE,
+            status=TaskStatus.READY,
+            record_count=1,
+            stages=(),
+        )
+        self.tasks.append(info)
+        return info
+
+    def list_tasks(self):
+        return tuple(reversed(self.tasks))
+
+    def inspect_task(self, task_id):
+        for info in self.tasks:
+            if info.task_id == task_id:
+                return info
+        raise SessionStoreError(f"task transcript does not exist: {task_id}")
+
     def new_session(self):
         self.current = "22345678-1234-4234-9234-123456789abc"
         self.latest = self.current
@@ -407,6 +436,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     tool_details = ToolDetailSettings()
 
     assert "Session commands:" in dispatch_slash("/session", session).message
+    assert "Task commands:" in dispatch_slash("/task", session).message
     assert "Provider commands:" in dispatch_slash("/provider", session).message
     assert "Host command groups:" in dispatch_slash("/help", session).message
     assert "Tool and audit commands:" in dispatch_slash("/help tools", session).message
@@ -414,7 +444,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Input controls:" in dispatch_slash("/help input", session).message
     assert "Policy commands:" in dispatch_slash("/help policy", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|tools|git|context|provider|policy|input]"
+        "Usage: /help [session|task|tools|git|context|provider|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -856,6 +886,30 @@ def test_valid_session_commands_do_not_enter_model_history(tmp_path) -> None:
     assert "fake runtime" in resumed.message
     assert session.current == "32345678-1234-4234-9234-123456789abc"
     assert session.prompts == []
+
+
+def test_task_commands_are_host_only_and_bind_creation_to_current_session(tmp_path) -> None:
+    session = Session(tmp_path)
+
+    empty = dispatch_slash("/task list", session)
+    created = dispatch_slash("/task start Implement durable stages", session)
+    listed = dispatch_slash("/task list", session)
+    shown = dispatch_slash(
+        "/task show 42345678-1234-4234-9234-123456789abc",
+        session,
+    )
+
+    assert empty.message == "No durable Tasks found."
+    assert created.kind == "success"
+    assert "Task: Implement durable stages" in created.message
+    assert f"Owner Session: {session.current}" in created.message
+    assert "Implement durable stages" in listed.message
+    assert shown.kind == "info"
+    assert "Status: ready" in shown.message
+    assert session.prompts == []
+    assert dispatch_slash("/task start", session).message == "Usage: /task start <objective>"
+    assert dispatch_slash("/task list extra", session).message == "Usage: /task list"
+    assert dispatch_slash("/task show bad", session).message == "Usage: /task show <task-id>"
 
 
 def test_valid_provider_commands_and_history(tmp_path) -> None:

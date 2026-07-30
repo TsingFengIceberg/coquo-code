@@ -178,11 +178,23 @@ uv run leonervis-code --resume <session-uuid>
 
 Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保存Host逐请求工具账本，记录实际成功、错误、跳过和预算拒绝，不依赖模型自报。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
+### 管理 Task
+
+```bash
+uv run leonervis-code task create "实现可恢复的多阶段任务" \
+  --accept "每个Stage使用普通Turn预算" \
+  --accept "每个Action保留权限与审计"
+uv run leonervis-code task list
+uv run leonervis-code task show <task-uuid>
+```
+
+Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。底层现已支持严格的Stage开始/提交/失败记录、独占writer与真实Session Turn证据，但当前用户入口仍只有创建、列表和查看；尚无`/task continue`，不会调用provider、执行Stage或授予后续Action权限。
+
 ### REPL 命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help [session\|tools\|git\|context\|provider\|policy\|input]` | 按类别查看Host控制命令；`policy`集中说明权限、审批与命令沙箱 |
+| `/help [session\|task\|tools\|git\|context\|provider\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
 | `/tools catalog [tool-name]` | 显示21个规范工具的权限与可用性，或查看单个工具的参数schema和主要硬边界 |
@@ -224,6 +236,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/session rename <名称>` | 持久重命名当前 Session；使用`--auto`恢复首个成功turn生成的自动标题 |
 | `/session archive`、`/session unarchive` | 可逆地标记或取消归档当前Session；不改变history、runtime、latest或resume身份 |
 | `/session pin`、`/session unpin` | 可逆地收藏或取消收藏当前Session；不改变history、runtime、latest或resume身份 |
+| `/task start <目标>` | 创建绑定当前Session的持久Task；不调用模型或执行Stage |
+| `/task list` | 只读列出当前workspace的持久Task |
+| `/task show <task-id>` | 严格回放并显示一个Task的目标、owner与验收条件 |
 | `/resume <latest\|id>` | 保持当前 runtime，切换 Session |
 | `/clear` | 只清空当前终端画面，不修改 Session 或 history |
 | `/exit`、`/quit` | 正常退出 |
@@ -306,6 +321,7 @@ uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles 与 active selection |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcript |
+| `<workspace>/.leonervis-code/tasks/.../*.jsonl` | 独立的Task transcript |
 | `${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json` | private context capability discovery cache |
 
 `.leonervis-code/` 可能包含用户输入、模型回答、源码片段和工具结果，应加入目标项目的 `.gitignore`，不要提交、同步或公开。配置和 capability cache 不保存已知 credential value，但系统无法识别用户文本或源码中自行出现的未知 secret。
@@ -335,6 +351,8 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
 - [确定性离线 Host Eval 基线](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md)：固定任务、隔离执行、Host事实评分及与pytest/真实模型评测的边界。
 - [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md)：实际代码结果、受保护文件、Host私有测试、显式真实provider opt-in与命令沙箱边界。
+- [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md)：Task/Stage/Turn/Action层次、独立持久身份与Host-only管理边界。
+- [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)：Stage start/terminal状态机、独占writer、重启中断语义与Session Turn证据。
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。

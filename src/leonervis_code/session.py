@@ -135,6 +135,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
     SessionWriter,
 )
+from leonervis_code.task_store import TaskInfo, TaskStore
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
     DeleteDirectoryOutcome,
@@ -597,6 +598,7 @@ class ProjectSession:
         self._store = store
         self._manager = manager
         self._session_store = session_store
+        self._task_store = TaskStore(workspace)
         self._writer = writer
         self._read_file = read_file
         self._glob = glob
@@ -937,6 +939,33 @@ class ProjectSession:
     def list_sessions(self) -> tuple[SessionInfo, ...]:
         self._ensure_open()
         return self._session_store.list()
+
+    def create_task(
+        self,
+        objective: str,
+        acceptance_criteria: tuple[str, ...] = (),
+    ) -> TaskInfo:
+        """Create a durable Task owned by the current Session without model invocation."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._task_store.create(
+                objective,
+                owner_session=self._writer.session_id,
+                acceptance_criteria=acceptance_criteria,
+            )
+
+    def list_tasks(self) -> tuple[TaskInfo, ...]:
+        """List workspace Tasks without changing Session or runtime state."""
+        with self._lock:
+            self._ensure_open()
+            return self._task_store.list()
+
+    def inspect_task(self, task_id: str) -> TaskInfo:
+        """Strictly inspect one workspace Task without changing current state."""
+        with self._lock:
+            self._ensure_open()
+            return self._task_store.inspect(task_id)
 
     def latest_session_info(self) -> SessionInfo:
         """Return the Session referenced by this workspace's latest pointer."""

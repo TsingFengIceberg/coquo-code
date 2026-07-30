@@ -143,6 +143,17 @@ class SessionTurnRange:
 
 
 @dataclass(frozen=True)
+class SessionTurnEvidence:
+    """Content-free identity for one exact committed Session Turn record."""
+
+    session_id: str
+    turn_number: int
+    record_sequence: int
+    record_sha256: str
+    committed_at: str
+
+
+@dataclass(frozen=True)
 class SessionSearchMatch:
     """One bounded literal match from final user or assistant text."""
 
@@ -558,6 +569,38 @@ class SessionStore:
             total_turns=total,
             start_turn=start_turn,
             turns=state.turns[start_turn - 1 : start_turn - 1 + count],
+        )
+
+    def turn_evidence(
+        self,
+        selector: str | Path,
+        record_sequence: int,
+    ) -> SessionTurnEvidence:
+        """Return exact raw-record identity for one strictly replayed committed Turn."""
+        if type(record_sequence) is not int or record_sequence < 1:
+            raise SessionStoreError("Session Turn record sequence must be a positive integer")
+        path = self._resolve_existing_path(selector)
+        data, state = self._strict_snapshot(path)
+        if record_sequence >= len(state.records):
+            raise SessionStoreError(
+                f"Session Turn record sequence exceeds the {len(state.records) - 1} records"
+            )
+        record = state.records[record_sequence]
+        if not isinstance(record, TurnCommitted):
+            raise SessionStoreError("selected Session record is not a committed Turn")
+        lines = data.splitlines(keepends=True)
+        if len(lines) != len(state.records):
+            raise SessionStoreError("Session transcript record boundaries are inconsistent")
+        turn_number = sum(
+            isinstance(candidate, TurnCommitted)
+            for candidate in state.records[: record_sequence + 1]
+        )
+        return SessionTurnEvidence(
+            session_id=state.header.session_id,
+            turn_number=turn_number,
+            record_sequence=record_sequence,
+            record_sha256=hashlib.sha256(lines[record_sequence]).hexdigest(),
+            committed_at=record.committed_at,
         )
 
     def conversation_export(self, selector: str | Path) -> SessionConversationExport:

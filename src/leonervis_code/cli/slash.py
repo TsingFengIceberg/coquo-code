@@ -23,6 +23,7 @@ from leonervis_code.cli.presentation import (
     MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
+    TASK_HELP,
     MessageKind,
     ToolDetailMode,
     render_compact_result,
@@ -55,6 +56,8 @@ from leonervis_code.cli.presentation import (
     render_session_resume,
     render_session_summary,
     render_session_turn_range,
+    render_task_info,
+    render_task_summary,
     render_switch_rejection,
     render_tool_ledgers,
     render_tool_catalog,
@@ -80,6 +83,7 @@ from leonervis_code.session_records import (
     SessionRecordError,
     canonical_session_id,
 )
+from leonervis_code.task_records import TaskRecordError, canonical_task_id
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 from leonervis_code.tools.catalog import TOOL_CATALOG
@@ -107,6 +111,7 @@ TOP_LEVEL_COMMANDS = (
     "/provider",
     "/model",
     "/session",
+    "/task",
     "/resume",
     "/clear",
 )
@@ -124,6 +129,7 @@ class SlashCompletionSpec:
 SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help", "Show Host commands", True),
     SlashCompletionSpec("/help session", "Session history, browsing, and resume"),
+    SlashCompletionSpec("/help task", "Durable Task identity and inspection"),
     SlashCompletionSpec("/help tools", "Action Audit and tool outcomes"),
     SlashCompletionSpec("/help git", "Read-only Git observation"),
     SlashCompletionSpec("/help context", "Context, usage, and compaction"),
@@ -170,6 +176,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider", "Provider commands", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
+    SlashCompletionSpec("/task", "Task commands", True),
     SlashCompletionSpec("/resume", "Resume a Session", True),
     SlashCompletionSpec("/clear", "Clear terminal output", True),
     SlashCompletionSpec("/exit", "Exit the REPL", True),
@@ -194,6 +201,9 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session unpin", "Unpin the current Session"),
     SlashCompletionSpec("/session switch", "Build or use a recent Session picker"),
     SlashCompletionSpec("/session switch list", "Refresh the Session picker with filters"),
+    SlashCompletionSpec("/task start", "Create a Task owned by the current Session"),
+    SlashCompletionSpec("/task list", "List workspace Tasks"),
+    SlashCompletionSpec("/task show", "Show one workspace Task"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -282,6 +292,12 @@ class ReplSession(Protocol):
     def repair_session(self, selector: str): ...
 
     def list_sessions(self): ...
+
+    def create_task(self, objective: str, acceptance_criteria: tuple[str, ...] = ()): ...
+
+    def list_tasks(self): ...
+
+    def inspect_task(self, task_id: str): ...
 
     def rename_session(self, name: str | None = None): ...
 
@@ -466,6 +482,21 @@ def dispatch_slash(
         return _actions(command, session)
     if command == "/tools" or command.startswith("/tools "):
         return _tools(command, session)
+    if command == "/task":
+        return SlashResult(handled=True, message=TASK_HELP, kind="info")
+    if command == "/task start" or command.startswith("/task start "):
+        return _task_start(command, session)
+    if command == "/task list" or command.startswith("/task list "):
+        return _task_list(command, session)
+    if command == "/task show" or command.startswith("/task show "):
+        return _task_show(command, session)
+    if command.startswith("/task "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("start", "list", "show"))
+        return _usage(
+            "Unknown task command: "
+            f"{subcommand}{_suggestion_line(suggestion)}\nUsage: /task <start|list|show>"
+        )
     if command == "/session show" or command.startswith("/session show "):
         return _session_show(command, session)
     if command == "/session preview" or command.startswith("/session preview "):
@@ -1030,6 +1061,45 @@ def _valid_session_read_selector(value: str) -> bool:
     except SessionRecordError:
         return False
     return True
+
+
+def _task_start(command: str, session: ReplSession) -> SlashResult:
+    objective = command.removeprefix("/task start").strip()
+    if not objective:
+        return _usage("Usage: /task start <objective>")
+    return _call(
+        lambda: "Created durable Task:\n" + render_task_info(session.create_task(objective)),
+        kind="success",
+        failure_prefix="Task creation failed",
+    )
+
+
+def _task_list(command: str, session: ReplSession) -> SlashResult:
+    if command != "/task list":
+        return _usage("Usage: /task list")
+
+    def render() -> str:
+        tasks = session.list_tasks()
+        if not tasks:
+            return "No durable Tasks found."
+        return "\n".join(render_task_summary(info) for info in tasks)
+
+    return _call(render, kind="info", failure_prefix="Task listing failed")
+
+
+def _task_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /task show <task-id>")
+    try:
+        task_id = canonical_task_id(parts[2])
+    except TaskRecordError:
+        return _usage("Usage: /task show <task-id>")
+    return _call(
+        lambda: render_task_info(session.inspect_task(task_id)),
+        kind="info",
+        failure_prefix="Task inspection failed",
+    )
 
 
 def _session_list(command: str, session: ReplSession) -> SlashResult:

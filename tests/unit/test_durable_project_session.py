@@ -133,6 +133,31 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     second.close()
 
 
+def test_project_session_task_management_is_host_only_and_session_nonmutating(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    transcript = session.transcript_path
+    before = transcript.read_bytes()
+    history = session.history
+
+    created = session.create_task(
+        "Implement resumable stages",
+        ("Each Stage uses one ordinary Turn",),
+    )
+
+    assert created.owner_session_id == SESSION_ONE
+    assert session.inspect_task(created.task_id) == created
+    assert session.list_tasks() == (created,)
+    assert session.history == history == ()
+    assert transcript.read_bytes() == before
+    session.close()
+
+
 def test_project_session_names_after_commit_and_renames_without_changing_context(
     tmp_path: Path,
 ) -> None:

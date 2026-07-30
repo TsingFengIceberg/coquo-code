@@ -79,10 +79,11 @@ class ToolDetailMode(StrEnum):
     FULL = "full"
 
 
-HELP_TOPICS = ("session", "tools", "git", "context", "provider", "policy", "input")
+HELP_TOPICS = ("session", "task", "tools", "git", "context", "provider", "policy", "input")
 HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
+    "  /help task      Durable Task identity and inspection\n"
     "  /help tools     Action Audit and durable tool outcomes\n"
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
@@ -110,6 +111,14 @@ SESSION_HELP = (
     "  /session pin | /session unpin\n"
     "  /resume <latest|session-id>\n"
     "  /history <count>"
+)
+TASK_HELP = (
+    "Task commands:\n"
+    "  /task start <objective>\n"
+    "  /task list\n"
+    "  /task show <task-id>\n"
+    "Tasks are durable Host-owned objectives. This first slice records identity only; it does "
+    "not execute Stages or grant tool permissions."
 )
 TOOLS_HELP = (
     "Tool and audit commands:\n"
@@ -169,6 +178,7 @@ INPUT_HELP = (
 
 HELP_BY_TOPIC = {
     "session": SESSION_HELP,
+    "task": TASK_HELP,
     "tools": TOOLS_HELP,
     "git": GIT_HELP,
     "context": CONTEXT_HELP,
@@ -284,6 +294,34 @@ class SessionInfoView(Protocol):
     title_fallback_reason: object | None
     forked_from_session_id: str | None
     forked_from_turn: int | None
+
+
+class TaskInfoView(Protocol):
+    task_id: str
+    path: object
+    workspace: str
+    workspace_fingerprint: str
+    owner_session_id: str
+    objective: str
+    acceptance_criteria: tuple[str, ...]
+    created_at: str
+    scope: object
+    status: object
+    record_count: int
+    stages: tuple[TaskStageInfoView, ...]
+
+
+class TaskStageInfoView(Protocol):
+    stage_id: str
+    stage_number: int
+    objective: str
+    started_at: str
+    outcome: str
+    terminal_at: str | None
+    turn_number: int | None
+    turn_record_sequence: int | None
+    turn_record_sha256: str | None
+    failure_reason: object | None
 
 
 class ConversationTurnView(Protocol):
@@ -875,6 +913,15 @@ def render_session_summary(
     return (
         f"{name!r}{marker_text} ({info.session_id}): {turns}, {state}, created {info.created_at}, "
         f"runtime {provider}/{model}"
+    )
+
+
+def render_task_summary(info: TaskInfoView) -> str:
+    """Render compact durable Task metadata without terminal control injection."""
+    objective = _safe_inline(info.objective)
+    return (
+        f"{objective!r} ({info.task_id}): {info.status.value}, {len(info.stages)} stages, "
+        f"owner {info.owner_session_id}, created {info.created_at}"
     )
 
 
@@ -1707,6 +1754,46 @@ def render_session_info(info: SessionInfoView) -> str:
             f"Created: {info.created_at}",
         )
     )
+    return "\n".join(lines)
+
+
+def render_task_info(info: TaskInfoView) -> str:
+    """Render one durable Task and its bounded acceptance contract."""
+    lines = [
+        f"Task: {_safe_inline(info.objective)}",
+        f"Status: {info.status.value}",
+        f"Task ID: {info.task_id}",
+        f"Owner Session: {info.owner_session_id}",
+        f"Scope: {info.scope.value}",
+        f"Transcript: {info.path}",
+        f"Created: {info.created_at}",
+        f"Records: {info.record_count}",
+        f"Stages: {len(info.stages)}",
+        f"Acceptance criteria: {len(info.acceptance_criteria)}",
+    ]
+    lines.extend(
+        f"  {index}. {_safe_inline(criterion)}"
+        for index, criterion in enumerate(info.acceptance_criteria, start=1)
+    )
+    if info.stages:
+        latest = info.stages[-1]
+        lines.extend(
+            (
+                f"Latest Stage: #{latest.stage_number} {latest.outcome}",
+                f"Stage ID: {latest.stage_id}",
+                f"Stage objective: {_safe_inline(latest.objective)}",
+                f"Stage started: {latest.started_at}",
+            )
+        )
+        if latest.turn_number is not None:
+            lines.append(
+                f"Turn evidence: Session turn #{latest.turn_number}, "
+                f"record #{latest.turn_record_sequence}, SHA-256 {latest.turn_record_sha256}"
+            )
+        elif latest.failure_reason is not None:
+            lines.append(f"Stage failure: {latest.failure_reason.value}")
+        elif latest.outcome == "interrupted":
+            lines.append("Recovery: interrupted Stage requires an explicit terminal decision.")
     return "\n".join(lines)
 
 

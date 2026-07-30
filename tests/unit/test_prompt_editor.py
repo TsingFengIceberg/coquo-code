@@ -156,6 +156,9 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         completion.text for completion in completer.get_completions(Document("/provider c"), event)
     ] == ["/provider current"]
     assert [
+        completion.text for completion in completer.get_completions(Document("/task s"), event)
+    ] == ["/task start", "/task show"]
+    assert [
         completion.text
         for completion in completer.get_completions(Document("/tool-details "), event)
     ] == ["/tool-details compact", "/tool-details full"]

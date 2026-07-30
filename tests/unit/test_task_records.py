@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+from dataclasses import replace
+import json
+from pathlib import Path
+
+import pytest
+
+from leonervis_code.session_records import workspace_fingerprint
+from leonervis_code.task_records import (
+    MAX_ACCEPTANCE_CRITERIA,
+    MAX_TASK_OBJECTIVE_CHARACTERS,
+    StageCommitted,
+    StageFailed,
+    StageFailureReason,
+    StageStarted,
+    TaskHeader,
+    TaskRecordError,
+    TaskStatus,
+    canonical_acceptance_criteria,
+    canonical_task_id,
+    canonical_task_objective,
+    decode_task_record,
+    encode_task_record,
+    replay_task_records,
+)
+
+TASK_ID = "12345678-1234-4234-9234-123456789abc"
+SESSION_ID = "22345678-1234-4234-9234-123456789abc"
+CREATED_AT = "2026-07-31T01:02:03.000004Z"
+STAGE_ID = "32345678-1234-4234-9234-123456789abc"
+
+
+def header(workspace: Path) -> TaskHeader:
+    return TaskHeader(
+        sequence=0,
+        task_id=TASK_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        owner_session_id=SESSION_ID,
+        objective="Implement durable task state",
+        acceptance_criteria=("Task survives process restart", "No provider call is made"),
+        created_at=CREATED_AT,
+    )
+
+
+def test_task_header_round_trips_as_closed_canonical_json(tmp_path: Path) -> None:
+    record = header(tmp_path)
+
+    payload = encode_task_record(record)
+
+    assert payload.endswith(b"\n")
+    assert decode_task_record(payload.removesuffix(b"\n")) == record
+    assert json.loads(payload)["scope"] == "workspace"
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("record_type", "task_created", "unknown task record type"),
+        ("schema_version", 2, "unsupported task_header schema version"),
+        ("scope", "module", "unsupported task scope"),
+        ("sequence", 1, "sequence must be 0"),
+    ],
+)
+def test_task_header_decode_rejects_unknown_contract_values(
+    tmp_path: Path, field: str, value: object, error: str
+) -> None:
+    document = json.loads(encode_task_record(header(tmp_path)))
+    document[field] = value
+
+    with pytest.raises(TaskRecordError, match=error):
+        decode_task_record(json.dumps(document).encode())
+
+
+def test_task_header_decode_rejects_unknown_and_missing_fields(tmp_path: Path) -> None:
+    document = json.loads(encode_task_record(header(tmp_path)))
+    document["unexpected"] = True
+    with pytest.raises(TaskRecordError, match="unknown or missing"):
+        decode_task_record(json.dumps(document).encode())
+
+    document.pop("unexpected")
+    document.pop("objective")
+    with pytest.raises(TaskRecordError, match="unknown or missing"):
+        decode_task_record(json.dumps(document).encode())
+
+
+def test_task_identity_and_text_bounds_are_strict() -> None:
+    assert canonical_task_id(TASK_ID) == TASK_ID
+    with pytest.raises(TaskRecordError, match="lowercase UUID4"):
+        canonical_task_id(TASK_ID.upper())
+    with pytest.raises(TaskRecordError, match="nonblank"):
+        canonical_task_objective(" \n")
+    with pytest.raises(TaskRecordError, match="exceeds"):
+        canonical_task_objective("x" * (MAX_TASK_OBJECTIVE_CHARACTERS + 1))
+    with pytest.raises(TaskRecordError, match="duplicates"):
+        canonical_acceptance_criteria(("same", "same"))
+    with pytest.raises(TaskRecordError, match="item limit"):
+        canonical_acceptance_criteria(
+            tuple(str(index) for index in range(MAX_ACCEPTANCE_CRITERIA + 1))
+        )
+
+
+def test_replay_derives_ready_state_and_rejects_binding_mismatch(tmp_path: Path) -> None:
+    record = header(tmp_path)
+    state = replay_task_records(
+        [record],
+        expected_workspace=str(tmp_path),
+        expected_workspace_fingerprint=workspace_fingerprint(tmp_path),
+        expected_task_id=TASK_ID,
+        expected_file_name=f"{TASK_ID}.jsonl",
+    )
+
+    assert state.status is TaskStatus.READY
+    assert state.next_sequence == 1
+
+    with pytest.raises(TaskRecordError, match="current workspace"):
+        replay_task_records(
+            [record],
+            expected_workspace=str(tmp_path / "other"),
+            expected_workspace_fingerprint=workspace_fingerprint(tmp_path),
+            expected_task_id=TASK_ID,
+            expected_file_name=f"{TASK_ID}.jsonl",
+        )
+    with pytest.raises(TaskRecordError, match="does not match its task ID"):
+        replay_task_records(
+            [record],
+            expected_workspace=str(tmp_path),
+            expected_workspace_fingerprint=workspace_fingerprint(tmp_path),
+            expected_task_id=TASK_ID,
+            expected_file_name="wrong.jsonl",
+        )
+
+
+def test_encode_revalidates_immutable_record_values(tmp_path: Path) -> None:
+    with pytest.raises(TaskRecordError, match="owner Session ID"):
+        encode_task_record(replace(header(tmp_path), owner_session_id="not-a-session"))
+    with pytest.raises(TaskRecordError, match="canonical UTC timestamp"):
+        encode_task_record(replace(header(tmp_path), created_at="2026-07-31"))
+    with pytest.raises(TaskRecordError, match="canonical UTC timestamp"):
+        encode_task_record(replace(header(tmp_path), created_at="2026-99-31T01:02:03.000004Z"))
+    with pytest.raises(TaskRecordError, match="unsupported task scope"):
+        encode_task_record(replace(header(tmp_path), scope="workspace"))  # type: ignore[arg-type]
+
+
+def started(sequence: int = 1, stage_number: int = 1) -> StageStarted:
+    return StageStarted(
+        sequence=sequence,
+        stage_id=STAGE_ID,
+        stage_number=stage_number,
+        session_id=SESSION_ID,
+        objective="Implement one bounded Stage",
+        started_at="2026-07-31T01:03:00.000000Z",
+    )
+
+
+def committed(sequence: int = 2, stage_number: int = 1) -> StageCommitted:
+    return StageCommitted(
+        sequence=sequence,
+        stage_id=STAGE_ID,
+        stage_number=stage_number,
+        session_id=SESSION_ID,
+        turn_number=1,
+        turn_record_sequence=1,
+        turn_record_sha256="a" * 64,
+        committed_at="2026-07-31T01:04:00.000000Z",
+    )
+
+
+def replay(workspace: Path, records) -> object:
+    return replay_task_records(
+        records,
+        expected_workspace=str(workspace),
+        expected_workspace_fingerprint=workspace_fingerprint(workspace),
+        expected_task_id=TASK_ID,
+        expected_file_name=f"{TASK_ID}.jsonl",
+    )
+
+
+def test_stage_records_round_trip_and_derive_interrupted_paused_and_blocked(
+    tmp_path: Path,
+) -> None:
+    start = started()
+    commit = committed()
+    failure = StageFailed(
+        sequence=2,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        reason=StageFailureReason.PROVIDER_ERROR,
+        failed_at="2026-07-31T01:04:00.000000Z",
+    )
+
+    assert decode_task_record(encode_task_record(start).rstrip(b"\n")) == start
+    assert decode_task_record(encode_task_record(commit).rstrip(b"\n")) == commit
+    assert decode_task_record(encode_task_record(failure).rstrip(b"\n")) == failure
+    assert replay(tmp_path, [header(tmp_path), start]).status is TaskStatus.INTERRUPTED
+    assert replay(tmp_path, [header(tmp_path), start, commit]).status is TaskStatus.PAUSED
+    assert replay(tmp_path, [header(tmp_path), start, failure]).status is TaskStatus.BLOCKED
+
+
+def test_stage_replay_requires_contiguous_alternating_identity(tmp_path: Path) -> None:
+    with pytest.raises(TaskRecordError, match="before the active Stage terminates"):
+        replay(tmp_path, [header(tmp_path), started(), replace(started(), sequence=2)])
+    with pytest.raises(TaskRecordError, match="terminal ID"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                started(),
+                replace(committed(), stage_id="42345678-1234-4234-9234-123456789abc"),
+            ],
+        )
+    with pytest.raises(TaskRecordError, match="contiguous"):
+        replay(tmp_path, [header(tmp_path), started(stage_number=2)])
+    with pytest.raises(TaskRecordError, match="sequence must be 1"):
+        replay(tmp_path, [header(tmp_path), started(sequence=2)])
+
+
+def test_stage_replay_rejects_wrong_owner_invalid_evidence_and_time_regression(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TaskRecordError, match="owner Session"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                replace(started(), session_id="42345678-1234-4234-9234-123456789abc"),
+            ],
+        )
+    with pytest.raises(TaskRecordError, match="SHA-256"):
+        encode_task_record(replace(committed(), turn_record_sha256="short"))
+    with pytest.raises(TaskRecordError, match="nondecreasing"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                replace(started(), started_at="2026-07-31T00:00:00.000000Z"),
+            ],
+        )

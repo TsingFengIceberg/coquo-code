@@ -26,6 +26,8 @@
 - [Foundation 5A：根 AGENTS.md 项目指令](#foundation-5a根-agentsmd-项目指令)
 - [确定性离线 Host Eval 基线](#确定性离线-host-eval-基线)
 - [Actual Coding Task Eval](#actual-coding-task-eval)
+- [Durable Task Identity 与 Host Management](#durable-task-identity-与-host-management)
+- [Durable Stage Lifecycle 与 Turn Evidence](#durable-stage-lifecycle-与-turn-evidence)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -456,6 +458,22 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 可见测试和私有测试都使用固定`/usr/bin/python3 -m unittest discover ...`命令，并经过生产`RunCommandTool`的bubblewrap/seccomp沙箱；不存在“为了Eval直接subprocess”的旁路。`eval task run TASK --real-provider`还要求显式`--profile`、`--profile-id`或`--model`，固定在新建任务目录中以`danger-full-access + auto`运行普通ProjectSession/AgentLoop/PermissionGate/tool/Action Audit链。无`--output`时目录在评分后删除，有`--output`时保留供人工检查；工具生命周期写stderr，stdout只输出不含workspace path、provider正文或随机ID的稳定评分。Host按agent turn、committed turn、action certainty、workspace shape、protected files、visible tests和hidden tests评分，不依赖模型最终文字。
 
 普通command sandbox会只读挂载Host根目录，因此real-task Eval额外在bubblewrap中遮蔽当前Leonervis源码checkout；安装态至少遮蔽evaluator模块与bytecode cache，然后再挂载任务workspace。隐藏测试也只在agent Session关闭后的独立评分目录中生成，模型工具无法读取其正文。该切片没有改变21个model-visible tools、system prompt v23、adapter contract v26、`ctx-v5`/`ctx-v6`、ToolArguments、Session、Action Audit或compaction schema；它不是任意benchmark loader、模型排行榜、重试框架或无授权的provider smoke。详见[0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)。
+
+## Durable Task Identity 与 Host Management
+
+Leonervis现在明确区分`Task -> Stage -> Turn -> Action`：Task表示可跨重启继续的用户目标；未来每个Stage只推进一个有界步骤并继续使用普通Turn的8/32/24预算；每个Action仍经过PermissionGate、approval、工具硬边界与Action Audit。当前第一阶段只实现最外层Task身份，不实现Stage执行。
+
+每个Task以独立`task_header` schema v1保存在`<workspace>/.leonervis-code/tasks/<workspace-fingerprint>/<task-id>.jsonl`，包含canonical UUID4、workspace identity、一个已有owner Session、受限目标、最多16条验收条件和UTC创建时间，当前派生状态为`ready`。TaskStore执行no-follow普通文件读取、closed schema、严格完整行replay、有界扫描，以及temporary file fsync后exclusive hard-link安装和directory fsync；最终名称已可见但durability不确定时不会误报为完全未创建。List/inspect不创建或修复状态。
+
+Standalone提供`task create/list/show`，REPL提供`/task start/list/show`；REPL创建固定绑定当时的current Session。它们都是Host-only命令，不调用provider或工具、不消耗Turn预算、不写Session transcript或Action Audit，也不把Task目标提升为system authority或Action授权。System prompt保持v23、adapter contract保持v26，21个model-visible tools、ToolArguments v1、`ctx-v5`/`ctx-v6`以及Session/compaction/Action Audit schema均不变。ADR 0087随后增加Stage record与writer lease；`/task continue`和恢复执行仍是后续slice。详见[0086：Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)。
+
+## Durable Stage Lifecycle 与 Turn Evidence
+
+Task transcript新增closed schema-v1 `stage_started`、`stage_committed`和`stage_failed`。Replay要求header之后严格start/terminal交替、record sequence准确、Stage编号从1连续递增、Stage UUID唯一、identity与owner Session匹配且时间不倒退。没有Stage为`ready`；commit后为`paused`；失败后为`blocked`；未终结start在普通inspection中固定为`interrupted`，只有持有live writer的当前进程可显示`stage-in-progress`。
+
+`TaskStore.open()`提供非阻塞独占`TaskWriter`。每次append先candidate replay，再检查pathname/inode与transcript上限，完整写入并fsync后才更新内存。写入开始后发生I/O或fsync失败会返回“record可能可见”的typed错误并poison当前writer，调用方必须release后strict inspect，不能自动重试。`SessionStore.turn_evidence()`只接受真实`turn_committed` record，返回Session ID、Turn编号、record sequence、时间与原始newline-terminated JSONL行SHA-256，不暴露对话或工具正文；Stage commit由Host自己获取证据，调用方不能自报hash。
+
+`task list`现在显示Stage数，`task show`和`/task show`显示最近Stage目标、结果、commit Turn evidence、failure reason或interrupted recovery提示。这仍不是执行入口：当前没有`/task continue`、provider调用、completion proposal、累计Task预算或自动恢复。System prompt v23、adapter contract v26、21个工具、8/32/24预算、ToolArguments v1、`ctx-v5`/`ctx-v6`以及Session/compaction/Action Audit schema均不变。详见[0087：Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1080,3 +1098,5 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 83. [0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
 84. [0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)
 85. [0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)
+86. [0086：Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)
+87. [0087：Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)

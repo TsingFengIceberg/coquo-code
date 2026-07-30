@@ -26,6 +26,8 @@
 - [Foundation 5A: Root AGENTS.md Project Instructions](#foundation-5a-root-agentsmd-project-instructions)
 - [Deterministic Offline Host Eval Baseline](#deterministic-offline-host-eval-baseline)
 - [Actual Coding Task Eval](#actual-coding-task-eval)
+- [Durable Task Identity and Host Management](#durable-task-identity-and-host-management)
+- [Durable Stage Lifecycle and Turn Evidence](#durable-stage-lifecycle-and-turn-evidence)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -456,6 +458,22 @@ This is a Host-correctness baseline, not a pytest replacement and not an evaluat
 Visible and private tests use fixed `/usr/bin/python3 -m unittest discover ...` commands through the production `RunCommandTool` bubblewrap/seccomp sandbox; Eval has no direct-subprocess bypass. `eval task run TASK --real-provider` additionally requires an explicit `--profile`, `--profile-id`, or `--model`, then runs the ordinary ProjectSession, AgentLoop, PermissionGate, tools, and Action Audit under fixed `danger-full-access + auto` inside a newly created task directory. Without `--output`, that directory is removed after scoring; with `--output`, it remains for inspection. Tool lifecycle events go to stderr, while stdout contains only a stable score without workspace paths, provider text, or random IDs. Host checks cover agent completion, committed turn count, action certainty, workspace shape, protected files, visible tests, and hidden tests, independent of final model prose.
 
 The ordinary command sandbox read-only mounts the Host root, so real-task Eval additionally masks the current Leonervis source checkout inside bubblewrap; an installed build masks at least the evaluator module and bytecode cache before rebinding the task workspace. Hidden tests are generated only in a separate scoring directory after the agent Session closes, so model tools cannot inspect their text. This slice leaves all 21 model-visible tools, system prompt v23, adapter contract v26, `ctx-v5`/`ctx-v6`, ToolArguments, Session, Action Audit, and compaction schemas unchanged. It is not an arbitrary benchmark loader, model leaderboard, retry framework, or unauthorized provider smoke. See [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md).
+
+## Durable Task Identity and Host Management
+
+Leonervis now distinguishes `Task -> Stage -> Turn -> Action`: a Task is a user objective that can survive restart; each future Stage advances one bounded step while retaining the ordinary Turn's 8/32/24 budgets; every Action still passes PermissionGate, approval, tool hard bounds, and Action Audit. This first stage implements only the outer Task identity, not Stage execution.
+
+Each Task has an independent `task_header` schema-v1 transcript at `<workspace>/.leonervis-code/tasks/<workspace-fingerprint>/<task-id>.jsonl`. It stores a canonical UUID4, workspace identity, one existing owner Session, a bounded objective, at most 16 acceptance criteria, and a UTC creation timestamp; its current derived status is `ready`. TaskStore enforces no-follow regular-file reads, closed schemas, strict complete-line replay, bounded scans, and installation through a fsynced temporary file, exclusive hard link, and directory fsync. It does not claim complete non-creation if the final name is visible but durability is uncertain. List and inspect never create or repair state.
+
+Standalone commands provide `task create/list/show`, while the REPL provides `/task start/list/show`; REPL creation binds the then-current Session. These are Host-only commands: they invoke neither provider nor tool, consume no Turn budget, write no Session transcript or Action Audit, and do not elevate Task text into system authority or Action authorization. System prompt remains v23, adapter contract remains v26, and the 21 model-visible tools, ToolArguments v1, `ctx-v5`/`ctx-v6`, and Session/compaction/Action Audit schemas remain unchanged. ADR 0087 subsequently adds Stage records and a writer lease; `/task continue` and execution recovery remain future slices. See [0086: Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md).
+
+## Durable Stage Lifecycle and Turn Evidence
+
+Task transcripts add closed schema-v1 `stage_started`, `stage_committed`, and `stage_failed` records. Replay requires strict start/terminal alternation after the header, exact record sequences, contiguous Stage numbers from one, unique Stage UUIDs, matching identities and owner Session, and nondecreasing timestamps. No Stage is `ready`; commit yields `paused`; failure yields `blocked`; an unterminated start is always `interrupted` during ordinary inspection, while only the current process holding the live writer may render `stage-in-progress`.
+
+`TaskStore.open()` provides one nonblocking exclusive `TaskWriter`. Every append candidate-replays first, then validates pathname/inode and transcript limits, writes completely, and fsyncs before changing memory. An I/O or fsync failure after writing begins returns a typed "record may be visible" error and poisons the writer, requiring release plus strict inspection instead of automatic retry. `SessionStore.turn_evidence()` accepts only a real `turn_committed` record and returns Session ID, Turn number, record sequence, timestamp, and the exact newline-terminated raw JSONL-line SHA-256 without dialogue or tool bodies. The Host obtains commit evidence itself; callers cannot claim a digest.
+
+`task list` now includes Stage count, while `task show` and `/task show` render the latest objective, outcome, committed Turn evidence, failure reason, or interrupted recovery guidance. This is still not an execution entry point: there is no `/task continue`, provider invocation, completion proposal, cumulative Task budget, or automatic recovery. System prompt v23, adapter contract v26, all 21 tools and 8/32/24 budgets, ToolArguments v1, `ctx-v5`/`ctx-v6`, and Session/compaction/Action Audit schemas remain unchanged. See [0087: Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1080,3 +1098,5 @@ This slice establishes capacity facts only. It does not count current request to
 83. [0083: Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
 84. [0084: Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)
 85. [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)
+86. [0086: Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)
+87. [0087: Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)
