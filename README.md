@@ -184,7 +184,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | --- | --- |
 | `/help [session\|tools\|git\|context\|provider\|input]` | 按类别查看Host控制命令；不调用模型 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
-| `/actions [count] [status=<状态>] [tool=<名称>]` | 按状态和工具名筛选当前Session的脱敏Action Audit，默认20条、最多100条 |
+| `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
+| `/tools catalog` | 按规范顺序显示21个模型工具、权限分类及当前mode下的可用性 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -193,7 +194,8 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/changes staged` | 不调用模型，显示index相对HEAD的有界tracked patch |
 | `/commits [count] [path]` | 不调用模型，显示当前HEAD可达的近期提交，默认10条、最多50条 |
 | `/commit <full-id> [path]` | 不调用模型，显示一个当前HEAD可达提交的有界message与tracked patch |
-| `/status` | 显示脱敏 runtime、model 和 context-window 状态 |
+| `/status` | 汇总当前Session、权限/审批、最近context压力、工具预算、沙箱依赖及脱敏runtime状态 |
+| `/sandbox check` | 用固定`/usr/bin/true`检查Linux、bubblewrap、seccomp和真实沙箱activation；不调用模型或写Session |
 | `/context` | 只读检查当前 Effective Context、内容 ID、计数与 target fit |
 | `/usage` | 查看当前进程内最近调用、最近turn及当前profile的真实provider Token用量 |
 | `/usage session` | 查看当前Session跨重启保留的turn、失败与compaction累计用量 |
@@ -228,13 +230,15 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 ```text
 /status
+/sandbox check
 /context
 /compact preview
 /compactions 5
 /usage
 /usage session
 /usage turns
-/actions
+/actions last
+/tools catalog
 /tools details 3
 /tool-details full
 /changes
@@ -263,9 +267,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /history 5
 ```
 
-真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。
+真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Ctrl-R会在独立搜索栏中对当前Session最近1000条已提交prompt做大小写不敏感的反向搜索；Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。`/clear`只重置画面，不修改Session、history或transcript。
 
-底栏阶段由typed Host事件驱动，可区分准备turn/provider请求、规划动作、运行具体工具、处理工具结果、等待审批、compaction、记录provider usage、真实Session持久提交、最终收尾与取消。已知context、provider、runtime、authorization及Session失败会给出保守的`Next:`建议，但不会自动retry、声称rollback或掩盖已完成工具副作用；`/help`、`/session list`和`/actions`的新分类/过滤都只读Host状态，不进入模型历史。
+底栏阶段由typed Host事件驱动，可区分准备turn/provider请求、规划动作、运行具体工具、处理工具结果、等待审批、compaction、记录provider usage、真实Session持久提交、最终收尾与取消。已知context、provider、runtime、authorization、Session及`run_command`结果码会给出保守的`Next:`建议，但不会自动retry、声称rollback或掩盖已完成工具副作用；`/status`、`/sandbox check`、`/tools catalog`、`/actions last`及其他slash检查都不进入模型历史。Command审批会明确说明Host只读、workspace可写和socket禁止的实际沙箱边界。
 
 已提交用户消息固定以`› `开头，assistant正文固定以`• `开头；显式换行和终端自动换行都从标记后的正文列继续。用户消息与本轮首个可见输出之间固定留一行；若模型直接请求工具而没有阶段性正文，界面会从`  │ `Host轨迹开始，不伪造空`•`。同一user turn内的context、tool、approval、usage和failure等Host执行事实使用`  │ `轨迹线归入该Assistant Turn，但不会冒充模型原话；slash结果仍是turn外Host block，并以“回显的`›`输入 + Host结果 + 一次低强度短线”组成完整交互块。模型正文与Host轨迹切换时不再插入分隔线，完整turn结束后才在下一个`›`前显示一次低强度短线。Warning、approval和error继续保持醒目；`NO_COLOR=1`会关闭颜色与dim但保留角色、轨迹、分隔线、缩进和布局。
 
@@ -349,6 +353,7 @@ git diff --check
 - [Provenance-linked Session Forking](./docs/decisions/0078-provenance-linked-session-forking.md)：完整turn因果复制、`session_forked` v1来源与父Session不变性。
 - [Explicit Session Diagnosis and Tail Repair](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)：只读doctor、私有备份及仅未完成最终record的显式修复。
 - [Fail-closed Linux Command Sandbox](./docs/decisions/0080-fail-closed-linux-command-sandbox.md)：bubblewrap只读Host视图、workspace读写挂载、seccomp断网、敏感路径遮蔽及无降级执行。
+- [Host Workbench Diagnostics and Prompt History Search](./docs/decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)：综合状态、沙箱probe、工具目录、最近审计、命令失败指引与Ctrl-R历史搜索。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

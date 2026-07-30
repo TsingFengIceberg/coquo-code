@@ -184,7 +184,8 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | --- | --- |
 | `/help [session\|tools\|git\|context\|provider\|input]` | Show Host controls by category without invoking the model |
 | `/history <count>` | Show recent complete turns in the current Session |
-| `/actions [count] [status=<status>] [tool=<name>]` | Filter redacted current-Session Action Audits by lifecycle status and tool name, default 20 and maximum 100 |
+| `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
+| `/tools catalog` | Show all 21 model tools in canonical order with permission classes and current-mode availability |
 | `/tools [count]` | Show durable tool-ledger summaries for recent turns, default 5 and maximum 20 |
 | `/tools details [count]` | Expand per-request tool names, outcomes, and safe result codes with a 32 KiB total output bound |
 | `/tool-details [compact\|full]` | Inspect or switch process-local live tool detail; compact is default and full shows bounded structured command argv |
@@ -193,7 +194,8 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 | `/changes staged` | Show a bounded tracked patch from HEAD to index without invoking the model |
 | `/commits [count] [path]` | Show recent commits reachable from current HEAD without invoking the model; default 10 and maximum 50 |
 | `/commit <full-id> [path]` | Show one bounded message and tracked patch for a current-HEAD-reachable commit without invoking the model |
-| `/status` | Show redacted runtime, model, and context-window status |
+| `/status` | Summarize the current Session, permission/approval, latest context pressure, tool budgets, sandbox dependencies, and redacted runtime |
+| `/sandbox check` | Verify Linux, bubblewrap, seccomp, and real sandbox activation with fixed `/usr/bin/true`, without a model call or Session write |
 | `/context` | Read-only inspection of Effective Context, content ID, count, and target fit |
 | `/usage` | Show actual provider-token usage for the latest invocation, latest turn, and current process-local profile |
 | `/usage session` | Show durable turn, failure, and compaction usage across Session restarts |
@@ -228,13 +230,15 @@ Common REPL operations:
 
 ```text
 /status
+/sandbox check
 /context
 /compact preview
 /compactions 5
 /usage
 /usage session
 /usage turns
-/actions
+/actions last
+/tools catalog
 /tools details 3
 /tool-details full
 /changes
@@ -263,9 +267,9 @@ Common REPL operations:
 /history 5
 ```
 
-A real TTY now uses one persistent inline `prompt_toolkit.Application` for its input area and toolbar. Submission immediately leaves a blank prompt at the bottom while model and tool output appears between the submitted prompt and the new draft. One draft remains editable while busy, but Enter neither queues nor inserts a second message. Ctrl-C cooperatively cancels the active turn; Ctrl-D cancels first and waits for provider, tool, and Action Audit cleanup before exit. Approval temporarily owns input and restores the draft afterward.
+A real TTY now uses one persistent inline `prompt_toolkit.Application` for its input area and toolbar. Submission immediately leaves a blank prompt at the bottom while model and tool output appears between the submitted prompt and the new draft. One draft remains editable while busy, but Enter neither queues nor inserts a second message. Ctrl-R opens a separate case-insensitive reverse-search field over the current Session's latest 1,000 committed prompts. Ctrl-C cooperatively cancels the active turn; Ctrl-D cancels first and waits for provider, tool, and Action Audit cleanup before exit. Approval temporarily owns input and restores the draft afterward. `/clear` resets only the display and does not change Session, history, or transcript state.
 
-Typed Host events drive the toolbar phase, distinguishing turn/provider preparation, action planning, a specific running tool, tool-result processing, approval, compaction, provider-usage recording, the actual durable Session append, finalization, and cancellation. Known context, provider, runtime, authorization, and Session failures include a conservative `Next:` suggestion without automatic retry, rollback claims, or hiding completed tool side effects. The new `/help`, `/session list`, and `/actions` categories and filters inspect Host state only and never enter model history.
+Typed Host events drive the toolbar phase, distinguishing turn/provider preparation, action planning, a specific running tool, tool-result processing, approval, compaction, provider-usage recording, the actual durable Session append, finalization, and cancellation. Known context, provider, runtime, authorization, Session, and `run_command` result codes include a conservative `Next:` suggestion without automatic retry, rollback claims, or hiding completed tool side effects. `/status`, `/sandbox check`, `/tools catalog`, `/actions last`, and other slash inspections never enter model history. Command approval now states the actual read-only Host, writable workspace, and socket-denial sandbox boundary.
 
 Submitted user messages consistently start with `› ` and assistant bodies with `• `. Explicit newlines and terminal wrapping continue from the body column after the marker. One blank line separates the user message from the first visible output of its turn; if the model requests a tool without companion text, presentation starts with the `  │ ` Host trace and does not invent an empty `•`. Within one user turn, Host execution facts such as context, tools, approval, usage, and failures use that rail inside the same Assistant Turn without masquerading as model speech; slash results remain Host blocks outside a turn and form complete interaction blocks containing the echoed `›` input, Host result, and one low-intensity rule. Switching between assistant text and Host traces no longer inserts a separator, and one low-intensity short rule appears only after the complete turn before the next `›`. Warnings, approvals, and errors remain prominent; `NO_COLOR=1` removes color and dim styling while preserving roles, rails, separators, indentation, and layout.
 
@@ -349,6 +353,7 @@ After changing dependencies, run `uv lock` before checking the lockfile. Leonerv
 - [Provenance-linked Session Forking](./docs/decisions/0078-provenance-linked-session-forking.md): complete-turn causality copying, `session_forked` v1 provenance, and parent immutability.
 - [Explicit Session Diagnosis and Tail Repair](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md): read-only doctor, private backup, and explicit incomplete-final-record repair.
 - [Fail-closed Linux Command Sandbox](./docs/decisions/0080-fail-closed-linux-command-sandbox.md): read-only Host view, writable workspace mount, seccomp network denial, sensitive-path masking, and no unsandboxed fallback.
+- [Host Workbench Diagnostics and Prompt History Search](./docs/decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md): consolidated status, sandbox probing, tool catalog, latest audit, command guidance, and Ctrl-R history search.
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md): exact native projection for Anthropic and OpenAI-compatible continuation history.
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md): nullable companion text, v1/v2 replay compatibility, and unchanged legacy prefixes.
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md): strict conversion from both provider-native mixed shapes to one neutral `ToolUse`.

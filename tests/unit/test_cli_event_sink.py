@@ -103,6 +103,8 @@ def test_terminal_event_sink_full_mode_renders_command_result_metadata_only() ->
         "  stdout: captured=6 total=6 truncated=false\n"
         "  stderr: captured=10 total=10 truncated=false\n"
         "  cleanup_complete: true\n"
+        "Next: inspect the reported stdout, stderr, and exit code before changing or rerunning "
+        "the command.\n"
     )
     assert stream.flush_count == 1
 

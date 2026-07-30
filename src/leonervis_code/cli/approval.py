@@ -211,7 +211,8 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
         )
     if preview.kind == ApprovalPreviewKind.COMMAND:
         return _style(
-            "Direct argv execution with no shell parsing, OS/filesystem/network sandbox, or rollback.\n",
+            "Direct argv execution without shell parsing or rollback; Linux sandbox keeps the "
+            "Host filesystem read-only, the workspace writable, and socket creation denied.\n",
             _YELLOW,
             color=color,
         )

@@ -21,11 +21,12 @@ from leonervis_code.session import (
     CompactionHistoryResult,
     DurableUsageSnapshot,
     EffectiveContextInspection,
+    ProjectStatus,
     ResumeEffect,
     SessionResumeResult,
 )
 from leonervis_code.core.contracts import ToolArguments
-from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
 from leonervis_code.session_store import (
     LatestUpdateStatus,
@@ -45,6 +46,8 @@ from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
+from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
+from leonervis_code.tools.run_command import CommandSandboxInspection
 
 
 @dataclass
@@ -92,6 +95,29 @@ class Session:
             base_url_source=None,
             credential_required=False,
             credential_present=False,
+        )
+
+    def project_status(self):
+        return ProjectStatus(
+            runtime=self.status(),
+            session=self.session_info(),
+            usage=self.usage(),
+            permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+            approval_mode=ApprovalMode.ASK,
+            sandbox=self.inspect_command_sandbox(),
+        )
+
+    def inspect_command_sandbox(self):
+        return CommandSandboxInspection(
+            CommandSandboxDependencies(
+                platform="linux",
+                platform_supported=True,
+                bubblewrap_path="/usr/bin/bwrap",
+                bubblewrap_available=True,
+                seccomp_available=True,
+            ),
+            True,
+            "command_succeeded",
         )
 
     def inspect_context(self):
@@ -420,7 +446,15 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     restored = dispatch_slash("/session rename --auto", session)
     assert restored.message == "Session name: Automatic title (auto)"
     assert dispatch_slash("/provider use", session).message == "Usage: /provider use <name>"
+    status = dispatch_slash("/status", session).message
+    assert "Session: Automatic title" in status
+    assert "Permission mode: danger-full-access" in status
+    assert "Command sandbox: ready; activation verified" in status
     assert dispatch_slash("/status extra", session).message == "Usage: /status"
+    sandbox = dispatch_slash("/sandbox check", session).message
+    assert "Activation probe: verified" in sandbox
+    assert "Probe result: command_succeeded" in sandbox
+    assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
     assert "Context ID: ctx-v3-" in context.message
@@ -479,7 +513,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/compactions 21", session).message == "Usage: /compactions [1-20]"
     assert dispatch_slash("/actions", session).message == "No action audits yet."
     assert dispatch_slash("/actions 10", session).message == "No action audits yet."
-    actions_usage = "Usage: /actions [1-100] [status=<status>] [tool=<name>]"
+    actions_usage = "Usage: /actions last | /actions [1-100] [status=<status>] [tool=<name>]"
     assert dispatch_slash("/actions 0", session).message == actions_usage
     assert dispatch_slash("/actions 101", session).message == actions_usage
     assert dispatch_slash("/actions two", session).message == actions_usage
@@ -488,11 +522,14 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/tools 10", session).message == "No committed turns yet."
     assert dispatch_slash("/tools details", session).message == "No committed turns yet."
     assert dispatch_slash("/tools details 10", session).message == "No committed turns yet."
+    catalog = dispatch_slash("/tools catalog", session).message
+    assert "Model-visible tools: 21 in canonical order" in catalog
+    assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert dispatch_slash("/tools 0", session).message == (
-        "Usage: /tools [1-20] | /tools details [1-20]"
+        "Usage: /tools catalog | /tools [1-20] | /tools details [1-20]"
     )
     assert dispatch_slash("/tools details 21", session).message == (
-        "Usage: /tools [1-20] | /tools details [1-20]"
+        "Usage: /tools catalog | /tools [1-20] | /tools details [1-20]"
     )
 
 
@@ -723,6 +760,9 @@ def test_action_audit_filters_use_replayed_status_and_tool_name(tmp_path) -> Non
     assert dispatch_slash("/actions status=denied", session).message == (
         "No action audits match the selected filters."
     )
+    latest = dispatch_slash("/actions last", session).message
+    assert "Action #3: read_file" in latest
+    assert "Action #2" not in latest
 
 
 def test_manual_compaction_failure_shows_nonreducing_token_evidence(tmp_path) -> None:

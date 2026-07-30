@@ -20,6 +20,7 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.core.contracts import ToolRequestOutcome
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
 from leonervis_code.session import (
@@ -33,6 +34,7 @@ from leonervis_code.session import (
 from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
+from leonervis_code.tools.catalog import TOOL_CATALOG
 
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
@@ -102,7 +104,8 @@ SESSION_HELP = (
 )
 TOOLS_HELP = (
     "Tool and audit commands:\n"
-    "  /actions [1-100] [status=<status>] [tool=<name>]\n"
+    "  /actions last | /actions [1-100] [status=<status>] [tool=<name>]\n"
+    "  /tools catalog\n"
     "  /tools [1-20]\n"
     "  /tools details [1-20]\n"
     "  /tool-details [compact|full]\n"
@@ -129,6 +132,7 @@ PROVIDER_HELP = (
     "  /provider current\n"
     "  /provider use <name>\n"
     "  /status\n"
+    "  /sandbox check\n"
     "  /output [tokens|reset]\n"
     "  /model <model>"
 )
@@ -138,6 +142,7 @@ INPUT_HELP = (
     "  Alt+Enter inserts a newline; use Esc then Enter if Alt is intercepted\n"
     "  Ctrl-C clears a draft, cancels an active turn, or exits when idle and empty\n"
     "  Ctrl-D deletes ahead of the cursor or exits when the input is empty\n"
+    "  Ctrl-R searches committed prompts in the current Session\n"
     "  /clear clears terminal output\n"
     "  /exit or /quit exits the REPL"
 )
@@ -197,6 +202,35 @@ class RuntimeStatusView(Protocol):
     max_output_tokens: int | None
     default_max_output_tokens: int | None
     max_output_tokens_source: str
+
+
+class CommandSandboxDependenciesView(Protocol):
+    platform: str
+    platform_supported: bool
+    bubblewrap_path: str
+    bubblewrap_available: bool
+    seccomp_available: bool
+    ready: bool
+
+
+class CommandSandboxInspectionView(Protocol):
+    dependencies: CommandSandboxDependenciesView
+    activation_verified: bool | None
+    result_code: str | None
+    available: bool
+
+
+class ProjectStatusView(Protocol):
+    runtime: RuntimeStatusView
+    session: SessionInfoView
+    usage: RuntimeUsageSnapshot
+    permission_mode: object
+    approval_mode: object
+    sandbox: CommandSandboxInspectionView
+    tool_count: int
+    calls_per_response: int
+    requests_per_turn: int
+    provider_invocations_per_turn: int
 
 
 class EffectiveContextInspectionView(Protocol):
@@ -866,6 +900,143 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
     )
 
 
+def render_project_status(status: ProjectStatusView) -> str:
+    """Render one local workbench snapshot without triggering provider inspection."""
+    session = status.session
+    context = status.usage.latest_context
+    if context is None:
+        context_line = "Context pressure: not measured for the current runtime"
+    elif context.context_window_limit is None:
+        context_line = (
+            f"Context pressure: input={context.input_count.input_tokens} + "
+            f"reserve={context.requested_output_tokens}; window unknown "
+            f"({context.input_count.method.value})"
+        )
+    else:
+        used = context.input_count.input_tokens + context.requested_output_tokens
+        percent = min(100, (used * 100) // context.context_window_limit)
+        context_line = (
+            f"Context pressure: {used}/{context.context_window_limit} tokens ({percent}%, "
+            f"{context.input_count.method.value}, {context.decision.value})"
+        )
+    sandbox = _sandbox_summary(status.sandbox, activation_required=False)
+    policy = getattr(status.permission_mode, "value", str(status.permission_mode))
+    approval = getattr(status.approval_mode, "value", str(status.approval_mode))
+    return (
+        f"Session: {_safe_inline(session.name)} ({session.session_id}, {session.turn_count} turns)\n"
+        f"Permission mode: {policy}\n"
+        f"Approval mode: {approval}\n"
+        f"{context_line}\n"
+        f"Command sandbox: {sandbox}\n"
+        f"Tool surface: {status.tool_count} tools; {status.calls_per_response}/response, "
+        f"{status.requests_per_turn}/turn, {status.provider_invocations_per_turn} provider invocations/turn\n\n"
+        f"{render_runtime_status(status.runtime)}"
+    )
+
+
+def render_command_sandbox_inspection(inspection: CommandSandboxInspectionView) -> str:
+    """Render dependency and activation facts without raw setup errors."""
+    dependencies = inspection.dependencies
+    activation = (
+        "verified"
+        if inspection.activation_verified is True
+        else "failed"
+        if inspection.activation_verified is False
+        else "not run"
+    )
+    lines = [
+        f"Command sandbox: {_sandbox_summary(inspection, activation_required=True)}",
+        f"Platform: {dependencies.platform} ({'supported' if dependencies.platform_supported else 'unsupported'})",
+        f"Bubblewrap: {dependencies.bubblewrap_path} ({'ready' if dependencies.bubblewrap_available else 'unavailable'})",
+        f"Seccomp filter: {'ready' if dependencies.seccomp_available else 'unavailable'}",
+        f"Activation probe: {activation}",
+        "Probe command: fixed /usr/bin/true; no model call, user argv, Session write, or Action Audit entry.",
+    ]
+    if inspection.result_code is not None:
+        lines.append(f"Probe result: {_safe_inline(inspection.result_code)}")
+    if not inspection.available:
+        lines.append(
+            "Next: install or repair Linux /usr/bin/bwrap and libseccomp.so.2, then run /sandbox check again."
+        )
+    return "\n".join(lines)
+
+
+_TOOL_POLICY_LABELS = {
+    "read_file": "workspace-read",
+    "glob": "workspace-read",
+    "grep": "workspace-read",
+    "write_file": "workspace-create/overwrite",
+    "edit_file": "workspace-overwrite",
+    "run_command": "dangerous",
+    "mkdir": "workspace-create",
+    "move_file": "workspace-move",
+    "delete_file": "workspace-delete",
+    "delete_directory": "workspace-delete",
+    "list_directory": "workspace-read",
+    "copy_file": "workspace-create",
+    "read_file_lines": "workspace-read",
+    "stat_path": "workspace-read",
+    "list_tree": "workspace-read",
+    "grep_regex": "workspace-read",
+    "patch_file": "workspace-overwrite",
+    "git_status": "workspace-read",
+    "git_diff": "workspace-read",
+    "git_log": "workspace-read",
+    "git_show": "workspace-read",
+}
+
+
+def render_tool_catalog(status: ProjectStatusView) -> str:
+    """Render canonical tools with current policy availability, not argument schemas."""
+    mode = getattr(status.permission_mode, "value", str(status.permission_mode))
+    approval = getattr(status.approval_mode, "value", str(status.approval_mode))
+    lines = [
+        f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order",
+        f"Current policy: permission={mode}, approval={approval}",
+        "Availability below is policy-level; every request still passes tool hard validation.",
+    ]
+    for index, definition in enumerate(TOOL_CATALOG, start=1):
+        policy = _TOOL_POLICY_LABELS[definition.name]
+        if policy == "workspace-read":
+            availability = "available"
+        elif policy == "dangerous":
+            if mode != "danger-full-access":
+                availability = "denied by current permission mode"
+            elif not status.sandbox.dependencies.ready:
+                availability = "sandbox dependencies unavailable"
+            else:
+                availability = f"available ({approval}; sandbox required)"
+        elif mode == "read-only":
+            availability = "denied by current permission mode"
+        else:
+            availability = f"available ({approval})"
+        lines.append(f"{index:>2}. {definition.name}: {policy}; {availability}")
+    lines.append(
+        "Use /tools for durable per-turn tool ledgers and /tools details for request outcomes."
+    )
+    return "\n".join(lines)
+
+
+def _sandbox_summary(
+    inspection: CommandSandboxInspectionView,
+    *,
+    activation_required: bool,
+) -> str:
+    dependencies = inspection.dependencies
+    if not dependencies.platform_supported:
+        return "unavailable (Linux required)"
+    if not dependencies.bubblewrap_available:
+        return "unavailable (/usr/bin/bwrap missing or unusable)"
+    if not dependencies.seccomp_available:
+        return "unavailable (libseccomp filter unavailable)"
+    if inspection.activation_verified is False:
+        code = inspection.result_code or "activation_failed"
+        return f"unavailable ({_safe_inline(code)})"
+    if inspection.activation_verified is True:
+        return "ready; activation verified"
+    return "dependencies ready; run /sandbox check" if activation_required else "dependencies ready"
+
+
 def render_output_budget(status: RuntimeStatusView) -> tuple[str, MessageKind]:
     """Render effective and configured output limits without mutating runtime state."""
     if status.mode != "real" or status.max_output_tokens is None:
@@ -1125,10 +1296,11 @@ def render_prompt_event(
             kind = "warning"
         else:
             kind = "error"
-        return (
-            f"[tool {event.call_index}/{event.call_limit}] {event.status.value}{detail}",
-            kind,
-        )
+        message = f"[tool {event.call_index}/{event.call_limit}] {event.status.value}{detail}"
+        guidance = tool_result_guidance(event.tool_name, event.result_code)
+        if guidance is not None:
+            message = f"{message}\n{guidance}"
+        return message, kind
     if isinstance(event, ToolRequestLimited):
         return (
             f"[tool {event.call_index}/{event.call_limit}] {event.tool_name} not executed: "

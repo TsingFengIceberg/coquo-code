@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from leonervis_code.cli.presentation import render_provider_adapter_error
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.compaction import CompactionError
@@ -30,6 +29,8 @@ def render_turn_failure(error: BaseException, *, provider_prefix: str = "Provide
             )
         return f"Context preflight error: {error}\n{next_step}"
     if isinstance(error, ProviderAdapterError):
+        from leonervis_code.cli.presentation import render_provider_adapter_error
+
         message = render_provider_adapter_error(error, prefix=provider_prefix)
         note = "No turn was committed. Tool side effects completed earlier remain in Action Audit."
         return f"{message}\n{note}\n{_provider_next_step(error)}"
@@ -63,6 +64,36 @@ def command_failure_guidance(error: Exception) -> str | None:
         return "Next: run /compact preview; continue without compacting when the selection is ineligible."
     if isinstance(error, GitObservationError):
         return "Next: verify the workspace is a supported Git repository root and use a workspace-relative path."
+    return None
+
+
+def tool_result_guidance(tool_name: str, result_code: str | None) -> str | None:
+    """Return a conservative next step from one trusted tool result code."""
+    if tool_name != "run_command" or result_code is None:
+        return None
+    if result_code == "command_sandbox_unavailable":
+        return "Next: run /sandbox check; the requested command was not started."
+    if result_code == "command_cwd_invalid":
+        return "Next: verify the workspace-relative cwd before requesting a new command."
+    if result_code == "command_exited_nonzero":
+        return "Next: inspect the reported stdout, stderr, and exit code before changing or rerunning the command."
+    if result_code == "command_signaled":
+        return "Next: inspect the signal and workspace state; do not assume command side effects were rolled back."
+    if result_code == "command_timed_out":
+        return "Next: inspect workspace state and /actions last before deciding whether a longer timeout is safe."
+    if result_code == "command_cancelled":
+        return (
+            "Next: inspect workspace state and /actions last before requesting the command again."
+        )
+    if result_code in {
+        "command_timeout_cleanup_incomplete",
+        "command_cancel_cleanup_incomplete",
+        "command_cleanup_incomplete",
+        "command_sandbox_cleanup_incomplete",
+    }:
+        return (
+            "Next: process cleanup is uncertain; inspect the Host and workspace before any retry."
+        )
     return None
 
 

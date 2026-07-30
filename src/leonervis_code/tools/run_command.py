@@ -17,11 +17,12 @@ import time
 
 from leonervis_code.core.actions import ActionPrecondition
 from leonervis_code.core.cancellation import TurnCancellation
-from leonervis_code.core.contracts import ToolResult, ToolUse
+from leonervis_code.core.contracts import ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.tools.command_sandbox import (
     CommandSandbox,
+    CommandSandboxDependencies,
     CommandSandboxUnavailable,
     LinuxBubblewrapCommandSandbox,
     SANDBOX_STATUS_MAX_BYTES,
@@ -161,6 +162,19 @@ class RunCommandExecutionResult:
     observation: RunCommandExecutionObservation
 
 
+@dataclass(frozen=True)
+class CommandSandboxInspection:
+    """One read-only dependency check with optional activation verification."""
+
+    dependencies: CommandSandboxDependencies
+    activation_verified: bool | None
+    result_code: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.dependencies.ready and self.activation_verified is not False
+
+
 class RunCommandPreparationError(ValueError):
     """Reject malformed or unsafe-to-prepare command requests before permission policy."""
 
@@ -194,6 +208,41 @@ class RunCommandTool:
             raise ValueError("workspace must be an existing directory")
         self._environment = dict(os.environ if environment is None else environment)
         self._command_sandbox = command_sandbox or LinuxBubblewrapCommandSandbox()
+
+    def inspect_sandbox(self, *, verify_activation: bool = False) -> CommandSandboxInspection:
+        """Inspect dependencies and optionally run one fixed activation probe."""
+        if type(verify_activation) is not bool:
+            raise ValueError("sandbox activation verification flag is invalid")
+        inspect_dependencies = getattr(self._command_sandbox, "inspect_dependencies", None)
+        if not callable(inspect_dependencies):
+            dependencies = CommandSandboxDependencies(
+                platform="unknown",
+                platform_supported=False,
+                bubblewrap_path="<custom>",
+                bubblewrap_available=False,
+                seccomp_available=False,
+            )
+            return CommandSandboxInspection(dependencies, False, "sandbox_status_unavailable")
+        dependencies = inspect_dependencies()
+        if type(dependencies) is not CommandSandboxDependencies:
+            raise ValueError("command sandbox dependency inspection is invalid")
+        if not verify_activation or not dependencies.ready:
+            return CommandSandboxInspection(dependencies, None)
+
+        request = ToolUse(
+            "sandbox-check",
+            RUN_COMMAND_TOOL_NAME,
+            ToolArguments.from_mapping(
+                {
+                    "argv": ["/usr/bin/true"],
+                    "cwd": ".",
+                    "timeout_seconds": 5,
+                }
+            ),
+        )
+        result = self.execute_detailed(self.prepare(request))
+        verified = result.result_code == "command_succeeded"
+        return CommandSandboxInspection(dependencies, verified, result.result_code)
 
     def prepare(self, request: ToolUse) -> PreparedRunCommand:
         """Validate and freeze one exact command request without starting a process."""

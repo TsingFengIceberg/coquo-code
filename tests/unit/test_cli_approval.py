@@ -341,7 +341,10 @@ def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
     assert "argv=('uv', 'run', 'pytest', 'tests/unit')" in rendered
     assert "cwd='.'" in rendered
     assert "timeout=60s" in rendered
-    assert "no shell parsing, OS/filesystem/network sandbox, or rollback" in rendered
+    assert "without shell parsing or rollback" in rendered
+    assert "Host filesystem read-only" in rendered
+    assert "workspace writable" in rendered
+    assert "socket creation denied" in rendered
     assert "PWD" not in rendered
 
 

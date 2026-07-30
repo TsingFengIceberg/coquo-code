@@ -31,6 +31,7 @@ from leonervis_code.cli.frontend import (
     reduce_terminal_state,
 )
 from leonervis_code.cli.terminal_app import TerminalApplication
+from leonervis_code.cli.presentation import CLEAR_SCREEN
 from leonervis_code.core.action_coordinator import (
     ApprovalResolution,
     HumanApprovalRequest,
@@ -228,6 +229,26 @@ class _FailingSession:
         raise RuntimeError("provider unavailable")
 
 
+class _HistorySession:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self._turns = (
+            SimpleNamespace(user=SimpleNamespace(text="older diagnostic prompt")),
+            SimpleNamespace(user=SimpleNamespace(text="newer implementation prompt")),
+        )
+
+    @property
+    def turns(self):
+        return self._turns
+
+    def prompt(self, text, *, event_sink, include_tool_details, cancellation):
+        del include_tool_details, cancellation
+        self.prompts.append(text)
+        event_sink(AssistantResponseTextDeltaReceived("history reply"))
+        event_sink(AssistantFinalTextStreamCommitted("history reply"))
+        return "history reply"
+
+
 def test_persistent_application_commit_status_does_not_split_or_duplicate_stream(
     tmp_path: Path,
 ) -> None:
@@ -336,6 +357,73 @@ def test_persistent_application_keeps_failure_inside_turn_trace(tmp_path: Path) 
     rendered = stdout.getvalue()
     assert "  │ Turn failed: RuntimeError: provider unavailable" in rendered
     assert rendered.index("  │ Turn failed") < rendered.index(f"  {'─' * 24}")
+
+
+def test_persistent_application_clear_writes_terminal_reset_without_session_mutation(
+    tmp_path: Path,
+) -> None:
+    session = _HistorySession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("/clear\r")
+        _wait_until(lambda: CLEAR_SCREEN in stdout.getvalue())
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert session.prompts == []
+
+
+def test_persistent_application_ctrl_r_searches_current_session_prompt_history(
+    tmp_path: Path,
+) -> None:
+    session = _HistorySession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("\x12older")
+        _wait_until(lambda: terminal._search_toolbar.control.buffer.text == "older")
+        pipe.send_text("\r")
+        _wait_until(lambda: terminal.draft == "older diagnostic prompt")
+        pipe.send_text("\r")
+        _wait_until(lambda: session.prompts == ["older diagnostic prompt"])
+        _wait_until(lambda: not terminal.state.busy)
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
 
 
 def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: Path) -> None:

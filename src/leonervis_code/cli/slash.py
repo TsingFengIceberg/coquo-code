@@ -29,11 +29,13 @@ from leonervis_code.cli.presentation import (
     render_context_inspection,
     render_compact_preview,
     render_compaction_history,
+    render_command_sandbox_inspection,
     render_git_diff,
     render_git_log,
     render_git_show,
     render_git_status,
     render_provider_adapter_error,
+    render_project_status,
     render_output_budget,
     render_output_budget_rejection,
     render_output_budget_update,
@@ -52,6 +54,7 @@ from leonervis_code.cli.presentation import (
     render_session_turn_range,
     render_switch_rejection,
     render_tool_ledgers,
+    render_tool_catalog,
     render_durable_usage_summary,
     render_usage_summary,
 )
@@ -88,6 +91,7 @@ TOP_LEVEL_COMMANDS = (
     "/exit",
     "/quit",
     "/status",
+    "/sandbox",
     "/context",
     "/usage",
     "/output",
@@ -127,6 +131,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/commit", "Show one reachable Git commit", True),
     SlashCompletionSpec("/commits", "Show recent reachable Git commits", True),
     SlashCompletionSpec("/status", "Show runtime status", True),
+    SlashCompletionSpec("/sandbox", "Command sandbox diagnostics", True),
+    SlashCompletionSpec("/sandbox check", "Verify command sandbox activation"),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
     SlashCompletionSpec("/usage session", "Show durable Session usage"),
@@ -162,6 +168,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session switch", "Build or use a recent Session picker"),
     SlashCompletionSpec("/session switch list", "Refresh the Session picker with filters"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
+    SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
+    SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
     SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
     SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
     SlashCompletionSpec("/tool-details full", "Show bounded structured tool details"),
@@ -185,6 +193,10 @@ class ReplSession(Protocol):
     def git_show(self, commit_id: str, path: str): ...
 
     def status(self): ...
+
+    def project_status(self): ...
+
+    def inspect_command_sandbox(self): ...
 
     def inspect_context(self): ...
 
@@ -315,9 +327,17 @@ def dispatch_slash(
     if command == "/provider":
         return _info(PROVIDER_HELP)
     if command == "/status":
-        return _call(lambda: render_runtime_status(session.status()), kind="info")
+        return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):
         return _usage("Usage: /status")
+    if command == "/sandbox" or command == "/sandbox check":
+        return _call(
+            lambda: render_command_sandbox_inspection(session.inspect_command_sandbox()),
+            kind="info",
+            failure_prefix="Sandbox check failed",
+        )
+    if command.startswith("/sandbox "):
+        return _usage("Usage: /sandbox check")
     if command == "/context":
         try:
             message, kind = render_context_inspection(session.inspect_context())
@@ -501,6 +521,8 @@ def _commit(command: str, session: ReplSession) -> SlashResult:
 
 def _actions(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
+    if parts == ["/actions", "last"]:
+        return _call(lambda: render_action_audits(session.action_audits(), 1), kind="info")
     count = DEFAULT_ACTION_AUDIT_COUNT
     status_filter: str | None = None
     tool_filter: str | None = None
@@ -537,11 +559,16 @@ def _actions(command: str, session: ReplSession) -> SlashResult:
 
 
 def _actions_usage() -> SlashResult:
-    return _usage(f"Usage: /actions [1-{MAX_ACTION_AUDIT_COUNT}] [status=<status>] [tool=<name>]")
+    return _usage(
+        f"Usage: /actions last | /actions [1-{MAX_ACTION_AUDIT_COUNT}] "
+        "[status=<status>] [tool=<name>]"
+    )
 
 
 def _tools(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
+    if parts == ["/tools", "catalog"]:
+        return _call(lambda: render_tool_catalog(session.project_status()), kind="info")
     details = False
     if len(parts) == 1:
         count = DEFAULT_TOOL_LEDGER_COUNT
@@ -566,7 +593,8 @@ def _tools(command: str, session: ReplSession) -> SlashResult:
         details = True
     else:
         return _usage(
-            f"Usage: /tools [1-{MAX_TOOL_LEDGER_COUNT}] | /tools details [1-{MAX_TOOL_LEDGER_COUNT}]"
+            f"Usage: /tools catalog | /tools [1-{MAX_TOOL_LEDGER_COUNT}] | "
+            f"/tools details [1-{MAX_TOOL_LEDGER_COUNT}]"
         )
     return _call(
         lambda: render_tool_ledgers(session.tool_ledgers(count), details=details),

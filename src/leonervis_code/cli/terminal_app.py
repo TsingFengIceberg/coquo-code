@@ -13,11 +13,15 @@ from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer
 from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.filters import is_searching
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.emacs import load_emacs_search_bindings
+from prompt_toolkit.key_binding.key_bindings import KeyBindingsBase, merge_key_bindings
 from prompt_toolkit.layout import BufferControl, FormattedTextControl, HSplit, Layout, Window
 from prompt_toolkit.output import Output
+from prompt_toolkit.widgets import SearchToolbar
 
 from leonervis_code.cli.approval import TerminalApprovalBroker, render_approval_request
 from leonervis_code.cli.event_sink import TerminalEventSink
@@ -188,13 +192,20 @@ class TerminalApplication:
             history=self._history,
             tempfile_suffix=".txt",
         )
+        self._search_toolbar = SearchToolbar(
+            backward_search_prompt="History search: ",
+            forward_search_prompt="History search forward: ",
+            ignore_case=True,
+        )
         control = BufferControl(
             buffer=self._buffer,
             include_default_input_processors=True,
+            search_buffer_control=self._search_toolbar.control,
         )
         body = HSplit(
             [
                 Window(control, wrap_lines=True, get_line_prefix=self._line_prefix),
+                self._search_toolbar,
                 Window(
                     FormattedTextControl(self._toolbar),
                     height=1,
@@ -405,10 +416,10 @@ class TerminalApplication:
         separator = render_message_separator(width, color=self._color)
         return f"\n{prompt}\n\n{result}\n\n{separator}\n"
 
-    def _bindings(self) -> KeyBindings:
+    def _bindings(self) -> KeyBindingsBase:
         bindings = KeyBindings()
 
-        @bindings.add("enter", eager=True)
+        @bindings.add("enter", filter=~is_searching, eager=True)
         def submit(event) -> None:
             if self._state.phase == TerminalPhase.APPROVAL:
                 self._submit_approval()
@@ -419,11 +430,11 @@ class TerminalApplication:
                 return
             event.current_buffer.validate_and_handle()
 
-        @bindings.add("escape", "enter", eager=True)
+        @bindings.add("escape", "enter", filter=~is_searching, eager=True)
         def newline(event) -> None:
             event.current_buffer.insert_text("\n")
 
-        @bindings.add("c-c", eager=True)
+        @bindings.add("c-c", filter=~is_searching, eager=True)
         def cancel(event) -> None:
             if self._turn_starting:
                 self._cancel_pending_start = True
@@ -441,7 +452,7 @@ class TerminalApplication:
             else:
                 event.app.exit(result=None)
 
-        @bindings.add("c-d", eager=True)
+        @bindings.add("c-d", filter=~is_searching, eager=True)
         def exit_or_delete(event) -> None:
             buffer = event.current_buffer
             if self._turn_starting:
@@ -462,7 +473,7 @@ class TerminalApplication:
             elif buffer.cursor_position < len(buffer.text):
                 buffer.delete(1)
 
-        return bindings
+        return merge_key_bindings((bindings, load_emacs_search_bindings()))
 
     def _submit_approval(self) -> None:
         resolution = _parse_approval(self._buffer.text)

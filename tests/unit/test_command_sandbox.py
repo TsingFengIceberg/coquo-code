@@ -156,6 +156,29 @@ def test_missing_bwrap_and_seccomp_setup_failure_fail_before_launch(tmp_path: Pa
         )
 
 
+def test_dependency_inspection_is_content_free_and_does_not_spawn(tmp_path: Path) -> None:
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    ready = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+    ).inspect_dependencies()
+    missing = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=tmp_path / "missing",
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+    ).inspect_dependencies()
+
+    assert ready.ready
+    assert ready.bubblewrap_available
+    assert ready.seccomp_available
+    assert not missing.ready
+    assert not missing.bubblewrap_available
+    assert not missing.seccomp_available
+
+
 def test_run_command_reports_unavailable_without_host_fallback(tmp_path: Path) -> None:
     marker = tmp_path / "must-not-exist"
     sandbox = LinuxBubblewrapCommandSandbox(
@@ -206,6 +229,21 @@ def test_invalid_or_missing_activation_report_is_rejected() -> None:
     assert not sandbox_activation_succeeded(b"", read_error=False)
     assert not sandbox_activation_succeeded(b'{"child-pid":0}\n', read_error=False)
     assert not sandbox_activation_succeeded(b'{"child-pid":12}\n', read_error=True)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or shutil.which("bwrap") is None
+    or ctypes.util.find_library("seccomp") is None,
+    reason="Linux bubblewrap and libseccomp are required",
+)
+def test_real_sandbox_inspection_verifies_fixed_activation_probe(tmp_path: Path) -> None:
+    inspection = RunCommandTool(tmp_path).inspect_sandbox(verify_activation=True)
+
+    assert inspection.dependencies.ready
+    assert inspection.activation_verified is True
+    assert inspection.available
+    assert inspection.result_code == "command_succeeded"
 
 
 @pytest.mark.skipif(

@@ -215,6 +215,7 @@ from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, Read
 from leonervis_code.tools.glob import GLOB_TOOL_NAME
 from leonervis_code.tools.grep import GREP_TOOL_NAME
 from leonervis_code.tools.run_command import (
+    CommandSandboxInspection,
     RUN_COMMAND_TOOL_NAME,
     PreparedRunCommand,
     RunCommandExecutionObservation,
@@ -231,7 +232,12 @@ from leonervis_code.tools.write_file import (
     WriteFileTool,
 )
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
-from leonervis_code.tools.catalog import MAX_PROVIDER_INVOCATIONS_PER_TURN
+from leonervis_code.tools.catalog import (
+    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+    MAX_TOOL_CALLS_PER_RESPONSE,
+    MAX_TOOL_REQUESTS_PER_TURN,
+    TOOL_CATALOG,
+)
 
 
 class ResumeEffect(StrEnum):
@@ -360,6 +366,22 @@ class AutoCompactionNotApplied:
 @dataclass(frozen=True)
 class TurnUsageCompleted:
     usage: RuntimeUsageSnapshot
+
+
+@dataclass(frozen=True)
+class ProjectStatus:
+    """One process-local Host workbench snapshot without provider invocation."""
+
+    runtime: RuntimeStatus
+    session: SessionInfo
+    usage: RuntimeUsageSnapshot
+    permission_mode: PermissionMode
+    approval_mode: ApprovalMode
+    sandbox: CommandSandboxInspection
+    tool_count: int = len(TOOL_CATALOG)
+    calls_per_response: int = MAX_TOOL_CALLS_PER_RESPONSE
+    requests_per_turn: int = MAX_TOOL_REQUESTS_PER_TURN
+    provider_invocations_per_turn: int = MAX_PROVIDER_INVOCATIONS_PER_TURN
 
 
 @dataclass(frozen=True)
@@ -1636,6 +1658,26 @@ class ProjectSession:
     def status(self) -> RuntimeStatus:
         self._ensure_open()
         return self._manager.status()
+
+    def project_status(self) -> ProjectStatus:
+        """Return local runtime, Session, policy, budget, and sandbox readiness facts."""
+        with self._lock:
+            self._ensure_open()
+            return ProjectStatus(
+                runtime=self._manager.status(),
+                session=self._writer.info,
+                usage=self._manager.usage_snapshot(),
+                permission_mode=self._permission_mode,
+                approval_mode=self._approval_mode,
+                sandbox=self._run_command.inspect_sandbox(),
+            )
+
+    def inspect_command_sandbox(self) -> CommandSandboxInspection:
+        """Verify the production sandbox with one fixed, non-user-controlled command."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._run_command.inspect_sandbox(verify_activation=True)
 
     def usage(self) -> RuntimeUsageSnapshot:
         self._ensure_open()

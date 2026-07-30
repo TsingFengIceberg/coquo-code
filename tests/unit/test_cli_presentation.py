@@ -1296,6 +1296,30 @@ def test_command_result_metadata_renders_compact_or_full_without_output_content(
     assert "TOP_SECRET" not in render_prompt_event(event)[0]
 
 
+@pytest.mark.parametrize(
+    ("result_code", "guidance"),
+    [
+        ("command_sandbox_unavailable", "run /sandbox check"),
+        ("command_timed_out", "inspect workspace state and /actions last"),
+        ("command_signaled", "do not assume command side effects were rolled back"),
+        ("command_cleanup_incomplete", "process cleanup is uncertain"),
+    ],
+)
+def test_command_failures_append_result_code_guidance(result_code: str, guidance: str) -> None:
+    message, kind = render_prompt_event(
+        ToolRequestFinished(
+            "run_command",
+            1,
+            32,
+            ToolEventStatus.FAILED,
+            result_code,
+        )
+    )
+
+    assert guidance in message
+    assert kind == "error"
+
+
 def test_colored_readline_prompt_marks_only_nonprinting_sequences() -> None:
     prompt = render_prompt(status(), Info(), color=True, readline=True)
 

@@ -21,6 +21,7 @@
 - [Foundation 4C Slices 4–6: Bounded Command Execution and Process-group Cleanup](#foundation-4c-slices-46-bounded-command-execution-and-process-group-cleanup)
 - [Foundation 4C Slices 7–9: Durable Model-visible Command Integration](#foundation-4c-slices-79-durable-model-visible-command-integration)
 - [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
+- [Host Workbench Diagnostics and Prompt History Search](#host-workbench-diagnostics-and-prompt-history-search)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -411,6 +412,14 @@ Production `run_command` now always executes through fixed `/usr/bin/bwrap`. The
 This Host cannot reliably create a network namespace, so it generates a BPF filter through `libseccomp.so.2` and has bubblewrap install it after mount/namespace setup. The filter denies `socket`, `socketcall` when available, and `io_uring_setup`, blocking both Internet and Unix-domain socket creation. Bubblewrap must produce private `--info-fd` activation evidence, while `--block-fd` prevents requested argv from starting before Host validation and release. Missing Linux support, fixed bwrap, libseccomp, filter setup, spawn, or activation returns `command_sandbox_unavailable`; the original argv is never retried directly on the Host.
 
 PermissionGate remains orthogonal: `run_command` still proceeds only within `danger-full-access` under ask or auto, and approval never disables sandboxing. Direct argv, `shell=False`, closed stdin/environment, the 1-to-300-second timeout, independent 32 KiB stdout/stderr retention, continuous drain, cancellation, and TERM-to-KILL process-group cleanup remain. Tool name, order, schema, provider projection, adapter contract v25, ToolArguments v1, ActionIdentity v1, Action Audit, and Session schemas do not change. The model-visible guarantee advances the system prompt to v22 and updates the current empty full-context identity to `ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`. See [0080: Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md).
+
+## Host Workbench Diagnostics and Prompt History Search
+
+`/status` now combines one local-only `ProjectStatus` snapshot containing the current Session, permission/approval modes, latest observed context pressure, all three tool budgets, sandbox dependencies, and the existing redacted runtime status. It performs no provider count or generation, executes no user command, and modifies neither Session nor Action Audit. `/sandbox check` separately uses the production `RunCommandTool` activation path to execute fixed `/usr/bin/true`, verifying Linux, fixed bubblewrap, seccomp-filter construction, and the activation gate. The probe contains no user argv or model call and creates no durable audit; it authorizes no later command, and failure still has no Host fallback.
+
+Existing `/tools` retains its durable-tool-ledger meaning. New `/tools catalog` displays permission classes and current-mode availability in canonical 21-tool order without breaking the old command. `/actions last` selects only the newest strictly replayed Action Audit view. Command approval now states the actual read-only Host, writable workspace, and socket-denial boundary. Trusted `run_command` result codes append conservative `Next:` guidance, while timeout, signal, cancellation, or cleanup uncertainty never triggers automatic retry or a rollback claim.
+
+The persistent TTY connects Ctrl-R to a dedicated prompt_toolkit SearchToolbar for case-insensitive reverse search over the current Session's latest 1,000 committed user prompts. Accepting a match restores one editable draft and requires another Enter to submit. Existing history replacement on Session switches prevents cross-Session search. The existing `/clear` command gains real frontend regression coverage proving that it writes only the terminal reset sequence and calls no model or Session/history/transcript mutation. This slice changes only the Host workbench and input presentation: canonical system prompt remains v22, adapter contract remains v25, and the 21-tool schema/order, Effective Context identities, and all Session/Action Audit schemas remain unchanged. See [0081: Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1030,3 +1039,4 @@ This slice establishes capacity facts only. It does not count current request to
 78. [0078: Provenance-linked Session Forking](./decisions/0078-provenance-linked-session-forking.md)
 79. [0079: Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)
 80. [0080: Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)
+81. [0081: Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)

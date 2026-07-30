@@ -21,6 +21,7 @@
 - [Foundation 4C Slice 4–6：Bounded Command Execution与Process-group Cleanup](#foundation-4c-slice-46bounded-command-execution与process-group-cleanup)
 - [Foundation 4C Slice 7–9：Durable Model-visible Command Integration](#foundation-4c-slice-79durable-model-visible-command-integration)
 - [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
+- [Host Workbench Diagnostics 与 Prompt History Search](#host-workbench-diagnostics-与-prompt-history-search)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -411,6 +412,14 @@ ToolArguments保持v1，new `turn_committed`保持schema v2，ActionIdentity与A
 本机无法可靠创建network namespace，因此Host用`libseccomp.so.2`生成BPF，在bubblewrap完成mount/namespace setup后禁止`socket`、可用时的`socketcall`及`io_uring_setup`。这同时拒绝Internet与Unix-domain socket创建。Bubblewrap必须通过私有`--info-fd`提供activation evidence，`--block-fd`会在Host验证并放行前阻止请求argv启动；Linux、固定bwrap、libseccomp、filter、spawn或activation任一步不可用都返回`command_sandbox_unavailable`，绝不把原argv降级为Host直接执行。
 
 PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内按ask/auto继续，approval不关闭沙箱。Direct argv、`shell=False`、closed stdin/environment、1–300秒timeout、stdout/stderr各32 KiB retention、持续drain、取消与TERM到KILL process-group cleanup均保持。工具名、顺序、schema、provider projection、adapter contract v25、ToolArguments v1、ActionIdentity v1、Action Audit与Session schema均不变；模型可见保证使system prompt升级到v22，current empty full-context identity更新为`ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`。完整决策见[0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)。
+
+## Host Workbench Diagnostics 与 Prompt History Search
+
+`/status`现在组合一个纯本地`ProjectStatus`快照，显示当前Session、permission/approval、最近一次已观察context压力、三层tool预算、沙箱依赖和既有脱敏runtime信息。它不发起provider count/generation、不执行用户命令、不修改Session或Action Audit。`/sandbox check`另行使用生产`RunCommandTool`的同一activation路径执行固定`/usr/bin/true`，验证Linux、固定bubblewrap、seccomp filter和activation gate；probe没有用户argv、模型调用或持久审计，也不授权后续命令，失败仍保持无Host fallback。
+
+既有`/tools`继续表示持久工具账本；新增`/tools catalog`按规范21-tool顺序显示权限分类与当前mode可用性，避免破坏旧命令语义。`/actions last`只复用严格replay后的Action Audit视图选择最新一条。Command approval修正为显示真实的只读Host、可写workspace与socket拒绝边界；可信`run_command` result code会附加保守`Next:`建议，timeout、signal、cancel或cleanup uncertainty均不会触发自动retry或rollback声称。
+
+常驻TTY为Ctrl-R接入独立prompt_toolkit SearchToolbar，对当前Session最近1000条已提交user prompt做大小写不敏感反向搜索。搜索接受后只恢复一份可编辑draft，仍需再次Enter才提交；Session切换沿用既有history replacement，不跨Session搜索。已有`/clear`获得真实frontend回归覆盖，确认只写terminal reset sequence，不调用模型或修改Session/history/transcript。该切片只改变Host workbench与输入呈现：canonical system prompt保持v22、adapter contract保持v25、21-tool schema/order、Effective Context identity及全部Session/Action Audit schema不变。详见[0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1030,3 +1039,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 78. [0078：Provenance-linked Session Forking](./decisions/0078-provenance-linked-session-forking.md)
 79. [0079：Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)
 80. [0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)
+81. [0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)

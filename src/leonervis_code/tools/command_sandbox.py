@@ -61,6 +61,21 @@ class CommandSandboxUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CommandSandboxDependencies:
+    """Content-free readiness facts for the production Linux sandbox."""
+
+    platform: str
+    platform_supported: bool
+    bubblewrap_path: str
+    bubblewrap_available: bool
+    seccomp_available: bool
+
+    @property
+    def ready(self) -> bool:
+        return self.platform_supported and self.bubblewrap_available and self.seccomp_available
+
+
+@dataclass(frozen=True)
 class CommandSandboxLaunch:
     """One exact process launch plus descriptors owned by the Host."""
 
@@ -212,6 +227,36 @@ class LinuxBubblewrapCommandSandbox:
                 ):
                     if descriptor is not None:
                         _close_fd(descriptor)
+
+    def inspect_dependencies(self) -> CommandSandboxDependencies:
+        """Check required local dependencies without starting a requested command."""
+        platform_supported = self._platform == "linux"
+        bubblewrap_available = False
+        seccomp_available = False
+        if platform_supported:
+            try:
+                self._validated_bubblewrap_path()
+            except CommandSandboxUnavailable:
+                pass
+            else:
+                bubblewrap_available = True
+            if bubblewrap_available:
+                descriptor: int | None = None
+                try:
+                    descriptor = self._seccomp_filter_factory()
+                    seccomp_available = type(descriptor) is int and descriptor >= 0
+                except (CommandSandboxUnavailable, OSError, ValueError):
+                    pass
+                finally:
+                    if descriptor is not None:
+                        _close_fd(descriptor)
+        return CommandSandboxDependencies(
+            platform=self._platform,
+            platform_supported=platform_supported,
+            bubblewrap_path=str(self._bubblewrap_path),
+            bubblewrap_available=bubblewrap_available,
+            seccomp_available=seccomp_available,
+        )
 
     def _validated_bubblewrap_path(self) -> Path:
         path = self._bubblewrap_path
