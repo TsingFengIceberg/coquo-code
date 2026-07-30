@@ -20,6 +20,13 @@ from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.core.contracts import ToolResult, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.tools.command_sandbox import (
+    CommandSandbox,
+    CommandSandboxUnavailable,
+    LinuxBubblewrapCommandSandbox,
+    SANDBOX_STATUS_MAX_BYTES,
+    sandbox_activation_succeeded,
+)
 
 RUN_COMMAND_TOOL_NAME = "run_command"
 MAX_COMMAND_ARGUMENTS = 64
@@ -36,6 +43,7 @@ MAX_COMMAND_STDERR_BYTES = 32 * 1024
 COMMAND_TERMINATE_GRACE_SECONDS = 1.0
 COMMAND_KILL_GRACE_SECONDS = 1.0
 COMMAND_PIPE_DRAIN_GRACE_SECONDS = 1.0
+COMMAND_SANDBOX_ACTIVATION_GRACE_SECONDS = 1.0
 COMMAND_ENVIRONMENT_ALLOWLIST = (
     "HOME",
     "LANG",
@@ -80,6 +88,7 @@ class RunCommandExecutionStatus(StrEnum):
     """Trusted Host observation of the command process lifecycle."""
 
     SPAWN_REJECTED = "spawn-rejected"
+    SANDBOX_REJECTED = "sandbox-rejected"
     SPAWN_FAILED = "spawn-failed"
     EXITED = "exited"
     SIGNALED = "signaled"
@@ -173,11 +182,18 @@ class _BoundedCapture:
 class RunCommandTool:
     """Prepare and execute one direct bounded command without shell interpretation."""
 
-    def __init__(self, workspace: Path, environment: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        environment: Mapping[str, str] | None = None,
+        *,
+        command_sandbox: CommandSandbox | None = None,
+    ) -> None:
         self._workspace = workspace.resolve()
         if not self._workspace.is_dir():
             raise ValueError("workspace must be an existing directory")
         self._environment = dict(os.environ if environment is None else environment)
+        self._command_sandbox = command_sandbox or LinuxBubblewrapCommandSandbox()
 
     def prepare(self, request: ToolUse) -> PreparedRunCommand:
         """Validate and freeze one exact command request without starting a process."""
@@ -236,7 +252,7 @@ class RunCommandTool:
         *,
         cancellation: TurnCancellation | None = None,
     ) -> RunCommandExecutionResult:
-        """Run argv directly with bounded output, timeout, and process-group cleanup."""
+        """Run argv in the required sandbox with bounded output and process cleanup."""
         if type(prepared) is not PreparedRunCommand:
             raise ValueError("prepared run_command is invalid")
         if cancellation is not None and type(cancellation) is not TurnCancellation:
@@ -287,19 +303,37 @@ class RunCommandTool:
         stdout_capture = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
         stderr_capture = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
 
+        try:
+            launch = self._command_sandbox.prepare_launch(
+                workspace=self._workspace,
+                cwd=cwd,
+                argv=prepared.argv,
+                environment=environment,
+            )
+        except CommandSandboxUnavailable:
+            return self._sandbox_unavailable(prepared)
+
         started = time.monotonic()
         try:
             process = subprocess.Popen(
-                prepared.argv,
-                cwd=cwd,
-                env=environment,
+                launch.argv,
+                cwd=launch.cwd,
+                env=launch.environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
                 start_new_session=True,
+                pass_fds=launch.pass_fds,
             )
         except (OSError, ValueError):
+            sandbox_expected = launch.activation_read_fd is not None
+            launch.close_without_spawn()
+            if sandbox_expected:
+                return self._sandbox_unavailable(
+                    prepared,
+                    duration_ms=_elapsed_milliseconds(started),
+                )
             observation = _execution_observation(
                 status=RunCommandExecutionStatus.SPAWN_FAILED,
                 returncode=None,
@@ -321,14 +355,101 @@ class RunCommandTool:
                 "run_command could not start the requested executable",
                 observation,
             )
+        launch.close_after_spawn()
 
         assert process.stdout is not None and process.stderr is not None
-        readers = (
+        readers = [
             Thread(target=_drain_pipe, args=(process.stdout, stdout_capture), daemon=True),
             Thread(target=_drain_pipe, args=(process.stderr, stderr_capture), daemon=True),
-        )
-        for reader in readers:
-            reader.start()
+        ]
+        activation_capture = _BoundedCapture(SANDBOX_STATUS_MAX_BYTES, bytearray())
+        activation_pipe = None
+        started_readers: list[Thread] = []
+        try:
+            if launch.activation_read_fd is not None:
+                activation_pipe = os.fdopen(launch.activation_read_fd, "rb", buffering=0)
+                readers.append(
+                    Thread(
+                        target=_drain_pipe,
+                        args=(activation_pipe, activation_capture),
+                        daemon=True,
+                    )
+                )
+            for reader in readers:
+                reader.start()
+                started_readers.append(reader)
+        except (OSError, RuntimeError):
+            if launch.activation_release_fd is not None:
+                try:
+                    os.close(launch.activation_release_fd)
+                except OSError:
+                    pass
+            cleanup_complete = self._terminate_process_group(process)
+            for pipe in (process.stdout, process.stderr, activation_pipe):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            if activation_pipe is None and launch.activation_read_fd is not None:
+                try:
+                    os.close(launch.activation_read_fd)
+                except OSError:
+                    pass
+            readers_complete = _join_readers(started_readers, COMMAND_PIPE_DRAIN_GRACE_SECONDS)
+            if cleanup_complete and readers_complete:
+                return self._sandbox_unavailable(
+                    prepared,
+                    duration_ms=_elapsed_milliseconds(started),
+                )
+            return self._sandbox_cleanup_incomplete(
+                prepared,
+                duration_ms=_elapsed_milliseconds(started),
+            )
+
+        if launch.activation_read_fd is not None:
+            assert activation_pipe is not None
+            activation_reader = readers[-1]
+            activation_reader.join(COMMAND_SANDBOX_ACTIVATION_GRACE_SECONDS)
+            sandbox_active = (
+                launch.activation_release_fd is not None
+                and not activation_reader.is_alive()
+                and sandbox_activation_succeeded(
+                    bytes(activation_capture.captured),
+                    read_error=(
+                        activation_capture.error
+                        or activation_capture.total > activation_capture.limit
+                    ),
+                )
+            )
+            if sandbox_active:
+                assert launch.activation_release_fd is not None
+                try:
+                    os.write(launch.activation_release_fd, b"1")
+                except OSError:
+                    sandbox_active = False
+            if launch.activation_release_fd is not None:
+                try:
+                    os.close(launch.activation_release_fd)
+                except OSError:
+                    pass
+            if not sandbox_active:
+                cleanup_complete = self._terminate_process_group(process)
+                for pipe in (process.stdout, process.stderr, activation_pipe):
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+                readers_complete = _join_readers(readers, COMMAND_PIPE_DRAIN_GRACE_SECONDS)
+                if cleanup_complete and readers_complete:
+                    return self._sandbox_unavailable(
+                        prepared,
+                        duration_ms=_elapsed_milliseconds(started),
+                    )
+                return self._sandbox_cleanup_incomplete(
+                    prepared,
+                    duration_ms=_elapsed_milliseconds(started),
+                )
 
         status = RunCommandExecutionStatus.EXITED
         cleanup_complete = True
@@ -363,6 +484,11 @@ class RunCommandTool:
                     pipe.close()
                 except OSError:
                     pass
+            if activation_pipe is not None:
+                try:
+                    activation_pipe.close()
+                except OSError:
+                    pass
             readers_complete = _join_readers(readers, COMMAND_PIPE_DRAIN_GRACE_SECONDS)
         cleanup_complete = (
             cleanup_complete
@@ -370,9 +496,17 @@ class RunCommandTool:
             and not (stdout_capture.error or stderr_capture.error)
         )
 
+        if activation_pipe is not None:
+            try:
+                activation_pipe.close()
+            except OSError:
+                pass
+
         returncode = process.poll()
         if returncode is None:
             cleanup_complete = False
+        elif launch.encodes_signals_as_exit_status and 129 <= returncode <= 192:
+            returncode = -(returncode - 128)
         if interrupted:
             result_code = (
                 "command_cancelled" if cleanup_complete else "command_cancel_cleanup_incomplete"
@@ -427,6 +561,7 @@ class RunCommandTool:
             "command_cancelled": "run_command was cancelled and its process group was terminated",
             "command_cancel_cleanup_incomplete": "run_command was cancelled and cleanup is incomplete",
             "command_cleanup_incomplete": "run_command process cleanup is incomplete",
+            "command_sandbox_unavailable": "run_command sandbox was unavailable",
         }[result_code]
         return RunCommandExecutionResult(
             ToolResult(
@@ -441,6 +576,72 @@ class RunCommandTool:
             outcome,
             result_code,
             audit_message,
+            observation,
+        )
+
+    def _sandbox_cleanup_incomplete(
+        self,
+        prepared: PreparedRunCommand,
+        *,
+        duration_ms: int,
+    ) -> RunCommandExecutionResult:
+        stdout = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
+        stderr = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
+        observation = _execution_observation(
+            status=RunCommandExecutionStatus.CLEANUP_INCOMPLETE,
+            returncode=None,
+            duration_ms=duration_ms,
+            stdout=stdout,
+            stderr=stderr,
+            cleanup_complete=False,
+        )
+        return RunCommandExecutionResult(
+            ToolResult(
+                prepared.request.tool_use_id,
+                self._payload(
+                    prepared,
+                    observation=observation,
+                    stdout=stdout,
+                    stderr=stderr,
+                ),
+                is_error=True,
+            ),
+            RunCommandOutcome.PARTIAL,
+            "command_cleanup_incomplete",
+            "run_command sandbox setup failed and process cleanup is incomplete",
+            observation,
+        )
+
+    def _sandbox_unavailable(
+        self,
+        prepared: PreparedRunCommand,
+        *,
+        duration_ms: int | None = None,
+    ) -> RunCommandExecutionResult:
+        stdout = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
+        stderr = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
+        observation = _execution_observation(
+            status=RunCommandExecutionStatus.SANDBOX_REJECTED,
+            returncode=None,
+            duration_ms=duration_ms,
+            stdout=stdout,
+            stderr=stderr,
+            cleanup_complete=True,
+        )
+        return RunCommandExecutionResult(
+            ToolResult(
+                prepared.request.tool_use_id,
+                self._payload(
+                    prepared,
+                    observation=observation,
+                    stdout=stdout,
+                    stderr=stderr,
+                ),
+                is_error=True,
+            ),
+            RunCommandOutcome.FAILED,
+            "command_sandbox_unavailable",
+            "run_command sandbox is unavailable; the requested command was not started",
             observation,
         )
 
@@ -627,7 +828,7 @@ def _drain_pipe(pipe, capture: _BoundedCapture) -> None:
         capture.error = True
 
 
-def _join_readers(readers: tuple[Thread, Thread], timeout: float) -> bool:
+def _join_readers(readers: list[Thread], timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     for reader in readers:
         reader.join(max(0.0, deadline - time.monotonic()))

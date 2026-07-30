@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及21个受限工具。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。Foundation 5A暂缓。
 
 ## 目录
 
@@ -33,7 +33,7 @@ Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding 
 
 ## 快速开始
 
-要求 Python 3.12 或 3.13、最新稳定版 [uv](https://docs.astral.sh/uv/) 和 Git。项目使用 `uv.lock` 管理可复现环境。
+要求 Python 3.12 或 3.13、最新稳定版 [uv](https://docs.astral.sh/uv/) 和 Git。项目使用 `uv.lock` 管理可复现环境。模型使用`run_command`还要求Linux、`/usr/bin/bwrap`与`libseccomp.so.2`；缺少任一项时其他功能仍可使用，但命令会fail closed。
 
 ```bash
 cd leonervis-code
@@ -95,7 +95,7 @@ uv run leonervis-code --permission-mode danger-full-access --approval ask
 uv run leonervis-code --permission-mode workspace-write --approval auto prompt "修改并验证项目"
 ```
 
-REPL的`ask`审批会在`write_file`、`edit_file`和`patch_file`前显示有界candidate diff，并为copy、move、delete、mkdir和command显示必要风险事实；批准后workspace状态变化仍会stale reject。One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。21个工具的参数、权限、workspace/symlink、timeout、stale-state和durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
+REPL的`ask`审批会在`write_file`、`edit_file`和`patch_file`前显示有界candidate diff，并为copy、move、delete、mkdir和command显示必要风险事实；批准后workspace状态变化仍会stale reject，也不会关闭command沙箱。沙箱把Host root设为只读、workspace重新挂载为读写、提供私有`/tmp`、遮蔽已知HOME敏感路径并禁止socket；它不提供回滚、资源配额或敌对并发事务。One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。21个工具的参数、权限、workspace/symlink、timeout、stale-state和durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
 
 ### 配置 Provider
 
@@ -348,6 +348,7 @@ git diff --check
 - [Bounded Conversation-only Session Export](./docs/decisions/0077-bounded-conversation-export.md)：Markdown/JSON stdout对话导出及与完整审计的边界。
 - [Provenance-linked Session Forking](./docs/decisions/0078-provenance-linked-session-forking.md)：完整turn因果复制、`session_forked` v1来源与父Session不变性。
 - [Explicit Session Diagnosis and Tail Repair](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)：只读doctor、私有备份及仅未完成最终record的显式修复。
+- [Fail-closed Linux Command Sandbox](./docs/decisions/0080-fail-closed-linux-command-sandbox.md)：bubblewrap只读Host视图、workspace读写挂载、seccomp断网、敏感路径遮蔽及无降级执行。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -385,4 +386,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有模型工具仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit与Git只读变更/历史观察现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v21、provider adapter contract v25、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent与远程服务仍不可用。当前Session管理设计见[ADR 0075](./docs/decisions/0075-bounded-cross-session-final-text-search.md)至[ADR 0079](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)及[ADR 0071](./docs/decisions/0071-durable-session-naming-and-terminal-identity.md)至[ADR 0074](./docs/decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)。
+Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit、Git只读变更/历史观察与fail-closed Linux command sandbox现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v22、provider adapter contract v25、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、network allowlist、resource quota、Host sandbox bypass、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent与远程服务仍不可用。当前Session管理设计见[ADR 0075](./docs/decisions/0075-bounded-cross-session-final-text-search.md)至[ADR 0079](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)，命令隔离见[ADR 0080](./docs/decisions/0080-fail-closed-linux-command-sandbox.md)。

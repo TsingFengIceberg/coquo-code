@@ -20,6 +20,7 @@
 - [Foundation 4C Slice 0–3：Controlled Command Contract与Side-effect-free Preparation](#foundation-4c-slice-03controlled-command-contract与side-effect-free-preparation)
 - [Foundation 4C Slice 4–6：Bounded Command Execution与Process-group Cleanup](#foundation-4c-slice-46bounded-command-execution与process-group-cleanup)
 - [Foundation 4C Slice 7–9：Durable Model-visible Command Integration](#foundation-4c-slice-79durable-model-visible-command-integration)
+- [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -80,9 +81,9 @@ SystemPromptSnapshot + neutral conversation history
   -> Scripted fake: record the same request snapshot
 ```
 
-Canonical model system prompt当前为version 21。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。当前21个model-visible tools包含有界`git_status`、`git_diff`、`git_log`与`git_show`；PermissionGate、approval、Action Audit及各工具hard bounds继续由Host强制，多call response不获得并行执行许可。
+Canonical model system prompt当前为version 22。它允许一个response携带属于整批的brief companion text，并说明Host会先完整验证最多8个有序calls，再逐个执行；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。强制text-only收尾时，模型必须以最后一个真实Tool result中的`Host tool ledger:`计数为准；`unused_admission_slots`只表示未使用容量，`tool_requests_closed=true`表示即使尚有空位也不能继续调用。普通Agent仍不能主动compact。当前21个model-visible tools包含有界`git_status`、`git_diff`、`git_log`与`git_show`；PermissionGate、approval、Action Audit及各工具hard bounds继续由Host强制，多call response不获得并行执行许可。
 
-它明确不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、OS/network sandbox、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit和durability的硬约束。
+它明确说明`run_command`必须经过Linux bubblewrap与seccomp沙箱，同时不声称具备recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、non-empty directory delete、directory move、recursive mkdir、shell source string、interactive PTY、网络allowlist、资源配额、主动compact、项目指令加载或多 Agent 能力。Prompt指令也不替代Host对workspace、symlink、编码、大小、exact-state conflict、timeout/process cleanup、causality、audit、sandbox和durability的硬约束。
 
 System prompt 不属于 `ConversationItem`，所以 `/history`、`ProjectSession.history` 和 append-only Session JSONL 只保存真实 user/assistant/tool 因果链。恢复旧 Session 后，新 turn 使用当前 binary 的 canonical prompt；schema-v2/v3 compact checkpoint只保存compact prompt、summary-framing与trigger provenance，不把正常system prompt写进conversation history。
 
@@ -402,6 +403,14 @@ REPL的`approval=ask`显示argv、relative cwd与timeout；one-shot ask继续安
 Canonical tool order现为`read_file, glob, grep, write_file, edit_file, run_command`，六者继续共享每个user turn最多三次顺序执行。Anthropic与OpenAI-compatible ordinary count/create投影相同第六个closed schema，compact-summary请求仍无tools，parallel calls仍关闭。Provider adapter contract升级到v8；canonical system prompt升级到v7，empty full-context golden更新为`ctx-v1-e6b5274ea57642fd614842c58dfa74def0b6f0c1319b2c312b7c54d61b834ce3`。
 
 ToolArguments保持v1，new `turn_committed`保持schema v2，ActionIdentity与Action Audit保持v1，普通Session records保持v1，`context_compacted`继续v2/v3 replay，Effective Context representation继续`ctx-v1`/`ctx-v2`；旧transcript/checkpoint不重写，resume和compaction也不会重跑command。完整决策见[0030：Foundation 4C Durable Model-visible Command Integration](./decisions/0030-foundation-4c-durable-model-visible-command-integration.md)。
+
+## Fail-closed Linux `run_command` Sandbox
+
+生产`run_command`现在固定通过`/usr/bin/bwrap`执行。Host root以只读方式呈现，当前workspace在原绝对路径重新挂载为读写；`/tmp`为私有tmpfs，`/dev`最小化，Host `/proc`、`/sys`和`/run`被空的私有视图遮蔽。Command可见的HOME、TMP、UV cache与XDG路径指向私有`/tmp`，原HOME存在时还会遮蔽已知credential、Git、cloud、container及Agent状态路径。Workspace仍可能被命令不可逆修改，沙箱不提供rollback、resource quota或hostile-concurrency transaction。
+
+本机无法可靠创建network namespace，因此Host用`libseccomp.so.2`生成BPF，在bubblewrap完成mount/namespace setup后禁止`socket`、可用时的`socketcall`及`io_uring_setup`。这同时拒绝Internet与Unix-domain socket创建。Bubblewrap必须通过私有`--info-fd`提供activation evidence，`--block-fd`会在Host验证并放行前阻止请求argv启动；Linux、固定bwrap、libseccomp、filter、spawn或activation任一步不可用都返回`command_sandbox_unavailable`，绝不把原argv降级为Host直接执行。
+
+PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内按ask/auto继续，approval不关闭沙箱。Direct argv、`shell=False`、closed stdin/environment、1–300秒timeout、stdout/stderr各32 KiB retention、持续drain、取消与TERM到KILL process-group cleanup均保持。工具名、顺序、schema、provider projection、adapter contract v25、ToolArguments v1、ActionIdentity v1、Action Audit与Session schema均不变；模型可见保证使system prompt升级到v22，current empty full-context identity更新为`ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`。完整决策见[0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1020,3 +1029,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 77. [0077：Bounded Conversation-only Session Export](./decisions/0077-bounded-conversation-export.md)
 78. [0078：Provenance-linked Session Forking](./decisions/0078-provenance-linked-session-forking.md)
 79. [0079：Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)
+80. [0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)

@@ -7,14 +7,30 @@ from threading import Thread
 import time
 
 import leonervis_code.tools.run_command as run_command_module
+import pytest
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.cancellation import TurnCancellation
+from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
 from leonervis_code.tools.run_command import (
     MAX_COMMAND_STDOUT_BYTES,
     RunCommandExecutionStatus,
     RunCommandOutcome,
     RunCommandTool,
 )
+
+
+class _DirectTestSandbox:
+    def prepare_launch(self, *, workspace, cwd, argv, environment) -> CommandSandboxLaunch:
+        return CommandSandboxLaunch(argv=argv, cwd=cwd, environment=dict(environment))
+
+
+@pytest.fixture(autouse=True)
+def _install_direct_test_sandbox(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_command_module,
+        "LinuxBubblewrapCommandSandbox",
+        _DirectTestSandbox,
+    )
 
 
 def command(argv: list[str], *, cwd: str = ".", timeout: int = 10) -> ToolUse:
