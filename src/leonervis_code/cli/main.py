@@ -25,6 +25,7 @@ from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
     DEFAULT_SESSION_PREVIEW_TURNS,
+    DEFAULT_SESSION_SEARCH_MATCHES,
     DEFAULT_TOOL_LEDGER_COUNT,
     MAX_ACTION_AUDIT_COUNT,
     MAX_SESSION_PREVIEW_TURNS,
@@ -32,8 +33,13 @@ from leonervis_code.cli.presentation import (
     render_action_audits,
     render_resume_rejection,
     render_session_resume,
+    render_session_diagnosis,
+    render_session_export,
     render_session_preview,
+    render_session_repair,
+    render_session_search,
     render_session_summary,
+    render_session_turn_range,
     render_session_title_fallback_reason,
     render_tool_ledgers,
 )
@@ -75,6 +81,7 @@ from leonervis_code.providers.routing import (
 )
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import (
+    MAX_SESSION_SEARCH_MATCHES,
     SessionResumeCommitError,
     SessionStore,
     SessionStoreError,
@@ -153,6 +160,25 @@ def session_preview_count(value: str) -> int:
             f"session preview limit must be between 1 and {MAX_SESSION_PREVIEW_TURNS}"
         )
     return count
+
+
+def session_search_count(value: str) -> int:
+    """Accept one bounded ASCII count for cross-Session search matches."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("session search limit must be an integer")
+    count = int(value)
+    if not 1 <= count <= MAX_SESSION_SEARCH_MATCHES:
+        raise argparse.ArgumentTypeError(
+            f"session search limit must be between 1 and {MAX_SESSION_SEARCH_MATCHES}"
+        )
+    return count
+
+
+def positive_turn_number(value: str) -> int:
+    """Accept one positive ASCII 1-based turn number."""
+    if not value.isascii() or not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError("turn number must be a positive integer")
+    return int(value)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -304,6 +330,43 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SESSION_PREVIEW_TURNS,
         help=f"number of recent complete turns to show (default: {DEFAULT_SESSION_PREVIEW_TURNS})",
     )
+    session_turns = session_commands.add_parser(
+        "turns", help="show a bounded range of complete final-text turns"
+    )
+    session_turns.add_argument("selector")
+    session_turns.add_argument("start_turn", type=positive_turn_number)
+    session_turns.add_argument(
+        "--count",
+        type=session_preview_count,
+        default=DEFAULT_SESSION_PREVIEW_TURNS,
+    )
+    session_search = session_commands.add_parser(
+        "search", help="search final user and assistant text across Sessions"
+    )
+    session_search.add_argument("query")
+    session_search.add_argument(
+        "--limit",
+        type=session_search_count,
+        default=DEFAULT_SESSION_SEARCH_MATCHES,
+    )
+    session_export = session_commands.add_parser(
+        "export", help="write a bounded conversation export to stdout"
+    )
+    session_export.add_argument("selector", nargs="?", default="latest")
+    session_export.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    session_fork = session_commands.add_parser(
+        "fork", help="create a new Session from complete parent turns"
+    )
+    session_fork.add_argument("selector")
+    session_fork.add_argument("through_turn", type=positive_turn_number)
+    session_doctor = session_commands.add_parser(
+        "doctor", help="diagnose one transcript without modifying it"
+    )
+    session_doctor.add_argument("selector", nargs="?", default="latest")
+    session_repair = session_commands.add_parser(
+        "repair", help="back up and repair only an incomplete final record"
+    )
+    session_repair.add_argument("selector", nargs="?", default="latest")
     session_actions = session_commands.add_parser(
         "actions", help="show recent redacted action audits for one durable session"
     )
@@ -635,6 +698,10 @@ def render_session_info(info, stdout: TextIO) -> None:
         stdout.write(
             f"title fallback: {render_session_title_fallback_reason(info.title_fallback_reason)}\n"
         )
+    if info.forked_from_session_id is not None:
+        stdout.write(
+            f"forked from: {info.forked_from_session_id} through turn {info.forked_from_turn}\n"
+        )
     stdout.write(f"archived: {'yes' if info.archived else 'no'}\n")
     stdout.write(f"pinned: {'yes' if info.pinned else 'no'}\n")
     stdout.write(f"session ID: {info.session_id}\n")
@@ -658,6 +725,30 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
         stdout.write(
             f"{render_session_preview(store.preview(arguments.selector, arguments.limit))}\n"
         )
+        return 0
+    if arguments.session_command == "turns":
+        stdout.write(
+            f"{render_session_turn_range(store.turn_range(arguments.selector, arguments.start_turn, arguments.count))}\n"
+        )
+        return 0
+    if arguments.session_command == "search":
+        stdout.write(f"{render_session_search(store.search(arguments.query, arguments.limit))}\n")
+        return 0
+    if arguments.session_command == "export":
+        stdout.write(
+            f"{render_session_export(store.conversation_export(arguments.selector), arguments.format)}\n"
+        )
+        return 0
+    if arguments.session_command == "doctor":
+        stdout.write(f"{render_session_diagnosis(store.diagnose(arguments.selector))}\n")
+        return 0
+    if arguments.session_command == "repair":
+        stdout.write(f"{render_session_repair(store.repair(arguments.selector))}\n")
+        return 0
+    if arguments.session_command == "fork":
+        writer = store.fork(arguments.selector, arguments.through_turn)
+        writer.close(reason="forked")
+        render_session_info(writer.info, stdout)
         return 0
     if arguments.session_command == "actions":
         stdout.write(

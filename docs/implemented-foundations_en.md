@@ -56,6 +56,7 @@
 - [Session Lifecycle Management and Naming Diagnostics](#session-lifecycle-management-and-naming-diagnostics)
 - [Pinned Sessions and Snapshot-based Quick Switching](#pinned-sessions-and-snapshot-based-quick-switching)
 - [Read-only Session Inspection and Bounded Turn Preview](#read-only-session-inspection-and-bounded-turn-preview)
+- [Session Search, Turn Navigation, Export, Fork, and Repair](#session-search-turn-navigation-export-fork-and-repair)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -762,6 +763,18 @@ Preview projects only each turn's final user and assistant text. It does not rep
 
 Target reads use existing-only validation, strict replay, and `allow_repair=false`. They create no empty-workspace state, take no writer lease, repair no incomplete tail, append no record, and invoke no provider. Success and failure leave the current Session, `latest`, runtime, history, Effective Context, picker snapshot, and every schema unchanged. Canonical system prompt remains v21, provider adapter contract remains v25, and the 21-tool catalog and Effective Context identity remain unchanged. See [0074: Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md).
 
+## Session Search, Turn Navigation, Export, Fork, and Repair
+
+Cross-Session search applies a case-sensitive literal query independently to each complete turn's final user and assistant logical lines. Results carry the complete UUID, 1-based turn, role, line, and bounded excerpt. One call scans at most 10,000 directory entries, selects 100 transcripts in stable UUID order, reads 16 MiB, returns 100 matches, and renders 32 KiB. Candidate, read, match, and rendering truncation are explicit, so no-match applies only to the scanned set. `/session turns` uses an independent 1-based start and a one-to-ten count to inspect a search location without turning recent-preview syntax into an ambiguous offset.
+
+Conversation export writes Markdown or export-local JSON v1 to stdout with only Session identity and every final user/assistant turn. Selection is capped at 1,000 turns and 1 MiB of text, while complete rendering is capped at 2 MiB; overflow fails as a whole rather than silently truncating. Tool companion text, ToolUse/Result, ledgers, Action Audit, usage, failures, compaction, and raw records remain outside this readable projection, while internal JSONL remains the complete audit source.
+
+Fork accepts only a positive complete-turn boundary from a strict source snapshot. The child receives a new UUID and writes `session_forked` v1 immediately after its header with the parent UUID, copied-turn count, and exact source transcript SHA-256. Selected turns retain complete provider-neutral items and ToolUse/Result causality. Current ledgers are copied, while legacy pre-ledger turns derive a minimal consistent ledger from requests and results. Copied provider usage is empty; parent Action Audit, failures, runtime events, names, archive/pin state, and compaction are not copied. A final runtime record installs the caller's current binding, the REPL selects the child, and parent bytes remain unchanged. Failure before `latest` replacement durably removes the new child and lock, and cleanup failure is not hidden; if replacement occurred but directory durability is unknown, the possibly referenced child is retained. If ProjectSession cannot construct the child AgentLoop, it releases the candidate writer lease and keeps the current in-memory Session unchanged.
+
+Doctor uses a no-follow descriptor and only reports `valid | repairable_tail | invalid`. Repairable means a strictly replayable newline-terminated complete prefix followed by an invalid UTF-8/JSON final fragment. Empty data, middle or complete-line corruption, and complete JSON missing only its final newline remain invalid. Explicit repair acquires the target writer lease and existing directory lock, rechecks descriptor/path identity, durably creates a private backup named by the complete source SHA-256, then truncates only the fragment and appends/fsyncs the existing `recovery` v1 record. It does not resume, update `latest`, switch runtime/current Session, or repair an active writer.
+
+All five stages are Host management features. Only fork adds the record-local `session_forked` v1 type; existing schemas do not advance. Canonical system prompt remains v21, provider adapter contract remains v25, and the 21-tool catalog, ToolArguments v1, ActionIdentity v1, `turn_committed` v8, Action Audit, compaction, and `ctx-v3`/`ctx-v4` identities remain unchanged. See [0075](./decisions/0075-bounded-cross-session-final-text-search.md), [0076](./decisions/0076-bounded-session-turn-range-inspection.md), [0077](./decisions/0077-bounded-conversation-export.md), [0078](./decisions/0078-provenance-linked-session-forking.md), and [0079](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -1002,3 +1015,8 @@ This slice establishes capacity facts only. It does not count current request to
 72. [0072: Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
 73. [0073: Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)
 74. [0074: Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)
+75. [0075: Bounded Cross-Session Final-text Search](./decisions/0075-bounded-cross-session-final-text-search.md)
+76. [0076: Bounded Session Turn-range Inspection](./decisions/0076-bounded-session-turn-range-inspection.md)
+77. [0077: Bounded Conversation-only Session Export](./decisions/0077-bounded-conversation-export.md)
+78. [0078: Provenance-linked Session Forking](./decisions/0078-provenance-linked-session-forking.md)
+79. [0079: Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)

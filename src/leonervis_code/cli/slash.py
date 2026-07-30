@@ -10,6 +10,7 @@ from leonervis_code.cli.presentation import (
     DEFAULT_COMPACTION_HISTORY_COUNT,
     DEFAULT_SESSION_LIST_COUNT,
     DEFAULT_SESSION_PREVIEW_TURNS,
+    DEFAULT_SESSION_SEARCH_MATCHES,
     DEFAULT_TOOL_LEDGER_COUNT,
     HELP_TEXT,
     HELP_BY_TOPIC,
@@ -41,9 +42,14 @@ from leonervis_code.cli.presentation import (
     render_runtime_switch,
     render_resume_rejection,
     render_session_info,
+    render_session_diagnosis,
+    render_session_export,
     render_session_preview,
+    render_session_repair,
+    render_session_search,
     render_session_resume,
     render_session_summary,
+    render_session_turn_range,
     render_switch_rejection,
     render_tool_ledgers,
     render_durable_usage_summary,
@@ -140,6 +146,12 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
+    SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
+    SlashCompletionSpec("/session search", "Search final dialogue across Sessions"),
+    SlashCompletionSpec("/session export", "Export final dialogue as Markdown or JSON"),
+    SlashCompletionSpec("/session fork", "Fork complete turns into a new Session"),
+    SlashCompletionSpec("/session doctor", "Diagnose one Session transcript"),
+    SlashCompletionSpec("/session repair", "Repair one incomplete transcript tail"),
     SlashCompletionSpec("/session list", "Browse and filter workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/session rename", "Rename the current Session"),
@@ -197,6 +209,18 @@ class ReplSession(Protocol):
     def inspect_session(self, selector: str): ...
 
     def preview_session(self, selector: str, limit: int): ...
+
+    def session_turn_range(self, selector: str, start_turn: int, count: int): ...
+
+    def search_sessions(self, query: str, limit: int): ...
+
+    def export_session(self, selector: str): ...
+
+    def fork_session(self, selector: str, through_turn: int): ...
+
+    def diagnose_session(self, selector: str): ...
+
+    def repair_session(self, selector: str): ...
 
     def list_sessions(self): ...
 
@@ -369,6 +393,22 @@ def dispatch_slash(
         return _session_show(command, session)
     if command == "/session preview" or command.startswith("/session preview "):
         return _session_preview(command, session)
+    if command == "/session turns" or command.startswith("/session turns "):
+        return _session_turns(command, session)
+    if command == "/session search" or command.startswith("/session search "):
+        return _session_search(command, session)
+    if command == "/session export" or command.startswith("/session export "):
+        return _session_export(command, session)
+    if command == "/session doctor" or command.startswith("/session doctor "):
+        return _session_doctor(command, session)
+    if command == "/session repair" or command.startswith("/session repair "):
+        if session_switch is not None:
+            session_switch.clear()
+        return _session_repair(command, session)
+    if command == "/session fork" or command.startswith("/session fork "):
+        if session_switch is not None:
+            session_switch.clear()
+        return _session_fork(command, session)
     if command == "/session list" or command.startswith("/session list "):
         return _session_list(command, session)
     if command == "/session switch" or command.startswith("/session switch "):
@@ -400,7 +440,7 @@ def dispatch_slash(
         return _usage(
             "Unknown session command: "
             f"{subcommand}\nUsage: "
-            "/session <show|preview|list|new|rename|archive|unarchive|pin|unpin|switch>"
+            "/session <show|preview|turns|search|export|fork|doctor|repair|list|new|rename|archive|unarchive|pin|unpin|switch>"
         )
     if command == "/resume" or command.startswith("/resume "):
         if session_switch is not None:
@@ -708,6 +748,111 @@ def _session_preview(command: str, session: ReplSession) -> SlashResult:
 
 def _session_preview_usage() -> SlashResult:
     return _usage(f"Usage: /session preview <latest|session-id> [1-{MAX_SESSION_PREVIEW_TURNS}]")
+
+
+def _session_turns(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if (
+        len(parts) not in {4, 5}
+        or not _valid_session_read_selector(parts[2])
+        or not _positive_ascii_integer(parts[3])
+    ):
+        return _session_turns_usage()
+    count = DEFAULT_SESSION_PREVIEW_TURNS
+    if len(parts) == 5:
+        if not _positive_ascii_integer(parts[4]):
+            return _session_turns_usage()
+        count = int(parts[4])
+    if count > MAX_SESSION_PREVIEW_TURNS:
+        return _session_turns_usage()
+    return _call(
+        lambda: render_session_turn_range(
+            session.session_turn_range(parts[2], int(parts[3]), count)
+        ),
+        kind="info",
+        failure_prefix="Session turn inspection failed",
+    )
+
+
+def _session_turns_usage() -> SlashResult:
+    return _usage(
+        f"Usage: /session turns <latest|session-id> <start> [1-{MAX_SESSION_PREVIEW_TURNS}]"
+    )
+
+
+def _session_search(command: str, session: ReplSession) -> SlashResult:
+    query = command.removeprefix("/session search").strip()
+    if not query:
+        return _usage("Usage: /session search <literal text>")
+    return _call(
+        lambda: render_session_search(
+            session.search_sessions(query, DEFAULT_SESSION_SEARCH_MATCHES)
+        ),
+        kind="info",
+        failure_prefix="Session search failed",
+    )
+
+
+def _session_export(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {3, 4} or not _valid_session_read_selector(parts[2]):
+        return _usage("Usage: /session export <latest|session-id> [markdown|json]")
+    format_name = parts[3] if len(parts) == 4 else "markdown"
+    if format_name not in {"markdown", "json"}:
+        return _usage("Usage: /session export <latest|session-id> [markdown|json]")
+    return _call(
+        lambda: render_session_export(session.export_session(parts[2]), format_name),
+        kind="info",
+        failure_prefix="Session export failed",
+    )
+
+
+def _session_doctor(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3 or not _valid_session_read_selector(parts[2]):
+        return _usage("Usage: /session doctor <latest|session-id>")
+    return _call(
+        lambda: render_session_diagnosis(session.diagnose_session(parts[2])),
+        kind="info",
+        failure_prefix="Session diagnosis failed",
+    )
+
+
+def _session_repair(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3 or not _valid_session_read_selector(parts[2]):
+        return _usage("Usage: /session repair <latest|session-id>")
+    return _call(
+        lambda: render_session_repair(session.repair_session(parts[2])),
+        kind="success",
+        failure_prefix="Session repair failed",
+    )
+
+
+def _session_fork(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if (
+        len(parts) != 4
+        or not _valid_session_read_selector(parts[2])
+        or not _positive_ascii_integer(parts[3])
+    ):
+        return _usage("Usage: /session fork <latest|session-id> <through-turn>")
+
+    def fork() -> str:
+        info = session.fork_session(parts[2], int(parts[3]))
+        return (
+            f"Forked and selected Session: {info.name}\n"
+            f"Session ID: {info.session_id}\n"
+            f"Source: {info.forked_from_session_id} through turn #{info.forked_from_turn}\n"
+            "Parent transcript, Action Audit, compaction checkpoints, and provider usage were "
+            "not modified."
+        )
+
+    return _call(fork, kind="success", failure_prefix="Session fork failed")
+
+
+def _positive_ascii_integer(value: str) -> bool:
+    return value.isascii() and value.isdigit() and int(value) >= 1
 
 
 def _valid_session_read_selector(value: str) -> bool:

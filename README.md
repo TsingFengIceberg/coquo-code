@@ -208,6 +208,12 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/model <model>` | 仅覆盖当前进程 model，不修改 profile |
 | `/session show [latest\|id]` | 显示当前或指定Session的严格回放元数据，不执行切换 |
 | `/session preview <latest\|id> [1-10]` | 只读显示指定Session最近的完整user/final-assistant回合，默认3轮、最多10轮 |
+| `/session turns <latest\|id> <start> [1-10]` | 从指定的1-based完整turn开始只读显示，默认3轮 |
+| `/session search <文本>` | 在最多100个Session、16 MiB transcript内字面搜索最终user/assistant文本 |
+| `/session export <latest\|id> [markdown\|json]` | 将有界完整对话视图输出到终端/stdout，不包含工具与审计正文 |
+| `/session fork <latest\|id> <turn>` | 复制截至指定完整turn的完整模型因果到新Session，并保留父级来源 |
+| `/session doctor <latest\|id>` | 只读诊断transcript为valid、repairable tail或invalid |
+| `/session repair <latest\|id>` | 先持久备份，再只修复可证明未完成的最终record |
 | `/session list [count] [open\|closed] [active\|archived] [pinned\|unpinned] [model=<名称>] [name=<文本>]` | 按状态、归档、收藏、精确model和名称字面子串组合筛选workspace Session |
 | `/session switch`、`/session switch list [筛选]` | 建立最多20条的进程内编号快照；再用`/session switch <编号>`单次安全切换 |
 | `/session new` | 保持当前 runtime，开始空白 Session |
@@ -240,6 +246,10 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /session show
 /session show latest
 /session preview latest 3
+/session turns latest 1 3
+/session search provider adapter
+/session export latest markdown
+/session doctor latest
 /session list 10
 /session list 20 archived name=provider
 /session pin
@@ -264,6 +274,10 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 `/session pin`通过append-only元数据保存收藏状态；`/session list pinned`可和其他筛选组合。`/session switch`只保存当前进程的一份“编号到完整UUID”快照，显示名称、turn数、开闭/归档/收藏状态、model和创建时间；`/session switch <编号>`消费一次后立即清空。任何普通prompt、Session元数据修改、直接resume或失败刷新也会废弃旧快照。真正切换仍执行现有prepare、context screening、stale/CAS验证与durable resume commit，失败时当前Session保持不变。
 
 `/session show <id>`和`/session preview <id> [1-10]`允许在不切换的情况下检查另一个Session。Preview通过strict replay选择最近完整turn，只显示最终user/assistant文本，不混入tool companion text、tool result或Action Audit；输出转义终端控制字符并限制为32 KiB。两个命令都不调用provider、不获取writer lease、不修复tail、不追加record，也不改变current Session、`latest`、runtime、history、Effective Context或picker快照。Standalone脚本可使用`leonervis-code -C <workspace> session preview [latest|id] --limit 3`获得同一投影。
+
+`/session search`只在最终对话文本中执行有界、大小写敏感的字面搜索，并返回完整UUID与turn编号；`/session turns`可继续查看对应位置。`/session export`只向stdout输出Markdown或JSON对话视图，不把内部Action Audit、tool result、usage或compaction summary冒充可分享对话。
+
+`/session fork`从严格source snapshot的完整turn边界创建新UUID，复制完整ToolUse/ToolResult因果但不复制父Session的Action Audit、provider usage、failure、compaction或归档/收藏状态；`session_forked` v1持久记录父UUID、turn边界和源transcript SHA-256。`/session doctor`永远只读；`/session repair`只接受“有效完整前缀+未完成最终JSON fragment”，获取writer lease、先写入digest命名的私有备份，再截断fragment并append+fsync现有`recovery` v1。中部损坏、完整JSON缺换行或正在写入的Session都不会被修复。
 
 `/commits`与`/commit`复用同一固定只读Git runner：只遍历当前`HEAD`可达历史，`git_show`只接受完整40/64位小写十六进制commit ID；subject、message和patch均有界并显式标记截断，终端控制字符会被转义。
 
@@ -329,6 +343,11 @@ git diff --check
 - [Session Archive, Search, and Title Fallback Diagnostics](./docs/decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)：可逆归档、组合列表筛选、标题兜底原因、v8兼容与不变的resume语义。
 - [Pinned Sessions and Snapshot-based Quick Switching](./docs/decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)：可逆收藏、组合筛选、一次性编号快照及复用原resume事务的失败原子性。
 - [Read-only Session Inspection and Bounded Turn Preview](./docs/decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)：不切换Session的严格元数据检查、最终对话预览及32 KiB终端边界。
+- [Bounded Cross-Session Final-text Search](./docs/decisions/0075-bounded-cross-session-final-text-search.md)：跨Session最终对话字面搜索、候选/读取/匹配边界与完整性标记。
+- [Bounded Session Turn-range Inspection](./docs/decisions/0076-bounded-session-turn-range-inspection.md)：指定1-based turn范围、严格回放与32 KiB只读呈现。
+- [Bounded Conversation-only Session Export](./docs/decisions/0077-bounded-conversation-export.md)：Markdown/JSON stdout对话导出及与完整审计的边界。
+- [Provenance-linked Session Forking](./docs/decisions/0078-provenance-linked-session-forking.md)：完整turn因果复制、`session_forked` v1来源与父Session不变性。
+- [Explicit Session Diagnosis and Tail Repair](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)：只读doctor、私有备份及仅未完成最终record的显式修复。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。
@@ -366,4 +385,4 @@ git diff --check
 
 当前model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show`。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。所有模型工具仍分别经过permission、approval、executor和Action Audit。
 
-Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/只读预览/usage audit与Git只读变更/历史观察现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v21、provider adapter contract v25、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、自动通用retry、并行工具、多Agent与远程服务仍不可用。当前Session管理、命令live详情、结果统计与Git历史设计见[ADR 0074](./docs/decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)、[ADR 0073](./docs/decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)、[ADR 0072](./docs/decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)、[ADR 0071](./docs/decisions/0071-durable-session-naming-and-terminal-identity.md)、[ADR 0065](./docs/decisions/0065-opt-in-bounded-live-tool-details.md)、[ADR 0066](./docs/decisions/0066-trusted-command-result-observability.md)和[ADR 0064](./docs/decisions/0064-bounded-reachable-git-history-observation.md)。
+Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit与Git只读变更/历史观察现已完成，Foundation 5A仍暂缓。当前版本为canonical system prompt v21、provider adapter contract v25、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v3`/`ctx-v4`representation；旧Session与`ctx-v1`/`ctx-v2`checkpoint继续兼容，empty full-context identity为`ctx-v3-bf336060a8cf9fb75df3766f81b6dae9ef175e8b6e0929f0a0ef10ebab387dd7`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent与远程服务仍不可用。当前Session管理设计见[ADR 0075](./docs/decisions/0075-bounded-cross-session-final-text-search.md)至[ADR 0079](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)及[ADR 0071](./docs/decisions/0071-durable-session-naming-and-terminal-identity.md)至[ADR 0074](./docs/decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)。

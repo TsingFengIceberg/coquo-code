@@ -57,6 +57,7 @@ from leonervis_code.system_prompt import build_system_prompt
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
+SESSION_THREE = "32345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-17T12:00:00.000000Z"
 
 
@@ -501,6 +502,63 @@ def test_project_session_inspection_and_preview_do_not_switch_or_change_runtime(
     assert session.latest_session_info().session_id == latest_id
     assert session.history == history
     assert session.status() == status
+    session.close()
+
+
+def test_project_session_search_export_range_and_fork_preserve_parent(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE, SESSION_TWO, SESSION_THREE),
+    )
+    session.prompt("alpha first")
+    parent_id = session.session_id
+    parent_path = session.transcript_path
+    session.new_session()
+    session.prompt("second current")
+    status = session.status()
+
+    search = session.search_sessions("alpha", 20)
+    turn_range = session.session_turn_range(parent_id, 1, 2)
+    exported = session.export_session(parent_id)
+    forked = session.fork_session(parent_id, 1)
+
+    assert search.matches[0].info.session_id == parent_id
+    assert turn_range.turns[0].user.text == "alpha first"
+    assert exported.turns[0].assistant.text == "Fake response: alpha first"
+    assert forked.session_id == SESSION_THREE
+    assert forked.forked_from_session_id == parent_id
+    assert session.session_id == SESSION_THREE
+    assert session.history[0].text == "alpha first"
+    assert session.status() == status
+    assert parent_path.exists()
+    session.close()
+
+
+def test_project_session_fork_releases_candidate_if_loop_construction_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE, SESSION_TWO),
+    )
+    session.prompt("parent")
+    current_id = session.session_id
+
+    def fail_loop(_writer) -> None:
+        raise RuntimeError("loop construction failed")
+
+    monkeypatch.setattr(session, "_new_loop", fail_loop)
+
+    with pytest.raises(RuntimeError, match="loop construction failed"):
+        session.fork_session(SESSION_ONE, 1)
+
+    assert session.session_id == current_id
+    prepared = SessionStore(tmp_path).prepare_resume(SESSION_TWO)
+    prepared.abort()
     session.close()
 
 

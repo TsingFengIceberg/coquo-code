@@ -39,6 +39,7 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import (
     AtomicJsonWriteError,
     MAX_SESSION_PREVIEW_TURNS,
+    SessionDiagnosisStatus,
     SessionLockedError,
     SessionNameConflictError,
     SessionResumeStaleError,
@@ -171,6 +172,252 @@ def test_show_and_preview_do_not_create_state_in_empty_workspace(tmp_path: Path)
         session_store.preview("latest", 1)
 
     assert not (tmp_path / ".leonervis-code").exists()
+
+
+def test_turn_range_search_and_export_are_bounded_read_only_projections(tmp_path: Path) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    binding = BindingSnapshot.fake()
+    first = session_store.create(binding)
+    first.append_turn(
+        (UserMessage("alpha first"), AssistantText("answer one")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    first.append_turn(
+        (UserMessage("second"), AssistantText("alpha answer")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    first_bytes = first.path.read_bytes()
+    first.release()
+    second = session_store.create(binding)
+    second.append_turn(
+        (UserMessage("unrelated"), AssistantText("done")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    latest_before = (session_store.root / "latest.json").read_bytes()
+
+    turn_range = session_store.turn_range(SESSION_ONE, 2, 3)
+    search = session_store.search("alpha", 20)
+    exported = session_store.conversation_export(SESSION_ONE)
+
+    assert turn_range.start_turn == 2
+    assert len(turn_range.turns) == 1
+    assert turn_range.turns[0].assistant.text == "alpha answer"
+    assert [(match.turn_number, match.role) for match in search.matches] == [
+        (1, "user"),
+        (2, "assistant"),
+    ]
+    assert search.truncated is False
+    assert exported.turns[0].user.text == "alpha first"
+    assert first.path.read_bytes() == first_bytes
+    assert (session_store.root / "latest.json").read_bytes() == latest_before
+    with pytest.raises(SessionStoreError, match="turn start exceeds"):
+        session_store.turn_range(SESSION_ONE, 3, 1)
+    second.release()
+
+
+def test_fork_materializes_complete_turns_with_provenance_without_parent_audit(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    binding = BindingSnapshot.fake()
+    parent = session_store.create(binding)
+    parent.append_turn(
+        (UserMessage("first"), AssistantText("one")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    parent.append_turn(
+        (UserMessage("second"), AssistantText("two")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    parent.turn_failed(binding=binding, failure_kind="provider", message="not copied")
+    parent_bytes = parent.path.read_bytes()
+
+    fork = session_store.fork(SESSION_ONE, 1, binding=BindingSnapshot.fake(generation=2))
+
+    assert fork.session_id == SESSION_TWO
+    assert fork.info.forked_from_session_id == SESSION_ONE
+    assert fork.info.forked_from_turn == 1
+    assert fork.info.name.startswith("Fork of ")
+    assert len(fork.state.turns) == 1
+    assert fork.state.turns[0].user.text == "first"
+    assert not any(record.record_type == "turn_failed" for record in fork.state.records)
+    copied = next(record for record in fork.state.records if isinstance(record, TurnCommitted))
+    assert copied.provider_usage == ()
+    assert parent.path.read_bytes() == parent_bytes
+    assert session_store.inspect("latest").session_id == SESSION_TWO
+    fork.release()
+    parent.release()
+
+
+def test_fork_upgrades_legacy_tool_turn_to_current_replayable_ledger(tmp_path: Path) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    binding = BindingSnapshot.fake()
+    parent = session_store.create(binding)
+    header = parent.state.header
+    parent_path = parent.path
+    parent.release()
+    legacy = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=binding,
+        items=committed_items(),
+        schema_version=TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+    )
+    parent_path.write_bytes(encode_record(header) + encode_record(legacy))
+
+    fork = session_store.fork(SESSION_ONE, 1)
+
+    copied = next(record for record in fork.state.records if isinstance(record, TurnCommitted))
+    assert copied.schema_version == TURN_COMMITTED_SCHEMA_VERSION
+    assert copied.tool_ledger == committed_ledger()
+    assert copied.provider_usage == ()
+    fork.release()
+
+
+def test_fork_durably_removes_child_when_latest_was_not_replaced(
+    monkeypatch, tmp_path: Path
+) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    parent = session_store.create(BindingSnapshot.fake())
+    parent.append_turn(
+        (UserMessage("first"), AssistantText("one")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+    )
+    latest = session_store.root / "latest.json"
+    latest_before = latest.read_bytes()
+
+    def fail_before_replace(session_id: str) -> None:
+        raise AtomicJsonWriteError(f"latest failed for {session_id}", replaced=False)
+
+    monkeypatch.setattr(session_store, "_write_latest", fail_before_replace)
+
+    with pytest.raises(AtomicJsonWriteError) as caught:
+        session_store.fork(SESSION_ONE, 1)
+
+    assert caught.value.replaced is False
+    assert latest.read_bytes() == latest_before
+    assert not (session_store.root / f"{SESSION_TWO}.jsonl").exists()
+    assert not (session_store.root / f"{SESSION_TWO}.lock").exists()
+    parent.release()
+
+
+def test_fork_keeps_child_when_latest_was_replaced_before_fsync_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    identifiers = iter((UUID(SESSION_ONE), UUID(SESSION_TWO)))
+    session_store = SessionStore(
+        tmp_path,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: NOW,
+    )
+    parent = session_store.create(BindingSnapshot.fake())
+    parent.append_turn(
+        (UserMessage("first"), AssistantText("one")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+    )
+
+    def fail_after_replace(session_id: str) -> None:
+        latest = session_store.root / "latest.json"
+        latest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "transcript": f"{session_id}.jsonl",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raise AtomicJsonWriteError("latest directory fsync failed", replaced=True)
+
+    monkeypatch.setattr(session_store, "_write_latest", fail_after_replace)
+
+    with pytest.raises(AtomicJsonWriteError) as caught:
+        session_store.fork(SESSION_ONE, 1)
+
+    assert caught.value.replaced is True
+    assert (session_store.root / f"{SESSION_TWO}.jsonl").is_file()
+    assert (session_store.root / f"{SESSION_TWO}.lock").is_file()
+    assert session_store.inspect("latest").session_id == SESSION_TWO
+    parent.release()
+
+
+def test_doctor_and_explicit_repair_preserve_backup_and_latest(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    writer.append_turn(
+        (UserMessage("first"), AssistantText("one")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    transcript = writer.path
+    writer.release()
+    valid = session_store.diagnose(SESSION_ONE)
+    assert valid.status == SessionDiagnosisStatus.VALID
+    latest_before = (session_store.root / "latest.json").read_bytes()
+    with transcript.open("ab") as stream:
+        stream.write(b'{"record_type":"turn_committed"')
+    corrupted = transcript.read_bytes()
+
+    diagnosis = session_store.diagnose(SESSION_ONE)
+    result = session_store.repair(SESSION_ONE)
+
+    assert diagnosis.status == SessionDiagnosisStatus.REPAIRABLE_TAIL
+    assert diagnosis.recoverable_tail_bytes == len(b'{"record_type":"turn_committed"')
+    assert result.truncated_bytes == diagnosis.recoverable_tail_bytes
+    assert result.backup_path.read_bytes() == corrupted
+    assert result.backup_path.suffix == ".bak"
+    assert session_store.diagnose(SESSION_ONE).status == SessionDiagnosisStatus.VALID
+    assert (session_store.root / "latest.json").read_bytes() == latest_before
+    with pytest.raises(SessionStoreError, match="does not need"):
+        session_store.repair(SESSION_ONE)
+
+
+def test_doctor_never_repairs_complete_record_without_newline(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    transcript = writer.path
+    writer.release()
+    data = transcript.read_bytes().removesuffix(b"\n")
+    transcript.write_bytes(data)
+
+    diagnosis = session_store.diagnose(SESSION_ONE)
+
+    assert diagnosis.status == SessionDiagnosisStatus.INVALID
+    assert diagnosis.code == "complete_record_missing_newline"
+    assert transcript.read_bytes() == data
+    with pytest.raises(SessionStoreError, match="complete JSON record"):
+        session_store.repair(SESSION_ONE)
+    assert transcript.read_bytes() == data
 
 
 def test_new_sessions_receive_monotonic_default_names_under_directory_lock(

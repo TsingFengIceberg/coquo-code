@@ -378,6 +378,76 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
     assert lines[1].startswith(f"'first' [latest] ({first_id}): 2 turns, closed, created ")
 
 
+def test_standalone_session_search_range_export_fork_doctor_and_repair(tmp_path) -> None:
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_profile_path": tmp_path / "user.json",
+        "project_profile_path": tmp_path / "project.json",
+    }
+    assert (
+        main(["prompt", "alpha source"], stdout=io.StringIO(), stderr=io.StringIO(), **common) == 0
+    )
+    shown = io.StringIO()
+    assert main(["session", "show", "latest"], stdout=shown, stderr=io.StringIO(), **common) == 0
+    session_id = next(
+        line.removeprefix("session ID: ")
+        for line in shown.getvalue().splitlines()
+        if line.startswith("session ID: ")
+    )
+    transcript = Path(
+        next(
+            line.removeprefix("transcript: ")
+            for line in shown.getvalue().splitlines()
+            if line.startswith("transcript: ")
+        )
+    )
+
+    searched = io.StringIO()
+    assert (
+        main(["session", "search", "alpha"], stdout=searched, stderr=io.StringIO(), **common) == 0
+    )
+    assert f"({session_id})" in searched.getvalue()
+    ranged = io.StringIO()
+    assert (
+        main(["session", "turns", session_id, "1"], stdout=ranged, stderr=io.StringIO(), **common)
+        == 0
+    )
+    assert "Turn #1" in ranged.getvalue()
+    exported = io.StringIO()
+    assert (
+        main(
+            ["session", "export", session_id, "--format", "json"],
+            stdout=exported,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    assert '"user": "alpha source"' in exported.getvalue()
+    doctor = io.StringIO()
+    assert (
+        main(["session", "doctor", session_id], stdout=doctor, stderr=io.StringIO(), **common) == 0
+    )
+    assert "Status: valid" in doctor.getvalue()
+
+    forked = io.StringIO()
+    assert (
+        main(["session", "fork", session_id, "1"], stdout=forked, stderr=io.StringIO(), **common)
+        == 0
+    )
+    assert f"forked from: {session_id} through turn 1" in forked.getvalue()
+
+    with transcript.open("ab") as stream:
+        stream.write(b'{"record_type":"turn_committed"')
+    repair = io.StringIO()
+    assert (
+        main(["session", "repair", session_id], stdout=repair, stderr=io.StringIO(), **common) == 0
+    )
+    assert "Session repaired" in repair.getvalue()
+    assert "Backup:" in repair.getvalue()
+
+
 def test_session_actions_replays_recent_redacted_action_audits(tmp_path) -> None:
     session_id = "12345678-1234-4234-9234-123456789abc"
     grant_id = "52345678-1234-4234-9234-123456789abc"

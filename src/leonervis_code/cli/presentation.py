@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import json
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -49,6 +50,9 @@ DEFAULT_SESSION_LIST_COUNT = 20
 MAX_SESSION_LIST_COUNT = 100
 DEFAULT_SESSION_PREVIEW_TURNS = 3
 MAX_SESSION_PREVIEW_RENDER_BYTES = 32 * 1024
+DEFAULT_SESSION_SEARCH_MATCHES = 20
+MAX_SESSION_QUERY_RENDER_BYTES = 32 * 1024
+MAX_SESSION_EXPORT_RENDER_BYTES = 2 * 1024 * 1024
 DEFAULT_TOOL_LEDGER_COUNT = 5
 MAX_TOOL_LEDGER_COUNT = MAX_TOOL_LEDGER_QUERY_TURNS
 MAX_TOOL_LEDGER_RENDER_BYTES = 32 * 1024
@@ -80,6 +84,12 @@ SESSION_HELP = (
     "Session commands:\n"
     "  /session show [latest|session-id]\n"
     f"  /session preview <latest|session-id> [1-{MAX_SESSION_PREVIEW_TURNS}]\n"
+    f"  /session turns <latest|session-id> <start> [1-{MAX_SESSION_PREVIEW_TURNS}]\n"
+    "  /session search <literal text>\n"
+    "  /session export <latest|session-id> [markdown|json]\n"
+    "  /session fork <latest|session-id> <through-turn>\n"
+    "  /session doctor <latest|session-id>\n"
+    "  /session repair <latest|session-id>\n"
     "  /session list [1-100] [open|closed] [active|archived] [pinned|unpinned] "
     "[model=<name>] [name=<text>]\n"
     "  /session switch | /session switch <number> | /session switch list [filters]\n"
@@ -217,6 +227,8 @@ class SessionInfoView(Protocol):
     archived: bool
     pinned: bool
     title_fallback_reason: object | None
+    forked_from_session_id: str | None
+    forked_from_turn: int | None
 
 
 class ConversationTurnView(Protocol):
@@ -227,6 +239,13 @@ class ConversationTurnView(Protocol):
 class SessionPreviewView(Protocol):
     info: SessionInfoView
     total_turns: int
+    turns: tuple[ConversationTurnView, ...]
+
+
+class SessionTurnRangeView(Protocol):
+    info: SessionInfoView
+    total_turns: int
+    start_turn: int
     turns: tuple[ConversationTurnView, ...]
 
 
@@ -442,6 +461,148 @@ def render_session_preview(preview: SessionPreviewView) -> str:
     available = MAX_SESSION_PREVIEW_RENDER_BYTES - len(marker.encode("utf-8"))
     prefix = rendered.encode("utf-8")[:available].decode("utf-8", errors="ignore")
     return prefix + marker
+
+
+def render_session_turn_range(result: SessionTurnRangeView) -> str:
+    """Render one explicit complete-turn range with stable 1-based numbering."""
+    lines = [
+        f"Session turns: {_safe_inline(result.info.name)}",
+        f"Session ID: {result.info.session_id}",
+        f"Showing {len(result.turns)} turns from #{result.start_turn} of {result.total_turns} "
+        "complete turns (read-only).",
+    ]
+    if not result.turns:
+        lines.append("No conversation turns yet.")
+    for offset, turn in enumerate(result.turns):
+        lines.extend(
+            (
+                "",
+                f"Turn #{result.start_turn + offset}",
+                "User:",
+                indent_terminal_block(_escape_terminal_text(turn.user.text), "  "),
+                "Assistant:",
+                indent_terminal_block(_escape_terminal_text(turn.assistant.text), "  "),
+            )
+        )
+    return _cap_rendered_text(
+        "\n".join(lines),
+        MAX_SESSION_PREVIEW_RENDER_BYTES,
+        "[Session turn range truncated at 32768 UTF-8 bytes.]",
+    )
+
+
+def render_session_search(result) -> str:
+    """Render bounded cross-Session matches and explicit completeness facts."""
+    lines = [
+        f"Session search: {_safe_inline(result.query)}",
+        f"Scanned {result.scanned_sessions} of {result.candidate_sessions} candidate Sessions "
+        f"and {result.scanned_transcript_bytes} transcript bytes.",
+    ]
+    if not result.matches:
+        lines.append("No matches in the bounded scanned set.")
+    for match in result.matches:
+        lines.extend(
+            (
+                "",
+                f"{_safe_inline(match.info.name)} ({match.info.session_id})",
+                f"Turn #{match.turn_number} {match.role} line {match.line_number}",
+                f"  {_safe_inline(match.excerpt)}",
+            )
+        )
+    if result.truncated:
+        lines.append("Search was truncated; omitted Sessions or matches may still contain results.")
+    else:
+        lines.append("Search completed within all configured bounds.")
+    return _cap_rendered_text(
+        "\n".join(lines),
+        MAX_SESSION_QUERY_RENDER_BYTES,
+        "[Session search rendering truncated at 32768 UTF-8 bytes.]",
+    )
+
+
+def render_session_export(result, format_name: str) -> str:
+    """Serialize one bounded final-text conversation as Markdown or JSON."""
+    if format_name == "json":
+        payload = {
+            "schema_version": 1,
+            "session": {
+                "id": result.info.session_id,
+                "name": result.info.name,
+                "created_at": result.info.created_at,
+                "turn_count": len(result.turns),
+            },
+            "turns": [
+                {
+                    "turn": index,
+                    "user": _escape_terminal_text(turn.user.text),
+                    "assistant": _escape_terminal_text(turn.assistant.text),
+                }
+                for index, turn in enumerate(result.turns, start=1)
+            ],
+        }
+        rendered = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
+    elif format_name == "markdown":
+        lines = [
+            f"# Session export: {_safe_inline(result.info.name)}",
+            "",
+            f"- Session ID: `{result.info.session_id}`",
+            f"- Created: `{result.info.created_at}`",
+            f"- Complete turns: {len(result.turns)}",
+        ]
+        for index, turn in enumerate(result.turns, start=1):
+            lines.extend(
+                (
+                    "",
+                    f"## Turn {index}",
+                    "",
+                    "### User",
+                    "",
+                    indent_terminal_block(_escape_terminal_text(turn.user.text), "    "),
+                    "",
+                    "### Assistant",
+                    "",
+                    indent_terminal_block(_escape_terminal_text(turn.assistant.text), "    "),
+                )
+            )
+        rendered = "\n".join(lines)
+    else:
+        raise ValueError("Session export format must be markdown or json")
+    if len(rendered.encode("utf-8")) > MAX_SESSION_EXPORT_RENDER_BYTES:
+        raise ValueError(
+            f"rendered Session export exceeds {MAX_SESSION_EXPORT_RENDER_BYTES} UTF-8 bytes"
+        )
+    return rendered
+
+
+def render_session_diagnosis(diagnosis) -> str:
+    """Render bounded transcript health without raw record content."""
+    lines = [
+        f"Session doctor: {diagnosis.session_id}",
+        f"Status: {diagnosis.status.value}",
+        f"Code: {diagnosis.code}",
+        f"Transcript bytes: {diagnosis.transcript_bytes}",
+    ]
+    if diagnosis.record_count is not None:
+        lines.append(f"Validated records: {diagnosis.record_count}")
+    if diagnosis.turn_count is not None:
+        lines.append(f"Complete turns: {diagnosis.turn_count}")
+    if diagnosis.recoverable_tail_bytes is not None:
+        lines.append(f"Recoverable incomplete tail bytes: {diagnosis.recoverable_tail_bytes}")
+        lines.append("Run explicit Session repair only after reviewing this diagnosis.")
+    return "\n".join(lines)
+
+
+def render_session_repair(result) -> str:
+    """Render a truthful completed tail repair and retained backup identity."""
+    return "\n".join(
+        (
+            f"Session repaired: {result.info.session_id}",
+            f"Truncated incomplete tail bytes: {result.truncated_bytes}",
+            f"Backup: {result.backup_path.name}",
+            f"Validated records after repair: {result.info.record_count}",
+            "Current Session, runtime, and latest pointer were not changed by repair.",
+        )
+    )
 
 
 def render_git_status(snapshot: GitStatusSnapshotView) -> str:
@@ -1186,6 +1347,10 @@ def render_session_info(info: SessionInfoView) -> str:
         lines.append(
             f"Title fallback: {render_session_title_fallback_reason(info.title_fallback_reason)}"
         )
+    if getattr(info, "forked_from_session_id", None) is not None:
+        lines.append(
+            f"Forked from: {info.forked_from_session_id} through turn #{info.forked_from_turn}"
+        )
     lines.extend(
         (
             f"Archived: {'yes' if info.archived else 'no'}",
@@ -1331,6 +1496,16 @@ def _safe_inline(value: str) -> str:
     """Escape control characters before rendering persisted text in a terminal."""
     rendered = repr(value)
     return rendered[1:-1]
+
+
+def _cap_rendered_text(text: str, limit: int, marker: str) -> str:
+    payload = text.encode("utf-8")
+    if len(payload) <= limit:
+        return text
+    suffix = "\n" + marker
+    available = limit - len(suffix.encode("utf-8"))
+    prefix = payload[:available].decode("utf-8", errors="ignore")
+    return prefix + suffix
 
 
 def _escape_terminal_text(value: str) -> str:

@@ -56,6 +56,7 @@
 - [Session Lifecycle Management 与 Naming Diagnostics](#session-lifecycle-management-与-naming-diagnostics)
 - [Pinned Sessions 与 Snapshot-based Quick Switching](#pinned-sessions-与-snapshot-based-quick-switching)
 - [Read-only Session Inspection 与 Bounded Turn Preview](#read-only-session-inspection-与-bounded-turn-preview)
+- [Session Search、Turn Navigation、Export、Fork 与 Repair](#session-searchturn-navigationexportfork-与-repair)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -762,6 +763,18 @@ Preview只投影每个turn最终的user与assistant文本，不重复tool compan
 
 目标读取使用existing-only、strict replay和`allow_repair=false`，不创建空workspace状态、不获取writer lease、不修复incomplete tail、不append record，也不调用provider。成功或失败都不改变current Session、`latest`、runtime、history、Effective Context、picker snapshot或任何schema。Canonical system prompt保持v21，provider adapter contract保持v25，21-tool catalog及Effective Context identity均不变。完整决策见[0074：Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)。
 
+## Session Search、Turn Navigation、Export、Fork 与 Repair
+
+跨Session搜索以大小写敏感literal query独立匹配每个完整turn的最终user/assistant logical lines，返回完整UUID、1-based turn、role、line与有界excerpt。单次最多扫描10,000个目录entry、选择100个stable UUID顺序的transcript、读取16 MiB、返回100个match并渲染32 KiB；任何candidate/read/match/render截断都会明确说明，no-match只对实际扫描范围成立。`/session turns`使用独立的1-based start和1至10轮count查看搜索定位，不把最近预览语法变成有歧义的offset。
+
+Conversation export通过stdout提供Markdown或export-local JSON v1，只包含Session身份与全部最终user/assistant turn。选择上限为1,000轮和1 MiB文本，完整render上限为2 MiB；超限整体失败，不静默截断。Tool companion、ToolUse/Result、ledger、Action Audit、usage、failure、compaction与raw record都不进入这个可读投影，内部JSONL仍是完整审计来源。
+
+Fork只接受strict source snapshot中的正整数完整turn边界。新Session获得新UUID，并在header后写入`session_forked` v1，持久保存parent UUID、复制turn数量和exact source transcript SHA-256。选中turn的完整provider-neutral items保留ToolUse/Result因果；current ledger直接复制，legacy pre-ledger turn从request/result导出最小一致ledger。复制的provider usage为空，父级Action Audit、failure、runtime event、name、archive/pin和compaction都不复制；末尾runtime record安装调用方当前binding，REPL原子选择child而parent bytes不变。`latest`替换前的失败会持久删除新建child与lock，cleanup失败不会被隐藏；若替换已发生但目录durability未知，则保留可能已被引用的child。ProjectSession若无法构建child AgentLoop，会释放candidate writer lease并保持current内存Session不变。
+
+Doctor使用no-follow descriptor只读分类`valid | repairable_tail | invalid`。只有“严格可回放且newline结束的完整prefix + invalid UTF-8/JSON final fragment”可修复；empty、中部/完整行损坏、完整JSON仅缺最终newline都保持invalid。Repair必须显式调用并获取目标writer lease与existing directory lock，复查descriptor/path identity，先以完整source SHA-256命名创建private durable backup，再只截断fragment并append+fsync现有`recovery` v1。它不resume、不更新`latest`、不切换runtime/current Session，也不修复active writer。
+
+五个阶段均为Host管理面；只有fork新增record-local `session_forked` v1，其他既有schema不前进。Canonical system prompt保持v21，provider adapter contract保持v25，21-tool catalog、ToolArguments v1、ActionIdentity v1、`turn_committed` v8、Action Audit、compaction和`ctx-v3`/`ctx-v4` identity均不变。完整决策见[0075](./decisions/0075-bounded-cross-session-final-text-search.md)、[0076](./decisions/0076-bounded-session-turn-range-inspection.md)、[0077](./decisions/0077-bounded-conversation-export.md)、[0078](./decisions/0078-provenance-linked-session-forking.md)与[0079](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -1002,3 +1015,8 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 72. [0072：Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
 73. [0073：Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)
 74. [0074：Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)
+75. [0075：Bounded Cross-Session Final-text Search](./decisions/0075-bounded-cross-session-final-text-search.md)
+76. [0076：Bounded Session Turn-range Inspection](./decisions/0076-bounded-session-turn-range-inspection.md)
+77. [0077：Bounded Conversation-only Session Export](./decisions/0077-bounded-conversation-export.md)
+78. [0078：Provenance-linked Session Forking](./decisions/0078-provenance-linked-session-forking.md)
+79. [0079：Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)

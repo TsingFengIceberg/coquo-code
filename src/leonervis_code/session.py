@@ -117,7 +117,12 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionInfo,
+    SessionConversationExport,
+    SessionDiagnosis,
     SessionPreview,
+    SessionRepairResult,
+    SessionSearchResult,
+    SessionTurnRange,
     SessionNameConflictError,
     SessionResumeStaleError,
     SessionStore,
@@ -912,13 +917,74 @@ class ProjectSession:
             self._ensure_open()
             return self._session_store.preview(selector, limit)
 
+    def session_turn_range(
+        self,
+        selector: str | Path,
+        start_turn: int,
+        count: int,
+    ) -> SessionTurnRange:
+        """Read one bounded complete-turn range without changing current state."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.turn_range(selector, start_turn, count)
+
+    def search_sessions(self, query: str, limit: int) -> SessionSearchResult:
+        """Search bounded final dialogue text without invoking the provider."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.search(query, limit)
+
+    def export_session(self, selector: str | Path) -> SessionConversationExport:
+        """Project one complete bounded conversation for stdout export."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.conversation_export(selector)
+
+    def diagnose_session(self, selector: str | Path) -> SessionDiagnosis:
+        """Diagnose one transcript without mutation or repair."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.diagnose(selector)
+
+    def repair_session(self, selector: str | Path) -> SessionRepairResult:
+        """Explicitly back up and repair another Session's incomplete final tail."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._session_store.repair(selector)
+
     def new_session(self) -> SessionInfo:
         """Create and atomically select an empty Session without changing runtime."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
             candidate = self._session_store.create(binding_from_status(self._manager.status()))
-            loop = self._new_loop(candidate)
+            try:
+                loop = self._new_loop(candidate)
+            except BaseException:
+                candidate.release()
+                raise
+            old = self._writer
+            self._writer = candidate
+            self._loop = loop
+            old.release()
+            return candidate.info
+
+    def fork_session(self, selector: str | Path, through_turn: int) -> SessionInfo:
+        """Create and select a provenance-linked Session from complete parent turns."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            candidate = self._session_store.fork(
+                selector,
+                through_turn,
+                binding=binding_from_status(self._manager.status()),
+            )
+            try:
+                loop = self._new_loop(candidate)
+            except BaseException:
+                candidate.release()
+                raise
             old = self._writer
             self._writer = candidate
             self._loop = loop

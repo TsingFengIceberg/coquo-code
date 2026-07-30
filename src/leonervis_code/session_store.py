@@ -23,7 +23,16 @@ else:
     import fcntl
 
 from leonervis_code.core.actions import ActionIdentity
-from leonervis_code.core.contracts import ConversationItem, ConversationTurn, ToolTurnLedger
+from leonervis_code.core.contracts import (
+    AssistantToolBatch,
+    ConversationItem,
+    ConversationTurn,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolResult,
+    ToolTurnLedger,
+    ToolUse,
+)
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionMode,
@@ -52,6 +61,7 @@ from leonervis_code.session_records import (
     RuntimeChanged,
     SessionArchiveChanged,
     SessionClosed,
+    SessionForked,
     SessionHeader,
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
@@ -75,6 +85,16 @@ from leonervis_code.session_records import (
 MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_TOOL_LEDGER_QUERY_TURNS = 20
 MAX_SESSION_PREVIEW_TURNS = 10
+MAX_SESSION_SEARCH_QUERY_CHARACTERS = 256
+MAX_SESSION_SEARCH_QUERY_BYTES = 1024
+MAX_SESSION_SEARCH_DIRECTORY_ENTRIES = 10_000
+MAX_SESSION_SEARCH_CANDIDATES = 100
+MAX_SESSION_SEARCH_TRANSCRIPT_BYTES = 16 * 1024 * 1024
+MAX_SESSION_SEARCH_MATCHES = 100
+MAX_SESSION_SEARCH_EXCERPT_CHARACTERS = 320
+MAX_SESSION_SEARCH_EXCERPT_BYTES = 2048
+MAX_SESSION_EXPORT_TURNS = 1000
+MAX_SESSION_EXPORT_TEXT_BYTES = 1024 * 1024
 LATEST_SCHEMA_VERSION = 1
 _DIRECTORY_LOCK_NAME = ".directory.lock"
 _LATEST_NAME = "latest.json"
@@ -110,6 +130,77 @@ class SessionPreview:
     info: SessionInfo
     total_turns: int
     turns: tuple[ConversationTurn, ...]
+
+
+@dataclass(frozen=True)
+class SessionTurnRange:
+    """One bounded chronological range of complete conversation turns."""
+
+    info: SessionInfo
+    total_turns: int
+    start_turn: int
+    turns: tuple[ConversationTurn, ...]
+
+
+@dataclass(frozen=True)
+class SessionSearchMatch:
+    """One bounded literal match from final user or assistant text."""
+
+    info: SessionInfo
+    turn_number: int
+    role: str
+    line_number: int
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class SessionSearchResult:
+    """Bounded cross-Session literal search result and completeness facts."""
+
+    query: str
+    candidate_sessions: int
+    scanned_sessions: int
+    scanned_transcript_bytes: int
+    matches: tuple[SessionSearchMatch, ...]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class SessionConversationExport:
+    """Complete bounded final-text conversation projection for export."""
+
+    info: SessionInfo
+    turns: tuple[ConversationTurn, ...]
+
+
+class SessionDiagnosisStatus(StrEnum):
+    """Closed read-only diagnosis outcomes."""
+
+    VALID = "valid"
+    REPAIRABLE_TAIL = "repairable_tail"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True)
+class SessionDiagnosis:
+    """Bounded diagnosis without transcript mutation or repair."""
+
+    session_id: str
+    status: SessionDiagnosisStatus
+    code: str
+    transcript_bytes: int
+    record_count: int | None
+    turn_count: int | None
+    recoverable_tail_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class SessionRepairResult:
+    """Durable explicit incomplete-tail repair with a retained backup."""
+
+    info: SessionInfo
+    truncated_bytes: int
+    backup_path: Path
 
 
 def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
@@ -231,6 +322,8 @@ class SessionInfo:
     archived: bool = False
     pinned: bool = False
     title_fallback_reason: SessionTitleFallbackReason | None = None
+    forked_from_session_id: str | None = None
+    forked_from_turn: int | None = None
 
 
 @dataclass(frozen=True)
@@ -331,26 +424,12 @@ class SessionStore:
                 lock_stream.close()
                 _release_active_writer(lock_path)
                 if not error.replaced:
-                    try:
-                        transcript_path.unlink()
-                    except OSError:
-                        pass
-                    try:
-                        lock_path.unlink()
-                    except OSError:
-                        pass
+                    _remove_created_session_files(transcript_path, lock_path)
                 raise
             except Exception:
                 lock_stream.close()
                 _release_active_writer(lock_path)
-                try:
-                    transcript_path.unlink()
-                except OSError:
-                    pass
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+                _remove_created_session_files(transcript_path, lock_path)
                 raise
         state = replay_records(
             [header],
@@ -453,6 +532,356 @@ class SessionStore:
             total_turns=len(state.turns),
             turns=state.turns[-limit:],
         )
+
+    def turn_range(
+        self,
+        selector: str | Path,
+        start_turn: int,
+        count: int,
+    ) -> SessionTurnRange:
+        """Strictly replay one bounded 1-based range of complete turns."""
+        if type(start_turn) is not int or start_turn < 1:
+            raise SessionStoreError("session turn start must be a positive integer")
+        if type(count) is not int or not 1 <= count <= MAX_SESSION_PREVIEW_TURNS:
+            raise SessionStoreError(
+                f"session turn count must be between 1 and {MAX_SESSION_PREVIEW_TURNS}"
+            )
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        total = len(state.turns)
+        if total and start_turn > total:
+            raise SessionStoreError(f"session turn start exceeds the {total} committed turns")
+        if not total and start_turn != 1:
+            raise SessionStoreError("empty Session only accepts turn start 1")
+        return SessionTurnRange(
+            info=_info(path, state),
+            total_turns=total,
+            start_turn=start_turn,
+            turns=state.turns[start_turn - 1 : start_turn - 1 + count],
+        )
+
+    def conversation_export(self, selector: str | Path) -> SessionConversationExport:
+        """Return a complete bounded final-text projection suitable for stdout export."""
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        if len(state.turns) > MAX_SESSION_EXPORT_TURNS:
+            raise SessionStoreError(
+                f"session export exceeds {MAX_SESSION_EXPORT_TURNS} complete turns"
+            )
+        text_bytes = sum(
+            len(turn.user.text.encode("utf-8")) + len(turn.assistant.text.encode("utf-8"))
+            for turn in state.turns
+        )
+        if text_bytes > MAX_SESSION_EXPORT_TEXT_BYTES:
+            raise SessionStoreError(
+                f"session export text exceeds {MAX_SESSION_EXPORT_TEXT_BYTES} UTF-8 bytes"
+            )
+        return SessionConversationExport(_info(path, state), state.turns)
+
+    def search(self, query: str, limit: int) -> SessionSearchResult:
+        """Search final dialogue text across a bounded set of strictly replayed Sessions."""
+        canonical = _canonical_session_search_query(query)
+        if type(limit) is not int or not 1 <= limit <= MAX_SESSION_SEARCH_MATCHES:
+            raise SessionStoreError(
+                f"session search limit must be between 1 and {MAX_SESSION_SEARCH_MATCHES}"
+            )
+        _validate_existing_session_root(self.root, self.workspace)
+        paths = _bounded_session_paths(self.root)
+        candidate_count = len(paths)
+        truncated = candidate_count > MAX_SESSION_SEARCH_CANDIDATES
+        selected = paths[:MAX_SESSION_SEARCH_CANDIDATES]
+        loaded: list[tuple[SessionInfo, ReplayState]] = []
+        scanned_bytes = 0
+        for path in selected:
+            try:
+                size = path.lstat().st_size
+            except OSError:
+                raise SessionStoreError(f"session transcript is inaccessible: {path}") from None
+            if scanned_bytes + size > MAX_SESSION_SEARCH_TRANSCRIPT_BYTES:
+                truncated = True
+                break
+            state = self._load_state(path, allow_repair=False)
+            scanned_bytes += size
+            loaded.append((_info(path, state), state))
+        loaded.sort(key=lambda item: (item[0].created_at, item[0].session_id), reverse=True)
+        matches: list[SessionSearchMatch] = []
+        for info, state in loaded:
+            for turn_number, turn in enumerate(state.turns, start=1):
+                for role, text in (("user", turn.user.text), ("assistant", turn.assistant.text)):
+                    for line_number, line in enumerate(text.splitlines() or ("",), start=1):
+                        if canonical not in line:
+                            continue
+                        matches.append(
+                            SessionSearchMatch(
+                                info=info,
+                                turn_number=turn_number,
+                                role=role,
+                                line_number=line_number,
+                                excerpt=_bounded_search_excerpt(line, canonical),
+                            )
+                        )
+                        if len(matches) == limit:
+                            return SessionSearchResult(
+                                canonical,
+                                candidate_count,
+                                len(loaded),
+                                scanned_bytes,
+                                tuple(matches),
+                                True,
+                            )
+        return SessionSearchResult(
+            canonical,
+            candidate_count,
+            len(loaded),
+            scanned_bytes,
+            tuple(matches),
+            truncated,
+        )
+
+    def fork(
+        self,
+        selector: str | Path,
+        through_turn: int,
+        *,
+        binding: BindingSnapshot | None = None,
+    ) -> SessionWriter:
+        """Materialize complete parent turns into a new provenance-linked Session."""
+        if type(through_turn) is not int or through_turn < 1:
+            raise SessionStoreError("session fork turn must be a positive integer")
+        source_path = self._resolve_existing_path(selector)
+        source_data, source_state = self._strict_snapshot(source_path)
+        if through_turn > len(source_state.turns):
+            raise SessionStoreError(
+                f"session fork turn exceeds the {len(source_state.turns)} committed turns"
+            )
+        fork_binding = binding or source_state.binding
+        fork_binding.__post_init__()
+        source_info = _info(source_path, source_state)
+        committed = tuple(
+            record for record in source_state.records if isinstance(record, TurnCommitted)
+        )[:through_turn]
+        self._ensure_root()
+        with self._directory_lock():
+            session_id = _factory_session_id(self._uuid_factory)
+            transcript_path = self.root / f"{session_id}.jsonl"
+            lock_path = self.root / f"{session_id}.lock"
+            if transcript_path.exists() or transcript_path.is_symlink():
+                raise SessionStoreError(f"session ID collision: {session_id}")
+            lock_stream = self._acquire_writer_lock(lock_path, create_exclusive=True)
+            try:
+                fork_name = _fork_session_name(source_info.name, session_id)
+                header = SessionHeader(
+                    sequence=0,
+                    session_id=session_id,
+                    workspace=str(self.workspace),
+                    workspace_fingerprint=self.workspace_fingerprint,
+                    created_at=self._clock(),
+                    binding=fork_binding,
+                    name=fork_name,
+                    schema_version=SESSION_HEADER_SCHEMA_VERSION,
+                )
+                forked = SessionForked(
+                    sequence=1,
+                    occurred_at=self._clock(),
+                    source_session_id=source_info.session_id,
+                    source_turn_count=through_turn,
+                    source_transcript_sha256=hashlib.sha256(source_data).hexdigest(),
+                )
+                records: list[SessionRecord] = [header, forked]
+                for source_record in committed:
+                    records.append(
+                        TurnCommitted(
+                            sequence=len(records),
+                            committed_at=source_record.committed_at,
+                            binding=source_record.binding,
+                            items=source_record.items,
+                            tool_ledger=_copied_tool_ledger(source_record),
+                            provider_usage=(),
+                            session_name=None,
+                            session_name_source=None,
+                            session_title_fallback_reason=None,
+                        )
+                    )
+                records.append(
+                    RuntimeChanged(
+                        sequence=len(records),
+                        occurred_at=self._clock(),
+                        binding=fork_binding,
+                        reason="session_forked_current_runtime",
+                    )
+                )
+                records.append(
+                    SessionNamed(
+                        sequence=len(records),
+                        occurred_at=self._clock(),
+                        name=fork_name,
+                        source=SessionNameSource.AUTO,
+                    )
+                )
+                state = replay_records(
+                    records,
+                    expected_workspace=str(self.workspace),
+                    expected_workspace_fingerprint=self.workspace_fingerprint,
+                    expected_session_id=session_id,
+                    expected_file_name=transcript_path.name,
+                )
+                payload = b"".join(encode_record(record) for record in records)
+                if len(payload) > MAX_TRANSCRIPT_BYTES:
+                    raise SessionStoreError(
+                        f"forked session transcript exceeds {MAX_TRANSCRIPT_BYTES} bytes"
+                    )
+                _create_transcript(transcript_path, payload)
+                self._write_latest(session_id)
+            except AtomicJsonWriteError as error:
+                lock_stream.close()
+                _release_active_writer(lock_path)
+                if not error.replaced:
+                    _remove_created_session_files(transcript_path, lock_path)
+                raise
+            except Exception:
+                lock_stream.close()
+                _release_active_writer(lock_path)
+                _remove_created_session_files(transcript_path, lock_path)
+                raise
+        descriptor = _open_existing_transcript(transcript_path, writable=True)
+        return SessionWriter(
+            self,
+            transcript_path,
+            lock_path,
+            lock_stream,
+            descriptor,
+            state,
+        )
+
+    def diagnose(self, selector: str | Path) -> SessionDiagnosis:
+        """Classify transcript integrity without mutation, repair, or writer lease."""
+        path = self._resolve_existing_path(selector)
+        data, _ = _read_path_snapshot(path)
+        session_id = _session_id_from_path(path)
+        if not data:
+            return SessionDiagnosis(
+                session_id, SessionDiagnosisStatus.INVALID, "empty", 0, None, None
+            )
+        if data.endswith(b"\n"):
+            try:
+                state = self._replay(path, _decode_lines(data))
+            except SessionStoreError:
+                return SessionDiagnosis(
+                    session_id,
+                    SessionDiagnosisStatus.INVALID,
+                    "invalid_complete_transcript",
+                    len(data),
+                    None,
+                    None,
+                )
+            return SessionDiagnosis(
+                session_id,
+                SessionDiagnosisStatus.VALID,
+                "ok",
+                len(data),
+                len(state.records),
+                len(state.turns),
+            )
+        tail_start = data.rfind(b"\n") + 1
+        tail = data[tail_start:]
+        try:
+            json.loads(tail.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            if tail_start == 0:
+                return SessionDiagnosis(
+                    session_id,
+                    SessionDiagnosisStatus.INVALID,
+                    "incomplete_header",
+                    len(data),
+                    None,
+                    None,
+                )
+            try:
+                state = self._replay(path, _decode_lines(data[:tail_start]))
+            except SessionStoreError:
+                return SessionDiagnosis(
+                    session_id,
+                    SessionDiagnosisStatus.INVALID,
+                    "invalid_prefix_before_tail",
+                    len(data),
+                    None,
+                    None,
+                )
+            return SessionDiagnosis(
+                session_id,
+                SessionDiagnosisStatus.REPAIRABLE_TAIL,
+                "incomplete_final_record",
+                len(data),
+                len(state.records),
+                len(state.turns),
+                len(tail),
+            )
+        return SessionDiagnosis(
+            session_id,
+            SessionDiagnosisStatus.INVALID,
+            "complete_record_missing_newline",
+            len(data),
+            None,
+            None,
+        )
+
+    def repair(self, selector: str | Path) -> SessionRepairResult:
+        """Back up and repair only a replay-valid prefix plus incomplete final tail."""
+        path = self._resolve_existing_path(selector)
+        session_id = _session_id_from_path(path)
+        lock_path = self.root / f"{session_id}.lock"
+        lock_stream = self._acquire_writer_lock(
+            lock_path,
+            create_exclusive=False,
+            existing_only=True,
+        )
+        descriptor: int | None = None
+        try:
+            descriptor = _open_existing_transcript(path, writable=True)
+            with self._directory_lock(existing_only=True):
+                data, info = _read_descriptor_bytes(descriptor, path)
+                path_info = path.lstat()
+                if path.is_symlink() or (path_info.st_dev, path_info.st_ino) != (
+                    info.st_dev,
+                    info.st_ino,
+                ):
+                    raise SessionResumeStaleError("Session changed before explicit repair")
+                state, pending = self._prepare_replay(path, data)
+                if pending is None:
+                    raise SessionStoreError("session transcript does not need tail repair")
+                backup_path = _create_repair_backup(path, data)
+                recovery = Recovery(
+                    sequence=state.next_sequence,
+                    occurred_at=self._clock(),
+                    truncated_bytes=pending.truncated_bytes,
+                )
+                _truncate_and_append_recovery_descriptor(
+                    descriptor,
+                    path,
+                    pending.truncate_offset,
+                    recovery,
+                )
+                repaired_data, _ = _read_descriptor_bytes(descriptor, path)
+                repaired_state = self._replay(path, _decode_lines(repaired_data))
+                return SessionRepairResult(
+                    _info(path, repaired_state),
+                    pending.truncated_bytes,
+                    backup_path,
+                )
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            _release_writer_lease(lock_path, lock_stream)
+
+    def _resolve_existing_path(self, selector: str | Path) -> Path:
+        _validate_existing_session_root(self.root, self.workspace)
+        return self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+
+    def _strict_snapshot(self, path: Path) -> tuple[bytes, ReplayState]:
+        data, _ = _read_path_snapshot(path)
+        if not data.endswith(b"\n"):
+            raise SessionStoreError("session fork source must be a complete strict transcript")
+        return data, self._replay(path, _decode_lines(data))
 
     def action_audits(self, selector: str | Path) -> tuple[ActionAuditState, ...]:
         """Strictly replay and return one session's Host-only action lifecycles."""
@@ -1432,6 +1861,59 @@ def _release_writer_lease(path: Path, stream: BinaryIO) -> None:
             _release_active_writer(path)
 
 
+def _read_path_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
+    descriptor = _open_existing_transcript(path, writable=False)
+    try:
+        data, info = _read_descriptor_bytes(descriptor, path)
+        path_info = path.lstat()
+        if path.is_symlink() or (path_info.st_dev, path_info.st_ino) != (
+            info.st_dev,
+            info.st_ino,
+        ):
+            raise SessionStoreError("session transcript changed while it was being read")
+        return data, info
+    finally:
+        os.close(descriptor)
+
+
+def _remove_created_session_files(transcript_path: Path, lock_path: Path) -> None:
+    failures: list[str] = []
+    removed = False
+    for path in (transcript_path, lock_path):
+        try:
+            path.unlink()
+            removed = True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            failures.append(path.name)
+    if removed:
+        try:
+            _fsync_directory(transcript_path.parent)
+        except SessionStoreError:
+            failures.append("session directory durability")
+    if failures:
+        details = ", ".join(failures)
+        raise SessionStoreError(f"failed Session creation cleanup was incomplete: {details}")
+
+
+def _create_repair_backup(path: Path, data: bytes) -> Path:
+    digest = hashlib.sha256(data).hexdigest()
+    backup = path.parent / f"{path.stem}.repair-backup-{digest}.bak"
+    if backup.exists() or backup.is_symlink():
+        if backup.is_symlink() or not backup.is_file():
+            raise SessionStoreError("Session repair backup path is unsafe")
+        try:
+            existing = backup.read_bytes()
+        except OSError:
+            raise SessionStoreError("could not verify existing Session repair backup") from None
+        if existing != data:
+            raise SessionStoreError("existing Session repair backup does not match source")
+        return backup
+    _create_transcript(backup, data)
+    return backup
+
+
 def _factory_session_id(factory: Callable[[], UUID | str]) -> str:
     value = factory()
     candidate = str(value) if isinstance(value, UUID) else value
@@ -1742,6 +2224,12 @@ def _info(path: Path, state: ReplayState) -> SessionInfo:
         archived=state.archived,
         pinned=state.pinned,
         title_fallback_reason=_committed_title_fallback_reason(state),
+        forked_from_session_id=(
+            state.forked_from.source_session_id if state.forked_from is not None else None
+        ),
+        forked_from_turn=(
+            state.forked_from.source_turn_count if state.forked_from is not None else None
+        ),
     )
 
 
@@ -1819,6 +2307,98 @@ def _next_default_session_name(root: Path) -> str:
     except OSError:
         raise SessionStoreError(f"could not allocate session name in: {root}") from None
     return f"New session {count + 1}"
+
+
+def _fork_session_name(source_name: str, session_id: str) -> str:
+    suffix = f" [{session_id[:8]}]"
+    base = _truncate_session_name(
+        f"Fork of {source_name}",
+        80 - len(suffix),
+        256 - len(suffix.encode("utf-8")),
+    )
+    return canonical_session_name(base + suffix)
+
+
+def _copied_tool_ledger(record: TurnCommitted) -> ToolTurnLedger:
+    if record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
+        return record.tool_ledger
+    requests: list[ToolUse] = []
+    results: dict[str, ToolResult] = {}
+    for item in record.items:
+        if isinstance(item, ToolUse):
+            requests.append(item)
+        elif isinstance(item, AssistantToolBatch):
+            requests.extend(item.tool_uses)
+        elif isinstance(item, ToolResult):
+            results[item.tool_use_id] = item
+    return ToolTurnLedger(
+        tuple(
+            ToolOutcomeEntry(
+                request.tool_use_id,
+                request.name,
+                index,
+                (
+                    ToolRequestOutcome.ERROR
+                    if results[request.tool_use_id].is_error
+                    else ToolRequestOutcome.SUCCEEDED
+                ),
+            )
+            for index, request in enumerate(requests, start=1)
+        )
+    )
+
+
+def _canonical_session_search_query(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise SessionStoreError("session search query must be non-empty text")
+    if (
+        len(value) > MAX_SESSION_SEARCH_QUERY_CHARACTERS
+        or len(value.encode("utf-8")) > MAX_SESSION_SEARCH_QUERY_BYTES
+    ):
+        raise SessionStoreError("session search query exceeds its character or UTF-8 byte limit")
+    if any(not character.isprintable() for character in value):
+        raise SessionStoreError("session search query must be printable single-line text")
+    return value
+
+
+def _bounded_session_paths(root: Path) -> tuple[Path, ...]:
+    try:
+        entries = tuple(root.iterdir())
+    except OSError:
+        raise SessionStoreError(f"could not list session directory: {root}") from None
+    if len(entries) > MAX_SESSION_SEARCH_DIRECTORY_ENTRIES:
+        raise SessionStoreError(
+            f"session directory exceeds {MAX_SESSION_SEARCH_DIRECTORY_ENTRIES} entries"
+        )
+    paths = []
+    for path in entries:
+        if not path.name.endswith(".jsonl"):
+            continue
+        _session_id_from_path(path)
+        paths.append(path)
+    return tuple(sorted(paths, key=lambda path: path.name))
+
+
+def _bounded_search_excerpt(line: str, query: str) -> str:
+    if (
+        len(line) <= MAX_SESSION_SEARCH_EXCERPT_CHARACTERS
+        and len(line.encode("utf-8")) <= MAX_SESSION_SEARCH_EXCERPT_BYTES
+    ):
+        return line
+    index = line.find(query)
+    start = max(0, index - 40)
+    end = min(len(line), start + MAX_SESSION_SEARCH_EXCERPT_CHARACTERS - 6)
+    if end < index + len(query):
+        end = min(len(line), index + len(query) + 40)
+        start = max(0, end - (MAX_SESSION_SEARCH_EXCERPT_CHARACTERS - 6))
+    prefix = "..." if start else ""
+    suffix = "..." if end < len(line) else ""
+    candidate = prefix + line[start:end] + suffix
+    while len(candidate.encode("utf-8")) > MAX_SESSION_SEARCH_EXCERPT_BYTES:
+        end -= 1
+        suffix = "..." if end < len(line) else ""
+        candidate = prefix + line[start:end] + suffix
+    return candidate
 
 
 def _session_name_exists(

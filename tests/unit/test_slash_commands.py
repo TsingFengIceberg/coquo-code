@@ -29,9 +29,16 @@ from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
 from leonervis_code.session_store import (
     LatestUpdateStatus,
+    SessionConversationExport,
+    SessionDiagnosis,
+    SessionDiagnosisStatus,
     SessionInfo,
     SessionPreview,
+    SessionRepairResult,
+    SessionSearchMatch,
+    SessionSearchResult,
     SessionStoreError,
+    SessionTurnRange,
     ToolLedgerQueryResult,
 )
 from leonervis_code.tools.glob import GlobTool
@@ -261,6 +268,54 @@ class Session:
         info = self.inspect_session(selector)
         return SessionPreview(info, len(self.turns), self.turns[-limit:])
 
+    def session_turn_range(self, selector, start_turn, count):
+        info = self.inspect_session(selector)
+        return SessionTurnRange(
+            info,
+            len(self.turns),
+            start_turn,
+            self.turns[start_turn - 1 : start_turn - 1 + count],
+        )
+
+    def search_sessions(self, query, limit):
+        info = self.session_info()
+        matches = (
+            (SessionSearchMatch(info, 1, "user", 1, self.turns[0].user.text),)
+            if query in self.turns[0].user.text
+            else ()
+        )
+        return SessionSearchResult(query, 1, 1, 100, matches[:limit], False)
+
+    def export_session(self, selector):
+        return SessionConversationExport(self.inspect_session(selector), self.turns)
+
+    def diagnose_session(self, selector):
+        info = self.inspect_session(selector)
+        return SessionDiagnosis(
+            info.session_id,
+            SessionDiagnosisStatus.VALID,
+            "ok",
+            100,
+            info.record_count,
+            info.turn_count,
+        )
+
+    def repair_session(self, selector):
+        info = self.inspect_session(selector)
+        return SessionRepairResult(info, 12, self.tmp_path / f"{info.session_id}.bak")
+
+    def fork_session(self, selector, through_turn):
+        source = self.inspect_session(selector)
+        self.current = "32345678-1234-4234-9234-123456789abc"
+        self.latest = self.current
+        self.name = "Fork of Current work"
+        info = self.session_info()
+        return replace(
+            info,
+            forked_from_session_id=source.session_id,
+            forked_from_turn=through_turn,
+        )
+
     def list_sessions(self):
         return self.sessions if self.sessions is not None else (self.session_info(),)
 
@@ -333,7 +388,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert unknown.kind == "warning"
     assert unknown.message == (
         "Unknown session command: wat\nUsage: "
-        "/session <show|preview|list|new|rename|archive|unarchive|pin|unpin|switch>"
+        "/session <show|preview|turns|search|export|fork|doctor|repair|list|new|rename|archive|unarchive|pin|unpin|switch>"
     )
     assert dispatch_slash("/session show one two", session).message == (
         "Usage: /session show [latest|session-id]"
@@ -346,6 +401,15 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     )
     assert dispatch_slash("/session preview ../outside", session).message == (
         "Usage: /session preview <latest|session-id> [1-10]"
+    )
+    assert dispatch_slash("/session turns latest 0", session).message == (
+        "Usage: /session turns <latest|session-id> <start> [1-10]"
+    )
+    assert dispatch_slash("/session search", session).message == (
+        "Usage: /session search <literal text>"
+    )
+    assert dispatch_slash("/session export latest yaml", session).message == (
+        "Usage: /session export <latest|session-id> [markdown|json]"
     )
     assert dispatch_slash("/session rename", session).message == (
         "Usage: /session rename <name> | /session rename --auto"
@@ -523,6 +587,29 @@ def test_session_show_and_preview_inspect_exact_target_without_switching(tmp_pat
     failure = dispatch_slash("/session show 32345678-1234-4234-9234-123456789abc", session)
     assert failure.kind == "error"
     assert "Session inspection failed" in failure.message
+
+
+def test_session_search_turns_export_doctor_repair_and_fork_commands(tmp_path) -> None:
+    session = Session(tmp_path)
+    session.turns = (Turn(Text("hello alpha"), Text("reply")),)
+
+    turns = dispatch_slash(f"/session turns {session.current} 1 3", session)
+    search = dispatch_slash("/session search alpha", session)
+    exported = dispatch_slash(f"/session export {session.current} json", session)
+    doctor = dispatch_slash(f"/session doctor {session.current}", session)
+    repair = dispatch_slash(f"/session repair {session.current}", session)
+    forked = dispatch_slash(f"/session fork {session.current} 1", session)
+
+    assert turns.kind == "info"
+    assert "Showing 1 turns from #1" in turns.message
+    assert "Turn #1" in search.message
+    assert '"schema_version": 1' in exported.message
+    assert "Status: valid" in doctor.message
+    assert repair.kind == "success"
+    assert "Truncated incomplete tail bytes: 12" in repair.message
+    assert forked.kind == "success"
+    assert "Forked and selected Session" in forked.message
+    assert session.current == "32345678-1234-4234-9234-123456789abc"
 
 
 def test_session_archive_commands_are_idempotent_and_preserve_identity(tmp_path) -> None:

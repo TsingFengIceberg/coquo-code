@@ -136,6 +136,12 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
     ] == [
         "/session show",
         "/session preview",
+        "/session turns",
+        "/session search",
+        "/session export",
+        "/session fork",
+        "/session doctor",
+        "/session repair",
         "/session list",
         "/session new",
         "/session rename",

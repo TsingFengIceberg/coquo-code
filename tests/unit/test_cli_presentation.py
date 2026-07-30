@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,8 +51,12 @@ from leonervis_code.cli.presentation import (
     render_runtime_status,
     render_runtime_switch,
     render_session_resume,
+    render_session_diagnosis,
+    render_session_export,
     render_session_info,
     render_session_preview,
+    render_session_search,
+    render_session_turn_range,
     render_switch_rejection,
     render_tool_ledgers,
     render_durable_usage_summary,
@@ -741,6 +746,67 @@ def test_session_preview_escapes_controls_and_enforces_output_bound(tmp_path: Pa
     assert "\x1b" not in rendered
     assert rendered.endswith("[Session preview truncated at 32768 UTF-8 bytes.]")
     assert len(rendered.encode("utf-8")) <= MAX_SESSION_PREVIEW_RENDER_BYTES
+
+
+def test_session_management_projection_renderers_are_safe_and_structured(tmp_path: Path) -> None:
+    info = SessionInfo(
+        session_id="12345678-1234-4234-9234-123456789abc",
+        path=tmp_path / "session.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-30T00:00:00.000000Z",
+        record_count=2,
+        turn_count=1,
+        closed=True,
+        binding=BindingSnapshot.fake(),
+        name="Preview",
+        name_source=SessionNameSource.MANUAL,
+    )
+    turn = SimpleNamespace(
+        user=SimpleNamespace(text="hello\x1b[31m"),
+        assistant=SimpleNamespace(text="answer"),
+    )
+
+    ranged = render_session_turn_range(
+        SimpleNamespace(info=info, total_turns=1, start_turn=1, turns=(turn,))
+    )
+    searched = render_session_search(
+        SimpleNamespace(
+            query="hello",
+            candidate_sessions=1,
+            scanned_sessions=1,
+            scanned_transcript_bytes=100,
+            matches=(
+                SimpleNamespace(
+                    info=info,
+                    turn_number=1,
+                    role="user",
+                    line_number=1,
+                    excerpt="hello\x1b[31m",
+                ),
+            ),
+            truncated=False,
+        )
+    )
+    exported = render_session_export(SimpleNamespace(info=info, turns=(turn,)), "json")
+    diagnosis = render_session_diagnosis(
+        SimpleNamespace(
+            session_id=info.session_id,
+            status=SimpleNamespace(value="repairable_tail"),
+            code="incomplete_final_record",
+            transcript_bytes=120,
+            record_count=2,
+            turn_count=1,
+            recoverable_tail_bytes=20,
+        )
+    )
+
+    assert "Turn #1" in ranged
+    assert "hello\\x1b[31m" in ranged
+    assert "Search completed" in searched
+    assert "\\u001b" not in exported
+    assert json.loads(exported)["turns"][0]["user"] == "hello\\x1b[31m"
+    assert "Recoverable incomplete tail bytes: 20" in diagnosis
 
 
 def test_prompt_and_toolbar_have_safe_fallbacks() -> None:

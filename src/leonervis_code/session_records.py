@@ -282,6 +282,19 @@ class SessionPinChanged:
 
 
 @dataclass(frozen=True)
+class SessionForked:
+    """Durable provenance for a Session materialized from complete parent turns."""
+
+    sequence: int
+    occurred_at: str
+    source_session_id: str
+    source_turn_count: int
+    source_transcript_sha256: str
+    record_type: str = "session_forked"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TurnFailed:
     sequence: int
     occurred_at: str
@@ -482,6 +495,7 @@ SessionRecord: TypeAlias = (
     | SessionNamed
     | SessionArchiveChanged
     | SessionPinChanged
+    | SessionForked
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -499,6 +513,7 @@ AuditRecord: TypeAlias = (
     | SessionNamed
     | SessionArchiveChanged
     | SessionPinChanged
+    | SessionForked
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -528,6 +543,7 @@ class ReplayState:
     latest_name: SessionNamed | None
     archived: bool
     pinned: bool
+    forked_from: SessionForked | None
     binding: BindingSnapshot
     next_sequence: int
     closed: bool
@@ -665,6 +681,7 @@ def replay_records(
     latest_name: SessionNamed | None = None
     archived = False
     pinned = False
+    forked_from: SessionForked | None = None
     binding = header.binding
     closed = False
     seen_tool_ids: set[str] = set()
@@ -729,6 +746,12 @@ def replay_records(
             if type(record.pinned) is not bool:
                 raise SessionRecordError("session_pin_changed pinned must be boolean")
             pinned = record.pinned
+        elif isinstance(record, SessionForked):
+            _require_no_live_action(live_action_request_id, "session_forked")
+            _validate_session_forked(record, header=header, turns=turns)
+            if forked_from is not None:
+                raise SessionRecordError("session_forked may appear only once")
+            forked_from = record
         elif isinstance(record, TurnFailed):
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -906,6 +929,7 @@ def replay_records(
         latest_name=latest_name,
         archived=archived,
         pinned=pinned,
+        forked_from=forked_from,
         binding=binding,
         next_sequence=len(validated),
         closed=closed,
@@ -1126,6 +1150,19 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         if type(record.pinned) is not bool:
             raise SessionRecordError("session_pin_changed pinned must be boolean")
         common.update(occurred_at=record.occurred_at, pinned=record.pinned)
+    elif isinstance(record, SessionForked):
+        _validate_timestamp(record.occurred_at, "session_forked occurred_at")
+        canonical_session_id(record.source_session_id)
+        if type(record.source_turn_count) is not int or record.source_turn_count < 1:
+            raise SessionRecordError("session_forked source_turn_count must be positive")
+        if _SHA256.fullmatch(record.source_transcript_sha256) is None:
+            raise SessionRecordError("session_forked source transcript digest is invalid")
+        common.update(
+            occurred_at=record.occurred_at,
+            source_session_id=record.source_session_id,
+            source_turn_count=record.source_turn_count,
+            source_transcript_sha256=record.source_transcript_sha256,
+        )
     elif isinstance(record, TurnFailed):
         _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
         _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -1459,6 +1496,30 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             sequence=sequence,
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             pinned=pinned,
+        )
+    if record_type == "session_forked":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "source_session_id",
+            "source_turn_count",
+            "source_transcript_sha256",
+        }
+        _closed_fields(value, fields, record_type)
+        source_turn_count = value.get("source_turn_count")
+        if type(source_turn_count) is not int or source_turn_count < 1:
+            raise SessionRecordError("session_forked source_turn_count must be positive")
+        source_digest = _required_field_text(value, "source_transcript_sha256", record_type)
+        if _SHA256.fullmatch(source_digest) is None:
+            raise SessionRecordError("session_forked source transcript digest is invalid")
+        return SessionForked(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            source_session_id=canonical_session_id(value.get("source_session_id")),
+            source_turn_count=source_turn_count,
+            source_transcript_sha256=source_digest,
         )
     if record_type == "turn_failed":
         fields = {
@@ -2300,6 +2361,24 @@ def _validate_turn_session_name(record: TurnCommitted) -> None:
             and record.session_title_fallback_reason is not None
         ):
             raise SessionRecordError("model Session name cannot contain a fallback reason")
+
+
+def _validate_session_forked(
+    record: SessionForked,
+    *,
+    header: SessionHeader,
+    turns: list[ConversationTurn],
+) -> None:
+    _validate_timestamp(record.occurred_at, "session_forked occurred_at")
+    if record.sequence != 1 or turns:
+        raise SessionRecordError("session_forked must immediately follow session_header")
+    canonical_session_id(record.source_session_id)
+    if record.source_session_id == header.session_id:
+        raise SessionRecordError("session_forked source must differ from the new Session")
+    if type(record.source_turn_count) is not int or record.source_turn_count < 1:
+        raise SessionRecordError("session_forked source_turn_count must be positive")
+    if _SHA256.fullmatch(record.source_transcript_sha256) is None:
+        raise SessionRecordError("session_forked source transcript digest is invalid")
 
 
 def _validate_header(header: SessionHeader) -> None:

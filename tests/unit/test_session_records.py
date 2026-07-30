@@ -30,6 +30,7 @@ from leonervis_code.session_records import (
     RuntimeChanged,
     SessionArchiveChanged,
     SessionClosed,
+    SessionForked,
     SessionHeader,
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
@@ -76,6 +77,38 @@ def successful_ledger(*requests: ToolUse) -> ToolTurnLedger:
             for index, request in enumerate(requests, start=1)
         )
     )
+
+
+def test_session_forked_round_trip_requires_immediate_distinct_provenance(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path.resolve()
+    binding = BindingSnapshot.fake()
+    header = SessionHeader(
+        0,
+        SESSION_ID,
+        str(workspace),
+        workspace_fingerprint(workspace),
+        NOW,
+        binding,
+    )
+    forked = SessionForked(
+        sequence=1,
+        occurred_at=NOW,
+        source_session_id="22345678-1234-4234-9234-123456789abc",
+        source_turn_count=2,
+        source_transcript_sha256="a" * 64,
+    )
+
+    decoded = decode_record(encode_record(forked))
+    state = replay_records([header, decoded])
+
+    assert decoded == forked
+    assert state.forked_from == forked
+    with pytest.raises(SessionRecordError, match="source must differ"):
+        replay_records([header, replace(forked, source_session_id=SESSION_ID)])
+    with pytest.raises(SessionRecordError, match="sequence mismatch"):
+        replay_records([header, replace(forked, sequence=2)])
 
 
 def test_record_codec_round_trip_and_replay_excludes_audit(tmp_path: Path) -> None:
