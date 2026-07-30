@@ -11,15 +11,37 @@ from leonervis_code.evals.baseline import (
     run_eval_case,
     run_eval_suite,
 )
+from leonervis_code.evals.coding_tasks import (
+    CODING_TASK_SUITE_ID,
+    CodingTask,
+    CodingTaskRunResult,
+    builtin_coding_tasks,
+    get_coding_task,
+    materialize_coding_task,
+    render_coding_task_result_json,
+    render_coding_task_result_text,
+    run_coding_task,
+    score_coding_task,
+)
 
 __all__ = [
     "DETERMINISTIC_BASELINE_ID",
+    "CODING_TASK_SUITE_ID",
+    "CodingTask",
+    "CodingTaskRunResult",
     "EvalError",
     "EvalCaseResult",
     "EvalSuiteResult",
     "builtin_eval_cases",
+    "builtin_coding_tasks",
+    "get_coding_task",
+    "materialize_coding_task",
+    "render_coding_task_result_json",
+    "render_coding_task_result_text",
     "render_eval_result_json",
     "render_eval_result_text",
     "run_eval_case",
     "run_eval_suite",
+    "run_coding_task",
+    "score_coding_task",
 ]

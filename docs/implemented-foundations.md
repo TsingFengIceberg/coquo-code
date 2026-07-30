@@ -25,6 +25,7 @@
 - [Host Policy 与 Tool Discoverability](#host-policy-与-tool-discoverability)
 - [Foundation 5A：根 AGENTS.md 项目指令](#foundation-5a根-agentsmd-项目指令)
 - [确定性离线 Host Eval 基线](#确定性离线-host-eval-基线)
+- [Actual Coding Task Eval](#actual-coding-task-eval)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -447,6 +448,14 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、逐请求durable tool ledger和Action Audit lifecycle。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
 
 这是Host correctness baseline，不是pytest替代品，也不是对真实模型规划质量、随机性或泛化能力的评估。它不运行credential、网络、API费用、command sandbox、性能benchmark、排行榜或外部fixture；scripted trajectory通过只说明固定Harness路径仍符合已声明不变量。该Host-only入口没有改变model-visible tool、system prompt v23、adapter contract v26、Effective Context、Session或Action Audit schema。详见[0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)。
+
+## Actual Coding Task Eval
+
+`coding-task-v1`新增`inventory-validation`与`slug-normalization`两道固定小型Python任务。`eval task prepare TASK OUTPUT`只物化README、一个待修生产文件和可见`unittest`，不复制Host私有测试；`eval task score TASK WORKSPACE`对现有候选执行只读评分。Scorer先检查完整entry shape与protected README/test SHA-256，再通过逐层no-follow读取把声明文件复制到新的temporary scoring workspace，最后才注入私有测试。候选目录不会被写入隐藏文件或测试产物，额外entry、protected修改、symlink、special file、单文件超过1 MiB、总量超过4 MiB或扫描超过100 entries都会失败或fail closed。
+
+可见测试和私有测试都使用固定`/usr/bin/python3 -m unittest discover ...`命令，并经过生产`RunCommandTool`的bubblewrap/seccomp沙箱；不存在“为了Eval直接subprocess”的旁路。`eval task run TASK --real-provider`还要求显式`--profile`、`--profile-id`或`--model`，固定在新建任务目录中以`danger-full-access + auto`运行普通ProjectSession/AgentLoop/PermissionGate/tool/Action Audit链。无`--output`时目录在评分后删除，有`--output`时保留供人工检查；工具生命周期写stderr，stdout只输出不含workspace path、provider正文或随机ID的稳定评分。Host按agent turn、committed turn、action certainty、workspace shape、protected files、visible tests和hidden tests评分，不依赖模型最终文字。
+
+普通command sandbox会只读挂载Host根目录，因此real-task Eval额外在bubblewrap中遮蔽当前Leonervis源码checkout；安装态至少遮蔽evaluator模块与bytecode cache，然后再挂载任务workspace。隐藏测试也只在agent Session关闭后的独立评分目录中生成，模型工具无法读取其正文。该切片没有改变21个model-visible tools、system prompt v23、adapter contract v26、`ctx-v5`/`ctx-v6`、ToolArguments、Session、Action Audit或compaction schema；它不是任意benchmark loader、模型排行榜、重试框架或无授权的provider smoke。详见[0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1070,3 +1079,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 82. [0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)
 83. [0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
 84. [0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)
+85. [0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)

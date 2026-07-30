@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TextIO
 
 from leonervis_code import ProjectSession, __version__
@@ -51,9 +52,16 @@ from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.evals import (
     EvalError,
     builtin_eval_cases,
+    builtin_coding_tasks,
+    get_coding_task,
+    materialize_coding_task,
+    render_coding_task_result_json,
+    render_coding_task_result_text,
     render_eval_result_json,
     render_eval_result_text,
+    run_coding_task,
     run_eval_suite,
+    score_coding_task,
 )
 from leonervis_code.core.orchestration import (
     GenerationOptions,
@@ -262,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     route_parser.add_argument("--temperature", type=float)
 
     eval_parser = subcommands.add_parser(
-        "eval", help="run the deterministic offline Host evaluation baseline"
+        "eval", help="run deterministic Host and actual coding-task evaluations"
     )
     eval_commands = eval_parser.add_subparsers(dest="eval_command", required=True)
     eval_commands.add_parser("list", help="list built-in deterministic Eval cases")
@@ -271,6 +279,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_run_parser.add_argument("selector", nargs="?", default="all")
     eval_run_parser.add_argument("--format", choices=["text", "json"], default="text")
+    eval_task_parser = eval_commands.add_parser(
+        "task", help="prepare, score, or explicitly run an actual coding task"
+    )
+    eval_task_commands = eval_task_parser.add_subparsers(dest="eval_task_command", required=True)
+    eval_task_commands.add_parser("list", help="list built-in actual coding tasks")
+    eval_task_prepare = eval_task_commands.add_parser(
+        "prepare", help="materialize one task without Host-private tests"
+    )
+    eval_task_prepare.add_argument("task_id")
+    eval_task_prepare.add_argument("output")
+    eval_task_score = eval_task_commands.add_parser(
+        "score", help="score one existing candidate with visible and Host-private tests"
+    )
+    eval_task_score.add_argument("task_id")
+    eval_task_score.add_argument("candidate_workspace", metavar="WORKSPACE")
+    eval_task_score.add_argument("--format", choices=["text", "json"], default="text")
+    eval_task_run = eval_task_commands.add_parser(
+        "run", help="opt in to one real-provider attempt and deterministic Host scoring"
+    )
+    eval_task_run.add_argument("task_id")
+    eval_task_run.add_argument("--real-provider", action="store_true", required=True)
+    eval_task_run.add_argument("--output", help="retain the new isolated task workspace")
+    eval_task_run.add_argument("--format", choices=["text", "json"], default="text")
 
     provider_parser = subcommands.add_parser("provider", help="manage named provider profiles")
     provider_commands = provider_parser.add_subparsers(dest="provider_command", required=True)
@@ -788,12 +819,103 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
-def handle_eval_command(arguments: argparse.Namespace, stdout: TextIO) -> int:
-    """Run the built-in no-network Eval surface outside the selected user workspace."""
+def _eval_path(value: str, invocation_workspace: Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else invocation_workspace / path
+
+
+def _render_coding_task_score(arguments: argparse.Namespace, result, stdout: TextIO) -> int:
+    rendered = (
+        render_coding_task_result_json(result)
+        if arguments.format == "json"
+        else render_coding_task_result_text(result)
+    )
+    stdout.write(f"{rendered}\n")
+    return 0 if result.passed else 1
+
+
+def handle_eval_command(
+    arguments: argparse.Namespace,
+    *,
+    invocation_workspace: Path,
+    environment: Mapping[str, str],
+    user_profile_path: Path | None,
+    project_profile_path: Path | None,
+    provider_factory,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """Run deterministic Host Eval or one explicitly opted-in actual coding task."""
     if arguments.eval_command == "list":
         for case in builtin_eval_cases():
             stdout.write(f"{case.case_id}: {case.summary}\n")
         return 0
+    if arguments.eval_command == "task":
+        if arguments.eval_task_command == "list":
+            for task in builtin_coding_tasks():
+                stdout.write(f"{task.task_id}: {task.summary}\n")
+            return 0
+        task = get_coding_task(arguments.task_id)
+        if arguments.eval_task_command == "prepare":
+            target = _eval_path(arguments.output, invocation_workspace)
+            materialize_coding_task(task, target)
+            stdout.write(f"Prepared {task.task_id} at {target}.\n")
+            return 0
+        if arguments.eval_task_command == "score":
+            target = _eval_path(arguments.candidate_workspace, invocation_workspace)
+            return _render_coding_task_score(
+                arguments,
+                score_coding_task(task, target, environment=environment),
+                stdout,
+            )
+
+        event_sink = TerminalEventSink(
+            stderr,
+            color=color_enabled(stderr, environment),
+            stream_deltas=False,
+            render_markdown=stderr.isatty(),
+        )
+        source_project_profile = (
+            project_profile_path
+            or _store(
+                invocation_workspace,
+                environment,
+                user_profile_path,
+                project_profile_path,
+            ).project_path
+        )
+
+        def execute(target: Path):
+            attempt = run_coding_task(
+                task,
+                target,
+                environment=environment,
+                profile=arguments.profile,
+                profile_id=arguments.invocation_profile_id,
+                model=arguments.invocation_model,
+                custom_protocol=arguments.invocation_provider_protocol,
+                custom_base_url=arguments.invocation_base_url,
+                custom_api_key_env=arguments.invocation_api_key_env,
+                max_output_tokens=arguments.invocation_max_output_tokens,
+                user_profile_path=user_profile_path,
+                provider_project_profile_path=source_project_profile,
+                provider_factory=provider_factory,
+                event_sink=event_sink,
+            )
+            if attempt.execution_error is not None:
+                stderr.write(
+                    f"Coding task provider attempt ended with {attempt.execution_error}.\n"
+                )
+            return _render_coding_task_score(arguments, attempt.result, stdout)
+
+        if arguments.output is not None:
+            target = _eval_path(arguments.output, invocation_workspace)
+            exit_code = execute(target)
+            stderr.write(f"Retained coding task workspace: {target}\n")
+            return exit_code
+        with TemporaryDirectory(prefix="leonervis-coding-task-") as temporary:
+            return execute(Path(temporary) / task.task_id)
+
     result = run_eval_suite(arguments.selector)
     rendered = (
         render_eval_result_json(result)
@@ -841,23 +963,54 @@ def main(
                 raise EvalError(
                     "eval uses isolated temporary workspaces and does not accept -C/--cwd"
                 )
+            coding_task_run = (
+                arguments.eval_command == "task" and arguments.eval_task_command == "run"
+            )
+            if arguments.resume is not None:
+                raise EvalError("eval does not accept --resume")
             if (
-                any(
-                    value is not None
-                    for value in (
-                        arguments.resume,
-                        arguments.profile,
-                        arguments.invocation_profile_id,
-                        arguments.invocation_model,
-                        arguments.invocation_max_output_tokens,
-                    )
+                arguments.permission_mode != PermissionMode.READ_ONLY.value
+                or arguments.approval != ApprovalMode.ASK.value
+            ):
+                raise EvalError("eval controls its own permission and approval policy")
+            provider_selected = any(
+                value is not None
+                for value in (
+                    arguments.profile,
+                    arguments.invocation_profile_id,
+                    arguments.invocation_model,
                 )
+            )
+            if coding_task_run and not provider_selected:
+                raise EvalError(
+                    "eval task run requires an explicit --profile, --profile-id, or --model"
+                )
+            if coding_task_run and custom_requested and arguments.invocation_model is None:
+                raise EvalError("custom endpoint options require --model")
+            if (
+                coding_task_run
+                and (arguments.profile is not None or arguments.invocation_profile_id is not None)
+                and custom_requested
+            ):
+                raise EvalError("profile selection cannot be combined with custom endpoint options")
+            if not coding_task_run and (
+                provider_selected
+                or arguments.invocation_max_output_tokens is not None
                 or custom_requested
             ):
                 raise EvalError(
                     "eval is offline and does not accept runtime or provider selection options"
                 )
-            return handle_eval_command(arguments, output)
+            return handle_eval_command(
+                arguments,
+                invocation_workspace=workspace,
+                environment=env,
+                user_profile_path=user_profile_path,
+                project_profile_path=project_profile_path,
+                provider_factory=factory,
+                stdout=output,
+                stderr=errors,
+            )
         if arguments.resume is not None and arguments.command not in {None, "prompt"}:
             raise ProviderProfileError("--resume is only valid with prompt or interactive mode")
         if arguments.invocation_max_output_tokens is not None and arguments.command not in {

@@ -122,10 +122,12 @@ class LinuxBubblewrapCommandSandbox:
         bubblewrap_path: Path = DEFAULT_BUBBLEWRAP_PATH,
         seccomp_filter_factory: Callable[[], int] | None = None,
         platform: str | None = None,
+        masked_read_paths: tuple[Path, ...] = (),
     ) -> None:
         self._bubblewrap_path = Path(bubblewrap_path)
         self._seccomp_filter_factory = seccomp_filter_factory or _create_network_seccomp_filter
         self._platform = sys.platform if platform is None else platform
+        self._masked_read_paths = tuple(Path(path) for path in masked_read_paths)
 
     def prepare_launch(
         self,
@@ -140,6 +142,7 @@ class LinuxBubblewrapCommandSandbox:
         bubblewrap = self._validated_bubblewrap_path()
         original_home = _absolute_home(environment)
         sensitive_mounts = _sensitive_mounts(original_home, workspace)
+        masked_read_mounts = _masked_read_mounts(self._masked_read_paths, workspace)
 
         seccomp_fd: int | None = None
         activation_read_fd: int | None = None
@@ -177,10 +180,9 @@ class LinuxBubblewrapCommandSandbox:
                 "/run",
                 "--tmpfs",
                 "/tmp",
-                "--bind",
-                str(workspace),
-                str(workspace),
             ]
+            command.extend(masked_read_mounts)
+            command.extend(("--bind", str(workspace), str(workspace)))
             command.extend(sensitive_mounts)
             for directory in _PRIVATE_DIRECTORIES:
                 if directory != SANDBOX_PRIVATE_TMP:
@@ -316,6 +318,24 @@ def _sensitive_mounts(home: Path | None, workspace: Path) -> list[str]:
             raise CommandSandboxUnavailable("sensitive path could not be inspected") from error
         if workspace == target or workspace.is_relative_to(target):
             raise CommandSandboxUnavailable("workspace conflicts with a sensitive path")
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            mounts.extend(("--tmpfs", str(target)))
+        else:
+            mounts.extend(("--ro-bind", "/dev/null", str(target)))
+    return mounts
+
+
+def _masked_read_mounts(paths: tuple[Path, ...], workspace: Path) -> list[str]:
+    mounts: list[str] = []
+    for target in paths:
+        if not target.is_absolute():
+            raise CommandSandboxUnavailable("masked read path must be absolute")
+        try:
+            info = target.lstat()
+        except OSError as error:
+            raise CommandSandboxUnavailable("masked read path could not be inspected") from error
+        if target == workspace or target.is_relative_to(workspace):
+            raise CommandSandboxUnavailable("masked read path conflicts with workspace")
         if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
             mounts.extend(("--tmpfs", str(target)))
         else:

@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, workspace-root `AGENTS.md` project instructions, a deterministic offline Eval baseline, and 21 bounded tools are implemented. On Linux, `run_command` requires bubblewrap and seccomp isolation: the workspace is the only Host-persistent writable area and network sockets are denied; an unavailable sandbox never degrades to direct Host execution. Read-only Git observation distinguishes staged, unstaged, and untracked state, returns bounded tracked patches, and reads recent current-HEAD history or one complete-ID reachable commit. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers, compaction checkpoints, and provider usage audits are inspectable, while context pressure and current-process token usage remain immediately visible. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, workspace-root `AGENTS.md` project instructions, deterministic offline Host Eval, actual Coding Task Eval, and 21 bounded tools are implemented. On Linux, `run_command` requires bubblewrap and seccomp isolation: the workspace is the only Host-persistent writable area and network sockets are denied; an unavailable sandbox never degrades to direct Host execution. Read-only Git observation distinguishes staged, unstaged, and untracked state, returns bounded tracked patches, and reads recent current-HEAD history or one complete-ID reachable commit. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers, compaction checkpoints, and provider usage audits are inspectable, while context pressure and current-process token usage remain immediately visible. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation.
 
 ## Contents
 
@@ -321,15 +321,20 @@ git diff --check
 uv run leonervis-code eval list
 uv run leonervis-code eval run all
 uv run leonervis-code eval run all --format json
+uv run leonervis-code eval task list
+tmp=$(mktemp -d)
+uv run leonervis-code eval task prepare inventory-validation "$tmp/task"
+uv run leonervis-code eval task score inventory-validation "$tmp/task"
 ```
 
-`pytest` verifies functions, modules, and protocol boundaries. `eval run` instead gives fixed tasks to the real `ProjectSession -> AgentLoop -> PermissionGate -> tool -> Session` path, then scores final workspace state, the durable tool ledger, Action Audit, and committed-turn facts. Eval always uses a scripted fake provider and temporary workspaces, reads no credentials, performs no network access, and is not presented as a real-model quality leaderboard. After changing dependencies, run `uv lock` before checking the lockfile. Leonervis Code does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
+`pytest` verifies functions, modules, and protocol boundaries, while `eval run` sends fixed scripted-fake trajectories through the complete Host path. `eval task prepare/score` instead creates a small code task offline and scores actual outcomes outside the candidate directory with visible and Host-private tests. Only `eval task run` with both `--real-provider` and an explicit profile/model may invoke a real vendor; it runs in a newly created isolated task directory, writes tool events to stderr, and reserves stdout for the stable Host score. After changing dependencies, run `uv lock` before checking the lockfile. Leonervis Code does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
 
 ## Detailed documentation
 
 - [Implemented foundations and design evolution](./docs/implemented-foundations_en.md): a consolidated account of the system prompt, tool loop, route policy, multi-provider runtime, profiles, Sessions, context capability, compaction, permission/approval, and controlled writes.
 - [Architecture decision records](./docs/decisions/): complete problem statements, trade-offs, boundaries, and verification records for each learning slice.
 - [Deterministic Offline Host Eval Baseline](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md): fixed tasks, isolated execution, Host-fact scoring, and the boundary from pytest and real-model evaluation.
+- [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md): actual code outcomes, protected files, Host-private tests, explicit real-provider opt-in, and command-sandbox boundaries.
 - [AgentLoop and Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md): mixed-response execution order, live presentation, failure atomicity, and Session recovery.
 - [AgentLoop, Runtime, and Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md): stream preflight, complete tool assembly, live REPL display, and durable final confirmation.
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md): safe-block streaming, TTY layout, raw redirects, and terminal-control boundaries.

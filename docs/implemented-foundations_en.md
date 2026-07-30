@@ -25,6 +25,7 @@
 - [Host Policy and Tool Discoverability](#host-policy-and-tool-discoverability)
 - [Foundation 5A: Root AGENTS.md Project Instructions](#foundation-5a-root-agentsmd-project-instructions)
 - [Deterministic Offline Host Eval Baseline](#deterministic-offline-host-eval-baseline)
+- [Actual Coding Task Eval](#actual-coding-task-eval)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -447,6 +448,14 @@ This model-visible change advances the system prompt to v23 with fingerprint `v2
 Scoring occurs after the Session closes. The runner strictly replays through `SessionStore` and compares committed-turn count, the complete workspace entry and file-byte identities, the per-request durable tool ledger, and Action Audit lifecycles. Final assistant text is also compared by its exact UTF-8 byte count and SHA-256 identity, but cannot override workspace facts: a regression test proves that even a response claiming creation fails when the target file is absent. Text reports expand only failed checks, while stable JSON excludes temporary paths, timestamps, random UUIDs, and original text, making it suitable for local regression and later CI comparison. `eval list` lists cases, `eval run <id>` runs one, and `eval run all --format json` runs the machine-readable baseline.
 
 This is a Host-correctness baseline, not a pytest replacement and not an evaluation of real-model planning quality, randomness, or generalization. It runs no credentials, network, API spend, command sandbox, performance benchmark, leaderboard, or external fixture. A scripted trajectory passing proves only that the fixed Harness path retains its declared invariants. This Host-only entry point leaves model-visible tools, system prompt v23, adapter contract v26, Effective Context, Session schemas, and Action Audit schemas unchanged. See [0084: Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md).
+
+## Actual Coding Task Eval
+
+`coding-task-v1` adds two fixed small Python tasks, `inventory-validation` and `slug-normalization`. `eval task prepare TASK OUTPUT` materializes only the README, one production file to repair, and visible `unittest` files; it never copies Host-private tests. `eval task score TASK WORKSPACE` performs read-only scoring over an existing candidate. The scorer first checks the complete entry shape and SHA-256 identities of protected README/test files, then copies declared files through component-by-component no-follow reads into a new temporary scoring workspace before injecting private tests. The candidate receives no hidden files or test artifacts. Extra entries, protected changes, symlinks, special files, a file above 1 MiB, more than 4 MiB total, or more than 100 scanned entries fail or fail closed.
+
+Visible and private tests use fixed `/usr/bin/python3 -m unittest discover ...` commands through the production `RunCommandTool` bubblewrap/seccomp sandbox; Eval has no direct-subprocess bypass. `eval task run TASK --real-provider` additionally requires an explicit `--profile`, `--profile-id`, or `--model`, then runs the ordinary ProjectSession, AgentLoop, PermissionGate, tools, and Action Audit under fixed `danger-full-access + auto` inside a newly created task directory. Without `--output`, that directory is removed after scoring; with `--output`, it remains for inspection. Tool lifecycle events go to stderr, while stdout contains only a stable score without workspace paths, provider text, or random IDs. Host checks cover agent completion, committed turn count, action certainty, workspace shape, protected files, visible tests, and hidden tests, independent of final model prose.
+
+The ordinary command sandbox read-only mounts the Host root, so real-task Eval additionally masks the current Leonervis source checkout inside bubblewrap; an installed build masks at least the evaluator module and bytecode cache before rebinding the task workspace. Hidden tests are generated only in a separate scoring directory after the agent Session closes, so model tools cannot inspect their text. This slice leaves all 21 model-visible tools, system prompt v23, adapter contract v26, `ctx-v5`/`ctx-v6`, ToolArguments, Session, Action Audit, and compaction schemas unchanged. It is not an arbitrary benchmark loader, model leaderboard, retry framework, or unauthorized provider smoke. See [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1070,3 +1079,4 @@ This slice establishes capacity facts only. It does not count current request to
 82. [0082: Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)
 83. [0083: Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)
 84. [0084: Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)
+85. [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)

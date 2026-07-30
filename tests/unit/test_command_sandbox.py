@@ -104,6 +104,61 @@ def test_bubblewrap_launch_has_fixed_mount_namespace_environment_and_seccomp_ord
         _close_launch(launch)
 
 
+def test_bubblewrap_masks_eval_sources_before_rebinding_nested_workspace(tmp_path: Path) -> None:
+    source_checkout = tmp_path / "source"
+    workspace = source_checkout / "task"
+    workspace.mkdir(parents=True)
+    hidden_file = tmp_path / "hidden.py"
+    hidden_file.write_text("private", encoding="utf-8")
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    sandbox = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+        masked_read_paths=(source_checkout, hidden_file),
+    )
+
+    launch = sandbox.prepare_launch(
+        workspace=workspace,
+        cwd=workspace,
+        argv=("/usr/bin/true",),
+        environment={"PATH": "/usr/bin"},
+    )
+    try:
+        argv = launch.argv
+        assert _subsequence(argv, ("--tmpfs", str(source_checkout)))
+        assert _subsequence(argv, ("--ro-bind", "/dev/null", str(hidden_file)))
+        assert argv.index(str(source_checkout)) < argv.index(str(workspace))
+    finally:
+        _close_launch(launch)
+
+
+def test_bubblewrap_rejects_masked_read_path_inside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    hidden = workspace / "hidden.py"
+    hidden.write_text("private", encoding="utf-8")
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    sandbox = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+        masked_read_paths=(hidden,),
+    )
+
+    with pytest.raises(CommandSandboxUnavailable, match="conflicts with workspace"):
+        sandbox.prepare_launch(
+            workspace=workspace,
+            cwd=workspace,
+            argv=("/usr/bin/true",),
+            environment={"PATH": "/usr/bin"},
+        )
+
+
 @pytest.mark.parametrize("platform", ["darwin", "win32"])
 def test_unsupported_platform_fails_closed(tmp_path: Path, platform: str) -> None:
     sandbox = LinuxBubblewrapCommandSandbox(
@@ -311,6 +366,38 @@ def test_real_sandbox_masks_sensitive_home_and_kernel_runtime_views(tmp_path: Pa
     assert "ssh []\n" in data["stdout"]["text"]
     assert "netrc-denied" in data["stdout"]["text"]
     assert "runtime [0, 0, 0]\n" in data["stdout"]["text"]
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or shutil.which("bwrap") is None
+    or ctypes.util.find_library("seccomp") is None,
+    reason="Linux bubblewrap and libseccomp are required",
+)
+def test_real_sandbox_masks_source_parent_and_rebinds_task_workspace(tmp_path: Path) -> None:
+    source_checkout = tmp_path / "source"
+    workspace = source_checkout / "task"
+    workspace.mkdir(parents=True)
+    secret = source_checkout / "hidden-tests.py"
+    secret.write_text("private", encoding="utf-8")
+    sandbox = LinuxBubblewrapCommandSandbox(masked_read_paths=(source_checkout,))
+    tool = RunCommandTool(
+        workspace,
+        environment={"PATH": "/usr/bin"},
+        command_sandbox=sandbox,
+    )
+    code = (
+        "from pathlib import Path; "
+        f"print('hidden', Path({str(secret)!r}).exists()); "
+        "Path('result.txt').write_text('visible', encoding='utf-8')"
+    )
+
+    result = tool.execute_detailed(tool.prepare(_request(["/usr/bin/python3", "-c", code])))
+    data = _payload(result)
+
+    assert result.result_code == "command_succeeded"
+    assert data["stdout"]["text"] == "hidden False\n"
+    assert (workspace / "result.txt").read_text(encoding="utf-8") == "visible"
 
 
 @pytest.mark.skipif(

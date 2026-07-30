@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、确定性离线Eval基线，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、确定性离线Host Eval与实际Coding Task Eval，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
 
 ## 目录
 
@@ -321,15 +321,20 @@ git diff --check
 uv run leonervis-code eval list
 uv run leonervis-code eval run all
 uv run leonervis-code eval run all --format json
+uv run leonervis-code eval task list
+tmp=$(mktemp -d)
+uv run leonervis-code eval task prepare inventory-validation "$tmp/task"
+uv run leonervis-code eval task score inventory-validation "$tmp/task"
 ```
 
-`pytest`验证函数、模块和协议边界；`eval run`则把固定任务交给真实`ProjectSession -> AgentLoop -> PermissionGate -> tool -> Session`路径，再以最终workspace、持久tool ledger、Action Audit和turn提交事实评分。Eval始终使用脚本化fake provider和临时workspace，不读取credential、不访问网络，也不把结果当作真实模型质量排行榜。依赖变化后先执行 `uv lock`，再检查锁文件。Leonervis Code 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
+`pytest`验证函数、模块和协议边界；`eval run`用scripted fake provider把固定轨迹送入完整Host路径。`eval task prepare/score`则离线创建小型代码任务，并在候选目录外以可见测试和Host私有测试评分实际结果。只有显式写出`--real-provider`并选择profile/model的`eval task run`才会调用真实厂商；它固定在新建隔离任务目录内运行，工具事件写入stderr，稳定Host评分写入stdout。依赖变化后先执行 `uv lock`，再检查锁文件。Leonervis Code 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
 
 ## 详细文档
 
 - [已实现 Foundation 与设计演进](./docs/implemented-foundations.md)：system prompt、工具循环、route policy、多 provider runtime、profile、Session、context capability、compaction、permission/approval与controlled write的集中说明。
 - [架构决策记录](./docs/decisions/)：每个学习切片的完整问题、取舍、边界与验证记录。
 - [确定性离线 Host Eval 基线](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md)：固定任务、隔离执行、Host事实评分及与pytest/真实模型评测的边界。
+- [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md)：实际代码结果、受保护文件、Host私有测试、显式真实provider opt-in与命令沙箱边界。
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
