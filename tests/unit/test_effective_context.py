@@ -24,6 +24,7 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.tools.catalog import TOOL_CATALOG
 from leonervis_code.tools.read_file import read_file_model_definition
 
@@ -47,7 +48,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8"
+        == "ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -206,6 +207,24 @@ def test_context_identity_includes_prompt_and_tool_contract() -> None:
         replace(context, tool_definitions=(TOOL_CATALOG[0], TOOL_CATALOG[0]))
 
 
+def test_context_identity_includes_exact_project_instructions(tmp_path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text("first\n", encoding="utf-8")
+    first = replace(
+        snapshot(),
+        project_instructions=ProjectInstructionsLoader(tmp_path).load(),
+    )
+    target.write_text("second\n", encoding="utf-8")
+    second = replace(
+        snapshot(),
+        project_instructions=ProjectInstructionsLoader(tmp_path).load(),
+    )
+
+    assert first.context_id != snapshot().context_id
+    assert first.context_id != second.context_id
+    assert first.to_conversation_request().project_instructions == first.project_instructions
+
+
 def test_full_history_source_requires_transcript_and_effective_equality() -> None:
     full = (UserMessage("one"), AssistantText("reply"))
     with pytest.raises(ValueError, match="must equal"):
@@ -239,7 +258,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v4-")
+    assert context.context_id.startswith("ctx-v6-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

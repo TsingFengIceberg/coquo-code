@@ -23,6 +23,7 @@
 - [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
 - [Host Workbench Diagnostics 与 Prompt History Search](#host-workbench-diagnostics-与-prompt-history-search)
 - [Host Policy 与 Tool Discoverability](#host-policy-与-tool-discoverability)
+- [Foundation 5A：根 AGENTS.md 项目指令](#foundation-5a根-agentsmd-项目指令)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -427,6 +428,16 @@ PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内
 `/tools catalog <tool-name>`从当前规范`TOOL_CATALOG`读取顺序和input schema，显示参数形状、required状态、权限分类、当前policy可用性与一条Host维护的主要硬边界摘要；它不调用工具，也不意味着跳过执行时的workspace、symlink、size、conflict、timeout、output或durability复查。原有无参数catalog和持久`/tools`账本保持兼容。
 
 `/permissions`用真实纯函数`PermissionGate`显示当前六类action的`allow | ask | deny`与稳定reason，同时单独报告沙箱依赖状态，避免把“policy允许”误解为“执行一定可用”；可选mode和approval只计算“未应用的policy preview”，不会改变进程配置、授权任何action或写Session。`/help policy`集中说明permission、approval和command sandbox的正交关系。补全候选扩展到规范tool names、permission modes、Action Audit status/tool筛选值和常用子命令；未知top-level、provider、session或tool name只在单个高相似候选时显示`Did you mean`，从不改写输入或自动dispatch。完整性测试要求每个规范工具都有hard-bound摘要，真实ProjectSession回归还证明这些发现性命令不调用provider、不改变transcript、history、usage、Action Audit或Session metadata。该Host-only切片保持system prompt v22、adapter contract v25、21-tool schema/order、Effective Context identity和全部持久schema不变。详见[0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)。
+
+## Foundation 5A：根 `AGENTS.md` 项目指令
+
+Leonervis现在只识别workspace根目录的`AGENTS.md`。Missing表示没有项目指令；现有entry必须经root directory descriptor以no-follow方式打开，并保持non-symlink regular-file identity。内容使用strict UTF-8，允许空文件并保留原始LF或CRLF bytes，不允许NUL，characters和UTF-8 bytes均最多32 KiB。它不向parent、child directory或Git root搜索，不合并层级，也不自动读取`CLAUDE.md`、`LEONERVIS.md`或其他兼容名称。Invalid existing file会在普通provider调用前明确失败，而不是静默当作missing。
+
+AgentLoop在每个user turn准备时读取一次`ProjectInstructionsSnapshot`，并和system prompt、tool catalog及committed history一起冻结。该turn内所有provider continuation、preflight和ActionLease复查都复用同一快照；即使工具在回合中重写`AGENTS.md`，当前回合仍完成于旧快照，下一回合才读取新内容。Manual/automatic compaction的source和candidate使用同一快照，变更中的manual compaction会按既有CAS规则冲突；resume和Session切换不会恢复历史指令副本，而是用当前workspace文件筛查下一次Effective Context。指令正文不写transcript、checkpoint、Action Audit或Session record。
+
+Provider-neutral `ConversationRequest`保留独立project-instructions字段。Anthropic将其投影为canonical system prompt后的第二个system text block，OpenAI-compatible投影为第二条system message；count/create/stream共享相同构造，因此内容准确参与preflight与token计量。Compact-summary与Session-title专用请求不暴露项目指令。Canonical prompt明确项目指导从属于Host policy、工具硬边界与当前直接user request，不能授权、放宽permission/approval、把普通file/tool output提升为指令或证明执行。`/instructions`只显示presence、相对path、UTF-8 byte count、representation与fingerprint，不显示正文、不调用provider、不消耗工具预算或修改Session。
+
+该模型可见变化把system prompt升级到v23，fingerprint为`v23-3858281d3354288e15dd51569d896fe22c6e4842d8c8b5192dc4a2e296792a55`；provider wire projection使adapter contract升级到v26。Effective Context current full/compacted representation升级为`ctx-v5`/`ctx-v6`并把exact指令snapshot或明确absent纳入identity；无项目指令时empty full-context identity为`ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`。旧`ctx-v1`至`ctx-v4`仍可校验与replay，Session与Action Audit schema均不升级，也不重写旧JSONL。完整决策见[0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1048,3 +1059,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 80. [0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)
 81. [0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)
 82. [0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)
+83. [0083：Foundation 5A Root AGENTS.md Project Instructions](./decisions/0083-foundation-5a-root-agents-project-instructions.md)

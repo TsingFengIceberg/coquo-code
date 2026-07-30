@@ -2566,7 +2566,7 @@ def _validate_context_compacted(
 
 
 def _context_id(value: object, label: str) -> None:
-    if not isinstance(value, str) or re.fullmatch(r"ctx-v[1-4]-[0-9a-f]{64}", value) is None:
+    if not isinstance(value, str) or re.fullmatch(r"ctx-v[1-6]-[0-9a-f]{64}", value) is None:
         raise SessionRecordError(f"{label} is invalid")
 
 

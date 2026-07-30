@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.project_instructions import render_project_instructions
 from leonervis_code.core.session_title import SessionTitleRequest
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
@@ -352,9 +353,18 @@ def build_input_projection(
     committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the Anthropic fields that contribute provider input tokens."""
+    system: object = request_snapshot.system_prompt.text
+    if request_snapshot.project_instructions is not None:
+        system = [
+            {"type": "text", "text": request_snapshot.system_prompt.text},
+            {
+                "type": "text",
+                "text": render_project_instructions(request_snapshot.project_instructions),
+            },
+        ]
     projection: dict[str, object] = {
         "model": config.model_id,
-        "system": request_snapshot.system_prompt.text,
+        "system": system,
         "messages": [
             *_serialize_effective_summary(request_snapshot.effective_summary),
             *serialize_history(

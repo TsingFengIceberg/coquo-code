@@ -129,7 +129,7 @@ def test_action_contracts_are_frozen_and_reject_untyped_or_malformed_values() ->
     with pytest.raises(ValueError, match="context ID"):
         ActionLease(SESSION_ID, LEASE_ID, 0, "ctx-v1-invalid")
     with pytest.raises(ValueError, match="context ID"):
-        ActionLease(SESSION_ID, LEASE_ID, 0, f"ctx-v5-{'1' * 64}")
+        ActionLease(SESSION_ID, LEASE_ID, 0, f"ctx-v7-{'1' * 64}")
     with pytest.raises(ValueError, match="request ID"):
         identity(request_id="not-a-uuid")
     with pytest.raises(ValueError, match="permission action"):

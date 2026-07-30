@@ -29,6 +29,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.definitions import OPENAI
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -175,6 +176,23 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
     assert "tools" not in counted and "parallel_tool_calls" not in counted
     assert "tools" not in created and "parallel_tool_calls" not in created
     assert counted["messages"] == created["messages"]
+
+
+def test_project_instructions_use_the_same_dedicated_count_and_create_message(tmp_path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Use exact tests.\n", encoding="utf-8")
+    snapshot = ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=(UserMessage("finish"),),
+        project_instructions=ProjectInstructionsLoader(tmp_path).load(),
+        allow_tools=False,
+    )
+
+    counted = build_input_projection(route(), snapshot)
+    created = build_request(route(), snapshot)
+
+    assert counted["messages"] == created["messages"]
+    assert counted["messages"][1]["role"] == "system"
+    assert counted["messages"][1]["content"].endswith("Use exact tests.\n")
 
 
 def test_compatible_response_outcome_retains_actual_usage_outside_response() -> None:

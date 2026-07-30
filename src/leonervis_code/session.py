@@ -66,6 +66,10 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.core.project_instructions import (
+    ProjectInstructionsLoader,
+    ProjectInstructionsSnapshot,
+)
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
@@ -586,6 +590,7 @@ class ProjectSession:
         approval_handler: ApprovalHandler | None = None,
         action_uuid_factory: Callable[[], UUID | str] = uuid4,
         loop: AgentLoop | None = None,
+        project_instructions_loader: ProjectInstructionsLoader | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
         self.workspace = workspace
@@ -614,6 +619,9 @@ class ProjectSession:
         self._git_diff = git_diff or GitDiffTool(workspace)
         self._git_log = git_log or GitLogTool(workspace)
         self._git_show = git_show or GitShowTool(workspace)
+        self._project_instructions_loader = (
+            project_instructions_loader or ProjectInstructionsLoader(workspace)
+        )
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -623,6 +631,7 @@ class ProjectSession:
         self._approval_handler = approval_handler or _cancel_approval
         self._action_uuid_factory = action_uuid_factory
         self._active_action_lease: ActionLease | None = None
+        self._active_turn_context: EffectiveContextSnapshot | None = None
         self._active_action_binding: BindingSnapshot | None = None
         self._active_usage_cursor: int | None = None
         self._active_turn_runtime: TurnRuntimeSnapshot | None = None
@@ -729,6 +738,7 @@ class ProjectSession:
             git_diff = git_diff_factory(resolved_workspace)
             git_log = git_log_factory(resolved_workspace)
             git_show = git_show_factory(resolved_workspace)
+            project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -764,6 +774,7 @@ class ProjectSession:
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
                     action_uuid_factory=action_uuid_factory,
+                    project_instructions_loader=project_instructions_loader,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -786,6 +797,7 @@ class ProjectSession:
                     commit_turn=lambda turn: session_holder["session"]._commit_turn(
                         writer_holder["writer"], turn
                     ),
+                    project_instructions_factory=project_instructions_loader.load,
                 )
                 snapshot = loop.effective_context_snapshot()
                 with manager.provider_for_context_transition() as runtime:
@@ -836,6 +848,7 @@ class ProjectSession:
                     approval_handler=approval_handler,
                     action_uuid_factory=action_uuid_factory,
                     loop=loop,
+                    project_instructions_loader=project_instructions_loader,
                     startup_resume_result=result,
                 )
                 session_holder["session"] = session
@@ -1071,6 +1084,7 @@ class ProjectSession:
                     self._git_log,
                     self._git_show,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
+                    project_instructions_factory=self._project_instructions_loader.load,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
                 snapshot = loop.effective_context_snapshot()
@@ -1165,6 +1179,7 @@ class ProjectSession:
                     )
                     prepared = prepared.with_action_lease(lease)
                     self._active_action_lease = lease
+                    self._active_turn_context = prepared.context
                     self._active_action_binding = binding
                     response = loop.run_prepared(
                         prepared,
@@ -1190,6 +1205,7 @@ class ProjectSession:
                 raise
             finally:
                 self._active_action_lease = None
+                self._active_turn_context = None
                 self._active_action_binding = None
                 self._active_usage_cursor = None
                 self._active_turn_runtime = None
@@ -1424,6 +1440,7 @@ class ProjectSession:
             representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
             system_prompt=source.system_prompt,
+            project_instructions=source.project_instructions,
             tool_definitions=source.tool_definitions,
             full_history=source.full_history,
             effective_history=prepared.plan.retained_history,
@@ -1655,6 +1672,13 @@ class ProjectSession:
                 checkpoint=self._writer.state.latest_checkpoint,
             )
 
+    def inspect_project_instructions(self) -> ProjectInstructionsSnapshot | None:
+        """Read current instruction metadata without provider or Session effects."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._project_instructions_loader.load()
+
     def status(self) -> RuntimeStatus:
         self._ensure_open()
         return self._manager.status()
@@ -1737,6 +1761,7 @@ class ProjectSession:
         git_show,
         *,
         commit_turn,
+        project_instructions_factory,
     ) -> AgentLoop:
         return AgentLoop(
             None,
@@ -1757,6 +1782,7 @@ class ProjectSession:
             initial_effective_summary=state.effective_summary,
             initial_effective_source=state.effective_source,
             commit_turn=commit_turn,
+            project_instructions_factory=project_instructions_factory,
         )
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
@@ -1775,6 +1801,7 @@ class ProjectSession:
             self._git_log,
             self._git_show,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
+            project_instructions_factory=self._project_instructions_loader.load,
         )
         loop.install_action_dispatcher(self._dispatch_action)
         return loop
@@ -2196,12 +2223,16 @@ class ProjectSession:
 
     def _assert_action_lease(self, lease: ActionLease) -> None:
         active = self._active_action_lease
-        if active != lease:
+        context = self._active_turn_context
+        if active != lease or context is None or context.context_id != lease.context_id:
             raise RuntimeError("prepared action lease is stale")
         if (
             self._writer.session_id != lease.session_id
             or self._manager.status().generation != lease.runtime_generation
-            or self._loop.effective_context_snapshot().context_id != lease.context_id
+            or self._loop.effective_context_snapshot_with_project_instructions(
+                context.project_instructions
+            ).context_id
+            != lease.context_id
         ):
             raise RuntimeError("prepared action lease no longer matches runtime context")
 

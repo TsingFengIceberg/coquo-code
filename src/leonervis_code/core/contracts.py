@@ -8,6 +8,8 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
 
+from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
+
 if TYPE_CHECKING:
     from leonervis_code.core.compaction import EffectiveContextSummary
 
@@ -328,10 +330,15 @@ class ConversationRequest:
     history: tuple[ConversationItem, ...]
     effective_summary: EffectiveContextSummary | None = None
     allow_tools: bool = True
+    project_instructions: ProjectInstructionsSnapshot | None = None
 
     def __post_init__(self) -> None:
         if type(self.allow_tools) is not bool:
             raise ValueError("conversation request allow_tools must be boolean")
+        if self.project_instructions is not None and not isinstance(
+            self.project_instructions, ProjectInstructionsSnapshot
+        ):
+            raise ValueError("conversation request project instructions are invalid")
 
 
 class ConversationProvider(Protocol):

@@ -24,6 +24,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.anthropic import (
     AnthropicConversationProvider,
@@ -169,6 +170,31 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
     assert "tools" not in client.requests[0]
     assert "tool_choice" not in client.requests[0]
     assert client.count_requests[0]["messages"] == client.requests[0]["messages"]
+
+
+def test_project_instructions_use_the_same_dedicated_count_and_create_block(tmp_path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Use exact tests.\n", encoding="utf-8")
+    instructions = ProjectInstructionsLoader(tmp_path).load()
+    client = RecordingMessagesClient(
+        [message(TextBlock(text="done", type="text"))],
+        counts=[SimpleNamespace(input_tokens=5)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+    snapshot = ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=(UserMessage("finish"),),
+        project_instructions=instructions,
+        allow_tools=False,
+    )
+
+    provider.count_input_tokens(snapshot)
+    provider.respond(snapshot)
+
+    counted = client.count_requests[0]["system"]
+    created = client.requests[0]["system"]
+    assert counted == created
+    assert isinstance(created, list) and len(created) == 2
+    assert created[1]["text"].endswith("Use exact tests.\n")
 
 
 def test_anthropic_response_outcome_retains_actual_usage_outside_response() -> None:

@@ -20,9 +20,10 @@ from leonervis_code.core.contracts import (
     UserMessage,
     system_prompt_fingerprint,
 )
+from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 3
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 4
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 5
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 6
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
@@ -84,12 +85,15 @@ class EffectiveContextSnapshot:
     tool_definitions: tuple[CanonicalToolDefinition, ...]
     full_history: tuple[ConversationItem, ...]
     effective_history: tuple[ConversationItem, ...]
+    project_instructions: ProjectInstructionsSnapshot | None = None
     effective_summary: EffectiveContextSummary | None = None
 
     def __post_init__(self) -> None:
         supported = {
             1,
             2,
+            3,
+            4,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }
@@ -101,6 +105,12 @@ class EffectiveContextSnapshot:
         }:
             raise ValueError("unsupported effective-context source")
         _validate_system_prompt_snapshot(self.system_prompt)
+        if self.project_instructions is not None and not isinstance(
+            self.project_instructions, ProjectInstructionsSnapshot
+        ):
+            raise ValueError("effective context contains invalid project instructions")
+        if self.representation_version in {1, 2, 3, 4} and self.project_instructions is not None:
+            raise ValueError("legacy effective context cannot contain project instructions")
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
             raise ValueError("effective context requires immutable tool definitions")
         tool_names: set[str] = set()
@@ -116,6 +126,7 @@ class EffectiveContextSnapshot:
         if self.source == EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY:
             if self.representation_version not in {
                 1,
+                3,
                 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError(
@@ -128,6 +139,7 @@ class EffectiveContextSnapshot:
         else:
             if self.representation_version not in {
                 2,
+                4,
                 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError("compacted effective context uses an unsupported representation")
@@ -175,6 +187,22 @@ class EffectiveContextSnapshot:
                 for turn in self.effective_turns
             ],
         }
+        if self.representation_version in {
+            EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+        }:
+            instructions = self.project_instructions
+            manifest["project_instructions"] = (
+                None
+                if instructions is None
+                else {
+                    "version": instructions.version,
+                    "path": instructions.path,
+                    "text": instructions.text,
+                    "byte_count": instructions.byte_count,
+                    "fingerprint": instructions.fingerprint,
+                }
+            )
         if self.effective_summary is not None:
             manifest["effective_summary"] = {
                 "assistant_acknowledgement": self.effective_summary.assistant_acknowledgement,
@@ -198,6 +226,7 @@ class EffectiveContextSnapshot:
         return ConversationRequest(
             system_prompt=self.system_prompt,
             history=self.effective_history + pending_items,
+            project_instructions=self.project_instructions,
             effective_summary=self.effective_summary,
             allow_tools=allow_tools,
         )

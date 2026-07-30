@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.project_instructions import render_project_instructions
 from leonervis_code.core.session_title import SessionTitleRequest
 from leonervis_code.providers.definitions import RuntimeProviderRoute
 from leonervis_code.providers.errors import (
@@ -355,10 +356,18 @@ def build_input_projection(
     committed_context: bool = False,
 ) -> dict[str, object]:
     """Build the native fields that contribute provider input tokens."""
+    system_messages = [{"role": "system", "content": request_snapshot.system_prompt.text}]
+    if request_snapshot.project_instructions is not None:
+        system_messages.append(
+            {
+                "role": "system",
+                "content": render_project_instructions(request_snapshot.project_instructions),
+            }
+        )
     projection: dict[str, object] = {
         "model": route.wire_model,
         "messages": [
-            {"role": "system", "content": request_snapshot.system_prompt.text},
+            *system_messages,
             *_serialize_effective_summary(request_snapshot.effective_summary),
             *serialize_history(
                 request_snapshot.history,

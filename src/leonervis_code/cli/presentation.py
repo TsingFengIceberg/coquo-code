@@ -27,6 +27,7 @@ from leonervis_code.core.permissions import (
     PermissionMode,
     PermissionRequest,
 )
+from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
@@ -130,6 +131,7 @@ GIT_HELP = (
 CONTEXT_HELP = (
     "Context commands:\n"
     "  /context\n"
+    "  /instructions\n"
     "  /usage [session|turns]\n"
     "  /output [tokens|reset]\n"
     "  /compact | /compact preview\n"
@@ -1341,6 +1343,23 @@ def render_context_inspection(
     if diagnostic:
         lines.append(f"Diagnostic: {diagnostic}")
     return "\n".join(lines), kind
+
+
+def render_project_instructions_inspection(
+    snapshot: ProjectInstructionsSnapshot | None,
+) -> str:
+    """Render current project-instruction metadata without exposing file content."""
+    if snapshot is None:
+        return "Project instructions: absent\nPath: AGENTS.md"
+    return "\n".join(
+        (
+            "Project instructions: loaded",
+            f"Path: {snapshot.path}",
+            f"UTF-8 bytes: {snapshot.byte_count}",
+            f"Representation: pi-v{snapshot.version}",
+            f"Fingerprint: {snapshot.fingerprint}",
+        )
+    )
 
 
 def render_session_resume(result: object) -> tuple[str, MessageKind]:

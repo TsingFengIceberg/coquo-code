@@ -33,6 +33,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
+from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -768,6 +769,57 @@ def test_prepared_turn_binds_one_action_lease_and_cannot_rebase_after_binding(tm
         leased.rebase(loop.effective_context_snapshot())
     with pytest.raises(ValueError, match="context does not match"):
         prepared.with_action_lease(replace(lease, context_id=f"ctx-v1-{'0' * 64}"))
+
+
+def test_project_instructions_are_pinned_across_continuations_and_reload_next_turn(
+    tmp_path,
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("first guidance\n", encoding="utf-8")
+    (tmp_path / "note.txt").write_text("note", encoding="utf-8")
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "note.txt"})),
+            AssistantText("first done"),
+            AssistantText("second done"),
+        ]
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        project_instructions_factory=ProjectInstructionsLoader(tmp_path).load,
+    )
+
+    prepared = loop.prepare_turn("first")
+    (tmp_path / "AGENTS.md").write_text("second guidance\n", encoding="utf-8")
+    assert loop.run_prepared(prepared) == "first done"
+    assert loop.run("second") == "second done"
+
+    first, continuation, second = provider.received_requests
+    assert first.project_instructions is continuation.project_instructions
+    assert first.project_instructions is not None
+    assert first.project_instructions.text == "first guidance\n"
+    assert second.project_instructions is not None
+    assert second.project_instructions.text == "second guidance\n"
+
+
+def test_invalid_project_instructions_block_provider_invocation(tmp_path) -> None:
+    (tmp_path / "AGENTS.md").write_bytes(b"\xff")
+    provider = ScriptedFakeProvider([AssistantText("must not run")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        project_instructions_factory=ProjectInstructionsLoader(tmp_path).load,
+    )
+
+    with pytest.raises(RuntimeError, match="not valid UTF-8"):
+        loop.run("blocked")
+    assert provider.received_requests == ()
 
 
 def test_action_dispatcher_receives_the_same_lease_across_tool_continuations(tmp_path) -> None:

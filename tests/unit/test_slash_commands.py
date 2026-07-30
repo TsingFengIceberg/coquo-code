@@ -137,6 +137,9 @@ class Session:
         )
         return EffectiveContextInspection(loop.effective_context_snapshot(), assessment)
 
+    def inspect_project_instructions(self):
+        return None
+
     def compact_context(self):
         return CompactContextResult(
             session_id=self.current,
@@ -479,8 +482,12 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v3-" in context.message
+    assert "Context ID: ctx-v5-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
+    instructions = dispatch_slash("/instructions", session)
+    assert instructions.kind == "info"
+    assert instructions.message == "Project instructions: absent\nPath: AGENTS.md"
+    assert dispatch_slash("/instructions extra", session).message == "Usage: /instructions"
     assert dispatch_slash("/usage", session).message == (
         "No provider generation usage recorded for the current runtime."
     )

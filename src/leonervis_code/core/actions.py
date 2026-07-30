@@ -16,7 +16,7 @@ from leonervis_code.core.permissions import PermissionAction
 ACTION_IDENTITY_VERSION = 1
 _ACTION_IDENTITY_DOMAIN = b"leonervis-code-action-identity-v1\0"
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
-_CONTEXT_ID = re.compile(r"ctx-v[1-4]-[0-9a-f]{64}\Z")
+_CONTEXT_ID = re.compile(r"ctx-v[1-6]-[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 MAX_ACTION_TEXT_LENGTH = 4096

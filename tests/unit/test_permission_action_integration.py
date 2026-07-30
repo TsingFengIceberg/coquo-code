@@ -145,6 +145,39 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
         session.close()
 
 
+def test_overwriting_agents_keeps_the_current_turn_pinned_and_reloads_next_turn(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("old guidance\n", encoding="utf-8")
+    write = write_call("AGENTS.md", "new guidance\n")
+    read = ToolUse(
+        "read-agents",
+        "read_file",
+        ToolArguments.from_mapping({"path": "AGENTS.md"}),
+    )
+    provider = ToolProvider([write, read, AssistantText("updated"), AssistantText("next turn")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("update guidance") == "updated"
+        assert session.prompt("continue") == "next turn"
+
+        first, second, third, next_turn = provider.requests
+        assert first.project_instructions is second.project_instructions
+        assert second.project_instructions is third.project_instructions
+        assert first.project_instructions is not None
+        assert first.project_instructions.text == "old guidance\n"
+        assert next_turn.project_instructions is not None
+        assert next_turn.project_instructions.text == "new guidance\n"
+        assert third.history[-1] == ToolResult("read-agents", "new guidance\n")
+    finally:
+        session.close()
+
+
 def test_list_directory_is_workspace_read_audited_and_committed_without_approval(
     tmp_path: Path,
 ) -> None:

@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v22-b0cfedb6ee5c835f0dfe874b396b63003a2f1a203fe5f214f0e2d000dfd8d08c"
+EXPECTED_FINGERPRINT = "v23-3858281d3354288e15dd51569d896fe22c6e4842d8c8b5192dc4a2e296792a55"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 22
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 23
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -34,6 +34,9 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "denies network socket creation" in prompt.text
     assert "returns `command_sandbox_unavailable` without starting" in prompt.text
     assert "there is no rollback" in prompt.text
+    assert "workspace-root `AGENTS.md`" in prompt.text
+    assert "current direct user request" in prompt.text
+    assert "cannot grant permissions" in prompt.text
     assert "does not provide an OS filesystem" not in prompt.text
     assert build_system_prompt() == prompt
 

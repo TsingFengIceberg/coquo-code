@@ -1033,6 +1033,62 @@ def test_context_inspection_does_not_mutate_session_or_transcript(tmp_path: Path
     session.close()
 
 
+def test_project_instruction_inspection_and_resume_use_current_workspace_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="instructions",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="instruction-model",
+            base_url="http://127.0.0.1:11434/v1",
+            context_window_tokens=100_000,
+            model_max_output_tokens=4096,
+        )
+    )
+    target = tmp_path / "AGENTS.md"
+    target.write_text("first project guidance\n", encoding="utf-8")
+    first_provider = RecordingProvider("first")
+    session = ProjectSession.open(
+        tmp_path,
+        profile="instructions",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: first_provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    before = session.transcript_path.read_bytes()
+    inspected = session.inspect_project_instructions()
+    assert inspected is not None
+    assert inspected.text == "first project guidance\n"
+    assert session.transcript_path.read_bytes() == before
+    session.prompt("one")
+    assert first_provider.requests[0].project_instructions == inspected
+    session.close()
+
+    target.write_text("second project guidance\n", encoding="utf-8")
+    second_provider = RecordingProvider("second")
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        profile="instructions",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: second_provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+    resumed.prompt("two")
+    current = second_provider.requests[0].project_instructions
+    assert current is not None
+    assert current.text == "second project guidance\n"
+    assert resumed.history[:2] == (UserMessage("one"), AssistantText("first: one"))
+    resumed.close()
+
+
 def test_runtime_switch_records_real_generation_and_reports_audit_failure(tmp_path: Path) -> None:
     store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
     store.add_profile(
@@ -1184,7 +1240,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v4-")
+    assert session.inspect_context().context_id.startswith("ctx-v6-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     history = session.compaction_history(5)

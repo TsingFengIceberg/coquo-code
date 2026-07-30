@@ -37,6 +37,7 @@ from leonervis_code.cli.presentation import (
     render_git_status,
     render_provider_adapter_error,
     render_project_status,
+    render_project_instructions_inspection,
     render_permission_matrix,
     render_output_budget,
     render_output_budget_rejection,
@@ -98,6 +99,7 @@ TOP_LEVEL_COMMANDS = (
     "/permissions",
     "/sandbox",
     "/context",
+    "/instructions",
     "/usage",
     "/output",
     "/compact",
@@ -158,6 +160,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/sandbox", "Command sandbox diagnostics", True),
     SlashCompletionSpec("/sandbox check", "Verify command sandbox activation"),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
+    SlashCompletionSpec("/instructions", "Inspect root AGENTS.md metadata", True),
     SlashCompletionSpec("/usage", "Show provider token usage", True),
     SlashCompletionSpec("/usage session", "Show durable Session usage"),
     SlashCompletionSpec("/usage turns", "Show recent durable turn usage"),
@@ -241,6 +244,8 @@ class ReplSession(Protocol):
     def inspect_command_sandbox(self): ...
 
     def inspect_context(self): ...
+
+    def inspect_project_instructions(self): ...
 
     def usage(self): ...
 
@@ -390,6 +395,14 @@ def dispatch_slash(
             return _command_error(error, failure_prefix="Context inspection failed")
     if command.startswith("/context "):
         return _usage("Usage: /context")
+    if command == "/instructions":
+        return _call(
+            lambda: render_project_instructions_inspection(session.inspect_project_instructions()),
+            kind="info",
+            failure_prefix="Project instruction inspection failed",
+        )
+    if command.startswith("/instructions "):
+        return _usage("Usage: /instructions")
     if command == "/usage":
         return _call(lambda: render_usage_summary(session.usage()), kind="info")
     if command == "/usage session":

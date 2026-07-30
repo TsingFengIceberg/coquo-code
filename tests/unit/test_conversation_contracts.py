@@ -8,12 +8,14 @@ from leonervis_code.core.contracts import (
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
     MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
     MAX_TOOL_OUTCOME_ENTRIES,
+    ConversationRequest,
     ToolArguments,
     ToolOutcomeEntry,
     ToolRequestOutcome,
     ToolTurnLedger,
     ToolUse,
 )
+from leonervis_code.system_prompt import build_system_prompt
 
 
 def tool_use(*, assistant_text: str | None = None) -> ToolUse:
@@ -36,6 +38,15 @@ def test_tool_use_canonically_binds_optional_assistant_text() -> None:
     assert mixed != pure
     with pytest.raises(FrozenInstanceError):
         mixed.assistant_text = "changed"  # type: ignore[misc]
+
+
+def test_conversation_request_rejects_invalid_project_instruction_value() -> None:
+    with pytest.raises(ValueError, match="project instructions"):
+        ConversationRequest(
+            build_system_prompt(),
+            (),
+            project_instructions="AGENTS.md",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("value", ["", 1])

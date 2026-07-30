@@ -52,6 +52,7 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
     validate_complete_history,
 )
+from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 from leonervis_code.providers.streaming import ProviderResponseOutcome, respond_with_streaming
 from leonervis_code.providers.request_context import ContextFitReport
 from leonervis_code.system_prompt import build_system_prompt
@@ -75,8 +76,13 @@ from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, Read
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
+ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
+
+
+def _no_project_instructions() -> None:
+    return None
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -139,6 +145,7 @@ class AgentLoop:
         initial_effective_source: str = EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
         commit_turn: TurnCommitter | None = None,
         system_prompt_factory: SystemPromptFactory = build_system_prompt,
+        project_instructions_factory: ProjectInstructionsFactory = _no_project_instructions,
         action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
@@ -181,6 +188,7 @@ class AgentLoop:
         self._turns = restored.display_turns
         self._commit_turn = commit_turn
         self._system_prompt_factory = system_prompt_factory
+        self._project_instructions_factory = project_instructions_factory
         self._action_dispatcher = action_dispatcher
 
     @property
@@ -210,6 +218,25 @@ class AgentLoop:
 
     def effective_context_snapshot(self) -> EffectiveContextSnapshot:
         """Freeze the full and provider-visible committed context without mutation."""
+        return self._effective_context_snapshot(
+            self._project_instructions_factory(),
+        )
+
+    def effective_context_snapshot_with_project_instructions(
+        self,
+        project_instructions: ProjectInstructionsSnapshot | None,
+    ) -> EffectiveContextSnapshot:
+        """Rebuild committed identity while retaining one already pinned instruction snapshot."""
+        if project_instructions is not None and not isinstance(
+            project_instructions, ProjectInstructionsSnapshot
+        ):
+            raise ValueError("project instructions snapshot is invalid")
+        return self._effective_context_snapshot(project_instructions)
+
+    def _effective_context_snapshot(
+        self,
+        project_instructions: ProjectInstructionsSnapshot | None,
+    ) -> EffectiveContextSnapshot:
         representation_version = (
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
             if self._effective_summary is None
@@ -219,6 +246,7 @@ class AgentLoop:
             representation_version=representation_version,
             source=self._effective_source,
             system_prompt=self._system_prompt_factory(),
+            project_instructions=project_instructions,
             tool_definitions=TOOL_CATALOG,
             full_history=self._full_history,
             effective_history=self._effective_history,

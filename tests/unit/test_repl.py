@@ -115,16 +115,17 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
     assert complete_command("/", 11) == "/permissions"
     assert complete_command("/", 12) == "/sandbox"
     assert complete_command("/", 13) == "/context"
-    assert complete_command("/", 14) == "/usage"
-    assert complete_command("/", 15) == "/output"
-    assert complete_command("/", 16) == "/compact"
-    assert complete_command("/", 17) == "/compactions"
-    assert complete_command("/", 18) == "/provider"
-    assert complete_command("/", 19) == "/model"
-    assert complete_command("/", 20) == "/session"
-    assert complete_command("/", 21) == "/resume"
-    assert complete_command("/", 22) == "/clear"
-    assert complete_command("/", 23) is None
+    assert complete_command("/", 14) == "/instructions"
+    assert complete_command("/", 15) == "/usage"
+    assert complete_command("/", 16) == "/output"
+    assert complete_command("/", 17) == "/compact"
+    assert complete_command("/", 18) == "/compactions"
+    assert complete_command("/", 19) == "/provider"
+    assert complete_command("/", 20) == "/model"
+    assert complete_command("/", 21) == "/session"
+    assert complete_command("/", 22) == "/resume"
+    assert complete_command("/", 23) == "/clear"
+    assert complete_command("/", 24) is None
     assert complete_command("/commit", 0) == "/commit"
     assert complete_command("ordinary prompt", 0) is None
 
