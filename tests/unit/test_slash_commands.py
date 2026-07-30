@@ -22,6 +22,7 @@ from leonervis_code.session import (
     DurableUsageSnapshot,
     EffectiveContextInspection,
     ProjectStatus,
+    ProjectSession,
     ResumeEffect,
     SessionResumeResult,
 )
@@ -48,6 +49,7 @@ from leonervis_code.tools.list_directory import ListDirectoryTool
 from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
 from leonervis_code.tools.run_command import CommandSandboxInspection
+from leonervis_code.tools.catalog import TOOL_CATALOG
 
 
 @dataclass
@@ -407,8 +409,9 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Tool and audit commands:" in dispatch_slash("/help tools", session).message
     assert "Read-only Git commands:" in dispatch_slash("/help git", session).message
     assert "Input controls:" in dispatch_slash("/help input", session).message
+    assert "Policy commands:" in dispatch_slash("/help policy", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|tools|git|context|provider|input]"
+        "Usage: /help [session|tools|git|context|provider|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -451,6 +454,25 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Permission mode: danger-full-access" in status
     assert "Command sandbox: ready; activation verified" in status
     assert dispatch_slash("/status extra", session).message == "Usage: /status"
+    permissions = dispatch_slash("/permissions", session).message
+    assert "Current policy: permission=danger-full-access, approval=ask" in permissions
+    assert "Command sandbox: ready; activation verified" in permissions
+    assert "Permission decisions describe policy only" in permissions
+    assert "workspace-create: ask (approval_required_workspace_create)" in permissions
+    assert "dangerous: ask (approval_required_dangerous)" in permissions
+    preview = dispatch_slash("/permissions workspace-write auto", session).message
+    assert "Policy preview (not applied): permission=workspace-write, approval=auto" in preview
+    assert "workspace-create: allow (allowed_workspace_create_auto)" in preview
+    assert "dangerous: deny (denied_workspace_write_mode)" in preview
+    assert session.project_status().permission_mode == PermissionMode.DANGER_FULL_ACCESS
+    permissions_usage = (
+        "Usage: /permissions | /permissions "
+        "<read-only|workspace-write|danger-full-access> [ask|auto]"
+    )
+    assert dispatch_slash("/permissions auto", session).message == permissions_usage
+    assert dispatch_slash("/permissions workspace-write later", session).message == (
+        permissions_usage
+    )
     sandbox = dispatch_slash("/sandbox check", session).message
     assert "Activation probe: verified" in sandbox
     assert "Probe result: command_succeeded" in sandbox
@@ -525,11 +547,23 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert "Model-visible tools: 21 in canonical order" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
+    run_command = dispatch_slash("/tools catalog run_command", session).message
+    assert "Tool 6/21: run_command" in run_command
+    assert "argv: array<string> [1..64 items]; required" in run_command
+    assert "timeout_seconds: integer [1..300]; required" in run_command
+    assert "Linux sandbox required" in run_command
+    for definition in TOOL_CATALOG:
+        detail = dispatch_slash(f"/tools catalog {definition.name}", session).message
+        assert f": {definition.name}" in detail
+        assert "Hard boundaries:" in detail
+    unknown_tool = dispatch_slash("/tools catalog git_stats", session).message
+    assert "Unknown model-visible tool: git_stats" in unknown_tool
+    assert "Did you mean git_status?" in unknown_tool
     assert dispatch_slash("/tools 0", session).message == (
-        "Usage: /tools catalog | /tools [1-20] | /tools details [1-20]"
+        "Usage: /tools catalog [tool-name] | /tools [1-20] | /tools details [1-20]"
     )
     assert dispatch_slash("/tools details 21", session).message == (
-        "Usage: /tools catalog | /tools [1-20] | /tools details [1-20]"
+        "Usage: /tools catalog [tool-name] | /tools [1-20] | /tools details [1-20]"
     )
 
 
@@ -835,7 +869,40 @@ def test_prefixes_remain_unknown_top_level_or_group_commands(tmp_path) -> None:
     assert "Unknown command: /modelx one" in dispatch_slash("/modelx one", session).message
     group = dispatch_slash("/provider usex one", session)
     assert "Unknown provider command: usex" in group.message
+    assert "Did you mean use?" in group.message
+    typo = dispatch_slash("/sandox", session)
+    assert "Unknown command: /sandox" in typo.message
+    assert "Did you mean /sandbox?" in typo.message
     assert session.prompts == []
+
+
+def test_host_discovery_commands_do_not_mutate_real_session_or_invoke_runtime(
+    tmp_path,
+) -> None:
+    session = ProjectSession.open(tmp_path, environment={})
+    transcript = session.transcript_path
+    before = (
+        transcript.read_bytes(),
+        session.history,
+        session.action_audits(),
+        session.usage(),
+        session.session_info(),
+    )
+
+    assert dispatch_slash("/permissions", session).handled
+    assert dispatch_slash("/permissions workspace-write auto", session).handled
+    assert dispatch_slash("/tools catalog run_command", session).handled
+    assert dispatch_slash("/sandox", session).handled
+
+    after = (
+        transcript.read_bytes(),
+        session.history,
+        session.action_audits(),
+        session.usage(),
+        session.session_info(),
+    )
+    session.close()
+    assert after == before
 
 
 def test_output_command_inspects_sets_resets_and_validates_budget(tmp_path) -> None:

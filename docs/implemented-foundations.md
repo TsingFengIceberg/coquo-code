@@ -22,6 +22,7 @@
 - [Foundation 4C Slice 7–9：Durable Model-visible Command Integration](#foundation-4c-slice-79durable-model-visible-command-integration)
 - [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
 - [Host Workbench Diagnostics 与 Prompt History Search](#host-workbench-diagnostics-与-prompt-history-search)
+- [Host Policy 与 Tool Discoverability](#host-policy-与-tool-discoverability)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -420,6 +421,12 @@ PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内
 既有`/tools`继续表示持久工具账本；新增`/tools catalog`按规范21-tool顺序显示权限分类与当前mode可用性，避免破坏旧命令语义。`/actions last`只复用严格replay后的Action Audit视图选择最新一条。Command approval修正为显示真实的只读Host、可写workspace与socket拒绝边界；可信`run_command` result code会附加保守`Next:`建议，timeout、signal、cancel或cleanup uncertainty均不会触发自动retry或rollback声称。
 
 常驻TTY为Ctrl-R接入独立prompt_toolkit SearchToolbar，对当前Session最近1000条已提交user prompt做大小写不敏感反向搜索。搜索接受后只恢复一份可编辑draft，仍需再次Enter才提交；Session切换沿用既有history replacement，不跨Session搜索。已有`/clear`获得真实frontend回归覆盖，确认只写terminal reset sequence，不调用模型或修改Session/history/transcript。该切片只改变Host workbench与输入呈现：canonical system prompt保持v22、adapter contract保持v25、21-tool schema/order、Effective Context identity及全部Session/Action Audit schema不变。详见[0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)。
+
+## Host Policy 与 Tool Discoverability
+
+`/tools catalog <tool-name>`从当前规范`TOOL_CATALOG`读取顺序和input schema，显示参数形状、required状态、权限分类、当前policy可用性与一条Host维护的主要硬边界摘要；它不调用工具，也不意味着跳过执行时的workspace、symlink、size、conflict、timeout、output或durability复查。原有无参数catalog和持久`/tools`账本保持兼容。
+
+`/permissions`用真实纯函数`PermissionGate`显示当前六类action的`allow | ask | deny`与稳定reason，同时单独报告沙箱依赖状态，避免把“policy允许”误解为“执行一定可用”；可选mode和approval只计算“未应用的policy preview”，不会改变进程配置、授权任何action或写Session。`/help policy`集中说明permission、approval和command sandbox的正交关系。补全候选扩展到规范tool names、permission modes、Action Audit status/tool筛选值和常用子命令；未知top-level、provider、session或tool name只在单个高相似候选时显示`Did you mean`，从不改写输入或自动dispatch。完整性测试要求每个规范工具都有hard-bound摘要，真实ProjectSession回归还证明这些发现性命令不调用provider、不改变transcript、history、usage、Action Audit或Session metadata。该Host-only切片保持system prompt v22、adapter contract v25、21-tool schema/order、Effective Context identity和全部持久schema不变。详见[0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1040,3 +1047,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 79. [0079：Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)
 80. [0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)
 81. [0081：Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)
+82. [0082：Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)

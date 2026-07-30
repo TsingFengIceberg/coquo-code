@@ -159,6 +159,40 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         completion.text
         for completion in completer.get_completions(Document("/tool-details "), event)
     ] == ["/tool-details compact", "/tool-details full"]
+    assert [
+        completion.text
+        for completion in completer.get_completions(
+            Document("/permissions workspace-write "), event
+        )
+    ] == [
+        "/permissions workspace-write ask",
+        "/permissions workspace-write auto",
+    ]
+    tool_matches = [
+        completion.text
+        for completion in completer.get_completions(Document("/tools catalog git_"), event)
+    ]
+    assert tool_matches == [
+        "/tools catalog git_status",
+        "/tools catalog git_diff",
+        "/tools catalog git_log",
+        "/tools catalog git_show",
+    ]
+    action_statuses = [
+        completion.text
+        for completion in completer.get_completions(Document("/actions status=partial"), event)
+    ]
+    assert action_statuses == ["/actions status=partial"]
+    action_tools = [
+        completion.text
+        for completion in completer.get_completions(Document("/actions tool=git_"), event)
+    ]
+    assert action_tools == [
+        "/actions tool=git_status",
+        "/actions tool=git_diff",
+        "/actions tool=git_log",
+        "/actions tool=git_show",
+    ]
     assert list(completer.get_completions(Document("/h\ntext"), event)) == []
     assert list(completer.get_completions(Document("ordinary"), event)) == []
 

@@ -22,6 +22,7 @@
 - [Foundation 4C Slices 7–9: Durable Model-visible Command Integration](#foundation-4c-slices-79-durable-model-visible-command-integration)
 - [Fail-closed Linux `run_command` Sandbox](#fail-closed-linux-run_command-sandbox)
 - [Host Workbench Diagnostics and Prompt History Search](#host-workbench-diagnostics-and-prompt-history-search)
+- [Host Policy and Tool Discoverability](#host-policy-and-tool-discoverability)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -420,6 +421,12 @@ PermissionGate remains orthogonal: `run_command` still proceeds only within `dan
 Existing `/tools` retains its durable-tool-ledger meaning. New `/tools catalog` displays permission classes and current-mode availability in canonical 21-tool order without breaking the old command. `/actions last` selects only the newest strictly replayed Action Audit view. Command approval now states the actual read-only Host, writable workspace, and socket-denial boundary. Trusted `run_command` result codes append conservative `Next:` guidance, while timeout, signal, cancellation, or cleanup uncertainty never triggers automatic retry or a rollback claim.
 
 The persistent TTY connects Ctrl-R to a dedicated prompt_toolkit SearchToolbar for case-insensitive reverse search over the current Session's latest 1,000 committed user prompts. Accepting a match restores one editable draft and requires another Enter to submit. Existing history replacement on Session switches prevents cross-Session search. The existing `/clear` command gains real frontend regression coverage proving that it writes only the terminal reset sequence and calls no model or Session/history/transcript mutation. This slice changes only the Host workbench and input presentation: canonical system prompt remains v22, adapter contract remains v25, and the 21-tool schema/order, Effective Context identities, and all Session/Action Audit schemas remain unchanged. See [0081: Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md).
+
+## Host Policy and Tool Discoverability
+
+`/tools catalog <tool-name>` reads order and input schema from the current canonical `TOOL_CATALOG`, displaying argument shapes, required state, permission class, current-policy availability, and one Host-maintained summary of major hard boundaries. It invokes no tool and never implies that runtime workspace, symlink, size, conflict, timeout, output, or durability validation can be skipped. The no-argument catalog and existing durable `/tools` ledgers remain compatible.
+
+`/permissions` evaluates the real pure `PermissionGate` to display `allow | ask | deny` and the stable reason for all six action classes, while reporting sandbox dependency status separately so policy permission is not mistaken for execution readiness. Optional mode and approval arguments compute only a "policy preview (not applied)" and never change process configuration, authorize an action, or write Session state. `/help policy` consolidates the orthogonal permission, approval, and command-sandbox boundaries. Completion candidates now extend through canonical tool names, permission modes, Action Audit status/tool filters, and common subcommands. Unknown top-level, provider, session, or tool names show `Did you mean` only for one close candidate and never rewrite input or dispatch it automatically. Completeness coverage requires every canonical tool to have a hard-bound summary, while a real ProjectSession regression proves that these discovery commands invoke no provider and leave transcript, history, usage, Action Audit, and Session metadata unchanged. This Host-only slice leaves system prompt v22, adapter contract v25, the 21-tool schema/order, Effective Context identities, and every durable schema unchanged. See [0082: Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1040,3 +1047,4 @@ This slice establishes capacity facts only. It does not count current request to
 79. [0079: Explicit Session Diagnosis and Tail Repair](./decisions/0079-explicit-session-diagnosis-and-tail-repair.md)
 80. [0080: Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)
 81. [0081: Host Workbench Diagnostics and Prompt History Search](./decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)
+82. [0082: Host Policy and Tool Discoverability](./decisions/0082-host-policy-and-tool-discoverability.md)

@@ -182,10 +182,10 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help [session\|tools\|git\|context\|provider\|input]` | 按类别查看Host控制命令；不调用模型 |
+| `/help [session\|tools\|git\|context\|provider\|policy\|input]` | 按类别查看Host控制命令；`policy`集中说明权限、审批与命令沙箱 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
-| `/tools catalog` | 按规范顺序显示21个模型工具、权限分类及当前mode下的可用性 |
+| `/tools catalog [tool-name]` | 显示21个规范工具的权限与可用性，或查看单个工具的参数schema和主要硬边界 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -195,6 +195,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 | `/commits [count] [path]` | 不调用模型，显示当前HEAD可达的近期提交，默认10条、最多50条 |
 | `/commit <full-id> [path]` | 不调用模型，显示一个当前HEAD可达提交的有界message与tracked patch |
 | `/status` | 汇总当前Session、权限/审批、最近context压力、工具预算、沙箱依赖及脱敏runtime状态 |
+| `/permissions [permission-mode [approval-mode]]` | 显示当前PermissionGate矩阵，或只读预览另一组mode/approval组合，不修改运行时 |
 | `/sandbox check` | 用固定`/usr/bin/true`检查Linux、bubblewrap、seccomp和真实沙箱activation；不调用模型或写Session |
 | `/context` | 只读检查当前 Effective Context、内容 ID、计数与 target fit |
 | `/usage` | 查看当前进程内最近调用、最近turn及当前profile的真实provider Token用量 |
@@ -239,6 +240,9 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /usage turns
 /actions last
 /tools catalog
+/tools catalog run_command
+/permissions
+/permissions workspace-write auto
 /tools details 3
 /tool-details full
 /changes
@@ -267,7 +271,7 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 /history 5
 ```
 
-真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Ctrl-R会在独立搜索栏中对当前Session最近1000条已提交prompt做大小写不敏感的反向搜索；Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。`/clear`只重置画面，不修改Session、history或transcript。
+真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Ctrl-R会在独立搜索栏中对当前Session最近1000条已提交prompt做大小写不敏感的反向搜索；slash补全可继续到工具名、permission mode、Action Audit status/tool筛选值和常用子命令，明确的近似拼写只给出建议而不自动执行。Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。`/clear`只重置画面，不修改Session、history或transcript。
 
 底栏阶段由typed Host事件驱动，可区分准备turn/provider请求、规划动作、运行具体工具、处理工具结果、等待审批、compaction、记录provider usage、真实Session持久提交、最终收尾与取消。已知context、provider、runtime、authorization、Session及`run_command`结果码会给出保守的`Next:`建议，但不会自动retry、声称rollback或掩盖已完成工具副作用；`/status`、`/sandbox check`、`/tools catalog`、`/actions last`及其他slash检查都不进入模型历史。Command审批会明确说明Host只读、workspace可写和socket禁止的实际沙箱边界。
 
@@ -354,6 +358,7 @@ git diff --check
 - [Explicit Session Diagnosis and Tail Repair](./docs/decisions/0079-explicit-session-diagnosis-and-tail-repair.md)：只读doctor、私有备份及仅未完成最终record的显式修复。
 - [Fail-closed Linux Command Sandbox](./docs/decisions/0080-fail-closed-linux-command-sandbox.md)：bubblewrap只读Host视图、workspace读写挂载、seccomp断网、敏感路径遮蔽及无降级执行。
 - [Host Workbench Diagnostics and Prompt History Search](./docs/decisions/0081-host-workbench-diagnostics-and-prompt-history-search.md)：综合状态、沙箱probe、工具目录、最近审计、命令失败指引与Ctrl-R历史搜索。
+- [Host Policy and Tool Discoverability](./docs/decisions/0082-host-policy-and-tool-discoverability.md)：单工具schema/硬边界查看、PermissionGate只读预览、上下文补全与非执行式拼写建议。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
 - [Provider Mixed-response Inbound Normalization](./docs/decisions/0043-provider-mixed-response-inbound-normalization.md)：两类provider native mixed response到统一`ToolUse`的严格转换。

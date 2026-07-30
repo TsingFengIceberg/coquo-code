@@ -20,6 +20,13 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.core.contracts import ToolRequestOutcome
 from leonervis_code.core.orchestration import ProviderFailureKind
+from leonervis_code.core.permissions import (
+    ApprovalMode,
+    PermissionAction,
+    PermissionGate,
+    PermissionMode,
+    PermissionRequest,
+)
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
@@ -71,7 +78,7 @@ class ToolDetailMode(StrEnum):
     FULL = "full"
 
 
-HELP_TOPICS = ("session", "tools", "git", "context", "provider", "input")
+HELP_TOPICS = ("session", "tools", "git", "context", "provider", "policy", "input")
 HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
@@ -79,6 +86,7 @@ HELP_TEXT = (
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
     "  /help provider  Provider and model selection\n"
+    "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-only and do not call the model."
 )
@@ -105,10 +113,11 @@ SESSION_HELP = (
 TOOLS_HELP = (
     "Tool and audit commands:\n"
     "  /actions last | /actions [1-100] [status=<status>] [tool=<name>]\n"
-    "  /tools catalog\n"
+    "  /tools catalog [tool-name]\n"
     "  /tools [1-20]\n"
     "  /tools details [1-20]\n"
     "  /tool-details [compact|full]\n"
+    "  /permissions [permission-mode [approval-mode]]\n"
     "Action status values: requested, awaiting-approval, authorized, approved, executing, "
     "succeeded, failed, partial, denied, rejected, cancelled, abandoned, outcome-unknown"
 )
@@ -132,9 +141,18 @@ PROVIDER_HELP = (
     "  /provider current\n"
     "  /provider use <name>\n"
     "  /status\n"
+    "  /permissions [permission-mode [approval-mode]]\n"
     "  /sandbox check\n"
     "  /output [tokens|reset]\n"
     "  /model <model>"
+)
+POLICY_HELP = (
+    "Policy commands:\n"
+    "  /status\n"
+    "  /permissions [read-only|workspace-write|danger-full-access] [ask|auto]\n"
+    "  /sandbox check\n"
+    "Permission mode is the capability ceiling; approval mode controls whether an in-scope "
+    "action asks first. Auto never bypasses tool hard validation or the run_command sandbox."
 )
 INPUT_HELP = (
     "Input controls:\n"
@@ -153,6 +171,7 @@ HELP_BY_TOPIC = {
     "git": GIT_HELP,
     "context": CONTEXT_HELP,
     "provider": PROVIDER_HELP,
+    "policy": POLICY_HELP,
     "input": INPUT_HELP,
 }
 
@@ -985,11 +1004,55 @@ _TOOL_POLICY_LABELS = {
     "git_show": "workspace-read",
 }
 
+_TOOL_HARD_BOUND_SUMMARIES = {
+    "read_file": "Existing UTF-8 regular file; no symlink traversal; output retained up to 32 KiB.",
+    "glob": "Regular files only; no symlink traversal; bounded scan, 200 paths, and 32 KiB output.",
+    "grep": "Case-sensitive literal UTF-8 line search; 1 MiB/file, 1,000 files, 200 matches, and 32 KiB output.",
+    "write_file": "Full UTF-8 content up to 4,096 characters/bytes; no parent creation or symlinks; atomic conflict-checked install.",
+    "edit_file": "Existing UTF-8 file up to 1 MiB; exactly one literal match; digest recheck and atomic replacement.",
+    "run_command": "Direct argv only; 64 arguments and 8 KiB argv; 1-300 seconds; 32 KiB per stream; Linux sandbox required.",
+    "mkdir": "Creates one missing directory only; existing parent required; no recursion or symlink traversal.",
+    "move_file": "Moves one regular file to a missing same-filesystem destination; no overwrite or symlink traversal.",
+    "delete_file": "Permanently deletes one existing non-symlink regular file; no trash, backup, or undo.",
+    "delete_directory": "Permanently removes one existing empty non-symlink directory; never recursive.",
+    "list_directory": "Direct children only; 10,000-entry scan bound, 200 results, and 32 KiB output; no symlink following.",
+    "copy_file": "Copies one regular file up to 1 MiB to a missing destination; no overwrite or symlink traversal.",
+    "read_file_lines": "Existing UTF-8 file up to 1 MiB; at most 200 logical lines and 32 KiB output.",
+    "stat_path": "No-follow metadata for one workspace path; reports symlinks without following them.",
+    "list_tree": "Depth 1-16; no symlink following; 10,000-entry scan, 500 results, and 32 KiB output.",
+    "grep_regex": "Case-sensitive per-line Python regex in a bounded worker; 1-second Host wait and 32 KiB output.",
+    "patch_file": "One existing UTF-8 file up to 1 MiB; 1-16 unique non-overlapping exact edits; atomic replacement.",
+    "git_status": "Read-only current-worktree observation; 10,000-entry parse bound, 200 results, and 32 KiB output.",
+    "git_diff": "Current staged or unstaged tracked patch only; literal path, no external diff, and 64 KiB output.",
+    "git_log": "Current-HEAD-reachable history only; literal path, at most 50 commits, and 32 KiB output.",
+    "git_show": "One full current-HEAD-reachable commit ID; bounded metadata/message and 64 KiB tracked patch.",
+}
 
-def render_tool_catalog(status: ProjectStatusView) -> str:
+
+def render_tool_catalog(status: ProjectStatusView, tool_name: str | None = None) -> str:
     """Render canonical tools with current policy availability, not argument schemas."""
     mode = getattr(status.permission_mode, "value", str(status.permission_mode))
     approval = getattr(status.approval_mode, "value", str(status.approval_mode))
+    if tool_name is not None:
+        definition = next(
+            (candidate for candidate in TOOL_CATALOG if candidate.name == tool_name),
+            None,
+        )
+        if definition is None:
+            raise ValueError(f"unknown model-visible tool: {tool_name}")
+        index = TOOL_CATALOG.index(definition) + 1
+        policy = _TOOL_POLICY_LABELS[definition.name]
+        return "\n".join(
+            (
+                f"Tool {index}/{len(TOOL_CATALOG)}: {definition.name}",
+                f"Permission class: {policy}",
+                f"Current policy: {_tool_policy_availability(policy, status)}",
+                "Arguments:",
+                *_render_tool_arguments(definition.as_mapping()),
+                f"Hard boundaries: {_TOOL_HARD_BOUND_SUMMARIES[definition.name]}",
+                "Permission and approval never bypass workspace, symlink, size, conflict, timeout, output, or durability checks.",
+            )
+        )
     lines = [
         f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order",
         f"Current policy: permission={mode}, approval={approval}",
@@ -997,24 +1060,116 @@ def render_tool_catalog(status: ProjectStatusView) -> str:
     ]
     for index, definition in enumerate(TOOL_CATALOG, start=1):
         policy = _TOOL_POLICY_LABELS[definition.name]
-        if policy == "workspace-read":
-            availability = "available"
-        elif policy == "dangerous":
-            if mode != "danger-full-access":
-                availability = "denied by current permission mode"
-            elif not status.sandbox.dependencies.ready:
-                availability = "sandbox dependencies unavailable"
-            else:
-                availability = f"available ({approval}; sandbox required)"
-        elif mode == "read-only":
-            availability = "denied by current permission mode"
-        else:
-            availability = f"available ({approval})"
+        availability = _tool_policy_availability(policy, status)
         lines.append(f"{index:>2}. {definition.name}: {policy}; {availability}")
     lines.append(
         "Use /tools for durable per-turn tool ledgers and /tools details for request outcomes."
     )
     return "\n".join(lines)
+
+
+def render_permission_matrix(
+    status: ProjectStatusView,
+    *,
+    permission_mode: PermissionMode | None = None,
+    approval_mode: ApprovalMode | None = None,
+) -> str:
+    """Render current or hypothetical pure PermissionGate decisions without mutation."""
+    current_permission = PermissionMode(
+        getattr(status.permission_mode, "value", status.permission_mode)
+    )
+    current_approval = ApprovalMode(getattr(status.approval_mode, "value", status.approval_mode))
+    selected_permission = permission_mode or current_permission
+    selected_approval = approval_mode or current_approval
+    scope = (
+        "Current policy"
+        if (selected_permission, selected_approval) == (current_permission, current_approval)
+        else "Policy preview (not applied)"
+    )
+    lines = [
+        f"{scope}: permission={selected_permission.value}, approval={selected_approval.value}",
+        "Capability and interaction are independent; auto never bypasses hard tool validation.",
+        f"Command sandbox: {_sandbox_summary(status.sandbox, activation_required=False)}",
+        "Permission decisions describe policy only; sandbox readiness and tool preparation can still reject execution.",
+    ]
+    gate = PermissionGate()
+    for action in (
+        PermissionAction.WORKSPACE_READ,
+        PermissionAction.WORKSPACE_CREATE,
+        PermissionAction.WORKSPACE_OVERWRITE,
+        PermissionAction.WORKSPACE_MOVE,
+        PermissionAction.WORKSPACE_DELETE,
+        PermissionAction.DANGEROUS,
+    ):
+        result = gate.evaluate(PermissionRequest(selected_permission, selected_approval, action))
+        lines.append(f"{action.value}: {result.decision.value} ({result.reason.value})")
+    lines.extend(
+        (
+            "read-only: workspace reads only.",
+            "workspace-write: reads and bounded workspace mutations; dangerous commands remain denied.",
+            "danger-full-access: includes dangerous actions, while run_command still requires its Linux sandbox.",
+            "Change startup policy with --permission-mode and --approval; this command never mutates it.",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _tool_policy_availability(policy: str, status: ProjectStatusView) -> str:
+    mode = getattr(status.permission_mode, "value", str(status.permission_mode))
+    approval = getattr(status.approval_mode, "value", str(status.approval_mode))
+    if policy == "workspace-read":
+        return "available"
+    if policy == "dangerous":
+        if mode != "danger-full-access":
+            return "denied by current permission mode"
+        if not status.sandbox.dependencies.ready:
+            return "sandbox dependencies unavailable"
+        return f"available ({approval}; sandbox required)"
+    if mode == "read-only":
+        return "denied by current permission mode"
+    return f"available ({approval})"
+
+
+def _render_tool_arguments(definition: dict[str, object]) -> tuple[str, ...]:
+    schema = definition.get("input_schema")
+    if not isinstance(schema, dict):
+        return ("  (schema unavailable)",)
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        return ("  (schema unavailable)",)
+    if not properties:
+        return ("  (none)",)
+    required_names = {name for name in required if isinstance(name, str)}
+    lines: list[str] = []
+    for name, raw_property in properties.items():
+        if not isinstance(name, str) or not isinstance(raw_property, dict):
+            continue
+        shape = _schema_shape(raw_property)
+        presence = "required" if name in required_names else "optional"
+        lines.append(f"  {name}: {shape}; {presence}")
+    return tuple(lines) or ("  (schema unavailable)",)
+
+
+def _schema_shape(schema: dict[str, object]) -> str:
+    kind = schema.get("type")
+    shape = kind if isinstance(kind, str) else "value"
+    if shape == "array" and isinstance(schema.get("items"), dict):
+        item_type = schema["items"].get("type")
+        if isinstance(item_type, str):
+            shape = f"array<{item_type}>"
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum and all(isinstance(item, str) for item in enum):
+        shape += f" {{{'|'.join(enum)}}}"
+    minimum = schema.get("minimum")
+    maximum = schema.get("maximum")
+    if type(minimum) is int or type(maximum) is int:
+        shape += f" [{minimum if type(minimum) is int else '?'}..{maximum if type(maximum) is int else '?'}]"
+    min_items = schema.get("minItems")
+    max_items = schema.get("maxItems")
+    if type(min_items) is int or type(max_items) is int:
+        shape += f" [{min_items if type(min_items) is int else '?'}..{max_items if type(max_items) is int else '?'} items]"
+    return shape
 
 
 def _sandbox_summary(

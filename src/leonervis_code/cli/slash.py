@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import get_close_matches
 from typing import Protocol
 
 from leonervis_code.cli.presentation import (
@@ -36,6 +37,7 @@ from leonervis_code.cli.presentation import (
     render_git_status,
     render_provider_adapter_error,
     render_project_status,
+    render_permission_matrix,
     render_output_budget,
     render_output_budget_rejection,
     render_output_budget_update,
@@ -59,6 +61,7 @@ from leonervis_code.cli.presentation import (
     render_usage_summary,
 )
 from leonervis_code.core.compaction import CompactionError
+from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.cli.failure_guidance import command_failure_guidance
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import (
@@ -78,6 +81,7 @@ from leonervis_code.session_records import (
 )
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
+from leonervis_code.tools.catalog import TOOL_CATALOG
 
 TOP_LEVEL_COMMANDS = (
     "/help",
@@ -91,6 +95,7 @@ TOP_LEVEL_COMMANDS = (
     "/exit",
     "/quit",
     "/status",
+    "/permissions",
     "/sandbox",
     "/context",
     "/usage",
@@ -121,6 +126,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help git", "Read-only Git observation"),
     SlashCompletionSpec("/help context", "Context, usage, and compaction"),
     SlashCompletionSpec("/help provider", "Provider and model selection"),
+    SlashCompletionSpec("/help policy", "Permission, approval, and command sandbox"),
     SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
     SlashCompletionSpec("/actions", "Show recent Action Audit", True),
@@ -131,6 +137,24 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/commit", "Show one reachable Git commit", True),
     SlashCompletionSpec("/commits", "Show recent reachable Git commits", True),
     SlashCompletionSpec("/status", "Show runtime status", True),
+    SlashCompletionSpec("/permissions", "Inspect or preview permission policy", True),
+    SlashCompletionSpec("/permissions read-only", "Preview read-only policy"),
+    SlashCompletionSpec("/permissions read-only ask", "Preview read-only with approvals"),
+    SlashCompletionSpec("/permissions read-only auto", "Preview read-only with auto approval"),
+    SlashCompletionSpec("/permissions workspace-write", "Preview workspace-write policy"),
+    SlashCompletionSpec(
+        "/permissions workspace-write ask", "Preview workspace-write with approvals"
+    ),
+    SlashCompletionSpec(
+        "/permissions workspace-write auto", "Preview workspace-write with auto approval"
+    ),
+    SlashCompletionSpec("/permissions danger-full-access", "Preview danger-full-access policy"),
+    SlashCompletionSpec(
+        "/permissions danger-full-access ask", "Preview danger-full-access with approvals"
+    ),
+    SlashCompletionSpec(
+        "/permissions danger-full-access auto", "Preview danger-full-access with auto approval"
+    ),
     SlashCompletionSpec("/sandbox", "Command sandbox diagnostics", True),
     SlashCompletionSpec("/sandbox check", "Verify command sandbox activation"),
     SlashCompletionSpec("/context", "Inspect Effective Context", True),
@@ -174,6 +198,24 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
     SlashCompletionSpec("/tool-details full", "Show bounded structured tool details"),
     SlashCompletionSpec("/compact preview", "Preview fixed compaction selection"),
+    *tuple(
+        SlashCompletionSpec(
+            f"/actions status={status.value}",
+            f"Filter actions by {status.value}",
+        )
+        for status in ActionAuditStatus
+    ),
+    *tuple(
+        SlashCompletionSpec(
+            f"/actions tool={tool.name}",
+            f"Filter actions for {tool.name}",
+        )
+        for tool in TOOL_CATALOG
+    ),
+    *tuple(
+        SlashCompletionSpec(f"/tools catalog {tool.name}", f"Inspect {tool.name}")
+        for tool in TOOL_CATALOG
+    ),
 )
 
 
@@ -330,6 +372,8 @@ def dispatch_slash(
         return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):
         return _usage("Usage: /status")
+    if command == "/permissions" or command.startswith("/permissions "):
+        return _permissions(command, session)
     if command == "/sandbox" or command == "/sandbox check":
         return _call(
             lambda: render_command_sandbox_inspection(session.inspect_command_sandbox()),
@@ -457,9 +501,30 @@ def dispatch_slash(
         return _usage("Usage: /session pin | /session unpin")
     if command.startswith("/session "):
         subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(
+            subcommand,
+            (
+                "show",
+                "preview",
+                "turns",
+                "search",
+                "export",
+                "fork",
+                "doctor",
+                "repair",
+                "list",
+                "new",
+                "rename",
+                "archive",
+                "unarchive",
+                "pin",
+                "unpin",
+                "switch",
+            ),
+        )
         return _usage(
             "Unknown session command: "
-            f"{subcommand}\nUsage: "
+            f"{subcommand}{_suggestion_line(suggestion)}\nUsage: "
             "/session <show|preview|turns|search|export|fork|doctor|repair|list|new|rename|archive|unarchive|pin|unpin|switch>"
         )
     if command == "/resume" or command.startswith("/resume "):
@@ -478,12 +543,61 @@ def dispatch_slash(
         return _provider_use(command, session)
     if command.startswith("/provider "):
         subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("list", "current", "use"))
         return _usage(
-            f"Unknown provider command: {subcommand}\nUsage: /provider <list|current|use>"
+            f"Unknown provider command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Usage: /provider <list|current|use>"
         )
     if command == "/model" or command.startswith("/model "):
         return _model(command, session)
+    token = command.split(maxsplit=1)[0]
+    suggestion = _suggest_token(token, TOP_LEVEL_COMMANDS)
+    if suggestion is not None:
+        return _usage(
+            f"Unknown command: {command}.\nDid you mean {suggestion}?\nType /help for controls."
+        )
     return _usage(f"Unknown command: {command}. Type /help for controls.")
+
+
+def _permissions(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    permission_mode: PermissionMode | None = None
+    approval_mode: ApprovalMode | None = None
+    if len(parts) in {2, 3}:
+        try:
+            permission_mode = PermissionMode(parts[1])
+            if len(parts) == 3:
+                approval_mode = ApprovalMode(parts[2])
+        except ValueError:
+            return _permissions_usage()
+    elif len(parts) != 1:
+        return _permissions_usage()
+    return _call(
+        lambda: render_permission_matrix(
+            session.project_status(),
+            permission_mode=permission_mode,
+            approval_mode=approval_mode,
+        ),
+        kind="info",
+    )
+
+
+def _permissions_usage() -> SlashResult:
+    return _usage(
+        "Usage: /permissions | /permissions "
+        "<read-only|workspace-write|danger-full-access> [ask|auto]"
+    )
+
+
+def _suggest_token(token: str, candidates: tuple[str, ...]) -> str | None:
+    if not token or len(token) > 64 or any(character.isspace() for character in token):
+        return None
+    matches = get_close_matches(token, candidates, n=1, cutoff=0.7)
+    return matches[0] if matches else None
+
+
+def _suggestion_line(suggestion: str | None) -> str:
+    return f"\nDid you mean {suggestion}?" if suggestion is not None else ""
 
 
 def _history(command: str, session: ReplSession) -> SlashResult:
@@ -569,6 +683,18 @@ def _tools(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if parts == ["/tools", "catalog"]:
         return _call(lambda: render_tool_catalog(session.project_status()), kind="info")
+    if len(parts) == 3 and parts[:2] == ["/tools", "catalog"]:
+        tool_name = parts[2]
+        if tool_name not in {definition.name for definition in TOOL_CATALOG}:
+            suggestion = _suggest_token(tool_name, tuple(tool.name for tool in TOOL_CATALOG))
+            return _usage(
+                f"Unknown model-visible tool: {tool_name}{_suggestion_line(suggestion)}\n"
+                "Usage: /tools catalog [tool-name]"
+            )
+        return _call(
+            lambda: render_tool_catalog(session.project_status(), tool_name),
+            kind="info",
+        )
     details = False
     if len(parts) == 1:
         count = DEFAULT_TOOL_LEDGER_COUNT
@@ -593,7 +719,7 @@ def _tools(command: str, session: ReplSession) -> SlashResult:
         details = True
     else:
         return _usage(
-            f"Usage: /tools catalog | /tools [1-{MAX_TOOL_LEDGER_COUNT}] | "
+            f"Usage: /tools catalog [tool-name] | /tools [1-{MAX_TOOL_LEDGER_COUNT}] | "
             f"/tools details [1-{MAX_TOOL_LEDGER_COUNT}]"
         )
     return _call(
