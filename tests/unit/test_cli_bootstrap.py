@@ -336,6 +336,31 @@ def test_session_list_marks_actual_latest_without_changing_creation_order(tmp_pa
         if line.startswith("session ID: ")
     )
 
+    previewed = io.StringIO()
+    assert (
+        main(
+            ["session", "preview", first_id, "--limit", "1"],
+            stdout=previewed,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    assert "Session preview: first" in previewed.getvalue()
+    assert "Showing latest 1 of 1 complete turns (read-only)." in previewed.getvalue()
+    assert "User:\n  first" in previewed.getvalue()
+    latest_after_preview = io.StringIO()
+    assert (
+        main(
+            ["session", "show", "latest"],
+            stdout=latest_after_preview,
+            stderr=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    assert f"session ID: {second_id}" in latest_after_preview.getvalue()
+
     assert (
         main(
             ["--resume", first_id, "prompt", "resumed"],

@@ -25,6 +25,7 @@ from leonervis_code.cli.presentation import (
     RED,
     RESET,
     YELLOW,
+    MAX_SESSION_PREVIEW_RENDER_BYTES,
     MAX_TOOL_LEDGER_RENDER_BYTES,
     ToolDetailMode,
     render_compact_preview,
@@ -50,6 +51,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_switch,
     render_session_resume,
     render_session_info,
+    render_session_preview,
     render_switch_rejection,
     render_tool_ledgers,
     render_durable_usage_summary,
@@ -706,6 +708,39 @@ def test_session_info_and_title_event_render_safe_fallback_reason(tmp_path: Path
     )
     assert message == "Session naming used a Host fallback: provider output limit."
     assert kind == "warning"
+
+
+def test_session_preview_escapes_controls_and_enforces_output_bound(tmp_path: Path) -> None:
+    info = SessionInfo(
+        session_id="12345678-1234-4234-9234-123456789abc",
+        path=tmp_path / "session.jsonl",
+        workspace=str(tmp_path),
+        workspace_fingerprint="v1-" + "a" * 64,
+        created_at="2026-07-30T00:00:00.000000Z",
+        record_count=2,
+        turn_count=1,
+        closed=True,
+        binding=BindingSnapshot.fake(),
+        name="Preview",
+        name_source=SessionNameSource.MANUAL,
+    )
+    preview = SimpleNamespace(
+        info=info,
+        total_turns=1,
+        turns=(
+            SimpleNamespace(
+                user=SimpleNamespace(text="hello\x1b[31m"),
+                assistant=SimpleNamespace(text="x" * (MAX_SESSION_PREVIEW_RENDER_BYTES * 2)),
+            ),
+        ),
+    )
+
+    rendered = render_session_preview(preview)
+
+    assert "hello\\x1b[31m" in rendered
+    assert "\x1b" not in rendered
+    assert rendered.endswith("[Session preview truncated at 32768 UTF-8 bytes.]")
+    assert len(rendered.encode("utf-8")) <= MAX_SESSION_PREVIEW_RENDER_BYTES
 
 
 def test_prompt_and_toolbar_have_safe_fallbacks() -> None:

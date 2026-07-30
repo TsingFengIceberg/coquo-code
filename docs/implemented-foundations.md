@@ -55,6 +55,7 @@
 - [Durable Session Naming 与 Terminal Identity](#durable-session-naming-与-terminal-identity)
 - [Session Lifecycle Management 与 Naming Diagnostics](#session-lifecycle-management-与-naming-diagnostics)
 - [Pinned Sessions 与 Snapshot-based Quick Switching](#pinned-sessions-与-snapshot-based-quick-switching)
+- [Read-only Session Inspection 与 Bounded Turn Preview](#read-only-session-inspection-与-bounded-turn-preview)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -753,6 +754,14 @@ Session现在可以通过`/session archive`和`/session unarchive`写入可逆�
 
 这是Host-only Session元数据和导航变化。Canonical system prompt保持v21，provider adapter contract保持v25，21-tool catalog、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v8、compaction和Effective Context identity均不变。完整决策见[0073：Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)。
 
+## Read-only Session Inspection 与 Bounded Turn Preview
+
+`/session show`继续无参数显示current Session，同时`/session show <latest|完整UUID>`可严格回放任意目标的元数据而不执行resume。`/session preview <latest|完整UUID> [1-10]`默认选择最近3个、最多10个已提交完整turn；standalone `session preview [selector] --limit N`提供同一投影。REPL selector只接受`latest`或canonical lowercase UUID4，名称、编号和path都不是预览身份。
+
+Preview只投影每个turn最终的user与assistant文本，不重复tool companion text、tool result、Action Audit、usage或compaction summary。终端控制字符先被转义，完整输出最多32 KiB并显式标记截断。完整tool因果和Host执行事实仍分别通过`/tools`、`/actions`及原transcript检查，预览不会把简化显示冒充完整审计。
+
+目标读取使用existing-only、strict replay和`allow_repair=false`，不创建空workspace状态、不获取writer lease、不修复incomplete tail、不append record，也不调用provider。成功或失败都不改变current Session、`latest`、runtime、history、Effective Context、picker snapshot或任何schema。Canonical system prompt保持v21，provider adapter contract保持v25，21-tool catalog及Effective Context identity均不变。完整决策见[0074：Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -992,3 +1001,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 71. [0071：Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)
 72. [0072：Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
 73. [0073：Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)
+74. [0074：Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)

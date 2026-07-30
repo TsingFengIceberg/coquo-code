@@ -30,7 +30,7 @@ from leonervis_code.session import (
     TurnUsageCompleted,
 )
 from leonervis_code.session_records import SessionTitleFallbackReason
-from leonervis_code.session_store import MAX_TOOL_LEDGER_QUERY_TURNS
+from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
 
 RESET = "\x1b[0m"
@@ -47,6 +47,8 @@ DEFAULT_ACTION_AUDIT_COUNT = 20
 MAX_ACTION_AUDIT_COUNT = 100
 DEFAULT_SESSION_LIST_COUNT = 20
 MAX_SESSION_LIST_COUNT = 100
+DEFAULT_SESSION_PREVIEW_TURNS = 3
+MAX_SESSION_PREVIEW_RENDER_BYTES = 32 * 1024
 DEFAULT_TOOL_LEDGER_COUNT = 5
 MAX_TOOL_LEDGER_COUNT = MAX_TOOL_LEDGER_QUERY_TURNS
 MAX_TOOL_LEDGER_RENDER_BYTES = 32 * 1024
@@ -76,7 +78,8 @@ HELP_TEXT = (
 )
 SESSION_HELP = (
     "Session commands:\n"
-    "  /session show\n"
+    "  /session show [latest|session-id]\n"
+    f"  /session preview <latest|session-id> [1-{MAX_SESSION_PREVIEW_TURNS}]\n"
     "  /session list [1-100] [open|closed] [active|archived] [pinned|unpinned] "
     "[model=<name>] [name=<text>]\n"
     "  /session switch | /session switch <number> | /session switch list [filters]\n"
@@ -219,6 +222,12 @@ class SessionInfoView(Protocol):
 class ConversationTurnView(Protocol):
     user: object
     assistant: object
+
+
+class SessionPreviewView(Protocol):
+    info: SessionInfoView
+    total_turns: int
+    turns: tuple[ConversationTurnView, ...]
 
 
 class ActionAuditView(Protocol):
@@ -402,6 +411,37 @@ def render_recent_history(turns: tuple[ConversationTurnView, ...], count: int) -
     return "\n\n".join(
         f"User: {turn.user.text}\nAssistant: {turn.assistant.text}" for turn in recent_turns
     )
+
+
+def render_session_preview(preview: SessionPreviewView) -> str:
+    """Render bounded final user/assistant text from one non-current Session."""
+    selected_count = len(preview.turns)
+    first_turn_number = preview.total_turns - selected_count + 1
+    lines = [
+        f"Session preview: {_safe_inline(preview.info.name)}",
+        f"Session ID: {preview.info.session_id}",
+        f"Showing latest {selected_count} of {preview.total_turns} complete turns (read-only).",
+    ]
+    if not preview.turns:
+        lines.append("No conversation turns yet.")
+    for offset, turn in enumerate(preview.turns):
+        lines.extend(
+            (
+                "",
+                f"Turn #{first_turn_number + offset}",
+                "User:",
+                indent_terminal_block(_escape_terminal_text(turn.user.text), "  "),
+                "Assistant:",
+                indent_terminal_block(_escape_terminal_text(turn.assistant.text), "  "),
+            )
+        )
+    rendered = "\n".join(lines)
+    if len(rendered.encode("utf-8")) <= MAX_SESSION_PREVIEW_RENDER_BYTES:
+        return rendered
+    marker = "\n[Session preview truncated at 32768 UTF-8 bytes.]"
+    available = MAX_SESSION_PREVIEW_RENDER_BYTES - len(marker.encode("utf-8"))
+    prefix = rendered.encode("utf-8")[:available].decode("utf-8", errors="ignore")
+    return prefix + marker
 
 
 def render_git_status(snapshot: GitStatusSnapshotView) -> str:

@@ -117,6 +117,7 @@ from leonervis_code.session_records import (
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionInfo,
+    SessionPreview,
     SessionNameConflictError,
     SessionResumeStaleError,
     SessionStore,
@@ -898,6 +899,18 @@ class ProjectSession:
         """Return the Session referenced by this workspace's latest pointer."""
         self._ensure_open()
         return self._session_store.show("latest")
+
+    def inspect_session(self, selector: str | Path) -> SessionInfo:
+        """Strictly inspect another Session without changing current or latest."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.inspect(selector)
+
+    def preview_session(self, selector: str | Path, limit: int) -> SessionPreview:
+        """Read bounded final-text turns without changing runtime or Session state."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.preview(selector, limit)
 
     def new_session(self) -> SessionInfo:
         """Create and atomically select an empty Session without changing runtime."""

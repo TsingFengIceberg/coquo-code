@@ -38,6 +38,7 @@ from leonervis_code.session_records import (
 )
 from leonervis_code.session_store import (
     AtomicJsonWriteError,
+    MAX_SESSION_PREVIEW_TURNS,
     SessionLockedError,
     SessionNameConflictError,
     SessionResumeStaleError,
@@ -121,6 +122,55 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
     assert resumed_after_clean_close.state.closed is False
     assert resumed_after_clean_close.state.history == committed_items()
     resumed_after_clean_close.release()
+
+
+def test_preview_replays_bounded_recent_turns_without_mutation(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    writer.append_turn(
+        (UserMessage("first"), AssistantText("answer one")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    writer.append_turn(
+        (UserMessage("second"), AssistantText("answer two")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    transcript_before = writer.path.read_bytes()
+    latest_path = session_store.root / "latest.json"
+    latest_before = latest_path.read_bytes()
+    state_before = writer.state
+
+    preview = session_store.preview(SESSION_ONE, 1)
+
+    assert preview.info.session_id == SESSION_ONE
+    assert preview.total_turns == 2
+    assert len(preview.turns) == 1
+    assert preview.turns[0].user.text == "second"
+    assert preview.turns[0].assistant.text == "answer two"
+    assert writer.path.read_bytes() == transcript_before
+    assert latest_path.read_bytes() == latest_before
+    assert writer.state == state_before
+    with pytest.raises(SessionStoreError, match="preview limit"):
+        session_store.preview(SESSION_ONE, 0)
+    with pytest.raises(SessionStoreError, match="preview limit"):
+        session_store.preview(SESSION_ONE, MAX_SESSION_PREVIEW_TURNS + 1)
+    with pytest.raises(SessionStoreError, match="preview limit"):
+        session_store.preview(SESSION_ONE, True)
+    writer.release()
+
+
+def test_show_and_preview_do_not_create_state_in_empty_workspace(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+
+    with pytest.raises(SessionStoreError, match="does not exist"):
+        session_store.inspect("latest")
+    with pytest.raises(SessionStoreError, match="does not exist"):
+        session_store.preview("latest", 1)
+
+    assert not (tmp_path / ".leonervis-code").exists()
 
 
 def test_new_sessions_receive_monotonic_default_names_under_directory_lock(

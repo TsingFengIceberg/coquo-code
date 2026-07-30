@@ -24,12 +24,15 @@ from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.cli.markdown_renderer import write_markdown_document
 from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
+    DEFAULT_SESSION_PREVIEW_TURNS,
     DEFAULT_TOOL_LEDGER_COUNT,
     MAX_ACTION_AUDIT_COUNT,
+    MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
     render_resume_rejection,
     render_session_resume,
+    render_session_preview,
     render_session_summary,
     render_session_title_fallback_reason,
     render_tool_ledgers,
@@ -136,6 +139,18 @@ def tool_ledger_count(value: str) -> int:
     if not 1 <= count <= MAX_TOOL_LEDGER_COUNT:
         raise argparse.ArgumentTypeError(
             f"tool ledger limit must be between 1 and {MAX_TOOL_LEDGER_COUNT}"
+        )
+    return count
+
+
+def session_preview_count(value: str) -> int:
+    """Accept one bounded ASCII count for read-only Session preview."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("session preview limit must be an integer")
+    count = int(value)
+    if not 1 <= count <= MAX_SESSION_PREVIEW_TURNS:
+        raise argparse.ArgumentTypeError(
+            f"session preview limit must be between 1 and {MAX_SESSION_PREVIEW_TURNS}"
         )
     return count
 
@@ -279,6 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
     session_commands.add_parser("list", help="list durable sessions")
     session_show = session_commands.add_parser("show", help="show one durable session")
     session_show.add_argument("selector", nargs="?", default="latest")
+    session_preview = session_commands.add_parser(
+        "preview", help="preview recent final-text turns without resuming"
+    )
+    session_preview.add_argument("selector", nargs="?", default="latest")
+    session_preview.add_argument(
+        "--limit",
+        type=session_preview_count,
+        default=DEFAULT_SESSION_PREVIEW_TURNS,
+        help=f"number of recent complete turns to show (default: {DEFAULT_SESSION_PREVIEW_TURNS})",
+    )
     session_actions = session_commands.add_parser(
         "actions", help="show recent redacted action audits for one durable session"
     )
@@ -627,7 +652,12 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     """List or inspect validated Session transcripts without taking a writer lease."""
     store = SessionStore(workspace)
     if arguments.session_command == "show":
-        render_session_info(store.show(arguments.selector), stdout)
+        render_session_info(store.inspect(arguments.selector), stdout)
+        return 0
+    if arguments.session_command == "preview":
+        stdout.write(
+            f"{render_session_preview(store.preview(arguments.selector, arguments.limit))}\n"
+        )
         return 0
     if arguments.session_command == "actions":
         stdout.write(

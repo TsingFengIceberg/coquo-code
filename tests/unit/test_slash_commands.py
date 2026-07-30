@@ -27,7 +27,13 @@ from leonervis_code.session import (
 from leonervis_code.core.contracts import ToolArguments
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
-from leonervis_code.session_store import LatestUpdateStatus, SessionInfo, ToolLedgerQueryResult
+from leonervis_code.session_store import (
+    LatestUpdateStatus,
+    SessionInfo,
+    SessionPreview,
+    SessionStoreError,
+    ToolLedgerQueryResult,
+)
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -244,6 +250,17 @@ class Session:
     def latest_session_info(self):
         return self._info(self.latest)
 
+    def inspect_session(self, selector):
+        session_id = self.latest if selector == "latest" else selector
+        for info in self.list_sessions():
+            if info.session_id == session_id:
+                return info
+        raise SessionStoreError(f"session transcript does not exist: {session_id}")
+
+    def preview_session(self, selector, limit):
+        info = self.inspect_session(selector)
+        return SessionPreview(info, len(self.turns), self.turns[-limit:])
+
     def list_sessions(self):
         return self.sessions if self.sessions is not None else (self.session_info(),)
 
@@ -316,9 +333,20 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert unknown.kind == "warning"
     assert unknown.message == (
         "Unknown session command: wat\nUsage: "
-        "/session <show|list|new|rename|archive|unarchive|pin|unpin|switch>"
+        "/session <show|preview|list|new|rename|archive|unarchive|pin|unpin|switch>"
     )
-    assert dispatch_slash("/session show extra", session).message == "Usage: /session show"
+    assert dispatch_slash("/session show one two", session).message == (
+        "Usage: /session show [latest|session-id]"
+    )
+    assert dispatch_slash("/session show ../outside", session).message == (
+        "Usage: /session show [latest|session-id]"
+    )
+    assert dispatch_slash("/session preview", session).message == (
+        "Usage: /session preview <latest|session-id> [1-10]"
+    )
+    assert dispatch_slash("/session preview ../outside", session).message == (
+        "Usage: /session preview <latest|session-id> [1-10]"
+    )
     assert dispatch_slash("/session rename", session).message == (
         "Usage: /session rename <name> | /session rename --auto"
     )
@@ -460,6 +488,41 @@ def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
         "Usage: /session list [1-100] [open|closed] [active|archived] [pinned|unpinned] "
         "[model=<name>] [name=<text>]"
     )
+
+
+def test_session_show_and_preview_inspect_exact_target_without_switching(tmp_path) -> None:
+    session = Session(tmp_path)
+    current = session.session_info()
+    target = SessionInfo(
+        **{
+            **current.__dict__,
+            "session_id": "22345678-1234-4234-9234-123456789abc",
+            "name": "Earlier review",
+            "closed": True,
+            "turn_count": 1,
+        }
+    )
+    session.sessions = (current, target)
+    before = (session.current, session.latest, session.prompts)
+
+    shown = dispatch_slash(f"/session show {target.session_id}", session)
+    preview = dispatch_slash(f"/session preview {target.session_id} 1", session)
+
+    assert shown.kind == "info"
+    assert "Session: Earlier review" in shown.message
+    assert f"Session ID: {target.session_id}" in shown.message
+    assert preview.kind == "info"
+    assert "Session preview: Earlier review" in preview.message
+    assert "Showing latest 1 of 1 complete turns (read-only)." in preview.message
+    assert "User:\n  hello" in preview.message
+    assert "Assistant:\n  reply" in preview.message
+    assert (session.current, session.latest, session.prompts) == before
+    assert dispatch_slash(f"/session preview {target.session_id} 0", session).message == (
+        "Usage: /session preview <latest|session-id> [1-10]"
+    )
+    failure = dispatch_slash("/session show 32345678-1234-4234-9234-123456789abc", session)
+    assert failure.kind == "error"
+    assert "Session inspection failed" in failure.message
 
 
 def test_session_archive_commands_are_idempotent_and_preserve_identity(tmp_path) -> None:

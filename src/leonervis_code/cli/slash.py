@@ -9,6 +9,7 @@ from leonervis_code.cli.presentation import (
     DEFAULT_ACTION_AUDIT_COUNT,
     DEFAULT_COMPACTION_HISTORY_COUNT,
     DEFAULT_SESSION_LIST_COUNT,
+    DEFAULT_SESSION_PREVIEW_TURNS,
     DEFAULT_TOOL_LEDGER_COUNT,
     HELP_TEXT,
     HELP_BY_TOPIC,
@@ -16,6 +17,7 @@ from leonervis_code.cli.presentation import (
     MAX_ACTION_AUDIT_COUNT,
     MAX_COMPACTION_HISTORY_COUNT,
     MAX_SESSION_LIST_COUNT,
+    MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
     SESSION_HELP,
@@ -39,6 +41,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_switch,
     render_resume_rejection,
     render_session_info,
+    render_session_preview,
     render_session_resume,
     render_session_summary,
     render_switch_rejection,
@@ -59,7 +62,11 @@ from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS
 from leonervis_code.providers.resolver import RuntimeRouteError
 from leonervis_code.session import SessionResumeConflictError, SessionResumeContextError
 from leonervis_code.session_store import SessionResumeCommitError, SessionStoreError
-from leonervis_code.session_records import ActionAuditStatus
+from leonervis_code.session_records import (
+    ActionAuditStatus,
+    SessionRecordError,
+    canonical_session_id,
+)
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 
@@ -131,7 +138,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider list", "List provider profiles"),
     SlashCompletionSpec("/provider current", "Show the current provider"),
     SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
-    SlashCompletionSpec("/session show", "Show the current Session"),
+    SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
+    SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session list", "Browse and filter workspace Sessions"),
     SlashCompletionSpec("/session new", "Start an empty Session"),
     SlashCompletionSpec("/session rename", "Rename the current Session"),
@@ -185,6 +193,10 @@ class ReplSession(Protocol):
     def session_info(self): ...
 
     def latest_session_info(self): ...
+
+    def inspect_session(self, selector: str): ...
+
+    def preview_session(self, selector: str, limit: int): ...
 
     def list_sessions(self): ...
 
@@ -354,9 +366,9 @@ def dispatch_slash(
     if command == "/tools" or command.startswith("/tools "):
         return _tools(command, session)
     if command == "/session show" or command.startswith("/session show "):
-        if command != "/session show":
-            return _usage("Usage: /session show")
-        return _call(lambda: render_session_info(session.session_info()), kind="info")
+        return _session_show(command, session)
+    if command == "/session preview" or command.startswith("/session preview "):
+        return _session_preview(command, session)
     if command == "/session list" or command.startswith("/session list "):
         return _session_list(command, session)
     if command == "/session switch" or command.startswith("/session switch "):
@@ -387,7 +399,8 @@ def dispatch_slash(
         subcommand = command.split(maxsplit=2)[1]
         return _usage(
             "Unknown session command: "
-            f"{subcommand}\nUsage: /session <show|list|new|rename|archive|unarchive|pin|unpin|switch>"
+            f"{subcommand}\nUsage: "
+            "/session <show|preview|list|new|rename|archive|unarchive|pin|unpin|switch>"
         )
     if command == "/resume" or command.startswith("/resume "):
         if session_switch is not None:
@@ -660,6 +673,51 @@ def _apply_session_filters(sessions, filters: _SessionFilters):
         needle = filters.name.casefold()
         sessions = tuple(info for info in sessions if needle in info.name.casefold())
     return sessions
+
+
+def _session_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 2:
+        return _call(lambda: render_session_info(session.session_info()), kind="info")
+    if len(parts) != 3 or not _valid_session_read_selector(parts[2]):
+        return _usage("Usage: /session show [latest|session-id]")
+    return _call(
+        lambda: render_session_info(session.inspect_session(parts[2])),
+        kind="info",
+        failure_prefix="Session inspection failed",
+    )
+
+
+def _session_preview(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {3, 4} or not _valid_session_read_selector(parts[2]):
+        return _session_preview_usage()
+    limit = DEFAULT_SESSION_PREVIEW_TURNS
+    if len(parts) == 4:
+        if not parts[3].isascii() or not parts[3].isdigit():
+            return _session_preview_usage()
+        limit = int(parts[3])
+    if not 1 <= limit <= MAX_SESSION_PREVIEW_TURNS:
+        return _session_preview_usage()
+    return _call(
+        lambda: render_session_preview(session.preview_session(parts[2], limit)),
+        kind="info",
+        failure_prefix="Session preview failed",
+    )
+
+
+def _session_preview_usage() -> SlashResult:
+    return _usage(f"Usage: /session preview <latest|session-id> [1-{MAX_SESSION_PREVIEW_TURNS}]")
+
+
+def _valid_session_read_selector(value: str) -> bool:
+    if value == "latest":
+        return True
+    try:
+        canonical_session_id(value)
+    except SessionRecordError:
+        return False
+    return True
 
 
 def _session_list(command: str, session: ReplSession) -> SlashResult:

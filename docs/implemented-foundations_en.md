@@ -55,6 +55,7 @@
 - [Durable Session Naming and Terminal Identity](#durable-session-naming-and-terminal-identity)
 - [Session Lifecycle Management and Naming Diagnostics](#session-lifecycle-management-and-naming-diagnostics)
 - [Pinned Sessions and Snapshot-based Quick Switching](#pinned-sessions-and-snapshot-based-quick-switching)
+- [Read-only Session Inspection and Bounded Turn Preview](#read-only-session-inspection-and-bounded-turn-preview)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -753,6 +754,14 @@ The actual switch fully reuses the existing `ProjectSession.switch_session` tran
 
 This is a Host-only Session metadata and navigation change. Canonical system prompt v21, provider adapter contract v25, the 21-tool catalog, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v8, compaction, and Effective Context identity remain unchanged. See [0073: Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md).
 
+## Read-only Session Inspection and Bounded Turn Preview
+
+`/session show` still reports the current Session with no argument, while `/session show <latest|complete-UUID>` strictly replays arbitrary target metadata without resuming it. `/session preview <latest|complete-UUID> [1-10]` selects the three most recent committed complete turns by default and at most ten; standalone `session preview [selector] --limit N` exposes the same projection. REPL selectors accept only `latest` or a canonical lowercase UUID4. Names, picker numbers, and paths are not preview identities.
+
+Preview projects only each turn's final user and assistant text. It does not repeat tool companion text, tool results, Action Audit, usage, or compaction summaries. Terminal controls are escaped before rendering, complete output is capped at 32 KiB, and truncation is explicit. Complete tool causality and Host execution facts remain available through `/tools`, `/actions`, and the original transcript; the simplified preview is never presented as a complete audit.
+
+Target reads use existing-only validation, strict replay, and `allow_repair=false`. They create no empty-workspace state, take no writer lease, repair no incomplete tail, append no record, and invoke no provider. Success and failure leave the current Session, `latest`, runtime, history, Effective Context, picker snapshot, and every schema unchanged. Canonical system prompt remains v21, provider adapter contract remains v25, and the 21-tool catalog and Effective Context identity remain unchanged. See [0074: Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -992,3 +1001,4 @@ This slice establishes capacity facts only. It does not count current request to
 71. [0071: Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)
 72. [0072: Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
 73. [0073: Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)
+74. [0074: Read-only Session Inspection and Bounded Turn Preview](./decisions/0074-read-only-session-inspection-and-bounded-turn-preview.md)

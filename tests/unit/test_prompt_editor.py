@@ -135,6 +135,7 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         completion.text for completion in completer.get_completions(Document("/session "), event)
     ] == [
         "/session show",
+        "/session preview",
         "/session list",
         "/session new",
         "/session rename",

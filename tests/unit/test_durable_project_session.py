@@ -473,6 +473,37 @@ def test_project_session_archive_toggle_preserves_latest_runtime_and_history(
     session.close()
 
 
+def test_project_session_inspection_and_preview_do_not_switch_or_change_runtime(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE, SESSION_TWO),
+    )
+    session.prompt("first")
+    first_id = session.session_id
+    session.new_session()
+    session.prompt("second")
+    current_id = session.session_id
+    latest_id = session.latest_session_info().session_id
+    history = session.history
+    status = session.status()
+
+    inspected = session.inspect_session(first_id)
+    preview = session.preview_session(first_id, 1)
+
+    assert inspected.session_id == first_id
+    assert preview.info == inspected
+    assert preview.total_turns == 1
+    assert preview.turns[0].user.text == "first"
+    assert session.session_id == current_id
+    assert session.latest_session_info().session_id == latest_id
+    assert session.history == history
+    assert session.status() == status
+    session.close()
+
+
 def test_project_session_cancellation_after_title_response_commits_neither_turn_nor_name(
     tmp_path: Path,
 ) -> None:

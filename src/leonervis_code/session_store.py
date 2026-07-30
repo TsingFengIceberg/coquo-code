@@ -23,7 +23,7 @@ else:
     import fcntl
 
 from leonervis_code.core.actions import ActionIdentity
-from leonervis_code.core.contracts import ConversationItem, ToolTurnLedger
+from leonervis_code.core.contracts import ConversationItem, ConversationTurn, ToolTurnLedger
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionMode,
@@ -74,6 +74,7 @@ from leonervis_code.session_records import (
 
 MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_TOOL_LEDGER_QUERY_TURNS = 20
+MAX_SESSION_PREVIEW_TURNS = 10
 LATEST_SCHEMA_VERSION = 1
 _DIRECTORY_LOCK_NAME = ".directory.lock"
 _LATEST_NAME = "latest.json"
@@ -100,6 +101,15 @@ class ToolLedgerQueryResult:
 
     total_turns: int
     turns: tuple[TurnToolLedger, ...]
+
+
+@dataclass(frozen=True)
+class SessionPreview:
+    """Bounded final-text projection from one strictly replayed Session."""
+
+    info: SessionInfo
+    total_turns: int
+    turns: tuple[ConversationTurn, ...]
 
 
 def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
@@ -422,6 +432,27 @@ class SessionStore:
         self._ensure_root()
         path = self._select_path(selector)
         return _info(path, self._load_state(path, allow_repair=False))
+
+    def inspect(self, selector: str | Path) -> SessionInfo:
+        """Describe an existing Session without creating storage or repairing state."""
+        _validate_existing_session_root(self.root, self.workspace)
+        path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+        return _info(path, self._load_state(path, allow_repair=False))
+
+    def preview(self, selector: str | Path, limit: int) -> SessionPreview:
+        """Strictly replay bounded recent final-text turns without durable mutation."""
+        if type(limit) is not int or not 1 <= limit <= MAX_SESSION_PREVIEW_TURNS:
+            raise SessionStoreError(
+                f"session preview limit must be between 1 and {MAX_SESSION_PREVIEW_TURNS}"
+            )
+        _validate_existing_session_root(self.root, self.workspace)
+        path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+        state = self._load_state(path, allow_repair=False)
+        return SessionPreview(
+            info=_info(path, state),
+            total_turns=len(state.turns),
+            turns=state.turns[-limit:],
+        )
 
     def action_audits(self, selector: str | Path) -> tuple[ActionAuditState, ...]:
         """Strictly replay and return one session's Host-only action lifecycles."""
