@@ -34,6 +34,7 @@ from leonervis_code.session_records import (
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
     SessionNameSource,
+    SessionPinChanged,
     SessionTitleFallbackReason,
     SessionRecordError,
     SessionResumed,
@@ -401,19 +402,25 @@ def test_session_archive_records_are_reversible_and_do_not_change_history(tmp_pa
         items=(UserMessage("first"), AssistantText("done")),
     )
     archived = SessionArchiveChanged(2, NOW, True)
-    active = SessionArchiveChanged(3, NOW, False)
+    pinned = SessionPinChanged(3, NOW, True)
+    active = SessionArchiveChanged(4, NOW, False)
+    unpinned = SessionPinChanged(5, NOW, False)
 
     decoded = tuple(
-        decode_record(encode_record(record)) for record in (header, turn, archived, active)
+        decode_record(encode_record(record))
+        for record in (header, turn, archived, pinned, active, unpinned)
     )
     state = replay_records(decoded)
 
-    assert decoded == (header, turn, archived, active)
+    assert decoded == (header, turn, archived, pinned, active, unpinned)
     assert state.archived is False
+    assert state.pinned is False
     assert state.history == turn.items
 
     with pytest.raises(SessionRecordError, match="archived must be boolean"):
         decode_record(encode_record(archived).replace(b'"archived":true', b'"archived":1'))
+    with pytest.raises(SessionRecordError, match="pinned must be boolean"):
+        decode_record(encode_record(pinned).replace(b'"pinned":true', b'"pinned":1'))
 
 
 def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_text() -> None:

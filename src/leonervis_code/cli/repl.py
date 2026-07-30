@@ -28,7 +28,7 @@ from leonervis_code.cli.presentation import (
     render_runtime_status,
     render_session_info,
 )
-from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
+from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import FrontendEventQueue
 from leonervis_code.cli.terminal_app import TerminalApplication, supports_terminal_application
@@ -89,6 +89,7 @@ def run_repl(
             approval_broker=approval_broker,
         ).run()
     tool_details = ToolDetailSettings()
+    session_switch = SessionSwitchCatalog()
 
     while True:
         status = _snapshot(session, "status")
@@ -129,7 +130,12 @@ def run_repl(
             continue
 
         try:
-            result = dispatch_slash(prompt, session, tool_details=tool_details)
+            result = dispatch_slash(
+                prompt,
+                session,
+                tool_details=tool_details,
+                session_switch=session_switch,
+            )
         except KeyboardInterrupt:
             stdout.write(
                 f"{render_message('Operation cancelled; no uncommitted state was installed.', 'warning', color=color)}\n"
@@ -148,6 +154,7 @@ def run_repl(
             continue
 
         try:
+            session_switch.clear()
             prompt_method = getattr(session, "prompt", None)
             event_sink = TerminalEventSink(
                 stdout,

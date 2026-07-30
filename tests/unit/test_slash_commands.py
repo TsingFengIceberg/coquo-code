@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.cli.presentation import ToolDetailMode
-from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
+from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.providers.manager import (
     CurrentTargetContextAssessment,
@@ -64,6 +64,7 @@ class Session:
         self.name = "Current work"
         self.name_source = SessionNameSource.AUTO
         self.archived = False
+        self.pinned = False
 
     def status(self):
         return RuntimeStatus(
@@ -145,6 +146,7 @@ class Session:
             name=self.name,
             name_source=self.name_source,
             archived=self.archived,
+            pinned=self.pinned,
         )
 
     def session_info(self):
@@ -261,6 +263,10 @@ class Session:
         self.archived = archived
         return self.session_info()
 
+    def set_session_pinned(self, pinned):
+        self.pinned = pinned
+        return self.session_info()
+
     def switch_session(self, selector):
         self.current = selector
         self.latest = selector
@@ -309,7 +315,8 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
     assert unknown.message == (
-        "Unknown session command: wat\nUsage: /session <show|list|new|rename|archive|unarchive>"
+        "Unknown session command: wat\nUsage: "
+        "/session <show|list|new|rename|archive|unarchive|pin|unpin|switch>"
     )
     assert dispatch_slash("/session show extra", session).message == "Usage: /session show"
     assert dispatch_slash("/session rename", session).message == (
@@ -407,6 +414,7 @@ def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
             "created_at": "2026-07-17T00:00:00.000000Z",
             "closed": True,
             "archived": True,
+            "pinned": True,
             "name": "Adapter Review",
             "binding": replace(BindingSnapshot.fake(), selected_model="model-a"),
         }
@@ -442,8 +450,15 @@ def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:
     assert dispatch_slash("/session list active name=adapter", session).message == (
         "No durable sessions match the selected filters."
     )
+    pinned = dispatch_slash("/session list pinned model=model-a", session).message
+    assert second.session_id in pinned
+    assert "pinned" in pinned
+    assert dispatch_slash("/session list unpinned model=model-a", session).message == (
+        "No durable sessions match the selected filters."
+    )
     assert dispatch_slash("/session list 0", session).message == (
-        "Usage: /session list [1-100] [open|closed] [active|archived] [model=<name>] [name=<text>]"
+        "Usage: /session list [1-100] [open|closed] [active|archived] [pinned|unpinned] "
+        "[model=<name>] [name=<text>]"
     )
 
 
@@ -466,6 +481,66 @@ def test_session_archive_commands_are_idempotent_and_preserve_identity(tmp_path)
     assert dispatch_slash("/session archive extra", session).message == (
         "Usage: /session archive | /session unarchive"
     )
+
+    pinned = dispatch_slash("/session pin", session)
+    assert "marked pinned" in pinned.message
+    assert session.pinned is True
+    assert session.current == session_id
+    assert session.latest == latest_id
+    assert "already pinned" in dispatch_slash("/session pin", session).message
+    assert "marked unpinned" in dispatch_slash("/session unpin", session).message
+    assert session.pinned is False
+    assert dispatch_slash("/session pin extra", session).message == (
+        "Usage: /session pin | /session unpin"
+    )
+
+
+def test_session_switch_catalog_maps_one_snapshot_number_to_exact_id(tmp_path) -> None:
+    session = Session(tmp_path)
+    current = session._info(session.current)
+    target = SessionInfo(
+        **{
+            **current.__dict__,
+            "session_id": "22345678-1234-4234-9234-123456789abc",
+            "created_at": "2026-07-17T00:00:00.000000Z",
+            "name": "Adapter Review",
+            "archived": True,
+            "pinned": True,
+            "turn_count": 4,
+            "binding": replace(BindingSnapshot.fake(), selected_model="model-a"),
+        }
+    )
+    session.sessions = (current, target)
+    catalog = SessionSwitchCatalog()
+
+    listing = dispatch_slash(
+        "/session switch list 10 archived pinned name=adapter",
+        session,
+        session_switch=catalog,
+    )
+    assert listing.kind == "info"
+    assert "1. 'Adapter Review'" in listing.message
+    assert "4 turns, open, archived, pinned" in listing.message
+    assert "runtime fake/model-a" in listing.message
+    assert catalog.session_ids == (target.session_id,)
+
+    switched = dispatch_slash("/session switch 1", session, session_switch=catalog)
+    assert switched.kind == "warning"
+    assert f"Resumed session {target.session_id}" in switched.message
+    assert session.current == target.session_id
+    assert catalog.session_ids == ()
+    unavailable = dispatch_slash("/session switch 1", session, session_switch=catalog)
+    assert unavailable.kind == "warning"
+    assert "build a fresh numbered snapshot" in unavailable.message
+
+    missing_state = dispatch_slash("/session switch", session)
+    assert missing_state.kind == "error"
+    assert "catalog is unavailable" in missing_state.message
+    catalog.replace((target.session_id,))
+    usage = dispatch_slash("/session switch list 21", session, session_switch=catalog)
+    assert usage.kind == "warning"
+    assert "Usage: /session switch" in usage.message
+    assert catalog.session_ids == ()
 
 
 def test_action_audit_filters_use_replayed_status_and_tool_name(tmp_path) -> None:

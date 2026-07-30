@@ -273,6 +273,15 @@ class SessionArchiveChanged:
 
 
 @dataclass(frozen=True)
+class SessionPinChanged:
+    sequence: int
+    occurred_at: str
+    pinned: bool
+    record_type: str = "session_pin_changed"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TurnFailed:
     sequence: int
     occurred_at: str
@@ -472,6 +481,7 @@ SessionRecord: TypeAlias = (
     | RuntimeChanged
     | SessionNamed
     | SessionArchiveChanged
+    | SessionPinChanged
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -488,6 +498,7 @@ AuditRecord: TypeAlias = (
     RuntimeChanged
     | SessionNamed
     | SessionArchiveChanged
+    | SessionPinChanged
     | TurnFailed
     | ActionRequested
     | PermissionDecided
@@ -516,6 +527,7 @@ class ReplayState:
     turns: tuple[ConversationTurn, ...]
     latest_name: SessionNamed | None
     archived: bool
+    pinned: bool
     binding: BindingSnapshot
     next_sequence: int
     closed: bool
@@ -652,6 +664,7 @@ def replay_records(
     turns: list[ConversationTurn] = []
     latest_name: SessionNamed | None = None
     archived = False
+    pinned = False
     binding = header.binding
     closed = False
     seen_tool_ids: set[str] = set()
@@ -710,6 +723,12 @@ def replay_records(
             if type(record.archived) is not bool:
                 raise SessionRecordError("session_archive_changed archived must be boolean")
             archived = record.archived
+        elif isinstance(record, SessionPinChanged):
+            _require_no_live_action(live_action_request_id, "session_pin_changed")
+            _validate_timestamp(record.occurred_at, "session_pin_changed occurred_at")
+            if type(record.pinned) is not bool:
+                raise SessionRecordError("session_pin_changed pinned must be boolean")
+            pinned = record.pinned
         elif isinstance(record, TurnFailed):
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -886,6 +905,7 @@ def replay_records(
         turns=tuple(turns),
         latest_name=latest_name,
         archived=archived,
+        pinned=pinned,
         binding=binding,
         next_sequence=len(validated),
         closed=closed,
@@ -1101,6 +1121,11 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         if type(record.archived) is not bool:
             raise SessionRecordError("session_archive_changed archived must be boolean")
         common.update(occurred_at=record.occurred_at, archived=record.archived)
+    elif isinstance(record, SessionPinChanged):
+        _validate_timestamp(record.occurred_at, "session_pin_changed occurred_at")
+        if type(record.pinned) is not bool:
+            raise SessionRecordError("session_pin_changed pinned must be boolean")
+        common.update(occurred_at=record.occurred_at, pinned=record.pinned)
     elif isinstance(record, TurnFailed):
         _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
         _required_text(record.failure_kind, "turn_failed failure_kind")
@@ -1417,6 +1442,23 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             sequence=sequence,
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             archived=archived,
+        )
+    if record_type == "session_pin_changed":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "occurred_at",
+            "pinned",
+        }
+        _closed_fields(value, fields, record_type)
+        pinned = value.get("pinned")
+        if type(pinned) is not bool:
+            raise SessionRecordError("session_pin_changed pinned must be boolean")
+        return SessionPinChanged(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            pinned=pinned,
         )
     if record_type == "turn_failed":
         fields = {

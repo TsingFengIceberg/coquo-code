@@ -56,6 +56,7 @@ from leonervis_code.session_records import (
     SESSION_HEADER_SCHEMA_VERSION,
     SessionNamed,
     SessionNameSource,
+    SessionPinChanged,
     SessionTitleFallbackReason,
     SessionRecord,
     SessionRecordError,
@@ -218,6 +219,7 @@ class SessionInfo:
     name: str = "New session"
     name_source: SessionNameSource = SessionNameSource.DEFAULT
     archived: bool = False
+    pinned: bool = False
     title_fallback_reason: SessionTitleFallbackReason | None = None
 
 
@@ -990,6 +992,22 @@ class SessionWriter:
         )
         return self.info
 
+    def set_pinned(self, pinned: bool) -> SessionInfo:
+        """Durably change reversible Session pin metadata when needed."""
+        self._ensure_writable()
+        if type(pinned) is not bool:
+            raise SessionStoreError("Session pinned state must be boolean")
+        if self._state.pinned == pinned:
+            return self.info
+        self.append_audit(
+            SessionPinChanged(
+                sequence=self._state.next_sequence,
+                occurred_at=self._store._clock(),
+                pinned=pinned,
+            )
+        )
+        return self.info
+
     def turn_failed(
         self,
         *,
@@ -1691,6 +1709,7 @@ def _info(path: Path, state: ReplayState) -> SessionInfo:
         name=name,
         name_source=name_source,
         archived=state.archived,
+        pinned=state.pinned,
         title_fallback_reason=_committed_title_fallback_reason(state),
     )
 

@@ -817,7 +817,8 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
         stdin=io.StringIO(
             "/session show\n/session list\n/actions\n/tools details\n/session new\n"
             "/session rename Sprint notes\n/session rename --auto\n/session show\n"
-            "/resume 22345678-1234-4234-9234-123456789abc\nHello\n/exit\n"
+            "/session switch\nHello\n/session switch 1\n"
+            "/resume 22345678-1234-4234-9234-123456789abc\n/exit\n"
         ),
         stdout=output,
         version="0.1.0",
@@ -838,6 +839,8 @@ def test_repl_session_commands_switch_without_entering_model_history(tmp_path) -
     assert "No committed turns yet." in rendered
     assert "'Current work' [current]" in rendered
     assert "'Latest work' [latest]" in rendered
+    assert "Session picker snapshot:" in rendered
+    assert "build a fresh numbered snapshot" in rendered
 
 
 def test_repl_exits_cleanly_at_end_of_input(tmp_path) -> None:

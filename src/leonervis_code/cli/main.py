@@ -611,6 +611,7 @@ def render_session_info(info, stdout: TextIO) -> None:
             f"title fallback: {render_session_title_fallback_reason(info.title_fallback_reason)}\n"
         )
     stdout.write(f"archived: {'yes' if info.archived else 'no'}\n")
+    stdout.write(f"pinned: {'yes' if info.pinned else 'no'}\n")
     stdout.write(f"session ID: {info.session_id}\n")
     stdout.write(f"workspace: {info.workspace}\n")
     stdout.write(f"transcript: {info.path}\n")

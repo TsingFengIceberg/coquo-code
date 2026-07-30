@@ -137,6 +137,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session rename", "Rename the current Session"),
     SlashCompletionSpec("/session archive", "Archive the current Session"),
     SlashCompletionSpec("/session unarchive", "Unarchive the current Session"),
+    SlashCompletionSpec("/session pin", "Pin the current Session"),
+    SlashCompletionSpec("/session unpin", "Unpin the current Session"),
+    SlashCompletionSpec("/session switch", "Build or use a recent Session picker"),
+    SlashCompletionSpec("/session switch list", "Refresh the Session picker with filters"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tool-details", "Show live tool detail mode", True),
     SlashCompletionSpec("/tool-details compact", "Use compact live tool lines"),
@@ -188,6 +192,8 @@ class ReplSession(Protocol):
 
     def set_session_archived(self, archived: bool): ...
 
+    def set_session_pinned(self, pinned: bool): ...
+
     def new_session(self): ...
 
     def switch_session(self, selector: str): ...
@@ -211,6 +217,8 @@ class SlashResult:
 
 
 _NOT_HANDLED = SlashResult(handled=False)
+DEFAULT_SESSION_SWITCH_COUNT = 10
+MAX_SESSION_SWITCH_COUNT = 20
 
 
 @dataclass
@@ -220,11 +228,32 @@ class ToolDetailSettings:
     mode: ToolDetailMode = ToolDetailMode.COMPACT
 
 
+@dataclass
+class SessionSwitchCatalog:
+    """Process-local mapping from displayed picker numbers to exact Session IDs."""
+
+    session_ids: tuple[str, ...] = ()
+
+    def replace(self, session_ids: tuple[str, ...]) -> None:
+        self.session_ids = session_ids
+
+    def clear(self) -> None:
+        self.session_ids = ()
+
+    def consume(self, number: int) -> str | None:
+        session_ids = self.session_ids
+        self.clear()
+        if not 1 <= number <= len(session_ids):
+            return None
+        return session_ids[number - 1]
+
+
 def dispatch_slash(
     command: str,
     session: ReplSession,
     *,
     tool_details: ToolDetailSettings | None = None,
+    session_switch: SessionSwitchCatalog | None = None,
 ) -> SlashResult:
     """Dispatch one exact slash command without writing terminal output."""
     if not command.startswith("/") or "\n" in command or "\r" in command:
@@ -330,23 +359,39 @@ def dispatch_slash(
         return _call(lambda: render_session_info(session.session_info()), kind="info")
     if command == "/session list" or command.startswith("/session list "):
         return _session_list(command, session)
+    if command == "/session switch" or command.startswith("/session switch "):
+        return _session_switch(command, session, session_switch)
     if command == "/session new" or command.startswith("/session new "):
         if command != "/session new":
             return _usage("Usage: /session new")
+        if session_switch is not None:
+            session_switch.clear()
         return _new_session(session)
     if command == "/session rename" or command.startswith("/session rename "):
+        if session_switch is not None:
+            session_switch.clear()
         return _rename_session(command, session)
     if command in {"/session archive", "/session unarchive"}:
+        if session_switch is not None:
+            session_switch.clear()
         return _archive_session(session, archived=command == "/session archive")
     if command.startswith("/session archive ") or command.startswith("/session unarchive "):
         return _usage("Usage: /session archive | /session unarchive")
+    if command in {"/session pin", "/session unpin"}:
+        if session_switch is not None:
+            session_switch.clear()
+        return _pin_session(session, pinned=command == "/session pin")
+    if command.startswith("/session pin ") or command.startswith("/session unpin "):
+        return _usage("Usage: /session pin | /session unpin")
     if command.startswith("/session "):
         subcommand = command.split(maxsplit=2)[1]
         return _usage(
             "Unknown session command: "
-            f"{subcommand}\nUsage: /session <show|list|new|rename|archive|unarchive>"
+            f"{subcommand}\nUsage: /session <show|list|new|rename|archive|unarchive|pin|unpin|switch>"
         )
     if command == "/resume" or command.startswith("/resume "):
+        if session_switch is not None:
+            session_switch.clear()
         return _resume(command, session)
     if command == "/provider list" or command.startswith("/provider list "):
         if command != "/provider list":
@@ -547,56 +592,92 @@ def _output(command: str, session: ReplSession) -> SlashResult:
         return _command_error(error, failure_prefix="Output budget change failed")
 
 
-def _session_list(command: str, session: ReplSession) -> SlashResult:
-    parts = command.split()
-    count = DEFAULT_SESSION_LIST_COUNT
-    state_filter: str | None = None
-    archive_filter: str | None = None
-    model_filter: str | None = None
-    name_filter: str | None = None
+@dataclass(frozen=True)
+class _SessionFilters:
+    count: int
+    state: str | None = None
+    archive: str | None = None
+    pin: str | None = None
+    model: str | None = None
+    name: str | None = None
+
+
+def _parse_session_filters(
+    arguments: list[str],
+    *,
+    default_count: int,
+    maximum_count: int,
+) -> _SessionFilters | None:
+    count = default_count
+    state: str | None = None
+    archive: str | None = None
+    pin: str | None = None
+    model: str | None = None
+    name: str | None = None
     count_seen = False
-    for argument in parts[2:]:
+    for argument in arguments:
         if argument.isascii() and argument.isdigit() and not count_seen:
             count = int(argument)
             count_seen = True
-        elif argument in {"open", "closed"} and state_filter is None:
-            state_filter = argument
-        elif argument in {"active", "archived"} and archive_filter is None:
-            archive_filter = argument
-        elif argument.startswith("model=") and model_filter is None:
-            model_filter = argument.removeprefix("model=")
-        elif argument.startswith("name=") and name_filter is None:
-            name_filter = argument.removeprefix("name=")
+        elif argument in {"open", "closed"} and state is None:
+            state = argument
+        elif argument in {"active", "archived"} and archive is None:
+            archive = argument
+        elif argument in {"pinned", "unpinned"} and pin is None:
+            pin = argument
+        elif argument.startswith("model=") and model is None:
+            model = argument.removeprefix("model=")
+        elif argument.startswith("name=") and name is None:
+            name = argument.removeprefix("name=")
         else:
-            return _session_list_usage()
-    if not 1 <= count <= MAX_SESSION_LIST_COUNT:
-        return _session_list_usage()
-    if model_filter is not None and (not model_filter or len(model_filter) > 256):
-        return _session_list_usage()
-    if name_filter is not None and not _valid_session_name_filter(name_filter):
+            return None
+    if not 1 <= count <= maximum_count:
+        return None
+    if model is not None and (not model or len(model) > 256):
+        return None
+    if name is not None and not _valid_session_name_filter(name):
+        return None
+    return _SessionFilters(count, state, archive, pin, model, name)
+
+
+def _apply_session_filters(sessions, filters: _SessionFilters):
+    if filters.state is not None:
+        closed = filters.state == "closed"
+        sessions = tuple(info for info in sessions if info.closed is closed)
+    if filters.archive is not None:
+        archived = filters.archive == "archived"
+        sessions = tuple(info for info in sessions if info.archived is archived)
+    if filters.pin is not None:
+        pinned = filters.pin == "pinned"
+        sessions = tuple(info for info in sessions if info.pinned is pinned)
+    if filters.model is not None:
+        sessions = tuple(
+            info
+            for info in sessions
+            if getattr(info.binding, "selected_model", None) == filters.model
+        )
+    if filters.name is not None:
+        needle = filters.name.casefold()
+        sessions = tuple(info for info in sessions if needle in info.name.casefold())
+    return sessions
+
+
+def _session_list(command: str, session: ReplSession) -> SlashResult:
+    filters = _parse_session_filters(
+        command.split()[2:],
+        default_count=DEFAULT_SESSION_LIST_COUNT,
+        maximum_count=MAX_SESSION_LIST_COUNT,
+    )
+    if filters is None:
         return _session_list_usage()
 
     def render() -> str:
         sessions = session.list_sessions()
         if not sessions:
             return "No durable sessions found."
-        if state_filter is not None:
-            closed = state_filter == "closed"
-            sessions = tuple(info for info in sessions if info.closed is closed)
-        if archive_filter is not None:
-            archived = archive_filter == "archived"
-            sessions = tuple(info for info in sessions if info.archived is archived)
-        if model_filter is not None:
-            sessions = tuple(
-                info
-                for info in sessions
-                if getattr(info.binding, "selected_model", None) == model_filter
-            )
-        if name_filter is not None:
-            needle = name_filter.casefold()
-            sessions = tuple(info for info in sessions if needle in info.name.casefold())
+        sessions = _apply_session_filters(sessions, filters)
         total = len(sessions)
-        sessions = sessions[:count]
+        sessions = sessions[: filters.count]
         if not sessions:
             return "No durable sessions match the selected filters."
         current_id = session.session_info().session_id
@@ -619,7 +700,7 @@ def _session_list(command: str, session: ReplSession) -> SlashResult:
 def _session_list_usage() -> SlashResult:
     return _usage(
         f"Usage: /session list [1-{MAX_SESSION_LIST_COUNT}] [open|closed] "
-        "[active|archived] [model=<name>] [name=<text>]"
+        "[active|archived] [pinned|unpinned] [model=<name>] [name=<text>]"
     )
 
 
@@ -663,6 +744,110 @@ def _archive_session(session: ReplSession, *, archived: bool) -> SlashResult:
     )
 
 
+def _pin_session(session: ReplSession, *, pinned: bool) -> SlashResult:
+    def change() -> str:
+        before = session.session_info()
+        info = session.set_session_pinned(pinned)
+        state = "pinned" if pinned else "unpinned"
+        if before.pinned == pinned:
+            return f"Session is already {state}: {info.name}"
+        return (
+            f"Session marked {state}: {info.name}. History, runtime, latest, and resume "
+            "identity are unchanged."
+        )
+
+    operation = "pin" if pinned else "unpin"
+    return _call(
+        change,
+        kind="success",
+        failure_prefix=f"Session {operation} failed",
+    )
+
+
+def _session_switch(
+    command: str,
+    session: ReplSession,
+    catalog: SessionSwitchCatalog | None,
+) -> SlashResult:
+    if catalog is None:
+        return _command_error(
+            SessionStoreError("Session switch catalog is unavailable"),
+            failure_prefix="Session switch failed",
+        )
+    parts = command.split()
+    if len(parts) == 3 and parts[2].isascii() and parts[2].isdigit():
+        number = int(parts[2])
+        selector = catalog.consume(number)
+        if selector is None:
+            return SlashResult(
+                handled=True,
+                message=(
+                    "Session picker entry is unavailable. Run /session switch to build a fresh "
+                    "numbered snapshot."
+                ),
+                kind="warning",
+            )
+        return _resume_selector(
+            selector,
+            session,
+            retry_command="Run /session switch again before retrying a numbered selection.",
+        )
+    if len(parts) == 2:
+        arguments: list[str] = []
+    elif len(parts) >= 3 and parts[2] == "list":
+        arguments = parts[3:]
+    else:
+        return _session_switch_usage()
+    catalog.clear()
+    filters = _parse_session_filters(
+        arguments,
+        default_count=DEFAULT_SESSION_SWITCH_COUNT,
+        maximum_count=MAX_SESSION_SWITCH_COUNT,
+    )
+    if filters is None:
+        return _session_switch_usage()
+
+    def build() -> str:
+        current_id = session.session_info().session_id
+        sessions = tuple(
+            info
+            for info in _apply_session_filters(session.list_sessions(), filters)
+            if info.session_id != current_id
+        )
+        total = len(sessions)
+        sessions = sessions[: filters.count]
+        if not sessions:
+            catalog.clear()
+            return "No other durable Sessions match the picker filters."
+        catalog.replace(tuple(info.session_id for info in sessions))
+        latest_id = session.latest_session_info().session_id
+        body = "\n".join(
+            f"{index}. "
+            + render_session_summary(
+                info,
+                current_session_id=current_id,
+                latest_session_id=latest_id,
+            )
+            for index, info in enumerate(sessions, start=1)
+        )
+        prefix = (
+            f"Session picker snapshot: {len(sessions)} of {total} matching Sessions.\n"
+            if len(sessions) < total
+            else f"Session picker snapshot: {len(sessions)} matching Sessions.\n"
+        )
+        return f"{prefix}{body}\nSelect once with /session switch <number>."
+
+    return _call(build, kind="info", failure_prefix="Session switch listing failed")
+
+
+def _session_switch_usage() -> SlashResult:
+    return _usage(
+        f"Usage: /session switch | /session switch <number> | /session switch list "
+        f"[1-{MAX_SESSION_SWITCH_COUNT}] [open|closed] [active|archived] "
+        "[pinned|unpinned] [model=<name>] [name=<text>]"
+    )
+
+
 def _valid_session_name_filter(value: str) -> bool:
     if not value or len(value) > 80 or len(value.encode("utf-8")) > 256:
         return False
@@ -673,8 +858,21 @@ def _resume(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) != 2:
         return _usage("Usage: /resume <latest|session-id>")
+    return _resume_selector(
+        parts[1],
+        session,
+        retry_command=f"Retry /resume {parts[1]}.",
+    )
+
+
+def _resume_selector(
+    selector: str,
+    session: ReplSession,
+    *,
+    retry_command: str,
+) -> SlashResult:
     try:
-        message, kind = render_session_resume(session.switch_session(parts[1]))
+        message, kind = render_session_resume(session.switch_session(selector))
         return SlashResult(handled=True, message=message, kind=kind)
     except SessionResumeContextError as error:
         return SlashResult(
@@ -687,7 +885,7 @@ def _resume(command: str, session: ReplSession) -> SlashResult:
             handled=True,
             message=(
                 f"Session resume was not committed: {error}. Current Session and runtime "
-                f"are unchanged. Retry /resume {parts[1]}."
+                f"are unchanged. {retry_command}"
             ),
             kind="warning",
         )

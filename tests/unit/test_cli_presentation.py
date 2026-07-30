@@ -670,6 +670,13 @@ def test_toolbar_shows_bounded_session_name_between_model_and_context() -> None:
         session=SimpleNamespace(name="Old review", archived=True),
     )
     assert "Old review [archived]" in archived
+    pinned_archived = render_prompt_toolbar(
+        status(),
+        Path("/workspace"),
+        color=False,
+        session=SimpleNamespace(name="Kept review", archived=True, pinned=True),
+    )
+    assert "Kept review [pinned archived]" in pinned_archived
 
 
 def test_session_info_and_title_event_render_safe_fallback_reason(tmp_path: Path) -> None:
@@ -686,11 +693,13 @@ def test_session_info_and_title_event_render_safe_fallback_reason(tmp_path: Path
         name="Fallback title",
         name_source=SessionNameSource.FALLBACK,
         archived=True,
+        pinned=True,
         title_fallback_reason=SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT,
     )
 
     rendered = render_session_info(info)
     assert "Archived: yes" in rendered
+    assert "Pinned: yes" in rendered
     assert "Title fallback: provider output limit" in rendered
     message, kind = render_prompt_event(
         SessionTitleFallbackApplied(SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT)

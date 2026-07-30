@@ -263,7 +263,19 @@ def test_archive_toggle_is_idempotent_append_only_and_survives_resume(tmp_path: 
     assert active.archived is False
     assert active.record_count == archived.record_count + 2
     assert resumed.set_archived(False).record_count == active.record_count
+
+    pinned = resumed.set_pinned(True)
+    assert pinned.pinned is True
+    assert pinned.record_count == active.record_count + 1
+    assert resumed.set_pinned(True).record_count == pinned.record_count
     resumed.release()
+
+    reopened = session_store.open(SESSION_ONE)
+    assert reopened.info.pinned is True
+    unpinned = reopened.set_pinned(False)
+    assert unpinned.pinned is False
+    assert reopened.set_pinned(False).record_count == unpinned.record_count
+    reopened.release()
 
 
 def test_fallback_title_reason_is_exposed_without_changing_name_identity(tmp_path: Path) -> None:

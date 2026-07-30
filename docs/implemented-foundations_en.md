@@ -54,6 +54,7 @@
 - [Assistant Turn Execution Trace Grouping](#assistant-turn-execution-trace-grouping)
 - [Durable Session Naming and Terminal Identity](#durable-session-naming-and-terminal-identity)
 - [Session Lifecycle Management and Naming Diagnostics](#session-lifecycle-management-and-naming-diagnostics)
+- [Pinned Sessions and Snapshot-based Quick Switching](#pinned-sessions-and-snapshot-based-quick-switching)
 - [Foundation 1D: Bounded Literal Grep](#foundation-1d-bounded-literal-grep-and-versioned-tool-arguments)
 - [Foundation 1C: Bounded Workspace Glob](#foundation-1c-bounded-workspace-glob)
 - [Foundation 1B: deterministic bounded read_file tool loop](#foundation-1b-deterministic-bounded-read_file-tool-loop)
@@ -742,6 +743,16 @@ When first-turn automatic naming uses the Host fallback, new `turn_committed` v8
 
 These changes are Session metadata, Host queries, and terminal presentation. Canonical system prompt v21, provider adapter contract v25, all 21 model-visible tools, ToolArguments v1, ActionIdentity v1, Action Audit v1, compaction, and Effective Context identity remain unchanged. See [0072: Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md).
 
+## Pinned Sessions and Snapshot-based Quick Switching
+
+`/session pin` and `/session unpin` store a reversible pin through append-only `session_pin_changed` v1. Pin is not rename, archive, close, or resume and changes neither history, runtime binding, Effective Context, `latest`, nor UUID identity. Setting the current state again appends no record. Older transcripts with no such record strictly replay as `pinned=false`. Session detail, list summaries, and the TTY toolbar expose pin state, while `/session list pinned|unpinned` composes with lifecycle, archive, model, name, and count filters.
+
+Quick switching does not promote names or numbers into identity. `/session switch` builds a process-local snapshot of at most ten other strictly replayed Sessions in newest-first order; `/session switch list` accepts the same filters and a 1-to-20 bound. Each preview contains a number, name, complete UUID, turn count, lifecycle/archive/pin state, creation time, and durable runtime provenance without reading conversation text. `/session switch <number>` resolves only through the current snapshot to its complete UUID, then clears the snapshot whether or not the number was valid.
+
+The actual switch fully reuses the existing `ProjectSession.switch_session` transaction: target-aware read-only prepare, current-runtime context screening, complete-transcript stale/CAS validation, durable `session_resumed` commit, writer transfer, and `latest` update. Ordinary prompts, new/rename/archive/pin, direct `/resume`, and every picker refresh clear the previous snapshot, so an old number is never silently reinterpreted against a new directory. Known-context rejection, stale conflict, or precommit failure preserves the current Session and runtime; post-commit partial outcomes retain the existing truthful resume semantics.
+
+This is a Host-only Session metadata and navigation change. Canonical system prompt v21, provider adapter contract v25, the 21-tool catalog, ToolArguments v1, ActionIdentity v1, Action Audit v1, `turn_committed` v8, compaction, and Effective Context identity remain unchanged. See [0073: Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md).
+
 ## Foundation 1D: Bounded Literal Grep and Versioned Tool Arguments
 
 The model-visible read-only surface now has the fixed `read_file, glob, grep` order. `grep(query, include)` uses the same portable workspace-relative selector as glob to choose non-symlink regular files, then performs case-sensitive literal substring search within strict UTF-8 logical lines. Each matching source line produces one compact JSONL record containing a POSIX relative path, 1-based line number, and complete line text. Regex, indexing, Unicode normalization, `.gitignore`, multiple patterns, and context windows remain unsupported.
@@ -980,3 +991,4 @@ This slice establishes capacity facts only. It does not count current request to
 70. [0070: Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)
 71. [0071: Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)
 72. [0072: Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
+73. [0073: Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)

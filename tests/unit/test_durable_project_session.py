@@ -465,6 +465,11 @@ def test_project_session_archive_toggle_preserves_latest_runtime_and_history(
     assert session.latest_session_info().session_id == latest
     assert session.set_session_archived(False).archived is False
     assert session.history == history
+    assert session.set_session_pinned(True).pinned is True
+    assert session.history == history
+    assert session.status() == status
+    assert session.latest_session_info().session_id == latest
+    assert session.set_session_pinned(False).pinned is False
     session.close()
 
 

@@ -55,7 +55,7 @@ from leonervis_code.cli.presentation import (
     render_turn_trace,
 )
 from leonervis_code.cli.prompt_editor import SlashCommandCompleter, validate_prompt_text
-from leonervis_code.cli.slash import ToolDetailSettings, dispatch_slash
+from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.turn_runner import TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
 from leonervis_code.session import SessionTitleGenerationStarted, TurnCommitStarted
@@ -169,6 +169,7 @@ class TerminalApplication:
         self._runner = TurnRunner(session, queue, approval_broker)
         self._state = TerminalViewState()
         self._tool_details = ToolDetailSettings()
+        self._session_switch = SessionSwitchCatalog()
         self._renderer = _QueuedPromptRenderer(color=color, render_markdown=render_markdown)
         self._status = _snapshot(session, "status")
         self._session_info = _snapshot(session, "session_info")
@@ -322,6 +323,7 @@ class TerminalApplication:
             buffer.reset(append_to_history=False)
             return False
         include_details = self._tool_details.mode == ToolDetailMode.FULL
+        self._session_switch.clear()
         self._renderer.configure(self._tool_details.mode, width=self._current_width())
         self._turn_output_started = False
         self._turn_starting = True
@@ -362,7 +364,12 @@ class TerminalApplication:
 
     def _dispatch_slash(self, text: str) -> None:
         try:
-            result = dispatch_slash(text, self._session, tool_details=self._tool_details)
+            result = dispatch_slash(
+                text,
+                self._session,
+                tool_details=self._tool_details,
+                session_switch=self._session_switch,
+            )
             if result.clear_screen:
                 self._schedule_write(CLEAR_SCREEN)
             elif result.message is not None:

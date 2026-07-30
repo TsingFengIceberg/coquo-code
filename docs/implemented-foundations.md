@@ -54,6 +54,7 @@
 - [Assistant Turn Execution Trace Grouping](#assistant-turn-execution-trace-grouping)
 - [Durable Session Naming 与 Terminal Identity](#durable-session-naming-与-terminal-identity)
 - [Session Lifecycle Management 与 Naming Diagnostics](#session-lifecycle-management-与-naming-diagnostics)
+- [Pinned Sessions 与 Snapshot-based Quick Switching](#pinned-sessions-与-snapshot-based-quick-switching)
 - [Foundation 1D：Bounded Literal Grep](#foundation-1dbounded-literal-grep-与-versioned-tool-arguments)
 - [Foundation 1C：Bounded Workspace Glob](#foundation-1cbounded-workspace-glob)
 - [Foundation 1B：确定性的受限 read_file 工具循环](#foundation-1b确定性的受限-read_file-工具循环)
@@ -742,6 +743,16 @@ Session现在可以通过`/session archive`和`/session unarchive`写入可逆�
 
 这些变化属于Session元数据、Host查询和终端呈现。Canonical system prompt保持v21，provider adapter contract保持v25，21个model-visible工具、ToolArguments v1、ActionIdentity v1、Action Audit v1、compaction和Effective Context identity均不变。完整决策见[0072：Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)。
 
+## Pinned Sessions 与 Snapshot-based Quick Switching
+
+`/session pin`和`/session unpin`通过append-only `session_pin_changed` v1保存可逆收藏状态。Pin不是rename、archive、close或resume，不改变history、runtime binding、Effective Context、`latest`或UUID身份；重复设置同一状态不追加record。旧transcript没有该记录时严格replay为`pinned=false`。Session show、列表摘要和TTY底栏显示收藏状态，`/session list pinned|unpinned`可继续与open/closed、active/archived、model、name及数量筛选组合。
+
+快速切换不把名称或编号升级为身份。`/session switch`默认从严格replay、newest-first的其他Session建立最多10条的进程内快照；`/session switch list`可使用同一过滤器并将上限调整到1至20。每条预览包含编号、名称、完整UUID、turn数量、生命周期/归档/收藏状态、创建时间和持久runtime来源，但不读取对话正文。`/session switch <number>`只从当前快照取出对应完整UUID，随后无论编号有效与否都清空快照。
+
+真正切换完全复用现有`ProjectSession.switch_session`事务：target-aware只读prepare、当前runtime context screening、完整transcript stale/CAS验证、`session_resumed` durable commit、writer transfer及`latest`更新。普通prompt、new/rename/archive/pin、直接`/resume`和任何picker刷新都会清空旧快照，因此旧编号不会在新目录中被悄悄重新解释。Known context拒绝、stale冲突或precommit失败保留当前Session与runtime；commit point后的partial结果继续按原resume语义如实报告。
+
+这是Host-only Session元数据和导航变化。Canonical system prompt保持v21，provider adapter contract保持v25，21-tool catalog、ToolArguments v1、ActionIdentity v1、Action Audit v1、`turn_committed` v8、compaction和Effective Context identity均不变。完整决策见[0073：Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)。
+
 ## Foundation 1D：Bounded Literal Grep 与 Versioned Tool Arguments
 
 模型可见只读工具面扩展为固定顺序的`read_file, glob, grep`。`grep(query, include)`使用与glob相同的portable workspace-relative selector选择non-symlink regular files，再在strict UTF-8 logical lines内执行case-sensitive literal substring search；每个matching line只输出一次compact JSONL，包含POSIX relative path、1-based line number与完整line text。它不支持regex、index、Unicode normalization、`.gitignore`、multiple patterns或context windows。
@@ -980,3 +991,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 70. [0070：Assistant Turn Execution Trace Grouping](./decisions/0070-assistant-turn-execution-trace-grouping.md)
 71. [0071：Durable Session Naming and Terminal Identity](./decisions/0071-durable-session-naming-and-terminal-identity.md)
 72. [0072：Session Archive, Search, and Title Fallback Diagnostics](./decisions/0072-session-archive-search-and-title-fallback-diagnostics.md)
+73. [0073：Pinned Sessions and Snapshot-based Quick Switching](./decisions/0073-pinned-sessions-and-snapshot-quick-switching.md)

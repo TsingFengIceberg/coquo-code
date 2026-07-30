@@ -926,6 +926,13 @@ class ProjectSession:
             self._ensure_not_compacting()
             return self._writer.set_archived(archived)
 
+    def set_session_pinned(self, pinned: bool) -> SessionInfo:
+        """Set reversible pin metadata without changing history, runtime, or latest."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._writer.set_pinned(pinned)
+
     def switch_session(self, selector: str | Path) -> SessionResumeResult:
         """Screen and atomically swap durable history without changing runtime."""
         with self._lock:

@@ -77,10 +77,13 @@ HELP_TEXT = (
 SESSION_HELP = (
     "Session commands:\n"
     "  /session show\n"
-    "  /session list [1-100] [open|closed] [active|archived] [model=<name>] [name=<text>]\n"
+    "  /session list [1-100] [open|closed] [active|archived] [pinned|unpinned] "
+    "[model=<name>] [name=<text>]\n"
+    "  /session switch | /session switch <number> | /session switch list [filters]\n"
     "  /session new\n"
     "  /session rename <name> | /session rename --auto\n"
     "  /session archive | /session unarchive\n"
+    "  /session pin | /session unpin\n"
     "  /resume <latest|session-id>\n"
     "  /history <count>"
 )
@@ -209,6 +212,7 @@ class SessionInfoView(Protocol):
     name: str
     name_source: object
     archived: bool
+    pinned: bool
     title_fallback_reason: object | None
 
 
@@ -606,6 +610,8 @@ def render_session_summary(
     state = "closed" if info.closed else "open"
     if info.archived:
         state = f"{state}, archived"
+    if getattr(info, "pinned", False):
+        state = f"{state}, pinned"
     binding = getattr(info, "binding", None)
     model = _safe_inline(getattr(binding, "selected_model", None) or "<none>")
     provider = _safe_inline(getattr(binding, "provider_id", None) or "<unknown>")
@@ -1143,6 +1149,7 @@ def render_session_info(info: SessionInfoView) -> str:
     lines.extend(
         (
             f"Archived: {'yes' if info.archived else 'no'}",
+            f"Pinned: {'yes' if getattr(info, 'pinned', False) else 'no'}",
             f"Session ID: {info.session_id}",
             f"Transcript: {info.path}",
             f"Turns: {info.turn_count}",
@@ -1339,7 +1346,12 @@ def _toolbar_runtime_label(status: RuntimeStatusView | None) -> str | None:
 
 
 def _toolbar_session_label(session: SessionInfoView) -> str:
-    suffix = " [archived]" if getattr(session, "archived", False) else ""
+    markers = []
+    if getattr(session, "pinned", False):
+        markers.append("pinned")
+    if getattr(session, "archived", False):
+        markers.append("archived")
+    suffix = f" [{' '.join(markers)}]" if markers else ""
     return _truncate(_safe_toolbar_text(f"{session.name}{suffix}"), 32)
 
 

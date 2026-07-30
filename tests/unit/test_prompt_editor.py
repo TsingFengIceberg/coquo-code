@@ -140,6 +140,10 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         "/session rename",
         "/session archive",
         "/session unarchive",
+        "/session pin",
+        "/session unpin",
+        "/session switch",
+        "/session switch list",
     ]
     assert [
         completion.text for completion in completer.get_completions(Document("/provider c"), event)
