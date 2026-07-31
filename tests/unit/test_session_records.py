@@ -39,6 +39,8 @@ from leonervis_code.session_records import (
     SessionTitleFallbackReason,
     SessionRecordError,
     SessionResumed,
+    SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
+    SESSION_RESUMED_SCHEMA_VERSION,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
@@ -860,10 +862,69 @@ def test_recovery_after_close_preserves_closed_state_until_resumed(tmp_path: Pat
             header,
             closed,
             recovery,
-            SessionResumed(sequence=3, occurred_at=NOW),
+            SessionResumed(sequence=3, occurred_at=NOW, schema_version=1),
         ]
     )
     assert resumed.closed is False
+
+
+def test_session_resumed_v2_installs_current_binding_and_v1_remains_readable(
+    tmp_path: Path,
+) -> None:
+    historical = BindingSnapshot.fake()
+    current = BindingSnapshot.fake(generation=3, source="current-runtime")
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=historical,
+    )
+    legacy = SessionResumed(
+        sequence=1,
+        occurred_at=NOW,
+        schema_version=SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
+    )
+    decoded_legacy = decode_record(encode_record(legacy))
+    assert decoded_legacy == legacy
+    assert replay_records([header, legacy]).binding == historical
+
+    resumed = SessionResumed(sequence=1, occurred_at=NOW, binding=current)
+    encoded = encode_record(resumed)
+    assert f'"schema_version":{SESSION_RESUMED_SCHEMA_VERSION}'.encode() in encoded
+    assert b'"binding":' in encoded
+    assert decode_record(encoded) == resumed
+    assert replay_records([header, resumed]).binding == current
+
+
+@pytest.mark.parametrize(
+    "value, message",
+    [
+        (
+            {
+                "record_type": "session_resumed",
+                "schema_version": SESSION_RESUMED_SCHEMA_VERSION,
+                "sequence": 1,
+                "occurred_at": NOW,
+            },
+            "missing required field: binding",
+        ),
+        (
+            {
+                "record_type": "session_resumed",
+                "schema_version": SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
+                "sequence": 1,
+                "occurred_at": NOW,
+                "binding": {},
+            },
+            "unknown field: binding",
+        ),
+    ],
+)
+def test_session_resumed_versions_fail_closed(value, message: str) -> None:
+    with pytest.raises(SessionRecordError, match=message):
+        decode_record((json.dumps(value) + "\n").encode())
 
 
 def test_replay_requires_closed_turns_and_strict_tool_causality(tmp_path: Path) -> None:

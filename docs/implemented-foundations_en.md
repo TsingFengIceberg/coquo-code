@@ -1044,6 +1044,14 @@ The cache contains no credential value, raw provider body, or Session content. P
 
 This slice establishes capacity facts only. It does not count current request tokens, reject oversized requests, or compact history. See [0013: provider-owned model context capability](./decisions/0013-provider-owned-model-context-capabilities.md) for the detailed design.
 
+## Resume Runtime Binding and the First Tool Action
+
+Session resume always keeps the caller's current runtime and never reconstructs a provider from transcript history. Legacy `session_resumed` v1 reopened lifecycle state without updating replay's current binding. A resumed text-only turn therefore switched binding naturally at its final `turn_committed`, but a provider that requested a tool first reached strict `action_requested` validation before commit and safely failed when the current runtime differed from historical provenance.
+
+New `session_resumed` records use record-local schema v2 and capture the context-screened current redacted `BindingSnapshot` at the same append-and-fsync semantic commit point. Both startup `--resume` and live REPL Session switching pass their pinned context-transition runtime. Candidate replay installs that binding before the first resumed Action while binding equality and Action lease validation remain strict. Low-level `SessionStore.open` retains the replayed binding when no explicit binding is supplied.
+
+Legacy v1 remains readable without rewriting; v1 rejects a binding field and v2 requires one complete valid binding. `SessionResumed` fsync semantics, latest-pointer partial outcomes, resume CAS, model history, and Effective Context identity remain unchanged. Canonical system prompt stays at v25, provider adapter stays at v26, and all 21 tool schemas, ToolArguments, Action Audit, Task records, and context representations remain unchanged. See [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1136,3 +1144,4 @@ This slice establishes capacity facts only. It does not count current request to
 88. [0088: Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
 89. [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
 90. [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
+91. [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)

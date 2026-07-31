@@ -76,6 +76,8 @@ TURN_COMMITTED_NAMING_SCHEMA_VERSION = 7
 TURN_COMMITTED_SCHEMA_VERSION = 8
 TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
 TURN_FAILED_SCHEMA_VERSION = 2
+SESSION_RESUMED_LEGACY_SCHEMA_VERSION = 1
+SESSION_RESUMED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_TRIGGER_SCHEMA_VERSION = 3
 CONTEXT_COMPACTED_SCHEMA_VERSION = 4
@@ -429,8 +431,9 @@ class ActionAuditState:
 class SessionResumed:
     sequence: int
     occurred_at: str
+    binding: BindingSnapshot | None = None
     record_type: str = "session_resumed"
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = SESSION_RESUMED_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -879,6 +882,9 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "session_resumed occurred_at")
             _interrupt_live_action(action_states, live_action_request_id, record.sequence)
             live_action_request_id = None
+            if record.schema_version == SESSION_RESUMED_SCHEMA_VERSION:
+                assert record.binding is not None
+                binding = record.binding
             closed = False
         elif isinstance(record, Recovery):
             _validate_timestamp(record.occurred_at, "recovery occurred_at")
@@ -1228,6 +1234,10 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
     elif isinstance(record, SessionResumed):
         _validate_timestamp(record.occurred_at, "session_resumed occurred_at")
         common["occurred_at"] = record.occurred_at
+        if record.schema_version == SESSION_RESUMED_SCHEMA_VERSION:
+            if record.binding is None:
+                raise SessionRecordError("current session_resumed requires a runtime binding")
+            common["binding"] = _binding_to_dict(record.binding)
     elif isinstance(record, Recovery):
         _validate_timestamp(record.occurred_at, "recovery occurred_at")
         if type(record.truncated_bytes) is not int or record.truncated_bytes < 1:
@@ -1309,6 +1319,11 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         }
     elif record_type == "turn_failed":
         allowed_versions = {TURN_FAILED_LEGACY_SCHEMA_VERSION, TURN_FAILED_SCHEMA_VERSION}
+    elif record_type == "session_resumed":
+        allowed_versions = {
+            SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
+            SESSION_RESUMED_SCHEMA_VERSION,
+        }
     else:
         allowed_versions = {SCHEMA_VERSION}
     if type(version) is not int or version not in allowed_versions:
@@ -1785,10 +1800,19 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         return record
     simple_fields = {"record_type", "schema_version", "sequence", "occurred_at"}
     if record_type == "session_resumed":
-        _closed_fields(value, simple_fields, record_type)
+        fields = set(simple_fields)
+        if version == SESSION_RESUMED_SCHEMA_VERSION:
+            fields.add("binding")
+        _closed_fields(value, fields, record_type)
         return SessionResumed(
             sequence=sequence,
             occurred_at=_required_field_text(value, "occurred_at", record_type),
+            binding=(
+                _binding_from_value(value.get("binding"))
+                if version == SESSION_RESUMED_SCHEMA_VERSION
+                else None
+            ),
+            schema_version=version,
         )
     if record_type == "recovery":
         _closed_fields(value, simple_fields | {"truncated_bytes"}, record_type)
@@ -2447,6 +2471,20 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_FAILED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
+        return
+    if isinstance(record, SessionResumed):
+        if record.schema_version not in {
+            SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
+            SESSION_RESUMED_SCHEMA_VERSION,
+        }:
+            raise SessionRecordError("unsupported session record schema version")
+        if (
+            record.schema_version == SESSION_RESUMED_LEGACY_SCHEMA_VERSION
+            and record.binding is not None
+        ):
+            raise SessionRecordError("legacy session_resumed cannot contain a runtime binding")
+        if record.schema_version == SESSION_RESUMED_SCHEMA_VERSION and record.binding is None:
+            raise SessionRecordError("current session_resumed requires a runtime binding")
         return
     if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")

@@ -522,11 +522,16 @@ class SessionStore:
             _release_writer_lease(lock_path, lock_stream)
             raise
 
-    def open(self, selector: str | Path) -> SessionWriter:
+    def open(
+        self,
+        selector: str | Path,
+        *,
+        binding: BindingSnapshot | None = None,
+    ) -> SessionWriter:
         """Compatibility wrapper over the prepared resume transaction."""
         prepared = self.prepare_resume(selector)
         try:
-            return prepared.commit().writer
+            return prepared.commit(binding=binding).writer
         except BaseException:
             prepared.abort()
             raise
@@ -1250,10 +1255,13 @@ class PreparedSessionResume:
     def info(self) -> SessionInfo:
         return _info(self.path, self.state)
 
-    def commit(self) -> CommittedSessionResume:
+    def commit(self, *, binding: BindingSnapshot | None = None) -> CommittedSessionResume:
         """Revalidate, durably resume, update latest, and transfer ownership."""
         if not self._live:
             raise SessionResumeStaleError("prepared resume is no longer active")
+        current_binding = self.state.binding if binding is None else binding
+        if type(current_binding) is not BindingSnapshot:
+            raise ValueError("resume runtime binding is invalid")
         recovery_applied = False
         with self._store._directory_lock(existing_only=True):
             self._revalidate()
@@ -1269,6 +1277,7 @@ class PreparedSessionResume:
             resumed = SessionResumed(
                 sequence=len(records),
                 occurred_at=self._store._clock(),
+                binding=current_binding,
             )
             records.append(resumed)
             candidate = self._store._replay(self.path, records)

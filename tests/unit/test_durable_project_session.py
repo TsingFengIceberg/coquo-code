@@ -46,6 +46,7 @@ from leonervis_code.session import (
     TurnCommitStarted,
 )
 from leonervis_code.session_records import (
+    ActionAuditStatus,
     BindingSnapshot,
     CompactionFailed,
     SessionNameSource,
@@ -131,6 +132,57 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert resumed_ledgers.turns[0].turn_number == 2
     assert second.transcript_path == transcript
     second.close()
+
+
+def test_first_tool_after_resume_uses_the_current_runtime_binding(tmp_path: Path) -> None:
+    store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
+    store.add_profile(
+        ProviderProfileSpec(
+            name="real-after-fake",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="current-model",
+            base_url="http://127.0.0.1:11434/v1",
+        )
+    )
+    first = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    first.prompt("establish fake-bound history")
+    first.close()
+
+    class ToolAfterResumeProvider(RecordingProvider):
+        def respond(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ToolUse(
+                    "list-after-resume",
+                    "list_directory",
+                    ToolArguments.from_mapping({"path": "."}),
+                )
+            return AssistantText("current runtime completed the resumed turn")
+
+    provider = ToolAfterResumeProvider("current")
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        profile="real-after-fake",
+        environment={},
+        user_profile_path=store.user_path,
+        project_profile_path=store.project_path,
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_TWO),
+    )
+
+    assert resumed.prompt("inspect after resume") == "current runtime completed the resumed turn"
+    assert resumed.action_audits()[0].status is ActionAuditStatus.SUCCEEDED
+    assert resumed.session_info().binding.provider_id == "custom"
+    assert resumed.session_info().binding.selected_model == "current-model"
+    resumed.close()
 
 
 def test_project_session_task_management_is_host_only_and_session_nonmutating(

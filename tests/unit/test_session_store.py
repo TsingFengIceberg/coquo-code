@@ -958,7 +958,7 @@ def test_complete_json_without_newline_is_not_repaired(tmp_path: Path) -> None:
         json.dumps(
             {
                 "record_type": "session_resumed",
-                "schema_version": 2,
+                "schema_version": 3,
                 "sequence": 1,
                 "occurred_at": NOW,
             }

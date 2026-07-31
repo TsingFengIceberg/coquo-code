@@ -1044,6 +1044,14 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 
 这一切片只建立容量事实，尚不计算当前请求 token、不阻止超限请求，也不自动 compact。详细设计见 [0013：Provider-owned Model Context Capability](./decisions/0013-provider-owned-model-context-capabilities.md)。
 
+## Resume Runtime Binding 与首个工具动作
+
+恢复Session始终使用调用方当前runtime，不会从历史transcript重建provider。旧`session_resumed` v1只重新打开lifecycle，却不更新replay中的current binding；因此恢复后的纯文本turn会在最终`turn_committed`时自然切换binding，但若provider首先请求工具，严格的`action_requested`校验会在commit前发现当前runtime与历史binding不同并安全失败。
+
+新`session_resumed`使用record-local schema v2，在同一个append+fsync语义commit point内记录已经完成context screening的当前redacted `BindingSnapshot`。Startup `--resume`与REPL Session切换都传入其固定context-transition runtime；candidate replay先安装该binding，恢复后的首个Action才可继续经过不放宽的binding equality与Action lease校验。低层`SessionStore.open`未显式传入binding时沿用replay状态。
+
+旧v1记录继续读取且不重写；v1不允许binding字段，v2必须有一个完整有效binding。`SessionResumed` fsync、latest pointer partial outcome、resume CAS、model history和Effective Context identity均保持原语义。Canonical system prompt保持v25，provider adapter保持v26，21个tool schema、ToolArguments、Action Audit、Task records与context representation均不变。详见[0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1136,3 +1144,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 88. [0088：Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
 89. [0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
 90. [0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
+91. [0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)

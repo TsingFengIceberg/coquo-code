@@ -850,7 +850,7 @@ class ProjectSession:
                     report = assessment.fit_report
                     if report is not None and rejects_context_transition(report.decision):
                         raise SessionResumeContextError(prepared.info, snapshot.context_id, report)
-                    committed = prepared.commit()
+                    committed = prepared.commit(binding=binding_from_status(runtime.status))
                 writer = committed.writer
                 writer_holder["writer"] = writer
                 result = _resume_result(
@@ -1600,7 +1600,7 @@ class ProjectSession:
                         raise SessionResumeConflictError(
                             "current Session or runtime changed during resume screening"
                         )
-                    committed = prepared.commit()
+                    committed = prepared.commit(binding=binding_from_status(runtime.status))
                 writer_holder["writer"] = committed.writer
                 self._writer = committed.writer
                 self._loop = loop

@@ -687,7 +687,7 @@ def test_only_one_unresolved_action_and_no_crossing_state_boundaries(tmp_path: P
 def test_resume_and_turn_failure_derive_abandoned_or_outcome_unknown(tmp_path: Path) -> None:
     exact = identity(tmp_path)
     requested = [header(tmp_path), request_record(tmp_path, exact=exact)]
-    abandoned = replay_records([*requested, SessionResumed(2, NOW)])
+    abandoned = replay_records([*requested, SessionResumed(2, NOW, schema_version=1)])
     assert abandoned.action_audits[0].status == ActionAuditStatus.ABANDONED
 
     started = [
@@ -695,7 +695,7 @@ def test_resume_and_turn_failure_derive_abandoned_or_outcome_unknown(tmp_path: P
         decision_record(exact),
         start_record(exact, sequence=3, authorization=ActionAuthorization.POLICY_ALLOW),
     ]
-    unknown = replay_records([*started, SessionResumed(4, NOW)])
+    unknown = replay_records([*started, SessionResumed(4, NOW, schema_version=1)])
     assert unknown.action_audits[0].status == ActionAuditStatus.OUTCOME_UNKNOWN
 
     failed_turn = replay_records(
