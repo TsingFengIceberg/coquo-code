@@ -86,7 +86,16 @@ class TerminalEventSink:
         try:
             message = "Working..."
             self._stream.write(
-                render_host_message(message, "info", color=self._color)
+                render_host_message(
+                    message,
+                    "info",
+                    color=self._color,
+                    width=(
+                        DEFAULT_TERMINAL_WIDTH
+                        if self._markdown_width is None
+                        else self._markdown_width
+                    ),
+                )
                 if self._show_role_markers
                 else render_message(message, "info", color=self._color)
             )
@@ -135,7 +144,14 @@ class TerminalEventSink:
         self._clear_waiting()
         message, kind = render_prompt_event(event, tool_detail_mode=self._tool_detail_mode)
         self._stream.write(
-            render_turn_trace(message, kind, color=self._color)
+            render_turn_trace(
+                message,
+                kind,
+                color=self._color,
+                width=(
+                    DEFAULT_TERMINAL_WIDTH if self._markdown_width is None else self._markdown_width
+                ),
+            )
             if self._show_role_markers
             else render_message(message, kind, color=self._color)
         )

@@ -58,7 +58,14 @@ from leonervis_code.cli.presentation import (
     render_prompt_toolbar,
     render_turn_trace,
 )
-from leonervis_code.cli.prompt_editor import SlashCommandCompleter, validate_prompt_text
+from leonervis_code.cli.prompt_editor import (
+    MAX_PROMPT_BYTES,
+    MAX_PROMPT_CHARACTERS,
+    MAX_PROMPT_HISTORY_BYTES,
+    MAX_PROMPT_HISTORY_ENTRIES,
+    SlashCommandCompleter,
+    validate_prompt_text,
+)
 from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.turn_runner import TaskTurnRequest, TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
@@ -182,7 +189,8 @@ class TerminalApplication:
         self._turn_starting = False
         self._cancel_pending_start = False
         self._turn_output_started = False
-        self._history = InMemoryHistory(_session_prompt_history(session))
+        self._history_entries = _session_prompt_history(session)
+        self._history = InMemoryHistory(self._history_entries)
         self._buffer = Buffer(
             multiline=True,
             accept_handler=self._accept,
@@ -290,6 +298,7 @@ class TerminalApplication:
                     escape_terminal_controls(event.message),
                     "warning" if event.cancelled else "error",
                     color=self._color,
+                    width=self._current_width(),
                 )
                 + "\n"
             )
@@ -303,7 +312,6 @@ class TerminalApplication:
             self._renderer.reset()
             self._turn_output_started = False
             self._refresh_snapshots()
-            self._replace_history()
             if should_exit:
                 self._application.exit(result=None)
         elif isinstance(event, (TurnSubmitted, TurnCompleting)):
@@ -329,6 +337,7 @@ class TerminalApplication:
             buffer.reset(append_to_history=False)
             return False
         validate_prompt_text(text)
+        self._remember_input(text)
         if text.startswith("/") and "\n" not in text:
             self._dispatch_slash(text)
             buffer.reset(append_to_history=False)
@@ -374,6 +383,7 @@ class TerminalApplication:
         self._application.invalidate()
 
     def _dispatch_slash(self, text: str) -> None:
+        previous_session_id = _session_identity(self._session_info)
         try:
             result = dispatch_slash(
                 text,
@@ -390,7 +400,8 @@ class TerminalApplication:
             if result.exit:
                 self._application.exit(result=None)
             self._refresh_snapshots()
-            self._replace_history()
+            if _session_identity(self._session_info) != previous_session_id:
+                self._replace_history((text,))
         except BaseException as error:
             self._schedule_write(
                 self._render_slash_block(
@@ -465,7 +476,7 @@ class TerminalApplication:
             continuation_prefix="  ",
             prefix_width=2,
         )
-        result = render_host_message(message, kind, color=self._color)
+        result = render_host_message(message, kind, color=self._color, width=width)
         separator = render_message_separator(width, color=self._color)
         return f"\n{prompt}\n\n{result}\n\n{separator}\n"
 
@@ -613,8 +624,16 @@ class TerminalApplication:
         self._session_info = _snapshot(self._session, "session_info")
         self._usage = _snapshot(self._session, "usage")
 
-    def _replace_history(self) -> None:
-        self._history = InMemoryHistory(_session_prompt_history(self._session))
+    def _remember_input(self, text: str) -> None:
+        self._history_entries = _bounded_prompt_history((*self._history_entries, text))
+        self._history = InMemoryHistory(self._history_entries)
+        self._buffer.history = self._history
+
+    def _replace_history(self, additional_entries: tuple[str, ...] = ()) -> None:
+        self._history_entries = _bounded_prompt_history(
+            (*_session_prompt_history(self._session), *additional_entries)
+        )
+        self._history = InMemoryHistory(self._history_entries)
         self._buffer.history = self._history
 
 
@@ -643,9 +662,33 @@ def _session_prompt_history(session: object) -> tuple[str, ...]:
     turns = getattr(session, "turns", ())
     if not isinstance(turns, tuple):
         return ()
-    entries = []
+    entries: list[str] = []
     for turn in turns[-1000:]:
         text = getattr(getattr(turn, "user", None), "text", None)
         if isinstance(text, str):
             entries.append(text)
-    return tuple(entries)
+    return _bounded_prompt_history(tuple(entries))
+
+
+def _bounded_prompt_history(entries: tuple[str, ...]) -> tuple[str, ...]:
+    selected: list[str] = []
+    total_bytes = 0
+    for text in reversed(entries):
+        if len(selected) == MAX_PROMPT_HISTORY_ENTRIES:
+            break
+        if not isinstance(text, str) or "\x00" in text or len(text) > MAX_PROMPT_CHARACTERS:
+            continue
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            continue
+        if len(encoded) > MAX_PROMPT_BYTES or total_bytes + len(encoded) > MAX_PROMPT_HISTORY_BYTES:
+            continue
+        selected.append(text)
+        total_bytes += len(encoded)
+    return tuple(reversed(selected))
+
+
+def _session_identity(info: object) -> str | None:
+    session_id = getattr(info, "session_id", None)
+    return session_id if isinstance(session_id, str) else None

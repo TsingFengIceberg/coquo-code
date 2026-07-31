@@ -29,6 +29,7 @@ from leonervis_code.core.permissions import (
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 from leonervis_code.cli.failure_guidance import tool_result_guidance
+from leonervis_code.cli.markdown_renderer import render_plain_document
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import ContextFitDecision, ContextFitReport
 from leonervis_code.session import (
@@ -184,7 +185,8 @@ INPUT_HELP = (
     "  Alt+Enter inserts a newline; use Esc then Enter if Alt is intercepted\n"
     "  Ctrl-C clears a draft, cancels an active turn, or exits when idle and empty\n"
     "  Ctrl-D deletes ahead of the cursor or exits when the input is empty\n"
-    "  Ctrl-R searches committed prompts in the current Session\n"
+    "  Up/Down recalls accepted prompts and slash commands from this process\n"
+    "  Ctrl-R searches the same process-local history\n"
     "  /clear clears terminal output\n"
     "  /exit or /quit exits the REPL"
 )
@@ -519,9 +521,25 @@ def indent_terminal_block(text: str, indent: str = "  ") -> str:
     return "".join(f"{indent}{line}" for line in text.splitlines(keepends=True))
 
 
-def render_host_message(text: str, kind: MessageKind, *, color: bool) -> str:
+def render_host_message(
+    text: str,
+    kind: MessageKind,
+    *,
+    color: bool,
+    width: int | None = None,
+) -> str:
     """Render non-assistant terminal information as an indented secondary block."""
-    indented = indent_terminal_block(text)
+    indented = (
+        indent_terminal_block(text)
+        if width is None
+        else render_plain_document(
+            text,
+            width=width,
+            first_prefix="  ",
+            continuation_prefix="  ",
+            prefix_width=2,
+        ).removesuffix("\n")
+    )
     if not color or kind == "plain":
         return indented
     if kind == "info":
@@ -531,9 +549,25 @@ def render_host_message(text: str, kind: MessageKind, *, color: bool) -> str:
     return render_message(indented, kind, color=color)
 
 
-def render_turn_trace(text: str, kind: MessageKind, *, color: bool) -> str:
+def render_turn_trace(
+    text: str,
+    kind: MessageKind,
+    *,
+    color: bool,
+    width: int | None = None,
+) -> str:
     """Render Host-owned execution facts inside one assistant turn."""
-    traced = indent_terminal_block(text, "  │ ")
+    traced = (
+        indent_terminal_block(text, "  │ ")
+        if width is None
+        else render_plain_document(
+            text,
+            width=width,
+            first_prefix="  │ ",
+            continuation_prefix="  │ ",
+            prefix_width=4,
+        ).removesuffix("\n")
+    )
     if not color or kind == "plain":
         return traced
     if kind == "info":

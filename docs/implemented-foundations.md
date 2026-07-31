@@ -1064,6 +1064,12 @@ Task现在会把当前completion proposal对应的Host/reviewer检查以有界�
 
 Canonical system prompt升级为v26；provider adapter保持v26，21个tool schema与顺序、ToolArguments v1、普通Turn预算、Session/Action Audit schema及`ctx-v5`/`ctx-v6`representation均不变。无项目指令的empty full-context ID更新为`ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`。详见[0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)。
 
+## TTY Host 包装与进程内命令历史
+
+常驻TTY现在把灰色Host block和Turn内`  │ `轨迹按当前显示宽度转换为有界视觉行，再为每一行应用相同缩进或轨迹前缀。超长context、tool、usage、failure与slash结果因此不会依赖终端在右边缘自行折行后回到第0列；非TTY、重定向输出、assistant Markdown及approval内部样式保持原路径。
+
+Prompt history启动时仍从当前Session最多1000条已提交user prompt建立，但当前进程每次接受的普通prompt或单行slash command都会立即进入同一有界内存历史，供Up/Down与Ctrl-R召回。Slash history不写Session transcript、Action Audit或provider history，进程退出即消失；Session切换会以目标Session历史替换普通prompt来源，并保留触发切换的slash command。Canonical system prompt v26、provider adapter v26、Effective Context identity及全部持久schema不变。详见[0093：TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1158,3 +1164,4 @@ Canonical system prompt升级为v26；provider adapter保持v26，21个tool sche
 90. [0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
 91. [0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
 92. [0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)
+93. [0093：TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)

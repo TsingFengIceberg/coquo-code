@@ -1064,6 +1064,12 @@ A `correction` Stage continues through the ordinary AgentLoop, PermissionGate, a
 
 The canonical system prompt advances to v26. Provider adapter v26, all 21 tool schemas and order, ToolArguments v1, ordinary Turn budgets, Session and Action Audit schemas, and `ctx-v5`/`ctx-v6` representation versions remain unchanged. The no-project-instructions empty full-context ID becomes `ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`. See [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md).
 
+## TTY Host Wrapping and Process-local Command History
+
+The persistent TTY now converts dim Host blocks and in-Turn `  │ ` traces into bounded visual lines at the current display width before applying the same indentation or rail to every line. Long context, tool, usage, failure, and slash-result lines therefore no longer depend on terminal edge wrapping that returns continuations to column zero. Non-TTY and redirected output, assistant Markdown, and internal approval styling retain their existing paths.
+
+Prompt history still starts from at most 1,000 committed user prompts in the current Session, but every ordinary prompt or single-line slash command accepted by the current process immediately enters the same bounded in-memory history for Up/Down and Ctrl-R recall. Slash history never enters the Session transcript, Action Audit, or provider history and disappears when the process exits. A Session switch replaces the ordinary-prompt source with the target Session history while retaining the slash command that triggered the switch. Canonical system prompt v26, provider adapter v26, Effective Context identity, and every durable schema remain unchanged. See [0093: TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1158,3 +1164,4 @@ The canonical system prompt advances to v26. Provider adapter v26, all 21 tool s
 90. [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
 91. [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
 92. [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)
+93. [0093: TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)

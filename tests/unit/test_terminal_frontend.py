@@ -545,6 +545,40 @@ def test_persistent_application_ctrl_r_searches_current_session_prompt_history(
     assert not thread.is_alive()
 
 
+def test_persistent_application_up_arrow_recalls_process_local_slash_command(
+    tmp_path: Path,
+) -> None:
+    session = _HistorySession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("/help\r")
+        _wait_until(lambda: "Host command groups:" in stdout.getvalue())
+        pipe.send_text("\x1b[A")
+        _wait_until(lambda: terminal.draft == "/help")
+        pipe.send_text("\x03\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert session.prompts == []
+
+
 def test_persistent_application_keeps_busy_draft_and_returns_to_idle(tmp_path: Path) -> None:
     session = _InteractiveSession()
     queue = FrontendEventQueue()

@@ -37,6 +37,7 @@ from leonervis_code.cli.presentation import (
     render_git_log,
     render_git_show,
     render_git_status,
+    render_host_message,
     render_action_audits,
     render_message,
     render_message_separator,
@@ -58,6 +59,7 @@ from leonervis_code.cli.presentation import (
     render_session_search,
     render_session_turn_range,
     render_switch_rejection,
+    render_turn_trace,
     render_tool_ledgers,
     render_durable_usage_summary,
     render_usage_summary,
@@ -1335,6 +1337,26 @@ def test_colored_non_readline_prompt_has_no_readline_markers() -> None:
     assert "\x1b[" in prompt
     assert "\001" not in prompt
     assert "\002" not in prompt
+
+
+def test_width_aware_host_blocks_keep_visual_continuation_indentation() -> None:
+    host = render_host_message(
+        "A long host-owned status line that must wrap without touching the terminal edge.",
+        "info",
+        color=False,
+        width=40,
+    )
+    trace = render_turn_trace(
+        "A long turn trace that must keep its rail on every wrapped visual line.",
+        "info",
+        color=False,
+        width=40,
+    )
+
+    assert len(host.splitlines()) > 1
+    assert all(line.startswith("  ") and len(line) <= 40 for line in host.splitlines())
+    assert len(trace.splitlines()) > 1
+    assert all(line.startswith("  │ ") and len(line) <= 40 for line in trace.splitlines())
 
 
 def test_colored_prompt_toolbar_has_ansi_without_raw_controls() -> None:
