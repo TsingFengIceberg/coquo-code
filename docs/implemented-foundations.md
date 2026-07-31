@@ -1119,6 +1119,18 @@ Provider adapter contract升级为v31；canonical system prompt保持v29。Catal
 
 Prompt history启动时仍从当前Session最多1000条已提交user prompt建立，但当前进程每次接受的普通prompt或单行slash command都会立即进入同一有界内存历史，供Up/Down与Ctrl-R召回。Slash history不写Session transcript、Action Audit或provider history，进程退出即消失；Session切换会以目标Session历史替换普通prompt来源，并保留触发切换的slash command。Canonical system prompt v26、provider adapter v26、Effective Context identity及全部持久schema不变。详见[0093：TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)。
 
+## 常驻活动提示与 Task 输出对齐
+
+常驻TTY在输入框上方新增一行有界活动提示。普通turn以`Preparing turn`开始，Task worker以`Preparing Task Stage`开始；随后typed frontend事件会把文字更新为provider准备、模型回复、具体工具执行、审批、compaction、Session保存或Task生命周期处理等阶段。该行只显示文字，不包含符号或动画，并在回到`Ready`后整行隐藏。活动文字只来自Host状态，不包含file content、完整argv、provider载荷或Task正文。
+
+Assistant完整回复现在始终复用`• `和两空格悬挂缩进，包括Task编排中流式完成文本不一致时的防御性回退；plain streaming在模型显式换行后也会恢复两空格续行前缀。Markdown、灰色Host block及`  │ `轨迹仍沿用各自既有的display-width包装。该活动行是瞬时prompt-toolkit UI，不进入Session/Task transcript、Action Audit、provider history、compaction、Effective Context或Eval证据。Canonical system prompt保持v29、provider adapter contract保持v31，全部模型可见、预算及持久schema契约不变。详见[0100：Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)。
+
+## `turn_committed` v5 继承内容兼容性
+
+`turn_committed` v3引入普通`tool_use.assistant_text`，v4引入原子的`assistant_tool_batch`，v5在这些既有能力上增加Host tool ledger。历史v5 writer因此会把继承字段与ledger同时持久化，包括无companion text时仍存在的`assistant_text: null`。当前codec曾在手写版本集合中漏掉v5，导致严格回放把合法字段误报为unknown，并可能在首轮Session名称查重扫描历史Session时阻止新turn提交。
+
+Item codec现在按能力引入版本表达继承：所有已支持的v3及以后schema读写普通assistant companion text，v4及以后读写assistant tool batch；支持版本仍是闭合的v1-v8集合，不接受未知未来版本。v1/v2拒绝新字段、v5 ledger严格校验、完整causality和旧transcript bytes均保持不变。Canonical system prompt保持v29、provider adapter contract保持v31，Effective Context、Session schema编号及其他持久契约不变。详见[0101：turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1220,3 +1232,5 @@ Prompt history启动时仍从当前Session最多1000条已提交user prompt建�
 97. [0097：Informed Task Admission and Foreground Handoff](./decisions/0097-informed-task-admission-and-foreground-handoff.md)
 98. [0098：Natural-language Task Lifecycle Handoffs](./decisions/0098-natural-language-task-lifecycle-handoffs.md)
 99. [0099：Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)
+100. [0100：Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)
+101. [0101：turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)

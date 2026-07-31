@@ -25,6 +25,7 @@ from leonervis_code.session_records import (
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+    TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
     BindingSnapshot,
@@ -742,6 +743,28 @@ def test_store_reopens_v3_assistant_tool_text_exactly(tmp_path: Path) -> None:
     assert reopened.state.history == mixed
     assert b'"assistant_text":"  I will read it.\\n"' in transcript
     reopened.release()
+
+
+def test_store_lists_v5_session_with_inherited_assistant_text(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    legacy = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=committed_items(assistant_text=None),
+        tool_ledger=committed_ledger(),
+        schema_version=TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
+    )
+    writer.path.write_bytes(writer.path.read_bytes() + encode_record(legacy))
+    prefix = writer.path.read_bytes()
+    writer.release()
+
+    listed = session_store.list()
+
+    assert len(listed) == 1
+    assert listed[0].session_id == SESSION_ONE
+    assert writer.path.read_bytes() == prefix
 
 
 def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Path) -> None:

@@ -2004,6 +2004,7 @@ def _item_to_dict(
         TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
         TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
         TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+        TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
         TURN_COMMITTED_USAGE_SCHEMA_VERSION,
         TURN_COMMITTED_NAMING_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
@@ -2018,13 +2019,7 @@ def _item_to_dict(
     if isinstance(item, ToolUse):
         _required_text(item.tool_use_id, "tool_use ID")
         _required_text(item.name, "tool_use name")
-        supports_assistant_text = schema_version in {
-            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
-            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
-            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
-            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
-            TURN_COMMITTED_SCHEMA_VERSION,
-        }
+        supports_assistant_text = schema_version >= TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION
         if item.assistant_text is not None and not supports_assistant_text:
             raise SessionRecordError(
                 "assistant tool text requires a newer turn_committed schema version"
@@ -2070,12 +2065,7 @@ def _item_to_dict(
             payload["assistant_text"] = item.assistant_text
         return payload
     if isinstance(item, AssistantToolBatch):
-        if schema_version not in {
-            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
-            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
-            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
-            TURN_COMMITTED_SCHEMA_VERSION,
-        }:
+        if schema_version < TURN_COMMITTED_BATCH_SCHEMA_VERSION:
             raise SessionRecordError(
                 "assistant tool batch requires a newer turn_committed schema version"
             )
@@ -2140,13 +2130,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             "arguments_version",
             "arguments",
         }
-        if schema_version in {
-            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
-            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
-            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
-            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
-            TURN_COMMITTED_SCHEMA_VERSION,
-        }:
+        if schema_version >= TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION:
             fields.add("assistant_text")
         _closed_fields(value, fields, item_type)
         arguments_version = value.get("arguments_version")
@@ -2163,13 +2147,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         except ValueError as error:
             raise SessionRecordError(str(error)) from None
         assistant_text = None
-        if schema_version in {
-            TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
-            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
-            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
-            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
-            TURN_COMMITTED_SCHEMA_VERSION,
-        }:
+        if schema_version >= TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION:
             raw_assistant_text = value.get("assistant_text")
             if raw_assistant_text is not None:
                 if not isinstance(raw_assistant_text, str):
@@ -2190,12 +2168,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
             _text_payload(assistant_text, "tool_use assistant_text")
         return request
     if item_type == "assistant_tool_batch":
-        if schema_version not in {
-            TURN_COMMITTED_BATCH_SCHEMA_VERSION,
-            TURN_COMMITTED_USAGE_SCHEMA_VERSION,
-            TURN_COMMITTED_NAMING_SCHEMA_VERSION,
-            TURN_COMMITTED_SCHEMA_VERSION,
-        }:
+        if schema_version < TURN_COMMITTED_BATCH_SCHEMA_VERSION:
             raise SessionRecordError(
                 "assistant tool batch requires a newer turn_committed schema version"
             )

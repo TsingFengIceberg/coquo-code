@@ -71,6 +71,7 @@ class TerminalEventSink:
         self._show_waiting = show_waiting
         self._waiting_visible = False
         self._assistant_output_active = False
+        self._plain_at_line_start = False
         if type(tool_detail_mode) is not ToolDetailMode:
             raise ValueError("tool detail mode is invalid")
         self._tool_detail_mode = tool_detail_mode
@@ -128,7 +129,7 @@ class TerminalEventSink:
             self._response_parts.append(event.text)
             if self._stream_deltas:
                 if self._markdown is None:
-                    self._stream.write(escape_terminal_controls(event.text))
+                    self._write_plain_delta(escape_terminal_controls(event.text))
                     self._stream.flush()
                     self._visible_response = True
                 elif self._markdown.push(event.text):
@@ -172,6 +173,7 @@ class TerminalEventSink:
         self._response_parts.clear()
         self._visible_response = False
         self._assistant_output_active = False
+        self._plain_at_line_start = False
         return had_partial
 
     def _resolve_stream(self, text: str, *, companion: bool) -> None:
@@ -193,6 +195,7 @@ class TerminalEventSink:
         self._response_parts.clear()
         self._visible_response = False
         self._assistant_output_active = False
+        self._plain_at_line_start = False
 
     def _begin_assistant_output(self) -> None:
         self._clear_waiting()
@@ -201,6 +204,21 @@ class TerminalEventSink:
         self._stream.write(self._assistant_prefix)
         self._stream.flush()
         self._assistant_output_active = True
+        self._plain_at_line_start = False
+
+    def _write_plain_delta(self, text: str) -> None:
+        if not text or not self._show_role_markers:
+            self._stream.write(text)
+            return
+        rendered: list[str] = []
+        for character in text:
+            if self._plain_at_line_start:
+                rendered.append(self._continuation_prefix)
+                self._plain_at_line_start = False
+            rendered.append(character)
+            if character == "\n":
+                self._plain_at_line_start = True
+        self._stream.write("".join(rendered))
 
     def _write_complete_assistant(self, text: str) -> None:
         self._clear_waiting()

@@ -31,7 +31,7 @@ from leonervis_code.cli.frontend import (
     TurnSubmitted,
     reduce_terminal_state,
 )
-from leonervis_code.cli.terminal_app import TerminalApplication
+from leonervis_code.cli.terminal_app import TerminalApplication, _QueuedPromptRenderer
 from leonervis_code.cli.presentation import CLEAR_SCREEN
 from leonervis_code.core.action_coordinator import (
     ApprovalResolution,
@@ -79,6 +79,21 @@ def test_terminal_reducer_accepts_only_one_matching_active_turn() -> None:
     state = reduce_terminal_state(state, TurnFinished(1, ""))
     assert state.phase == TerminalPhase.IDLE
     assert state.exit_after_turn is True
+
+
+def test_terminal_reducer_preserves_specific_initial_activity_status() -> None:
+    state = reduce_terminal_state(
+        TerminalViewState(),
+        TurnSubmitted(1, "Preparing Task Stage"),
+    )
+
+    assert state.phase == TerminalPhase.GENERATING
+    assert state.status == "Preparing Task Stage"
+
+    with pytest.raises(ValueError, match="turn ID"):
+        TurnSubmitted(0)
+    with pytest.raises(ValueError, match="status"):
+        TurnSubmitted(1, " ")
 
 
 def test_terminal_reducer_exposes_provider_tool_and_result_phases() -> None:
@@ -149,6 +164,29 @@ def test_frontend_queue_close_releases_a_blocked_critical_event_producer() -> No
 
     assert not producer.is_alive()
     assert result == [False]
+
+
+@pytest.mark.parametrize("render_markdown", [False, True])
+def test_queued_renderer_fallback_keeps_assistant_hanging_indent(
+    render_markdown: bool,
+) -> None:
+    renderer = _QueuedPromptRenderer(
+        color=False,
+        render_markdown=render_markdown,
+        width=40,
+    )
+    renderer.render(AssistantResponseTextDeltaReceived("partial"))
+
+    rendered = renderer.render(
+        AssistantFinalTextStreamCommitted(
+            "A corrected complete Task response that wraps safely.\nSecond logical line."
+        )
+    )
+
+    lines = rendered.splitlines()
+    assert any(line.startswith("• A corrected") for line in lines)
+    assert "Second logical line." in " ".join(line.strip() for line in lines)
+    assert all(line.startswith(("• ", "  ")) for line in lines if line)
 
 
 def test_turn_cancellation_is_idempotent_and_checked() -> None:
@@ -309,9 +347,10 @@ class _NaturalTaskSession:
         del include_tool_details
         cancellation.check()
         self.requests.append(("drive", task_id, max_stages))
-        event_sink(AssistantResponseTextDeltaReceived("Automatic Task Stage complete."))
-        event_sink(AssistantFinalTextStreamCommitted("Automatic Task Stage complete."))
-        return SimpleNamespace(stages=(SimpleNamespace(response="Automatic Task Stage complete."),))
+        response = "Automatic Task Stage complete.\nSecond Task line."
+        event_sink(AssistantResponseTextDeltaReceived(response))
+        event_sink(AssistantFinalTextStreamCommitted(response))
+        return SimpleNamespace(stages=(SimpleNamespace(response=response),))
 
 
 class _HistorySession:
@@ -332,6 +371,42 @@ class _HistorySession:
         event_sink(AssistantResponseTextDeltaReceived("history reply"))
         event_sink(AssistantFinalTextStreamCommitted("history reply"))
         return "history reply"
+
+
+def test_persistent_application_exposes_ephemeral_animated_activity_line(
+    tmp_path: Path,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+
+        assert terminal._activity_visible() is False
+        terminal._turn_starting = True
+        terminal._state = TerminalViewState(status="Preparing Task Stage")
+        assert terminal._activity_visible() is True
+        assert terminal._activity_line().value == "  Preparing Task Stage..."
+
+        terminal._turn_starting = False
+        terminal._state = reduce_terminal_state(
+            TerminalViewState(),
+            TurnSubmitted(1, "Preparing turn"),
+        )
+        assert terminal._activity_visible() is True
+        terminal._state = reduce_terminal_state(terminal._state, TurnFinished(1, "done"))
+        assert terminal._activity_visible() is False
 
 
 def test_persistent_application_commit_status_does_not_split_or_duplicate_stream(
@@ -564,6 +639,7 @@ def test_persistent_application_natural_lifecycle_automatically_starts_foregroun
     rendered = stdout.getvalue()
     assert "Task plan accepted and committed" in rendered
     assert "Automatic Task Stage complete" in rendered
+    assert "\n  Second Task line.\n" in rendered
     assert "/task" not in rendered
 
 

@@ -1119,6 +1119,18 @@ The persistent TTY now converts dim Host blocks and in-Turn `  │ ` traces into
 
 Prompt history still starts from at most 1,000 committed user prompts in the current Session, but every ordinary prompt or single-line slash command accepted by the current process immediately enters the same bounded in-memory history for Up/Down and Ctrl-R recall. Slash history never enters the Session transcript, Action Audit, or provider history and disappears when the process exits. A Session switch replaces the ordinary-prompt source with the target Session history while retaining the slash command that triggered the switch. Canonical system prompt v26, provider adapter v26, Effective Context identity, and every durable schema remain unchanged. See [0093: TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md).
 
+## Persistent Activity Indicator and Task Output Alignment
+
+The persistent TTY now places one bounded activity row above the prompt editor. Ordinary turns begin with `Preparing turn`, Task workers begin with `Preparing Task Stage`, and typed frontend events then update the label for provider preparation, model response, a specific running tool, approval, compaction, Session persistence, or Task lifecycle work. The row is text-only, contains no symbol or animation, and disappears on `Ready`. Host-owned labels contain no file content, complete argv, provider payload, or Task body.
+
+Complete assistant responses now always reuse the `• ` role marker and two-space hanging indent, including the defensive stream-mismatch fallback exercised by Task orchestration. Plain streaming also restores the continuation prefix after explicit model newlines. Markdown, dim Host blocks, and `  │ ` traces retain their existing display-width wrapping paths. The activity row is ephemeral prompt-toolkit UI and enters neither Session or Task transcripts, Action Audit, provider history, compaction, Effective Context, nor Eval evidence. Canonical system prompt remains v29, provider adapter contract remains v31, and every model-visible, budget, and durable-schema contract remains unchanged. See [0100: Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md).
+
+## `turn_committed` v5 Inherited Content Compatibility
+
+`turn_committed` v3 introduced ordinary `tool_use.assistant_text`, v4 introduced atomic `assistant_tool_batch`, and v5 added the Host tool ledger on top of those existing capabilities. Historical v5 writers therefore persisted inherited fields together with the ledger, including an explicit `assistant_text: null` when no companion text existed. The current codec accidentally omitted v5 from manually enumerated item-version sets, so strict replay reported a legal field as unknown and could block a new turn while first-turn Session title conflict checking scanned historical Sessions.
+
+The item codec now expresses inheritance at each capability's introduction boundary: every supported schema at v3 or later reads and writes ordinary assistant companion text, and every supported schema at v4 or later reads and writes assistant tool batches. The supported set remains closed to v1 through v8 and does not admit unknown future versions. Strict v1/v2 rejection, v5 ledger validation, complete causality, and historical transcript bytes remain unchanged. Canonical system prompt remains v29, provider adapter contract remains v31, and Effective Context, Session version numbers, and every other durable contract remain unchanged. See [0101: turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1220,3 +1232,5 @@ Prompt history still starts from at most 1,000 committed user prompts in the cur
 97. [0097: Informed Task Admission and Foreground Handoff](./decisions/0097-informed-task-admission-and-foreground-handoff.md)
 98. [0098: Natural-language Task Lifecycle Handoffs](./decisions/0098-natural-language-task-lifecycle-handoffs.md)
 99. [0099: Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)
+100. [0100: Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)
+101. [0101: turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)

@@ -56,6 +56,7 @@ class TurnRunner:
         return self._start_worker(
             self._run,
             (prompt, include_tool_details),
+            status="Preparing turn",
         )
 
     def start_task(
@@ -69,9 +70,16 @@ class TurnRunner:
         return self._start_worker(
             self._run_task,
             (request, include_tool_details),
+            status="Preparing Task Stage",
         )
 
-    def _start_worker(self, target, arguments: tuple[object, ...]) -> int | None:
+    def _start_worker(
+        self,
+        target,
+        arguments: tuple[object, ...],
+        *,
+        status: str,
+    ) -> int | None:
         with self._lock:
             if self._thread is not None:
                 return None
@@ -87,7 +95,7 @@ class TurnRunner:
             self._thread = thread
             self._cancellation = cancellation
             self._approval_broker.activate(turn_id, cancellation)
-            self._queue.put(TurnSubmitted(turn_id))
+            self._queue.put(TurnSubmitted(turn_id, status))
             thread.start()
             return turn_id
 

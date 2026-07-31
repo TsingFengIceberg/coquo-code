@@ -39,6 +39,7 @@ from leonervis_code.cli.presentation import (
     render_git_status,
     render_host_message,
     render_action_audits,
+    render_activity_line,
     render_message,
     render_message_separator,
     render_output_budget,
@@ -252,6 +253,21 @@ def test_prompt_is_minimal_and_toolbar_shows_model_and_workspace() -> None:
     assert render_prompt_toolbar(status(), Path("/workspace"), color=False) == (
         "  fake · /workspace"
     )
+
+
+def test_activity_line_is_bounded_safe_and_text_only() -> None:
+    rendered = render_activity_line("Preparing provider request", color=False)
+    unsafe = render_activity_line("Running\x1b[2J\ncommand", color=False)
+    bounded = render_activity_line("x" * 100, color=False)
+
+    assert rendered == "  Preparing provider request..."
+    assert unsafe == "  Running?[2J?command..."
+    assert len(bounded.removeprefix("  ")) == 72
+    assert bounded.endswith("...")
+    assert render_activity_line("Saving Session.", color=False).endswith("Session.")
+
+    with pytest.raises(ValueError, match="status"):
+        render_activity_line(" ", color=False)
 
 
 def test_output_budget_presentation_distinguishes_effective_default_and_rejection() -> None:

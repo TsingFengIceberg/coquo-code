@@ -13,13 +13,14 @@ from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer
 from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.filters import is_searching
+from prompt_toolkit.filters import Condition, is_searching
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.emacs import load_emacs_search_bindings
 from prompt_toolkit.key_binding.key_bindings import KeyBindingsBase, merge_key_bindings
 from prompt_toolkit.layout import BufferControl, FormattedTextControl, HSplit, Layout, Window
+from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.output import Output
 from prompt_toolkit.widgets import SearchToolbar
 
@@ -52,6 +53,8 @@ from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     MessageKind,
     ToolDetailMode,
+    render_activity_line,
+    render_assistant_prefix,
     render_host_message,
     render_message_separator,
     render_prompt,
@@ -106,13 +109,23 @@ class _QueuedPromptRenderer:
             self._sink.abort_stream()
             if not isinstance(text, str):
                 raise
+            first_prefix = f"\n{render_assistant_prefix(color=self._color)}"
             self._stream.write(
-                render_markdown_document(text, color=self._color)
+                render_markdown_document(
+                    text,
+                    color=self._color,
+                    width=self._width,
+                    first_prefix=first_prefix,
+                    continuation_prefix="  ",
+                    prefix_width=2,
+                )
                 if self._render_markdown
-                else (
-                    escape_terminal_controls(text)
-                    if text.endswith("\n")
-                    else f"{escape_terminal_controls(text)}\n"
+                else render_plain_document(
+                    text,
+                    width=self._width,
+                    first_prefix=first_prefix,
+                    continuation_prefix="  ",
+                    prefix_width=2,
                 )
             )
         return self._take_output()
@@ -212,6 +225,14 @@ class TerminalApplication:
         )
         body = HSplit(
             [
+                ConditionalContainer(
+                    Window(
+                        FormattedTextControl(self._activity_line),
+                        height=1,
+                        style="class:activity",
+                    ),
+                    filter=Condition(self._activity_visible),
+                ),
                 Window(control, wrap_lines=True, get_line_prefix=self._line_prefix),
                 self._search_toolbar,
                 Window(
@@ -608,6 +629,12 @@ class TerminalApplication:
             session=self._session_info,
         )
         return ANSI(f"{self._state.status} · {base.strip()}")
+
+    def _activity_visible(self) -> bool:
+        return self._turn_starting or self._state.busy
+
+    def _activity_line(self):
+        return ANSI(render_activity_line(self._state.status, color=self._color))
 
     def _current_width(self) -> int:
         try:

@@ -509,6 +509,16 @@ def render_prompt_toolbar(
     return _ansi(text, BLUE, readline=False) if color else text
 
 
+def render_activity_line(status: str, *, color: bool) -> str:
+    """Render one bounded ephemeral activity label above the prompt editor."""
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("terminal activity status is invalid")
+    label = _truncate(_safe_toolbar_text(status.strip()), 72)
+    suffix = "" if label.endswith((".", "!", "?", "…")) else "..."
+    text = f"  {label}{suffix}"
+    return f"{DIM}{BLUE}{text}{RESET}" if color else text
+
+
 def render_message(text: str, kind: MessageKind, *, color: bool) -> str:
     """Apply a semantic terminal style without changing message text."""
     if not color or kind == "plain":

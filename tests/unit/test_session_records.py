@@ -50,6 +50,7 @@ from leonervis_code.session_records import (
     SESSION_RESUMED_SCHEMA_VERSION,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_BATCH_SCHEMA_VERSION,
+    TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
     TURN_COMMITTED_LEGACY_SCHEMA_VERSION,
     TURN_COMMITTED_NAMING_SCHEMA_VERSION,
     TURN_COMMITTED_SCHEMA_VERSION,
@@ -616,6 +617,7 @@ def test_turn_schema_v5_round_trips_one_atomic_tool_batch_and_ledger() -> None:
             AssistantText("done"),
         ),
         tool_ledger=successful_ledger(*batch.tool_uses),
+        schema_version=TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
     )
 
     encoded = encode_record(turn)
@@ -634,6 +636,42 @@ def test_turn_schema_v5_round_trips_one_atomic_tool_batch_and_ledger() -> None:
     assert decode_record(legacy_encoded) == legacy_v4
     assert b'"schema_version":4' in legacy_encoded
     assert b'"tool_ledger"' not in legacy_encoded
+
+
+@pytest.mark.parametrize("assistant_text", [None, "I will inspect first."])
+def test_turn_schema_v5_inherits_tool_use_assistant_text(
+    assistant_text: str | None,
+) -> None:
+    request = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "README.md"}),
+        assistant_text=assistant_text,
+    )
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("read"),
+            request,
+            ToolResult("read-1", "notes"),
+            AssistantText("done"),
+        ),
+        tool_ledger=successful_ledger(request),
+        schema_version=TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
+    )
+
+    encoded = encode_record(turn)
+
+    assert decode_record(encoded) == turn
+    assert b'"schema_version":5' in encoded
+    expected = (
+        b'"assistant_text":null'
+        if assistant_text is None
+        else b'"assistant_text":"I will inspect first."'
+    )
+    assert expected in encoded
 
 
 @pytest.mark.parametrize(

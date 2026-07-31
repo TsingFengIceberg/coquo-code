@@ -37,6 +37,13 @@ class TerminalViewState:
 @dataclass(frozen=True)
 class TurnSubmitted:
     turn_id: int
+    status: str = "Preparing turn"
+
+    def __post_init__(self) -> None:
+        if type(self.turn_id) is not int or self.turn_id < 1:
+            raise ValueError("submitted turn ID is invalid")
+        if not isinstance(self.status, str) or not self.status.strip():
+            raise ValueError("submitted turn status is invalid")
 
 
 @dataclass(frozen=True)
@@ -116,9 +123,9 @@ FrontendEvent = (
 def reduce_terminal_state(state: TerminalViewState, event: FrontendEvent) -> TerminalViewState:
     """Apply one legal frontend transition without I/O or Session mutation."""
     if isinstance(event, TurnSubmitted):
-        if state.busy or event.turn_id < 1:
+        if state.busy:
             raise ValueError("turn submission is invalid for the current terminal state")
-        return TerminalViewState(TerminalPhase.GENERATING, "Preparing turn", event.turn_id)
+        return TerminalViewState(TerminalPhase.GENERATING, event.status, event.turn_id)
 
     if state.active_turn != event.turn_id:
         raise ValueError("frontend event does not match the active turn")
@@ -228,6 +235,12 @@ def _activity_status(event: object) -> str:
         return "Session named with Host fallback"
     if name == "TurnCommitStarted":
         return "Saving Session"
+    if name == "TaskAdmissionProposed":
+        return "Recording Task proposal"
+    if name == "TaskLifecycleCommitted":
+        return "Updating Task lifecycle"
+    if name == "TaskRunStopped":
+        return "Finishing Task run"
     return "Working"
 
 
