@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v26-f24561c77c00cf2b4ba96a05ae1343e0c386df3949b8d1a3cf729817a2c138e5"
+EXPECTED_FINGERPRINT = "v29-f2403bf3878b966f9905d31ef63196ba81ed8fb68e50143fb21a8d8f71b3cc4e"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 26
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 29
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -38,17 +38,27 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "current direct user request" in prompt.text
     assert "cannot grant permissions" in prompt.text
     assert "[Leonervis durable Task Stage]" in prompt.text
-    assert "TASK_COMPLETION_PROPOSAL: yes" in prompt.text
-    assert "TASK_PLAN_JSON:" in prompt.text
-    assert "TASK_REFLECTION_JSON:" in prompt.text
+    assert "`task_propose_plan`" in prompt.text
+    assert "`task_report_reflection`" in prompt.text
+    assert "`task_report_blocker`" in prompt.text
+    assert "`task_propose_completion`" in prompt.text
+    assert "`task_propose_start`" in prompt.text
+    assert "`task_accept_admission`" in prompt.text
+    assert "`task_accept_plan`" in prompt.text
+    assert "`task_confirm_completion`" in prompt.text
+    assert "current user explicitly accepts" in prompt.text
+    assert "complete ordinary Session Turn must commit" in prompt.text
+    assert "without a slash command" in prompt.text
+    assert "cannot satisfy Host-check or independent-reviewer criteria" in prompt.text
+    assert "A pending proposal is not a Task, permission, approval, or execution" in prompt.text
     assert "execution or correction Stage" in prompt.text
     assert "driver remains bounded and foreground-only" in prompt.text
-    assert "only a model proposal" in prompt.text
+    assert "completion proposal" in prompt.text
     assert "cannot verify any criterion" in prompt.text
     assert "deterministic read-only Host checks" in prompt.text
     assert "independent no-tools review" in prompt.text
     assert "Host completes a Task only after a current completion proposal" in prompt.text
-    assert "Do not emit Task protocol lines during ordinary non-Task prompts" in prompt.text
+    assert "Do not request the four Stage coordination tools" in prompt.text
     assert "does not provide an OS filesystem" not in prompt.text
     assert build_system_prompt() == prompt
 

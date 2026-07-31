@@ -68,9 +68,30 @@ class TurnCompleting:
 
 
 @dataclass(frozen=True)
+class ForegroundTaskHandoff:
+    task_id: str
+    max_stages: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, str) or not self.task_id:
+            raise ValueError("foreground Task handoff ID is invalid")
+        if type(self.max_stages) is not int or not 1 <= self.max_stages <= 16:
+            raise ValueError("foreground Task handoff Stage limit is invalid")
+
+
+@dataclass(frozen=True)
 class TurnFinished:
     turn_id: int
     response: str
+    task_handoff: ForegroundTaskHandoff | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.turn_id) is not int or self.turn_id < 1:
+            raise ValueError("finished turn ID is invalid")
+        if not isinstance(self.response, str):
+            raise ValueError("finished turn response is invalid")
+        if self.task_handoff is not None and type(self.task_handoff) is not ForegroundTaskHandoff:
+            raise ValueError("finished turn Task handoff is invalid")
 
 
 @dataclass(frozen=True)

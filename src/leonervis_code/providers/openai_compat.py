@@ -49,8 +49,8 @@ from leonervis_code.providers.usage import ProviderTokenUsage, parse_provider_us
 from leonervis_code.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     model_tool_definitions,
-    tool_input_from_use,
-    tool_use_from_input,
+    tool_input_for_provider_history,
+    tool_use_from_provider_input,
 )
 
 
@@ -344,6 +344,38 @@ def git_show_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[20])
 
 
+def task_propose_plan_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[21])
+
+
+def task_report_reflection_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[22])
+
+
+def task_report_blocker_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[23])
+
+
+def task_propose_completion_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[24])
+
+
+def task_propose_start_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[25])
+
+
+def task_accept_admission_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[26])
+
+
+def task_accept_plan_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[27])
+
+
+def task_confirm_completion_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[28])
+
+
 def model_tool_definitions_for_openai(
     enabled_tool_names: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, object], ...]:
@@ -467,7 +499,7 @@ def serialize_history(
             if expected != "assistant":
                 raise _invalid_history(route, "tool use is out of causal order")
             try:
-                tool_input = tool_input_from_use(item)
+                tool_input = tool_input_for_provider_history(item)
             except ValueError:
                 raise _invalid_history(route, f"unsupported tool in history: {item.name}") from None
             if not item.tool_use_id:
@@ -512,7 +544,7 @@ def serialize_history(
             tool_calls: list[dict[str, object]] = []
             for request in item.tool_uses:
                 try:
-                    tool_input = tool_input_from_use(request)
+                    tool_input = tool_input_for_provider_history(request)
                 except ValueError:
                     raise _invalid_history(
                         route, f"unsupported tool in history: {request.name}"
@@ -773,7 +805,7 @@ def parse_response(
         if not isinstance(tool_input, dict):
             raise _invalid_response(route, f"provider {name} arguments were malformed")
         try:
-            requests.append(tool_use_from_input(tool_use_id, name, tool_input))
+            requests.append(tool_use_from_provider_input(tool_use_id, name, tool_input))
         except ValueError:
             raise _invalid_response(route, f"provider {name} arguments were malformed") from None
     if len(requests) == 1:
@@ -1020,7 +1052,7 @@ def parse_response_stream(
         if not isinstance(tool_input, dict):
             raise _invalid_response(route, f"provider {name} arguments were malformed")
         try:
-            requests.append(tool_use_from_input(state.tool_use_id, name, tool_input))
+            requests.append(tool_use_from_provider_input(state.tool_use_id, name, tool_input))
         except ValueError:
             raise _invalid_response(route, f"provider {name} arguments were malformed") from None
     if len(requests) == 1:

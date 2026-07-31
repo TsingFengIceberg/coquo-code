@@ -16,6 +16,7 @@ from leonervis_code.task_records import (
     MAX_PLAN_STEPS,
     ReflectionRecommendation,
     StageKind,
+    TaskBlockerCategory,
     canonical_plan_steps,
     canonical_stage_objective,
 )
@@ -38,6 +39,7 @@ class ParsedTaskResponse:
     completion_proposed: bool
     plan_steps: tuple[str, ...] | None
     reflection: TaskReflectionProposal | None = None
+    blocker: TaskBlockerProposal | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,12 @@ class TaskReflectionProposal:
     recommendation: ReflectionRecommendation
     summary: str
     next_objective: str | None
+
+
+@dataclass(frozen=True)
+class TaskBlockerProposal:
+    category: TaskBlockerCategory
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,7 @@ class TaskStageExecutionResult:
     session_turn_number: int
     session_turn_record_sequence: int
     reflection: TaskReflectionProposal | None = None
+    blocker: TaskBlockerProposal | None = None
 
 
 @dataclass(frozen=True)
@@ -63,13 +72,15 @@ class TaskPlanExecutionResult:
     task: TaskInfo
     response: str
     plan_steps: tuple[str, ...]
+    blocker: TaskBlockerProposal | None = None
 
 
 @dataclass(frozen=True)
 class TaskReflectionExecutionResult:
     task: TaskInfo
     response: str
-    reflection: TaskReflectionProposal
+    reflection: TaskReflectionProposal | None
+    blocker: TaskBlockerProposal | None = None
 
 
 class TaskDriverStopReason(StrEnum):
@@ -91,6 +102,7 @@ class TaskDriverStopReason(StrEnum):
     REFLECTION_NEEDS_HUMAN = "reflection-needs-human"
     REFLECTION_FAILED = "reflection-failed"
     STAGE_INCOMPLETE = "stage-incomplete"
+    MODEL_BLOCKED = "model-blocked"
 
 
 @dataclass(frozen=True)
@@ -310,27 +322,25 @@ def build_task_stage_prompt(
         if remaining_plan_steps < 1:
             raise TaskRuntimeError("Task has no remaining Stage budget for a non-empty plan")
         instruction = (
-            f"Propose 1-{remaining_plan_steps} bounded execution stages. End with exactly one line "
-            f"`{TASK_PLAN_SIGNAL} <JSON array of stage objective strings>`. The JSON line is a "
-            "proposal only and does not execute or approve any stage."
+            f"Propose 1-{remaining_plan_steps} bounded execution stages by calling "
+            "`task_propose_plan` exactly once. If a required condition prevents safe planning, "
+            "call `task_report_blocker` instead. A proposal does not execute or approve a stage."
         )
     elif kind is StageKind.REFLECTION:
         instruction = (
-            "Do not request tools or claim new execution. Reflect on the current acceptance "
-            "feedback and prior durable facts. End with exactly one line "
-            f"`{TASK_REFLECTION_SIGNAL} <JSON object>`, where the object has exactly "
-            "recommendation (continue|correction|revise-plan|needs-human|fail), summary, and "
-            "next_objective. next_objective must be a bounded string for continue, correction, "
-            "or revise-plan and null otherwise. Reflection is advice only."
+            "Do not execute or claim new execution. Reflect on the current acceptance feedback "
+            "and prior durable facts, then call `task_report_reflection` exactly once. If a "
+            "required condition prevents reflection, call `task_report_blocker` instead. "
+            "Reflection is advice only."
         )
     else:
         stage_label = "correction" if kind is StageKind.CORRECTION else "execution"
         instruction = (
             f"Advance only the current bounded {stage_label} Stage using the ordinary tools and "
-            "budgets. End "
-            f"with exactly one line `{TASK_COMPLETION_SIGNAL} yes` only if the overall Task now "
-            f"appears complete, otherwise `{TASK_COMPLETION_SIGNAL} no`. This signal is only a "
-            "model proposal; it is not Host acceptance or execution proof."
+            "budgets. Call `task_propose_completion` only if the overall Task now appears "
+            "complete. Call `task_report_blocker` if a required condition prevents safe progress. "
+            "Otherwise finish with text describing the incomplete work. Completion remains only "
+            "a model proposal, not Host acceptance or execution proof."
         )
     prompt = (
         "[Leonervis durable Task Stage]\n"

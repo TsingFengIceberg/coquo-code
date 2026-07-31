@@ -117,6 +117,14 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "git_diff",
         "git_log",
         "git_show",
+        "task_propose_plan",
+        "task_report_reflection",
+        "task_report_blocker",
+        "task_propose_completion",
+        "task_propose_start",
+        "task_accept_admission",
+        "task_accept_plan",
+        "task_confirm_completion",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)

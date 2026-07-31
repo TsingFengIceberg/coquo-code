@@ -14,6 +14,7 @@ from leonervis_code.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     ProviderInvocationPreflighted,
+    TaskLifecycleCommitted,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -273,6 +274,46 @@ class _TaskTerminalSession:
         )
 
 
+class _NaturalTaskSession:
+    def __init__(self) -> None:
+        self.requests = []
+
+    @property
+    def turns(self):
+        return ()
+
+    def prompt(self, text, *, event_sink, include_tool_details, cancellation):
+        del include_tool_details
+        cancellation.check()
+        self.requests.append(("prompt", text))
+        event_sink(AssistantResponseTextDeltaReceived("Accepted naturally."))
+        event_sink(
+            TaskLifecycleCommitted(
+                "accept-plan",
+                "42345678-1234-4234-9234-123456789abc",
+                4,
+            )
+        )
+        event_sink(AssistantFinalTextStreamCommitted("Accepted naturally."))
+        return "Accepted naturally."
+
+    def drive_task(
+        self,
+        task_id,
+        *,
+        max_stages,
+        event_sink,
+        include_tool_details,
+        cancellation,
+    ):
+        del include_tool_details
+        cancellation.check()
+        self.requests.append(("drive", task_id, max_stages))
+        event_sink(AssistantResponseTextDeltaReceived("Automatic Task Stage complete."))
+        event_sink(AssistantFinalTextStreamCommitted("Automatic Task Stage complete."))
+        return SimpleNamespace(stages=(SimpleNamespace(response="Automatic Task Stage complete."),))
+
+
 class _HistorySession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
@@ -476,6 +517,54 @@ def test_persistent_task_run_keeps_all_nonstreamed_stage_responses(tmp_path: Pat
     assert rendered.count("First Stage complete") == 1
     assert rendered.count("Second Stage complete") == 1
     assert rendered.index("First Stage complete") < rendered.index("Second Stage complete")
+
+
+def test_persistent_application_natural_lifecycle_automatically_starts_foreground_driver(
+    tmp_path: Path,
+) -> None:
+    session = _NaturalTaskSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    task_id = "42345678-1234-4234-9234-123456789abc"
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text("计划没问题，继续\r")
+        _wait_until(
+            lambda: (
+                not terminal.state.busy
+                and not terminal._runner.busy
+                and ("drive", task_id, 4) in session.requests
+                and "Automatic Task Stage complete" in stdout.getvalue()
+            )
+        )
+        time.sleep(0.1)
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert session.requests == [
+        ("prompt", "计划没问题，继续"),
+        ("drive", task_id, 4),
+    ]
+    rendered = stdout.getvalue()
+    assert "Task plan accepted and committed" in rendered
+    assert "Automatic Task Stage complete" in rendered
+    assert "/task" not in rendered
 
 
 def test_persistent_application_clear_writes_terminal_reset_without_session_mutation(

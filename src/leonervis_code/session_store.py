@@ -24,7 +24,9 @@ else:
 
 from leonervis_code.core.actions import ActionIdentity
 from leonervis_code.core.contracts import (
+    AssistantText,
     AssistantToolBatch,
+    CommittedTurn,
     ConversationItem,
     ConversationTurn,
     ToolOutcomeEntry,
@@ -38,6 +40,11 @@ from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionMode,
     PermissionResult,
+)
+from leonervis_code.core.task_admission import (
+    TaskAdmissionOutcome,
+    TaskAdmissionProposal,
+    canonical_task_admission_id,
 )
 from leonervis_code.core.compaction import CompactionTrigger
 from leonervis_code.providers.usage import ProviderInvocationUsage
@@ -69,6 +76,7 @@ from leonervis_code.session_records import (
     SessionNameSource,
     SessionPinChanged,
     SessionTitleFallbackReason,
+    TaskAdmissionResolved,
     SessionRecord,
     SessionRecordError,
     SessionResumed,
@@ -352,6 +360,26 @@ class SessionInfo:
 
 
 @dataclass(frozen=True)
+class TaskAdmissionInfo:
+    """One committed Task admission proposal and its optional durable resolution."""
+
+    proposal: TaskAdmissionProposal
+    session_id: str
+    session_name: str
+    turn_record_sequence: int
+    turn_number: int
+    committed_at: str
+    outcome: TaskAdmissionOutcome | None = None
+    task_id: str | None = None
+    rejection_reason: str | None = None
+    resolved_at: str | None = None
+
+    @property
+    def status(self) -> str:
+        return self.outcome.value if self.outcome is not None else "pending"
+
+
+@dataclass(frozen=True)
 class TranscriptStaleToken:
     device: int
     inode: int
@@ -607,6 +635,25 @@ class SessionStore:
         if not isinstance(state.records[record_sequence], TurnCommitted):
             raise SessionStoreError("selected Session record is not a committed Turn")
         return _session_turn_evidence(data, state, record_sequence)
+
+    def committed_turn(self, selector: str | Path, record_sequence: int) -> CommittedTurn:
+        """Return one strictly replayed complete Turn including tool causality and ledger."""
+        if type(record_sequence) is not int or record_sequence < 1:
+            raise SessionStoreError("Session Turn record sequence must be a positive integer")
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        if record_sequence >= len(state.records):
+            raise SessionStoreError(
+                f"Session Turn record sequence exceeds the {len(state.records) - 1} records"
+            )
+        record = state.records[record_sequence]
+        if not isinstance(record, TurnCommitted):
+            raise SessionStoreError("selected Session record is not a committed Turn")
+        user = record.items[0]
+        assistant = record.items[-1]
+        if not isinstance(user, UserMessage) or not isinstance(assistant, AssistantText):
+            raise SessionStoreError("committed Session Turn boundary is invalid")
+        return CommittedTurn(record.items, user, assistant, record.tool_ledger)
 
     def find_turn_evidence(
         self,
@@ -972,6 +1019,12 @@ class SessionStore:
         _validate_existing_session_root(self.root, self.workspace)
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         return query_tool_ledgers(self._load_state(path, allow_repair=False), limit)
+
+    def task_admissions(self, selector: str | Path) -> tuple[TaskAdmissionInfo, ...]:
+        """Strictly derive committed Task admission state without mutation or provider work."""
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        return _task_admission_infos(_info(path, state), state)
 
     def list(self) -> tuple[SessionInfo, ...]:
         """Return all strictly validated transcripts, newest first."""
@@ -1485,6 +1538,53 @@ class SessionWriter:
         if isinstance(record, SessionClosed):
             raise SessionStoreError("use close() to append session_closed and release the lock")
         self._append(record)
+        return record
+
+    def resolve_task_admission(
+        self,
+        admission_id: str,
+        outcome: TaskAdmissionOutcome,
+        *,
+        task_id: str | None = None,
+        reason: str | None = None,
+    ) -> TaskAdmissionResolved:
+        """Durably resolve one committed proposal, returning an exact idempotent replay."""
+        self._ensure_writable()
+        try:
+            canonical = canonical_task_admission_id(admission_id)
+        except ValueError as error:
+            raise SessionStoreError(str(error)) from None
+        if type(outcome) is not TaskAdmissionOutcome:
+            raise SessionStoreError("Task admission outcome is invalid")
+        if not any(
+            source.proposal.admission_id == canonical for source in self._state.task_admissions
+        ):
+            raise SessionStoreError("Task admission proposal was not committed in this Session")
+        existing = next(
+            (
+                record
+                for record in self._state.task_admission_resolutions
+                if record.admission_id == canonical
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                existing.outcome is outcome
+                and existing.task_id == task_id
+                and existing.reason == reason
+            ):
+                return existing
+            raise SessionStoreError("Task admission proposal is already resolved differently")
+        record = TaskAdmissionResolved(
+            sequence=self._state.next_sequence,
+            occurred_at=self._store._clock(),
+            admission_id=canonical,
+            outcome=outcome,
+            task_id=task_id,
+            reason=reason,
+        )
+        self.append_audit(record)
         return record
 
     def runtime_changed(
@@ -2313,6 +2413,31 @@ def _info(path: Path, state: ReplayState) -> SessionInfo:
             state.forked_from.source_turn_count if state.forked_from is not None else None
         ),
     )
+
+
+def _task_admission_infos(
+    info: SessionInfo,
+    state: ReplayState,
+) -> tuple[TaskAdmissionInfo, ...]:
+    resolutions = {record.admission_id: record for record in state.task_admission_resolutions}
+    values: list[TaskAdmissionInfo] = []
+    for source in state.task_admissions:
+        resolution = resolutions.get(source.proposal.admission_id)
+        values.append(
+            TaskAdmissionInfo(
+                proposal=source.proposal,
+                session_id=info.session_id,
+                session_name=info.name,
+                turn_record_sequence=source.turn_record_sequence,
+                turn_number=source.turn_number,
+                committed_at=source.committed_at,
+                outcome=resolution.outcome if resolution is not None else None,
+                task_id=resolution.task_id if resolution is not None else None,
+                rejection_reason=resolution.reason if resolution is not None else None,
+                resolved_at=resolution.occurred_at if resolution is not None else None,
+            )
+        )
+    return tuple(values)
 
 
 def _session_name(state: ReplayState) -> tuple[str, SessionNameSource]:

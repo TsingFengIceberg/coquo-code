@@ -9,6 +9,7 @@ from leonervis_code.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextReceived,
+    TaskLifecycleCommitted,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -234,6 +235,60 @@ def test_repl_submits_exact_multiline_buffer_as_one_model_turn(tmp_path) -> None
     assert editor.prompts == ["› ", "› "]
     assert editor.toolbars == [f"  {tmp_path}", f"  {tmp_path}"]
     assert output.getvalue().count("reply:   explain this:") == 1
+
+
+def test_plain_repl_natural_task_lifecycle_automatically_runs_foreground_driver(
+    tmp_path: Path,
+) -> None:
+    task_id = "42345678-1234-4234-9234-123456789abc"
+
+    class NaturalTaskSession:
+        turns = ()
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def prompt(self, text, *, event_sink):
+            self.calls.append(("prompt", text))
+            event_sink(
+                TaskLifecycleCommitted(
+                    "accept-admission",
+                    task_id,
+                    3,
+                )
+            )
+            return "Accepted naturally."
+
+        def drive_task(self, selected_task_id, *, max_stages, event_sink, include_tool_details):
+            del event_sink, include_tool_details
+            self.calls.append(("drive", selected_task_id, max_stages))
+            return SimpleNamespace(
+                stages=(SimpleNamespace(response="Automatic planning Stage complete."),)
+            )
+
+    session = NaturalTaskSession()
+    output = io.StringIO()
+    editor = ScriptedPromptEditor(PromptRead.submit("同意，开始吧"), PromptRead.exit())
+
+    status = run_repl(
+        session,
+        stdin=io.StringIO(),
+        stdout=output,
+        version="0.1.0",
+        cwd=tmp_path,
+        color=False,
+        prompt_editor=editor,
+    )
+
+    assert status == 0
+    assert session.calls == [
+        ("prompt", "同意，开始吧"),
+        ("drive", task_id, 3),
+    ]
+    rendered = output.getvalue()
+    assert "Task admission accepted and committed" in rendered
+    assert "Automatic planning Stage complete" in rendered
+    assert "/task" not in rendered
 
 
 def test_repl_cancelled_draft_and_multiline_slash_prefix_do_not_dispatch_host_command(

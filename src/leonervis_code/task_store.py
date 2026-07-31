@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -18,10 +19,13 @@ if os.name == "nt":
 else:
     import fcntl
 
+from leonervis_code.core.contracts import ToolArguments
+from leonervis_code.core.task_admission import TaskAdmissionProposal, canonical_task_admission_id
 from leonervis_code.session_records import workspace_fingerprint
 from leonervis_code.session_store import SessionStore, SessionStoreError, SessionTurnEvidence
 from leonervis_code.task_records import (
     MAX_TASK_RECORDS,
+    MAX_ACCEPTANCE_CRITERIA,
     AcceptanceCheckOutcome,
     AcceptanceCriterionKind,
     AcceptancePathType,
@@ -38,8 +42,11 @@ from leonervis_code.task_records import (
     TaskAcceptanceChecked,
     TaskAcceptanceContract,
     TaskAcceptanceCriterion,
+    TaskAdmissionOrigin,
     TaskArchived,
     TaskBudget,
+    TaskBlockerCategory,
+    TaskBlockerRecorded,
     TaskCompletionProposed,
     TaskConfiguration,
     TaskCompletionPolicy,
@@ -107,6 +114,128 @@ class TaskAppendCommitError(TaskStoreError):
 
 
 @dataclass(frozen=True)
+class TaskAdmissionConfiguration:
+    """Canonical operator-owned settings for accepting one Task proposal."""
+
+    name: str | None = None
+    budget: TaskBudget = TaskBudget()
+    completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL
+    criteria: tuple[ToolArguments, ...] | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            if self.name is not None:
+                canonical_task_name(self.name)
+            canonical_task_budget(self.budget)
+        except TaskRecordError as error:
+            raise TaskStoreError(str(error)) from None
+        if type(self.completion_policy) is not TaskCompletionPolicy:
+            raise TaskStoreError("Task completion policy is invalid")
+        if self.criteria is not None:
+            if (
+                not isinstance(self.criteria, tuple)
+                or not 1 <= len(self.criteria) <= MAX_ACCEPTANCE_CRITERIA
+                or any(type(item) is not ToolArguments for item in self.criteria)
+            ):
+                raise TaskStoreError("Task admission criteria are invalid")
+
+    @classmethod
+    def from_mapping(cls, value: object | None) -> TaskAdmissionConfiguration:
+        if value is None:
+            return cls()
+        if not isinstance(value, dict) or not set(value) <= {
+            "name",
+            "budget",
+            "completion_policy",
+            "criteria",
+        }:
+            raise TaskStoreError("Task admission configuration has unknown fields")
+        name = value.get("name")
+        if name is not None and not isinstance(name, str):
+            raise TaskStoreError("Task admission name must be text or null")
+        raw_budget = value.get("budget", {})
+        budget_fields = {
+            "max_stages",
+            "max_provider_invocations",
+            "max_tool_requests",
+            "max_input_tokens",
+            "max_output_tokens",
+        }
+        if not isinstance(raw_budget, dict) or not set(raw_budget) <= budget_fields:
+            raise TaskStoreError("Task admission budget has unknown fields")
+        defaults = TaskBudget()
+        budget = TaskBudget(
+            max_stages=raw_budget.get("max_stages", defaults.max_stages),
+            max_provider_invocations=raw_budget.get(
+                "max_provider_invocations", defaults.max_provider_invocations
+            ),
+            max_tool_requests=raw_budget.get("max_tool_requests", defaults.max_tool_requests),
+            max_input_tokens=raw_budget.get("max_input_tokens", defaults.max_input_tokens),
+            max_output_tokens=raw_budget.get("max_output_tokens", defaults.max_output_tokens),
+        )
+        try:
+            completion_policy = TaskCompletionPolicy(
+                value.get("completion_policy", TaskCompletionPolicy.MANUAL.value)
+            )
+        except (TypeError, ValueError):
+            raise TaskStoreError("Task admission completion policy is invalid") from None
+        raw_criteria = value.get("criteria")
+        if raw_criteria is None:
+            criteria = None
+        elif not isinstance(raw_criteria, list):
+            raise TaskStoreError("Task admission criteria must be an array or null")
+        else:
+            try:
+                criteria = tuple(ToolArguments.from_mapping(item) for item in raw_criteria)
+            except (TypeError, ValueError):
+                raise TaskStoreError("Task admission criteria must contain JSON objects") from None
+        return cls(name, budget, completion_policy, criteria)
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "budget": {
+                "max_input_tokens": self.budget.max_input_tokens,
+                "max_output_tokens": self.budget.max_output_tokens,
+                "max_provider_invocations": self.budget.max_provider_invocations,
+                "max_stages": self.budget.max_stages,
+                "max_tool_requests": self.budget.max_tool_requests,
+            },
+            "completion_policy": self.completion_policy.value,
+            "criteria": (
+                None if self.criteria is None else [item.as_mapping() for item in self.criteria]
+            ),
+            "name": self.name,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_digest(b"leonervis-task-admission-configuration-v1\0", self.as_mapping())
+
+
+@dataclass(frozen=True)
+class TaskAdmissionAcceptancePreview:
+    """One exact no-write Task candidate requiring an explicit confirmation digest."""
+
+    proposal: TaskAdmissionProposal
+    name: str
+    budget: TaskBudget
+    completion_policy: TaskCompletionPolicy
+    criteria: tuple[TaskAcceptanceCriterion, ...]
+    configuration_sha256: str
+    confirmation_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.proposal) is not TaskAdmissionProposal:
+            raise TaskStoreError("Task admission preview proposal is invalid")
+        canonical_task_name(self.name)
+        canonical_task_budget(self.budget)
+        canonical_task_acceptance_contract(self.criteria, self.completion_policy)
+        for digest in (self.configuration_sha256, self.confirmation_sha256):
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise TaskStoreError("Task admission preview digest is invalid")
+
+
+@dataclass(frozen=True)
 class TaskStageInfo:
     """Terminal-safe metadata for one strictly replayed Stage."""
 
@@ -152,6 +281,7 @@ class TaskPlanInfo:
     predecessor_plan_id: str | None = None
     revision_reason: str | None = None
     reflection_id: str | None = None
+    proposal_tool_use_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +292,17 @@ class TaskReflectionInfo:
     recommendation: ReflectionRecommendation
     summary: str
     next_objective: str | None
+    recorded_at: str
+    proposal_tool_use_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskBlockerInfo:
+    stage_id: str
+    stage_number: int
+    category: TaskBlockerCategory
+    summary: str
+    proposal_tool_use_id: str
     recorded_at: str
 
 
@@ -228,6 +369,8 @@ class TaskInfo:
     driver_paused: bool = False
     latest_reflection: TaskReflectionInfo | None = None
     latest_checkpoint: TaskCheckpointInfo | None = None
+    latest_blocker: TaskBlockerInfo | None = None
+    admission_origin: TaskAdmissionOrigin | None = None
 
 
 def utc_now() -> str:
@@ -281,6 +424,10 @@ class TaskStore:
         name: str | None = None,
         budget: TaskBudget = TaskBudget(),
         parent_task_id: str | None = None,
+        _admission_proposal: TaskAdmissionProposal | None = None,
+        _admission_turn_record_sequence: int | None = None,
+        _admission_configuration_sha256: str | None = None,
+        _admission_confirmation_sha256: str | None = None,
     ) -> TaskInfo:
         """Atomically create one ready Task owned by an existing Session."""
         try:
@@ -306,6 +453,20 @@ class TaskStore:
             owner = SessionStore(self.workspace).inspect(owner_session)
         except SessionStoreError as error:
             raise TaskStoreError(f"owner Session is invalid or unavailable: {error}") from None
+        admission_values = (
+            _admission_proposal,
+            _admission_turn_record_sequence,
+            _admission_configuration_sha256,
+            _admission_confirmation_sha256,
+        )
+        if any(value is not None for value in admission_values) and not all(
+            value is not None for value in admission_values
+        ):
+            raise TaskStoreError("Task admission provenance is incomplete")
+        if _admission_turn_record_sequence is not None and (
+            type(_admission_turn_record_sequence) is not int or _admission_turn_record_sequence < 1
+        ):
+            raise TaskStoreError("Task admission source Turn record sequence is invalid")
         task_id = _factory_task_id(self._uuid_factory)
         timestamp = self._clock()
         header = TaskHeader(
@@ -318,9 +479,25 @@ class TaskStore:
             acceptance_criteria=canonical_criteria,
             created_at=timestamp,
         )
+        records: list[TaskRecord] = [header]
+        if _admission_proposal is not None:
+            records.append(
+                TaskAdmissionOrigin(
+                    sequence=len(records),
+                    admission_id=_admission_proposal.admission_id,
+                    proposal_sha256=_admission_proposal.proposal_sha256,
+                    configuration_sha256=_admission_configuration_sha256,
+                    confirmation_sha256=_admission_confirmation_sha256,
+                    source_session_id=owner.session_id,
+                    source_turn_record_sequence=_admission_turn_record_sequence,
+                    proposal_tool_use_id=_admission_proposal.tool_use_id,
+                    source_context_id=_admission_proposal.context_id,
+                    recorded_at=timestamp,
+                )
+            )
         configuration = (
             TaskConfiguration(
-                sequence=1,
+                sequence=len(records),
                 name=canonical_name,
                 budget=canonical_budget,
                 configured_at=timestamp,
@@ -329,9 +506,11 @@ class TaskStore:
             if name is not None or canonical_budget != TaskBudget() or canonical_parent is not None
             else None
         )
+        if configuration is not None:
+            records.append(configuration)
         contract = (
             TaskAcceptanceContract(
-                sequence=2 if configuration is not None else 1,
+                sequence=len(records),
                 criteria=contract_criteria,
                 completion_policy=completion_policy,
                 configured_at=timestamp,
@@ -339,24 +518,159 @@ class TaskStore:
             if structured_criteria or completion_policy is not TaskCompletionPolicy.MANUAL
             else None
         )
+        if contract is not None:
+            records.append(contract)
         try:
-            payload = encode_task_record(header)
-            if configuration is not None:
-                payload += encode_task_record(configuration)
-            if contract is not None:
-                payload += encode_task_record(contract)
+            payload = b"".join(encode_task_record(record) for record in records)
         except TaskRecordError as error:
             raise TaskStoreError(str(error)) from None
         self._ensure_root()
         path = self.root / f"{task_id}.jsonl"
         _install_task_transcript(path, payload)
-        records: list[TaskRecord] = [header]
-        if configuration is not None:
-            records.append(configuration)
-        if contract is not None:
-            records.append(contract)
         state = self._replay(path, records)
         return _task_info(path, state)
+
+    def create_from_admission(
+        self,
+        proposal: TaskAdmissionProposal,
+        *,
+        owner_session: str,
+        source_turn_record_sequence: int,
+        configuration: TaskAdmissionConfiguration = TaskAdmissionConfiguration(),
+        confirmation_sha256: str,
+    ) -> TaskInfo:
+        """Create one Task carrying immutable provenance from an accepted proposal."""
+        preview = self.prepare_admission_acceptance(
+            proposal,
+            owner_session=owner_session,
+            source_turn_record_sequence=source_turn_record_sequence,
+            configuration=configuration,
+        )
+        if confirmation_sha256 != preview.confirmation_sha256:
+            raise TaskStoreError("Task admission confirmation does not match the current candidate")
+        human_criteria = proposal.acceptance_criteria if configuration.criteria is None else ()
+        structured_criteria = (
+            ()
+            if configuration.criteria is None
+            else tuple(item.as_mapping() for item in configuration.criteria)
+        )
+        return self.create(
+            proposal.objective,
+            owner_session=owner_session,
+            acceptance_criteria=human_criteria,
+            structured_criteria=structured_criteria,
+            completion_policy=configuration.completion_policy,
+            name=configuration.name,
+            budget=configuration.budget,
+            _admission_proposal=proposal,
+            _admission_turn_record_sequence=source_turn_record_sequence,
+            _admission_configuration_sha256=configuration.sha256,
+            _admission_confirmation_sha256=preview.confirmation_sha256,
+        )
+
+    def prepare_admission_acceptance(
+        self,
+        proposal: TaskAdmissionProposal,
+        *,
+        owner_session: str,
+        source_turn_record_sequence: int,
+        configuration: TaskAdmissionConfiguration = TaskAdmissionConfiguration(),
+    ) -> TaskAdmissionAcceptancePreview:
+        """Validate and derive one exact no-write Task admission candidate."""
+        if type(proposal) is not TaskAdmissionProposal:
+            raise TaskStoreError("Task admission proposal is invalid")
+        if type(configuration) is not TaskAdmissionConfiguration:
+            raise TaskStoreError("Task admission configuration is invalid")
+        self._validate_admission_source(
+            proposal,
+            owner_session=owner_session,
+            source_turn_record_sequence=source_turn_record_sequence,
+        )
+        try:
+            name = canonical_task_name(configuration.name or default_task_name(proposal.objective))
+            budget = canonical_task_budget(configuration.budget)
+            human_criteria = proposal.acceptance_criteria if configuration.criteria is None else ()
+            criteria = _prepare_acceptance_criteria(
+                self.workspace,
+                canonical_acceptance_criteria(human_criteria),
+                (
+                    ()
+                    if configuration.criteria is None
+                    else tuple(item.as_mapping() for item in configuration.criteria)
+                ),
+                configuration.completion_policy,
+            )
+        except TaskRecordError as error:
+            raise TaskStoreError(str(error)) from None
+        candidate = {
+            "admission_id": proposal.admission_id,
+            "budget": configuration.as_mapping()["budget"],
+            "completion_policy": configuration.completion_policy.value,
+            "criteria": [_acceptance_criterion_mapping(item) for item in criteria],
+            "name": name,
+            "objective": proposal.objective,
+            "owner_session_id": owner_session,
+            "source_turn_record_sequence": source_turn_record_sequence,
+        }
+        return TaskAdmissionAcceptancePreview(
+            proposal,
+            name,
+            budget,
+            configuration.completion_policy,
+            criteria,
+            configuration.sha256,
+            _canonical_digest(b"leonervis-task-admission-confirmation-v1\0", candidate),
+        )
+
+    def validate_existing_admission_acceptance(
+        self,
+        task: TaskInfo,
+        configuration: TaskAdmissionConfiguration,
+        confirmation_sha256: str,
+    ) -> None:
+        """Require a retry to match the exact configuration stored on the sourced Task."""
+        origin = task.admission_origin
+        if origin is None or origin.configuration_sha256 != configuration.sha256:
+            raise TaskStoreError("existing Task admission configuration does not match this retry")
+        if origin.confirmation_sha256 != confirmation_sha256:
+            raise TaskStoreError("existing Task admission confirmation does not match this retry")
+
+    def _validate_admission_source(
+        self,
+        proposal: TaskAdmissionProposal,
+        *,
+        owner_session: str,
+        source_turn_record_sequence: int,
+    ) -> None:
+        try:
+            sources = SessionStore(self.workspace).task_admissions(owner_session)
+        except SessionStoreError as error:
+            raise TaskStoreError(f"Task admission source Session is unavailable: {error}") from None
+        source = next(
+            (item for item in sources if item.proposal.admission_id == proposal.admission_id),
+            None,
+        )
+        if (
+            source is None
+            or source.proposal != proposal
+            or source.turn_record_sequence != source_turn_record_sequence
+        ):
+            raise TaskStoreError("Task admission provenance does not match its source Session Turn")
+
+    def find_by_admission(self, admission_id: str) -> TaskInfo | None:
+        """Find at most one Task created from an exact admission proposal."""
+        try:
+            canonical = canonical_task_admission_id(admission_id)
+        except ValueError as error:
+            raise TaskStoreError(str(error)) from None
+        matches = tuple(
+            task
+            for task in self.list()
+            if task.admission_origin is not None and task.admission_origin.admission_id == canonical
+        )
+        if len(matches) > 1:
+            raise TaskStoreError("Task admission provenance is duplicated")
+        return matches[0] if matches else None
 
     def derive(
         self,
@@ -631,6 +945,7 @@ class TaskWriter:
         *,
         revision_reason: str | None = None,
         reflection_id: str | None = None,
+        proposal_tool_use_id: str | None = None,
     ) -> TaskPlanProposed:
         """Persist a parsed model plan only after its planning Stage committed."""
         self._ensure_writable()
@@ -641,6 +956,33 @@ class TaskWriter:
             or latest.started.kind is not StageKind.PLANNING
         ):
             raise TaskStoreError("Task plan requires a latest committed planning Stage")
+        if self._state.latest_plan is not None and (
+            self._state.latest_plan.stage_id == latest.started.stage_id
+        ):
+            if (
+                proposal_tool_use_id is not None
+                and self._state.latest_plan.proposal_tool_use_id == proposal_tool_use_id
+            ):
+                try:
+                    canonical_steps = canonical_plan_steps(steps)
+                except TaskRecordError as error:
+                    raise TaskStoreError(str(error)) from None
+                previous_plan = (
+                    self._state.plan_proposals[-2] if len(self._state.plan_proposals) >= 2 else None
+                )
+                expected_reason = (
+                    revision_reason or "user-requested-replan"
+                    if previous_plan is not None
+                    else None
+                )
+                if (
+                    self._state.latest_plan.steps != canonical_steps
+                    or self._state.latest_plan.revision_reason != expected_reason
+                    or self._state.latest_plan.reflection_id != reflection_id
+                ):
+                    raise TaskStoreError("replayed Task plan proposal does not match its tool call")
+                return self._state.latest_plan
+            raise TaskStoreError("latest planning Stage already has a plan proposal")
         try:
             canonical_steps = canonical_plan_steps(steps)
             plan_id = _factory_plan_id(self._store._plan_uuid_factory)
@@ -665,6 +1007,7 @@ class TaskWriter:
             revision_reason=(revision_reason if self._state.latest_plan is not None else None)
             or ("user-requested-replan" if self._state.latest_plan is not None else None),
             reflection_id=reflection_id,
+            proposal_tool_use_id=proposal_tool_use_id,
         )
         self._append(record)
         return record
@@ -684,7 +1027,9 @@ class TaskWriter:
         self._append(record)
         return record
 
-    def propose_completion(self) -> TaskCompletionProposed:
+    def propose_completion(
+        self, *, proposal_tool_use_id: str | None = None
+    ) -> TaskCompletionProposed:
         self._ensure_writable()
         latest = self._state.stages[-1] if self._state.stages else None
         if (
@@ -693,12 +1038,21 @@ class TaskWriter:
             or latest.started.kind not in {StageKind.EXECUTION, StageKind.CORRECTION}
         ):
             raise TaskStoreError("Task completion requires a committed execution Stage")
+        current = self._state.current_completion_proposal
+        if current is not None and current.stage_id == latest.started.stage_id:
+            if (
+                proposal_tool_use_id is not None
+                and current.proposal_tool_use_id == proposal_tool_use_id
+            ):
+                return current
+            raise TaskStoreError("latest execution Stage already proposed completion")
         record = TaskCompletionProposed(
             sequence=self._state.next_sequence,
             stage_id=latest.started.stage_id,
             stage_number=latest.started.stage_number,
             source=CompletionProposalSource.MODEL,
             proposed_at=self._store._clock(),
+            proposal_tool_use_id=proposal_tool_use_id,
         )
         self._append(record)
         return record
@@ -708,6 +1062,8 @@ class TaskWriter:
         recommendation: ReflectionRecommendation,
         summary: str,
         next_objective: str | None,
+        *,
+        proposal_tool_use_id: str | None = None,
     ) -> TaskReflectionRecorded:
         """Persist one parsed recommendation after its no-tools reflection Stage commits."""
         self._ensure_writable()
@@ -722,6 +1078,18 @@ class TaskWriter:
             self._state.reflections
             and self._state.reflections[-1].stage_id == latest.started.stage_id
         ):
+            if (
+                proposal_tool_use_id is not None
+                and self._state.reflections[-1].proposal_tool_use_id == proposal_tool_use_id
+            ):
+                current = self._state.reflections[-1]
+                if (
+                    current.recommendation is not recommendation
+                    or current.summary != summary
+                    or current.next_objective != next_objective
+                ):
+                    raise TaskStoreError("replayed Task reflection does not match its tool call")
+                return self._state.reflections[-1]
             raise TaskStoreError("latest reflection Stage is already recorded")
         record = TaskReflectionRecorded(
             sequence=self._state.next_sequence,
@@ -731,6 +1099,40 @@ class TaskWriter:
             recommendation=recommendation,
             summary=summary,
             next_objective=next_objective,
+            recorded_at=self._store._clock(),
+            proposal_tool_use_id=proposal_tool_use_id,
+        )
+        self._append(record)
+        return record
+
+    def record_blocker(
+        self,
+        category: TaskBlockerCategory,
+        summary: str,
+        *,
+        proposal_tool_use_id: str,
+    ) -> TaskBlockerRecorded:
+        """Persist one model blocker after its owning Stage committed."""
+        self._ensure_writable()
+        latest = self._state.stages[-1] if self._state.stages else None
+        if latest is None or not isinstance(latest.terminal, StageCommitted):
+            raise TaskStoreError("Task blocker requires a committed Stage")
+        if self._state.latest_blocker is not None and (
+            self._state.latest_blocker.stage_id == latest.started.stage_id
+        ):
+            if self._state.latest_blocker.proposal_tool_use_id == proposal_tool_use_id:
+                current = self._state.latest_blocker
+                if current.category is not category or current.summary != summary:
+                    raise TaskStoreError("replayed Task blocker does not match its tool call")
+                return self._state.latest_blocker
+            raise TaskStoreError("latest Task Stage already has a blocker")
+        record = TaskBlockerRecorded(
+            sequence=self._state.next_sequence,
+            stage_id=latest.started.stage_id,
+            stage_number=latest.started.stage_number,
+            category=category,
+            summary=summary,
+            proposal_tool_use_id=proposal_tool_use_id,
             recorded_at=self._store._clock(),
         )
         self._append(record)
@@ -1032,6 +1434,31 @@ def _criterion_spec_fields(spec: dict[str, object], expected: set[str]) -> None:
         raise TaskRecordError("structured acceptance criterion has unknown or missing fields")
 
 
+def _acceptance_criterion_mapping(criterion: TaskAcceptanceCriterion) -> dict[str, object]:
+    return {
+        "argv": list(criterion.argv),
+        "cwd": criterion.cwd,
+        "description": criterion.description,
+        "expected_sha256": criterion.expected_sha256,
+        "kind": criterion.kind.value,
+        "path": criterion.path,
+        "path_type": criterion.path_type.value if criterion.path_type is not None else None,
+        "review_paths": list(criterion.review_paths),
+        "timeout_seconds": criterion.timeout_seconds,
+    }
+
+
+def _canonical_digest(prefix: bytes, value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(prefix + payload).hexdigest()
+
+
 def _protected_file_sha256(workspace: Path, relative_path: str) -> str:
     parts = validate_workspace_path(
         relative_path,
@@ -1289,8 +1716,21 @@ def _task_info(
                 state.latest_reflection.summary,
                 state.latest_reflection.next_objective,
                 state.latest_reflection.recorded_at,
+                state.latest_reflection.proposal_tool_use_id,
             )
             if state.latest_reflection is not None
+            else None
+        ),
+        latest_blocker=(
+            TaskBlockerInfo(
+                state.latest_blocker.stage_id,
+                state.latest_blocker.stage_number,
+                state.latest_blocker.category,
+                state.latest_blocker.summary,
+                state.latest_blocker.proposal_tool_use_id,
+                state.latest_blocker.recorded_at,
+            )
+            if state.latest_blocker is not None
             else None
         ),
         latest_checkpoint=(
@@ -1307,6 +1747,7 @@ def _task_info(
             if state.latest_checkpoint is not None
             else None
         ),
+        admission_origin=state.admission_origin,
     )
 
 
@@ -1403,6 +1844,7 @@ def _task_plan_info(state: TaskReplayState) -> TaskPlanInfo | None:
         predecessor_plan_id=plan.predecessor_plan_id,
         revision_reason=plan.revision_reason,
         reflection_id=plan.reflection_id,
+        proposal_tool_use_id=plan.proposal_tool_use_id,
     )
 
 

@@ -9,10 +9,30 @@ import sys
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolTurnLedger, UserMessage
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolResult,
+    ToolTurnLedger,
+    ToolUse,
+    UserMessage,
+)
+from leonervis_code.core.task_admission import (
+    TASK_PROPOSE_START_TOOL_NAME,
+    TaskAdmissionProposal,
+    task_admission_receipt,
+)
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore
-from leonervis_code.task_records import StageFailureReason, TaskStatus
+from leonervis_code.task_records import (
+    ReflectionRecommendation,
+    StageFailureReason,
+    StageKind,
+    TaskBlockerCategory,
+    TaskStatus,
+)
 from leonervis_code.task_store import (
     MAX_TASK_TRANSCRIPT_BYTES,
     TaskCreateCommitError,
@@ -46,6 +66,34 @@ def task_store(
     )
 
 
+def committed_task_writer(workspace: Path, kind: StageKind):
+    workspace.mkdir()
+    session_times = iter(("2026-07-31T01:02:00.000000Z", "2026-07-31T01:02:03.000000Z"))
+    session_writer = SessionStore(
+        workspace,
+        uuid_factory=lambda: SESSION_ONE,
+        clock=lambda: next(session_times),
+    ).create(BindingSnapshot.fake())
+    task_times = iter(f"2026-07-31T01:02:{second:02}.000000Z" for second in range(1, 20))
+    store = TaskStore(
+        workspace,
+        uuid_factory=lambda: TASK_ONE,
+        stage_uuid_factory=lambda: STAGE_ONE,
+        clock=lambda: next(task_times),
+    )
+    task = store.create("Test proposal idempotence")
+    writer = store.open(task.task_id)
+    writer.start_stage("Commit one proposal", kind=kind)
+    turn = session_writer.append_turn(
+        (UserMessage("advance"), AssistantText("done")),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(),
+    )
+    session_writer.release()
+    writer.commit_stage(turn.sequence)
+    return writer
+
+
 def test_empty_list_is_read_only_and_does_not_create_state(tmp_path: Path) -> None:
     store = task_store(tmp_path)
 
@@ -72,6 +120,80 @@ def test_create_links_existing_owner_and_round_trips_strictly(tmp_path: Path) ->
     assert created.path.read_bytes().count(b"\n") == 1
     assert created.path.stat().st_mode & 0o777 == 0o600
     assert store.root.stat().st_mode & 0o777 == 0o700
+
+
+def test_create_from_admission_persists_origin_and_duplicate_lookup_fails_closed(
+    tmp_path: Path,
+) -> None:
+    request = ToolUse(
+        "admission-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Implement a sourced Task",
+                "reason": "The work needs multiple stages.",
+                "acceptance_criteria": ["The result exists"],
+            }
+        ),
+    )
+    proposal = TaskAdmissionProposal.from_request(request, "ctx-v5-" + "a" * 64)
+    writer = SessionStore(tmp_path, uuid_factory=lambda: SESSION_ONE).create(BindingSnapshot.fake())
+    source_turn = writer.append_turn(
+        (
+            UserMessage("Propose one durable Task"),
+            request,
+            ToolResult(request.tool_use_id, task_admission_receipt(proposal)),
+            AssistantText("Proposal recorded."),
+        ),
+        binding=BindingSnapshot.fake(),
+        tool_ledger=ToolTurnLedger(
+            (
+                ToolOutcomeEntry(
+                    request.tool_use_id,
+                    request.name,
+                    1,
+                    ToolRequestOutcome.SUCCEEDED,
+                ),
+            )
+        ),
+    )
+    writer.release()
+    first_store = task_store(tmp_path, TASK_ONE)
+    preview = first_store.prepare_admission_acceptance(
+        proposal,
+        owner_session=SESSION_ONE,
+        source_turn_record_sequence=source_turn.sequence,
+    )
+
+    with pytest.raises(TaskStoreError, match="does not match its source Session Turn"):
+        first_store.create_from_admission(
+            proposal,
+            owner_session=SESSION_ONE,
+            source_turn_record_sequence=source_turn.sequence + 1,
+            confirmation_sha256=preview.confirmation_sha256,
+        )
+
+    created = first_store.create_from_admission(
+        proposal,
+        owner_session=SESSION_ONE,
+        source_turn_record_sequence=source_turn.sequence,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+
+    assert created.admission_origin is not None
+    assert created.admission_origin.admission_id == proposal.admission_id
+    assert created.admission_origin.proposal_sha256 == proposal.proposal_sha256
+    assert created.admission_origin.source_session_id == SESSION_ONE
+    assert first_store.find_by_admission(proposal.admission_id) == created
+
+    task_store(tmp_path, TASK_TWO).create_from_admission(
+        proposal,
+        owner_session=SESSION_ONE,
+        source_turn_record_sequence=source_turn.sequence,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+    with pytest.raises(TaskStoreError, match="provenance is duplicated"):
+        first_store.find_by_admission(proposal.admission_id)
 
 
 def test_create_accepts_an_explicit_nonlatest_owner_session(tmp_path: Path) -> None:
@@ -246,6 +368,86 @@ def test_task_writer_is_exclusive_and_failed_stage_allows_next_attempt(tmp_path:
     first.release()
     assert store.inspect(task.task_id).status is TaskStatus.BLOCKED
     assert len(store.inspect(task.task_id).stages) == 2
+
+
+def test_task_proposal_writes_are_exactly_idempotent_and_reject_conflicts(
+    tmp_path: Path,
+) -> None:
+    plan_writer = committed_task_writer(tmp_path / "plan", StageKind.PLANNING)
+    plan = plan_writer.propose_plan(("Implement one step",), proposal_tool_use_id="plan-1")
+    assert plan_writer.propose_plan(("Implement one step",), proposal_tool_use_id="plan-1") == plan
+    with pytest.raises(TaskStoreError, match="does not match its tool call"):
+        plan_writer.propose_plan(("Different step",), proposal_tool_use_id="plan-1")
+    with pytest.raises(TaskStoreError, match="already has a plan proposal"):
+        plan_writer.propose_plan(("Implement one step",), proposal_tool_use_id="plan-2")
+    plan_writer.release()
+
+    reflection_writer = committed_task_writer(tmp_path / "reflection", StageKind.REFLECTION)
+    reflection = reflection_writer.record_reflection(
+        ReflectionRecommendation.NEEDS_HUMAN,
+        "Need user evidence",
+        None,
+        proposal_tool_use_id="reflection-1",
+    )
+    assert (
+        reflection_writer.record_reflection(
+            ReflectionRecommendation.NEEDS_HUMAN,
+            "Need user evidence",
+            None,
+            proposal_tool_use_id="reflection-1",
+        )
+        == reflection
+    )
+    with pytest.raises(TaskStoreError, match="does not match its tool call"):
+        reflection_writer.record_reflection(
+            ReflectionRecommendation.FAIL,
+            "Different reflection",
+            None,
+            proposal_tool_use_id="reflection-1",
+        )
+    with pytest.raises(TaskStoreError, match="already recorded"):
+        reflection_writer.record_reflection(
+            ReflectionRecommendation.NEEDS_HUMAN,
+            "Need user evidence",
+            None,
+            proposal_tool_use_id="reflection-2",
+        )
+    reflection_writer.release()
+
+    completion_writer = committed_task_writer(tmp_path / "completion", StageKind.EXECUTION)
+    completion = completion_writer.propose_completion(proposal_tool_use_id="completion-1")
+    assert completion_writer.propose_completion(proposal_tool_use_id="completion-1") == completion
+    with pytest.raises(TaskStoreError, match="already proposed completion"):
+        completion_writer.propose_completion(proposal_tool_use_id="completion-2")
+    completion_writer.release()
+
+    blocker_writer = committed_task_writer(tmp_path / "blocker", StageKind.EXECUTION)
+    blocker = blocker_writer.record_blocker(
+        TaskBlockerCategory.PERMISSION,
+        "Need write approval",
+        proposal_tool_use_id="blocker-1",
+    )
+    assert (
+        blocker_writer.record_blocker(
+            TaskBlockerCategory.PERMISSION,
+            "Need write approval",
+            proposal_tool_use_id="blocker-1",
+        )
+        == blocker
+    )
+    with pytest.raises(TaskStoreError, match="does not match its tool call"):
+        blocker_writer.record_blocker(
+            TaskBlockerCategory.INFORMATION,
+            "Different blocker",
+            proposal_tool_use_id="blocker-1",
+        )
+    with pytest.raises(TaskStoreError, match="already has a blocker"):
+        blocker_writer.record_blocker(
+            TaskBlockerCategory.PERMISSION,
+            "Need write approval",
+            proposal_tool_use_id="blocker-2",
+        )
+    blocker_writer.release()
 
 
 def test_task_writer_lock_is_visible_to_another_process(tmp_path: Path) -> None:

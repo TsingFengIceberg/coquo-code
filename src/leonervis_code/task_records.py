@@ -11,6 +11,7 @@ import re
 from typing import TypeAlias
 from uuid import UUID
 
+from leonervis_code.core.task_admission import canonical_task_admission_id
 from leonervis_code.session_records import (
     SessionRecordError,
     canonical_session_id,
@@ -23,17 +24,19 @@ TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION = 1
 STAGE_STARTED_SCHEMA_VERSION = 2
 STAGE_COMMITTED_SCHEMA_VERSION = 2
 STAGE_FAILED_SCHEMA_VERSION = 2
-TASK_PLAN_PROPOSED_SCHEMA_VERSION = 2
+TASK_PLAN_PROPOSED_SCHEMA_VERSION = 3
 TASK_PLAN_ACCEPTED_SCHEMA_VERSION = 1
-TASK_COMPLETION_PROPOSED_SCHEMA_VERSION = 1
+TASK_COMPLETION_PROPOSED_SCHEMA_VERSION = 2
 TASK_ACCEPTANCE_VERIFIED_SCHEMA_VERSION = 1
 TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION = 1
 TASK_TERMINATED_SCHEMA_VERSION = 1
 TASK_RENAMED_SCHEMA_VERSION = 1
 TASK_ARCHIVED_SCHEMA_VERSION = 1
-TASK_REFLECTION_RECORDED_SCHEMA_VERSION = 1
+TASK_REFLECTION_RECORDED_SCHEMA_VERSION = 2
+TASK_BLOCKER_RECORDED_SCHEMA_VERSION = 1
 TASK_PAUSE_CHANGED_SCHEMA_VERSION = 1
 TASK_CONTEXT_CHECKPOINT_SCHEMA_VERSION = 1
+TASK_ADMISSION_ORIGIN_SCHEMA_VERSION = 1
 MAX_TASK_RECORD_BYTES = 64 * 1024
 MAX_TASK_RECORDS = 10_000
 MAX_TASK_OBJECTIVE_CHARACTERS = 4096
@@ -58,6 +61,7 @@ DEFAULT_TASK_MAX_TOOL_REQUESTS = 32 * 32
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
 _CANONICAL_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_CONTEXT_ID = re.compile(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}\Z")
 
 
 class TaskRecordError(ValueError):
@@ -101,6 +105,14 @@ class ReflectionRecommendation(StrEnum):
     REVISE_PLAN = "revise-plan"
     NEEDS_HUMAN = "needs-human"
     FAIL = "fail"
+
+
+class TaskBlockerCategory(StrEnum):
+    INFORMATION = "information"
+    PERMISSION = "permission"
+    HUMAN_EVIDENCE = "human-evidence"
+    EXTERNAL_CONDITION = "external-condition"
+    OTHER = "other"
 
 
 class TaskTerminalOutcome(StrEnum):
@@ -218,6 +230,22 @@ class TaskAcceptanceContract:
 
 
 @dataclass(frozen=True)
+class TaskAdmissionOrigin:
+    sequence: int
+    admission_id: str
+    proposal_sha256: str
+    configuration_sha256: str
+    confirmation_sha256: str
+    source_session_id: str
+    source_turn_record_sequence: int
+    proposal_tool_use_id: str
+    source_context_id: str
+    recorded_at: str
+    record_type: str = "task_admission_origin"
+    schema_version: int = TASK_ADMISSION_ORIGIN_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class StageStarted:
     sequence: int
     stage_id: str
@@ -271,6 +299,7 @@ class TaskPlanProposed:
     predecessor_plan_id: str | None = None
     revision_reason: str | None = None
     reflection_id: str | None = None
+    proposal_tool_use_id: str | None = None
     record_type: str = "task_plan_proposed"
     schema_version: int = TASK_PLAN_PROPOSED_SCHEMA_VERSION
 
@@ -291,6 +320,7 @@ class TaskCompletionProposed:
     stage_number: int
     source: CompletionProposalSource
     proposed_at: str
+    proposal_tool_use_id: str | None = None
     record_type: str = "task_completion_proposed"
     schema_version: int = TASK_COMPLETION_PROPOSED_SCHEMA_VERSION
 
@@ -358,8 +388,22 @@ class TaskReflectionRecorded:
     summary: str
     next_objective: str | None
     recorded_at: str
+    proposal_tool_use_id: str | None = None
     record_type: str = "task_reflection_recorded"
     schema_version: int = TASK_REFLECTION_RECORDED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TaskBlockerRecorded:
+    sequence: int
+    stage_id: str
+    stage_number: int
+    category: TaskBlockerCategory
+    summary: str
+    proposal_tool_use_id: str
+    recorded_at: str
+    record_type: str = "task_blocker_recorded"
+    schema_version: int = TASK_BLOCKER_RECORDED_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -393,6 +437,7 @@ TaskRecord: TypeAlias = (
     TaskHeader
     | TaskConfiguration
     | TaskAcceptanceContract
+    | TaskAdmissionOrigin
     | StageStarted
     | StageCommitted
     | StageFailed
@@ -405,6 +450,7 @@ TaskRecord: TypeAlias = (
     | TaskRenamed
     | TaskArchived
     | TaskReflectionRecorded
+    | TaskBlockerRecorded
     | TaskPauseChanged
     | TaskContextCheckpoint
 )
@@ -423,6 +469,7 @@ class TaskReplayState:
     stages: tuple[TaskStageState, ...] = ()
     configuration: TaskConfiguration | None = None
     acceptance_contract: TaskAcceptanceContract | None = None
+    admission_origin: TaskAdmissionOrigin | None = None
     plan_proposals: tuple[TaskPlanProposed, ...] = ()
     accepted_plan_id: str | None = None
     accepted_plan_sequence: int | None = None
@@ -433,6 +480,7 @@ class TaskReplayState:
     renamed: tuple[TaskRenamed, ...] = ()
     archived_events: tuple[TaskArchived, ...] = ()
     reflections: tuple[TaskReflectionRecorded, ...] = ()
+    blockers: tuple[TaskBlockerRecorded, ...] = ()
     pause_events: tuple[TaskPauseChanged, ...] = ()
     context_checkpoints: tuple[TaskContextCheckpoint, ...] = ()
 
@@ -484,6 +532,10 @@ class TaskReplayState:
         return self.reflections[-1] if self.reflections else None
 
     @property
+    def latest_blocker(self) -> TaskBlockerRecorded | None:
+        return self.blockers[-1] if self.blockers else None
+
+    @property
     def latest_checkpoint(self) -> TaskContextCheckpoint | None:
         return self.context_checkpoints[-1] if self.context_checkpoints else None
 
@@ -499,6 +551,11 @@ class TaskReplayState:
         if self.current_completion_proposal is not None:
             return TaskStatus.COMPLETION_PROPOSED
         if isinstance(terminal, StageCommitted):
+            if (
+                self.latest_blocker is not None
+                and self.latest_blocker.stage_id == self.stages[-1].started.stage_id
+            ):
+                return TaskStatus.BLOCKED
             return TaskStatus.PAUSED
         return TaskStatus.BLOCKED
 
@@ -569,6 +626,15 @@ def canonical_reflection_id(value: object) -> str:
 
 def canonical_checkpoint_id(value: object) -> str:
     return _canonical_uuid4(value, "Task checkpoint ID")
+
+
+def canonical_task_proposal_tool_use_id(value: object) -> str:
+    return _bounded_text(
+        value,
+        "Task proposal tool-use ID",
+        max_characters=4096,
+        max_bytes=4096,
+    )
 
 
 def canonical_task_objective(value: object) -> str:
@@ -841,6 +907,7 @@ def replay_task_records(
 
     configuration: TaskConfiguration | None = None
     acceptance_contract: TaskAcceptanceContract | None = None
+    admission_origin: TaskAdmissionOrigin | None = None
     stages: list[TaskStageState] = []
     active: StageStarted | None = None
     plan_proposals: list[TaskPlanProposed] = []
@@ -852,11 +919,13 @@ def replay_task_records(
     renamed: list[TaskRenamed] = []
     archived: list[TaskArchived] = []
     reflections: list[TaskReflectionRecorded] = []
+    blockers: list[TaskBlockerRecorded] = []
     pause_events: list[TaskPauseChanged] = []
     checkpoints: list[TaskContextCheckpoint] = []
     previous_timestamp = header.created_at
     seen_stage_ids: set[str] = set()
     seen_plan_ids: set[str] = set()
+    seen_proposal_tool_use_ids: set[str] = set()
     verified_keys: set[tuple[str, int]] = set()
 
     for expected_sequence, record in enumerate(records[1:], start=1):
@@ -872,13 +941,27 @@ def replay_task_records(
         previous_timestamp = timestamp
 
         if isinstance(record, TaskConfiguration):
-            if configuration is not None or expected_sequence != 1 or stages:
+            expected_configuration_sequence = 2 if admission_origin is not None else 1
+            if (
+                configuration is not None
+                or expected_sequence != expected_configuration_sequence
+                or stages
+            ):
                 raise TaskRecordError(
                     "task_configuration must appear once immediately after header"
                 )
             if record.parent_task_id == header.task_id:
                 raise TaskRecordError("Task cannot derive from itself")
             configuration = record
+            continue
+        if isinstance(record, TaskAdmissionOrigin):
+            if admission_origin is not None or expected_sequence != 1:
+                raise TaskRecordError(
+                    "task_admission_origin must appear once immediately after header"
+                )
+            if record.source_session_id != header.owner_session_id:
+                raise TaskRecordError("Task admission source must match the owner Session")
+            admission_origin = record
             continue
         if isinstance(record, TaskAcceptanceContract):
             if acceptance_contract is not None or stages:
@@ -940,6 +1023,8 @@ def replay_task_records(
                 )
             if any(proposal.stage_id == record.stage_id for proposal in plan_proposals):
                 raise TaskRecordError("Task planning Stage may propose a plan only once")
+            if any(blocker.stage_id == record.stage_id for blocker in blockers):
+                raise TaskRecordError("blocked Task Stage cannot also propose a plan")
             remaining_stages = (
                 configuration.budget.max_stages
                 if configuration is not None
@@ -968,6 +1053,7 @@ def replay_task_records(
                 ):
                     raise TaskRecordError("Task plan revision reflection is not current")
             seen_plan_ids.add(record.plan_id)
+            _claim_proposal_tool_use_id(record, seen_proposal_tool_use_ids)
             plan_proposals.append(record)
             continue
         if isinstance(record, TaskPlanAccepted):
@@ -992,6 +1078,9 @@ def replay_task_records(
                 )
             if completion_proposals and completion_proposals[-1].stage_id == record.stage_id:
                 raise TaskRecordError("Task Stage may propose completion only once")
+            if any(blocker.stage_id == record.stage_id for blocker in blockers):
+                raise TaskRecordError("blocked Task Stage cannot also propose completion")
+            _claim_proposal_tool_use_id(record, seen_proposal_tool_use_ids)
             completion_proposals.append(record)
             continue
         if isinstance(record, TaskReflectionRecorded):
@@ -1008,7 +1097,29 @@ def replay_task_records(
                 )
             if any(item.stage_id == record.stage_id for item in reflections):
                 raise TaskRecordError("Task reflection Stage may be recorded only once")
+            if any(blocker.stage_id == record.stage_id for blocker in blockers):
+                raise TaskRecordError("blocked Task Stage cannot also record reflection")
+            _claim_proposal_tool_use_id(record, seen_proposal_tool_use_ids)
             reflections.append(record)
+            continue
+        if isinstance(record, TaskBlockerRecorded):
+            latest = stages[-1] if stages else None
+            if (
+                latest is None
+                or not isinstance(latest.terminal, StageCommitted)
+                or latest.started.stage_id != record.stage_id
+                or latest.started.stage_number != record.stage_number
+            ):
+                raise TaskRecordError("Task blocker must reference the latest committed Stage")
+            if any(item.stage_id == record.stage_id for item in blockers):
+                raise TaskRecordError("Task Stage may report a blocker only once")
+            if any(
+                item.stage_id == record.stage_id
+                for item in (*plan_proposals, *completion_proposals, *reflections)
+            ):
+                raise TaskRecordError("Task Stage cannot report a blocker after another proposal")
+            _claim_proposal_tool_use_id(record, seen_proposal_tool_use_ids)
+            blockers.append(record)
             continue
         if isinstance(record, (TaskAcceptanceVerified, TaskAcceptanceChecked)):
             if not 1 <= record.criterion_index <= len(header.acceptance_criteria):
@@ -1140,6 +1251,7 @@ def replay_task_records(
         stages=tuple(stages),
         configuration=configuration,
         acceptance_contract=acceptance_contract,
+        admission_origin=admission_origin,
         plan_proposals=tuple(plan_proposals),
         accepted_plan_id=accepted_plan_id,
         completion_proposals=tuple(completion_proposals),
@@ -1149,9 +1261,25 @@ def replay_task_records(
         renamed=tuple(renamed),
         archived_events=tuple(archived),
         reflections=tuple(reflections),
+        blockers=tuple(blockers),
         pause_events=tuple(pause_events),
         context_checkpoints=tuple(checkpoints),
     )
+
+
+def _claim_proposal_tool_use_id(
+    record: TaskPlanProposed
+    | TaskCompletionProposed
+    | TaskReflectionRecorded
+    | TaskBlockerRecorded,
+    seen: set[str],
+) -> None:
+    tool_use_id = record.proposal_tool_use_id
+    if tool_use_id is None:
+        return
+    if tool_use_id in seen:
+        raise TaskRecordError("Task proposal tool-use IDs must be unique")
+    seen.add(tool_use_id)
 
 
 def _record_to_dict(record: TaskRecord) -> dict[str, object]:
@@ -1188,6 +1316,21 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             "record_type": record.record_type,
             "schema_version": record.schema_version,
             "sequence": record.sequence,
+        }
+    if isinstance(record, TaskAdmissionOrigin):
+        return {
+            "admission_id": record.admission_id,
+            "configuration_sha256": record.configuration_sha256,
+            "confirmation_sha256": record.confirmation_sha256,
+            "proposal_sha256": record.proposal_sha256,
+            "proposal_tool_use_id": record.proposal_tool_use_id,
+            "record_type": record.record_type,
+            "recorded_at": record.recorded_at,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "source_context_id": record.source_context_id,
+            "source_session_id": record.source_session_id,
+            "source_turn_record_sequence": record.source_turn_record_sequence,
         }
     if isinstance(record, StageStarted):
         common = {
@@ -1258,17 +1401,22 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
                     "revision_reason": record.revision_reason,
                 }
             )
+        if record.schema_version >= 3:
+            common["proposal_tool_use_id"] = record.proposal_tool_use_id
         return common
     if isinstance(record, TaskPlanAccepted):
         return _simple_record(record, accepted_at=record.accepted_at, plan_id=record.plan_id)
     if isinstance(record, TaskCompletionProposed):
-        return _simple_record(
+        common = _simple_record(
             record,
             proposed_at=record.proposed_at,
             source=record.source.value,
             stage_id=record.stage_id,
             stage_number=record.stage_number,
         )
+        if record.schema_version >= 2:
+            common["proposal_tool_use_id"] = record.proposal_tool_use_id
+        return common
     if isinstance(record, TaskAcceptanceVerified):
         return _simple_record(
             record,
@@ -1300,12 +1448,25 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
     if isinstance(record, TaskArchived):
         return _simple_record(record, archived=record.archived, changed_at=record.changed_at)
     if isinstance(record, TaskReflectionRecorded):
-        return _simple_record(
+        common = _simple_record(
             record,
             next_objective=record.next_objective,
             recommendation=record.recommendation.value,
             recorded_at=record.recorded_at,
             reflection_id=record.reflection_id,
+            stage_id=record.stage_id,
+            stage_number=record.stage_number,
+            summary=record.summary,
+        )
+        if record.schema_version >= 2:
+            common["proposal_tool_use_id"] = record.proposal_tool_use_id
+        return common
+    if isinstance(record, TaskBlockerRecorded):
+        return _simple_record(
+            record,
+            category=record.category.value,
+            proposal_tool_use_id=record.proposal_tool_use_id,
+            recorded_at=record.recorded_at,
             stage_id=record.stage_id,
             stage_number=record.stage_number,
             summary=record.summary,
@@ -1415,6 +1576,37 @@ def _decode_acceptance_contract(value: dict[str, object]) -> TaskAcceptanceContr
         configured_at=value.get("configured_at"),
     )
     _validate_acceptance_contract(record)
+    return record
+
+
+def _decode_admission_origin(value: dict[str, object]) -> TaskAdmissionOrigin:
+    _fields(
+        value,
+        "task_admission_origin",
+        "admission_id",
+        "configuration_sha256",
+        "confirmation_sha256",
+        "proposal_sha256",
+        "proposal_tool_use_id",
+        "recorded_at",
+        "source_context_id",
+        "source_session_id",
+        "source_turn_record_sequence",
+    )
+    _version(value, TASK_ADMISSION_ORIGIN_SCHEMA_VERSION, "task_admission_origin")
+    record = TaskAdmissionOrigin(
+        sequence=value.get("sequence"),
+        admission_id=value.get("admission_id"),
+        proposal_sha256=value.get("proposal_sha256"),
+        configuration_sha256=value.get("configuration_sha256"),
+        confirmation_sha256=value.get("confirmation_sha256"),
+        source_session_id=value.get("source_session_id"),
+        source_turn_record_sequence=value.get("source_turn_record_sequence"),
+        proposal_tool_use_id=value.get("proposal_tool_use_id"),
+        source_context_id=value.get("source_context_id"),
+        recorded_at=value.get("recorded_at"),
+    )
+    _validate_admission_origin(record)
     return record
 
 
@@ -1544,7 +1736,7 @@ def _decode_plan_proposed(value: dict[str, object]) -> TaskPlanProposed:
     )
     if version == 1:
         _fields(value, "task_plan_proposed", *base)
-    elif version == 2:
+    elif version in {2, 3}:
         _fields(
             value,
             "task_plan_proposed",
@@ -1552,6 +1744,7 @@ def _decode_plan_proposed(value: dict[str, object]) -> TaskPlanProposed:
             "predecessor_plan_id",
             "reflection_id",
             "revision_reason",
+            *(() if version == 2 else ("proposal_tool_use_id",)),
         )
     else:
         raise TaskRecordError("unsupported task_plan_proposed schema version")
@@ -1568,6 +1761,7 @@ def _decode_plan_proposed(value: dict[str, object]) -> TaskPlanProposed:
         predecessor_plan_id=value.get("predecessor_plan_id"),
         revision_reason=value.get("revision_reason"),
         reflection_id=value.get("reflection_id"),
+        proposal_tool_use_id=value.get("proposal_tool_use_id"),
         schema_version=version,
     )
     _validate_plan_proposed(record)
@@ -1583,6 +1777,7 @@ def _decode_plan_accepted(value: dict[str, object]) -> TaskPlanAccepted:
 
 
 def _decode_completion_proposed(value: dict[str, object]) -> TaskCompletionProposed:
+    version = value.get("schema_version")
     _fields(
         value,
         "task_completion_proposed",
@@ -1590,18 +1785,22 @@ def _decode_completion_proposed(value: dict[str, object]) -> TaskCompletionPropo
         "source",
         "stage_id",
         "stage_number",
+        *(() if version == 1 else ("proposal_tool_use_id",)),
     )
-    _version(value, TASK_COMPLETION_PROPOSED_SCHEMA_VERSION, "task_completion_proposed")
+    if version not in {1, TASK_COMPLETION_PROPOSED_SCHEMA_VERSION}:
+        raise TaskRecordError("unsupported task_completion_proposed schema version")
     try:
         source = CompletionProposalSource(value.get("source"))
     except (TypeError, ValueError):
         raise TaskRecordError("unsupported completion proposal source") from None
     record = TaskCompletionProposed(
-        value.get("sequence"),
-        value.get("stage_id"),
-        value.get("stage_number"),
-        source,
-        value.get("proposed_at"),
+        sequence=value.get("sequence"),
+        stage_id=value.get("stage_id"),
+        stage_number=value.get("stage_number"),
+        source=source,
+        proposed_at=value.get("proposed_at"),
+        proposal_tool_use_id=value.get("proposal_tool_use_id"),
+        schema_version=version,
     )
     _validate_completion_proposed(record)
     return record
@@ -1695,6 +1894,7 @@ def _decode_archived(value: dict[str, object]) -> TaskArchived:
 
 
 def _decode_reflection_recorded(value: dict[str, object]) -> TaskReflectionRecorded:
+    version = value.get("schema_version")
     _fields(
         value,
         "task_reflection_recorded",
@@ -1705,8 +1905,10 @@ def _decode_reflection_recorded(value: dict[str, object]) -> TaskReflectionRecor
         "stage_id",
         "stage_number",
         "summary",
+        *(() if version == 1 else ("proposal_tool_use_id",)),
     )
-    _version(value, TASK_REFLECTION_RECORDED_SCHEMA_VERSION, "task_reflection_recorded")
+    if version not in {1, TASK_REFLECTION_RECORDED_SCHEMA_VERSION}:
+        raise TaskRecordError("unsupported task_reflection_recorded schema version")
     try:
         recommendation = ReflectionRecommendation(value.get("recommendation"))
     except (TypeError, ValueError):
@@ -1720,8 +1922,39 @@ def _decode_reflection_recorded(value: dict[str, object]) -> TaskReflectionRecor
         summary=value.get("summary"),
         next_objective=value.get("next_objective"),
         recorded_at=value.get("recorded_at"),
+        proposal_tool_use_id=value.get("proposal_tool_use_id"),
+        schema_version=version,
     )
     _validate_reflection_recorded(record)
+    return record
+
+
+def _decode_blocker_recorded(value: dict[str, object]) -> TaskBlockerRecorded:
+    _fields(
+        value,
+        "task_blocker_recorded",
+        "category",
+        "proposal_tool_use_id",
+        "recorded_at",
+        "stage_id",
+        "stage_number",
+        "summary",
+    )
+    _version(value, TASK_BLOCKER_RECORDED_SCHEMA_VERSION, "task_blocker_recorded")
+    try:
+        category = TaskBlockerCategory(value.get("category"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("unsupported Task blocker category") from None
+    record = TaskBlockerRecorded(
+        sequence=value.get("sequence"),
+        stage_id=value.get("stage_id"),
+        stage_number=value.get("stage_number"),
+        category=category,
+        summary=value.get("summary"),
+        proposal_tool_use_id=value.get("proposal_tool_use_id"),
+        recorded_at=value.get("recorded_at"),
+    )
+    _validate_blocker_recorded(record)
     return record
 
 
@@ -1776,6 +2009,7 @@ _DECODERS = {
     "task_header": _decode_header,
     "task_configuration": _decode_configuration,
     "task_acceptance_contract": _decode_acceptance_contract,
+    "task_admission_origin": _decode_admission_origin,
     "stage_started": _decode_stage_started,
     "stage_committed": _decode_stage_committed,
     "stage_failed": _decode_stage_failed,
@@ -1788,6 +2022,7 @@ _DECODERS = {
     "task_renamed": _decode_renamed,
     "task_archived": _decode_archived,
     "task_reflection_recorded": _decode_reflection_recorded,
+    "task_blocker_recorded": _decode_blocker_recorded,
     "task_pause_changed": _decode_pause_changed,
     "task_context_checkpoint": _decode_context_checkpoint,
 }
@@ -1798,6 +2033,7 @@ def _validate_record(record: object) -> None:
         TaskHeader: _validate_header,
         TaskConfiguration: _validate_configuration,
         TaskAcceptanceContract: _validate_acceptance_contract,
+        TaskAdmissionOrigin: _validate_admission_origin,
         StageStarted: _validate_stage_started,
         StageCommitted: _validate_stage_committed,
         StageFailed: _validate_stage_failed,
@@ -1810,6 +2046,7 @@ def _validate_record(record: object) -> None:
         TaskRenamed: _validate_renamed,
         TaskArchived: _validate_archived,
         TaskReflectionRecorded: _validate_reflection_recorded,
+        TaskBlockerRecorded: _validate_blocker_recorded,
         TaskPauseChanged: _validate_pause_changed,
         TaskContextCheckpoint: _validate_context_checkpoint,
     }
@@ -1870,6 +2107,37 @@ def _validate_acceptance_contract(record: object) -> None:
     )
     canonical_task_acceptance_contract(record.criteria, record.completion_policy)
     _validate_timestamp(record.configured_at, "Task acceptance contract configured_at")
+
+
+def _validate_admission_origin(record: object) -> None:
+    if not isinstance(record, TaskAdmissionOrigin):
+        raise TaskRecordError("unsupported task_admission_origin record")
+    _positive_sequence(record.sequence, "task_admission_origin sequence")
+    _record_identity(record, "task_admission_origin", TASK_ADMISSION_ORIGIN_SCHEMA_VERSION)
+    try:
+        canonical_task_admission_id(record.admission_id)
+    except ValueError as error:
+        raise TaskRecordError(str(error)) from None
+    if (
+        not isinstance(record.proposal_sha256, str)
+        or _SHA256.fullmatch(record.proposal_sha256) is None
+    ):
+        raise TaskRecordError("Task admission proposal SHA-256 is invalid")
+    for digest, label in (
+        (record.configuration_sha256, "Task admission configuration SHA-256"),
+        (record.confirmation_sha256, "Task admission confirmation SHA-256"),
+    ):
+        if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+            raise TaskRecordError(f"{label} is invalid")
+    _validate_session_id(record.source_session_id, "Task admission source Session ID")
+    _positive(record.source_turn_record_sequence, "Task admission source Turn record sequence")
+    canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
+    if (
+        not isinstance(record.source_context_id, str)
+        or _CONTEXT_ID.fullmatch(record.source_context_id) is None
+    ):
+        raise TaskRecordError("Task admission source context identity is invalid")
+    _validate_timestamp(record.recorded_at, "Task admission origin recorded_at")
 
 
 def _validate_stage_started(record: object) -> None:
@@ -1947,7 +2215,7 @@ def _validate_plan_proposed(record: object) -> None:
     if not isinstance(record, TaskPlanProposed):
         raise TaskRecordError("unsupported task_plan_proposed record")
     _positive_sequence(record.sequence, "task_plan_proposed sequence")
-    if record.record_type != "task_plan_proposed" or record.schema_version not in {1, 2}:
+    if record.record_type != "task_plan_proposed" or record.schema_version not in {1, 2, 3}:
         raise TaskRecordError("unsupported task_plan_proposed schema or record type")
     canonical_plan_id(record.plan_id)
     canonical_stage_id(record.stage_id)
@@ -1964,6 +2232,8 @@ def _validate_plan_proposed(record: object) -> None:
             )
         ):
             raise TaskRecordError("task_plan_proposed v1 cannot contain revision provenance")
+        if record.proposal_tool_use_id is not None:
+            raise TaskRecordError("task_plan_proposed v1 cannot contain a proposal tool ID")
         return
     if record.predecessor_plan_id is not None:
         canonical_plan_id(record.predecessor_plan_id)
@@ -1976,6 +2246,10 @@ def _validate_plan_proposed(record: object) -> None:
         )
     if record.reflection_id is not None:
         canonical_reflection_id(record.reflection_id)
+    if record.schema_version == 2 and record.proposal_tool_use_id is not None:
+        raise TaskRecordError("task_plan_proposed v2 cannot contain a proposal tool ID")
+    if record.schema_version >= 3 and record.proposal_tool_use_id is not None:
+        canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
 
 
 def _validate_plan_accepted(record: object) -> None:
@@ -1991,12 +2265,17 @@ def _validate_completion_proposed(record: object) -> None:
     if not isinstance(record, TaskCompletionProposed):
         raise TaskRecordError("unsupported task_completion_proposed record")
     _positive_sequence(record.sequence, "task_completion_proposed sequence")
-    _record_identity(record, "task_completion_proposed", TASK_COMPLETION_PROPOSED_SCHEMA_VERSION)
+    if record.record_type != "task_completion_proposed" or record.schema_version not in {1, 2}:
+        raise TaskRecordError("unsupported task_completion_proposed schema or record type")
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "Stage number")
     if type(record.source) is not CompletionProposalSource:
         raise TaskRecordError("unsupported completion proposal source")
     _validate_timestamp(record.proposed_at, "Task completion proposed_at")
+    if record.schema_version == 1 and record.proposal_tool_use_id is not None:
+        raise TaskRecordError("task_completion_proposed v1 cannot contain a proposal tool ID")
+    if record.schema_version >= 2 and record.proposal_tool_use_id is not None:
+        canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
 
 
 def _validate_acceptance_verified(record: object) -> None:
@@ -2068,11 +2347,8 @@ def _validate_reflection_recorded(record: object) -> None:
     if not isinstance(record, TaskReflectionRecorded):
         raise TaskRecordError("unsupported task_reflection_recorded record")
     _positive_sequence(record.sequence, "task_reflection_recorded sequence")
-    _record_identity(
-        record,
-        "task_reflection_recorded",
-        TASK_REFLECTION_RECORDED_SCHEMA_VERSION,
-    )
+    if record.record_type != "task_reflection_recorded" or record.schema_version not in {1, 2}:
+        raise TaskRecordError("unsupported task_reflection_recorded schema or record type")
     canonical_reflection_id(record.reflection_id)
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "reflection Stage number")
@@ -2092,6 +2368,24 @@ def _validate_reflection_recorded(record: object) -> None:
     ):
         raise TaskRecordError("actionable Task reflection requires a next objective")
     _validate_timestamp(record.recorded_at, "Task reflection recorded_at")
+    if record.schema_version == 1 and record.proposal_tool_use_id is not None:
+        raise TaskRecordError("task_reflection_recorded v1 cannot contain a proposal tool ID")
+    if record.schema_version >= 2 and record.proposal_tool_use_id is not None:
+        canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
+
+
+def _validate_blocker_recorded(record: object) -> None:
+    if not isinstance(record, TaskBlockerRecorded):
+        raise TaskRecordError("unsupported task_blocker_recorded record")
+    _positive_sequence(record.sequence, "task_blocker_recorded sequence")
+    _record_identity(record, "task_blocker_recorded", TASK_BLOCKER_RECORDED_SCHEMA_VERSION)
+    canonical_stage_id(record.stage_id)
+    _positive(record.stage_number, "blocker Stage number")
+    if type(record.category) is not TaskBlockerCategory:
+        raise TaskRecordError("unsupported Task blocker category")
+    _bounded_text(record.summary, "Task blocker summary", max_characters=1024, max_bytes=4096)
+    canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
+    _validate_timestamp(record.recorded_at, "Task blocker recorded_at")
 
 
 def _validate_pause_changed(record: object) -> None:

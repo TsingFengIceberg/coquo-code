@@ -22,6 +22,12 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.task_admission import (
+    TASK_PROPOSE_START_TOOL_NAME,
+    TaskAdmissionOutcome,
+    TaskAdmissionProposal,
+    task_admission_receipt,
+)
 from leonervis_code.session_records import (
     BindingSnapshot,
     CompactionFailed,
@@ -37,6 +43,7 @@ from leonervis_code.session_records import (
     SessionNameSource,
     SessionPinChanged,
     SessionTitleFallbackReason,
+    TaskAdmissionResolved,
     SessionRecordError,
     SessionResumed,
     SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
@@ -79,6 +86,75 @@ def successful_ledger(*requests: ToolUse) -> ToolTurnLedger:
             for index, request in enumerate(requests, start=1)
         )
     )
+
+
+def task_admission_turn(sequence: int = 1) -> tuple[TaskAdmissionProposal, TurnCommitted]:
+    request = ToolUse(
+        "admission-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Implement a durable feature",
+                "reason": "The work requires several bounded stages.",
+                "acceptance_criteria": ["The feature exists", "Tests pass"],
+            }
+        ),
+    )
+    proposal = TaskAdmissionProposal.from_request(request, "ctx-v5-" + "a" * 64)
+    return proposal, TurnCommitted(
+        sequence=sequence,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("Handle this as a durable Task"),
+            request,
+            ToolResult(request.tool_use_id, task_admission_receipt(proposal)),
+            AssistantText("The proposal is pending your decision."),
+        ),
+        tool_ledger=successful_ledger(request),
+    )
+
+
+def session_header(workspace: Path) -> SessionHeader:
+    workspace = workspace.resolve()
+    return SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(workspace),
+        workspace_fingerprint=workspace_fingerprint(workspace),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+    )
+
+
+def test_task_admission_resolution_round_trips_and_replays_strictly(tmp_path: Path) -> None:
+    proposal, turn = task_admission_turn()
+    resolved = TaskAdmissionResolved(
+        sequence=2,
+        occurred_at=NOW,
+        admission_id=proposal.admission_id,
+        outcome=TaskAdmissionOutcome.ACCEPTED,
+        task_id="32345678-1234-4234-9234-123456789abc",
+    )
+
+    assert decode_record(encode_record(resolved)) == resolved
+    state = replay_records([session_header(tmp_path), turn, resolved])
+    assert state.task_admissions[0].proposal == proposal
+    assert state.task_admission_resolutions == (resolved,)
+
+    with pytest.raises(SessionRecordError, match="unknown proposal"):
+        replay_records([session_header(tmp_path), replace(resolved, sequence=1)])
+    with pytest.raises(SessionRecordError, match="already resolved"):
+        replay_records(
+            [
+                session_header(tmp_path),
+                turn,
+                resolved,
+                replace(resolved, sequence=3),
+            ]
+        )
+    with pytest.raises(SessionRecordError, match="requires only its Task ID"):
+        encode_record(replace(resolved, reason="conflicting reason"))
 
 
 def test_session_forked_round_trip_requires_immediate_distinct_provenance(

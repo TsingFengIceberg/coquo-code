@@ -22,7 +22,7 @@ class ScriptedFakeProvider:
 
     def __init__(self, script: Sequence[ProviderResponse | Exception] | None = None) -> None:
         """Create a default echo fake or consume the supplied response script."""
-        self._script = tuple(script) if script is not None else None
+        self._script = list(script) if script is not None else None
         self._next_outcome = 0
         self._received_requests: list[ConversationRequest] = []
         self._received_title_requests: list[SessionTitleRequest] = []
@@ -63,3 +63,9 @@ class ScriptedFakeProvider:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+    def insert_next(self, responses: Sequence[ProviderResponse | Exception]) -> None:
+        """Insert deterministic outcomes before the unconsumed script tail."""
+        if self._script is None:
+            raise RuntimeError("cannot insert outcomes into the echo fake provider")
+        self._script[self._next_outcome : self._next_outcome] = list(responses)

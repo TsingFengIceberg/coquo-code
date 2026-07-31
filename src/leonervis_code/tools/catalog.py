@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 from leonervis_code.tools.copy_file import COPY_FILE_TOOL_NAME, copy_file_tool_snapshot
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
@@ -66,6 +67,16 @@ from leonervis_code.tools.run_command import (
 )
 from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, stat_path_tool_snapshot
+from leonervis_code.tools.task_coordination import (
+    TASK_ACCEPT_ADMISSION_TOOL_NAME,
+    TASK_ACCEPT_PLAN_TOOL_NAME,
+    TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_PLAN_TOOL_NAME,
+    TASK_REPORT_BLOCKER_TOOL_NAME,
+    TASK_REPORT_REFLECTION_TOOL_NAME,
+    task_control_tool_snapshots,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -75,7 +86,7 @@ MAX_TOOL_EXECUTIONS_PER_TURN = MAX_TOOL_REQUESTS_PER_TURN
 MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
 MAX_TOOL_INPUT_STRING_BYTES = 4096
 
-TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
+ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
     glob_tool_snapshot(),
     grep_tool_snapshot(),
@@ -97,6 +108,18 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     git_diff_tool_snapshot(),
     git_log_tool_snapshot(),
     git_show_tool_snapshot(),
+)
+ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
+ORDINARY_PROMPT_TOOL_NAMES = (
+    *ORDINARY_TOOL_NAMES,
+    TASK_PROPOSE_START_TOOL_NAME,
+    TASK_ACCEPT_ADMISSION_TOOL_NAME,
+    TASK_ACCEPT_PLAN_TOOL_NAME,
+    TASK_CONFIRM_COMPLETION_TOOL_NAME,
+)
+TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
+    *ORDINARY_TOOL_CATALOG,
+    *task_control_tool_snapshots(),
 )
 
 
@@ -147,6 +170,21 @@ def tool_use_from_input(
     )
 
 
+def tool_use_from_provider_input(
+    tool_use_id: str,
+    name: str,
+    tool_input: dict[str, object],
+) -> ToolUse:
+    """Freeze provider input while deferring ordinary-tool validation to the Host."""
+    if name not in ORDINARY_TOOL_NAMES:
+        return tool_use_from_input(tool_use_id, name, tool_input)
+    return ToolUse(
+        tool_use_id=tool_use_id,
+        name=name,
+        arguments=ToolArguments.from_mapping(tool_input),
+    )
+
+
 def tool_input_from_use(request: ToolUse) -> dict[str, object]:
     """Project and revalidate immutable arguments for one known tool."""
     if not isinstance(request.arguments, ToolArguments):
@@ -157,6 +195,15 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
         raise ValueError(f"{request.name} input is malformed")
     _validate_known_input(request.name, tool_input, expected)
     return tool_input
+
+
+def tool_input_for_provider_history(request: ToolUse) -> dict[str, object]:
+    """Replay frozen ordinary-tool input exactly after Host-side validation."""
+    if request.name in ORDINARY_TOOL_NAMES:
+        if not isinstance(request.arguments, ToolArguments):
+            raise ValueError("tool arguments are invalid")
+        return request.arguments.as_mapping()
+    return tool_input_from_use(request)
 
 
 def _expected_keys(name: str) -> set[str]:
@@ -202,6 +249,20 @@ def _expected_keys(name: str) -> set[str]:
         return {"limit", "path"}
     if name == GIT_SHOW_TOOL_NAME:
         return {"commit_id", "path"}
+    if name == TASK_PROPOSE_PLAN_TOOL_NAME:
+        return {"steps"}
+    if name == TASK_REPORT_REFLECTION_TOOL_NAME:
+        return {"recommendation", "summary", "next_objective"}
+    if name == TASK_REPORT_BLOCKER_TOOL_NAME:
+        return {"category", "summary"}
+    if name == TASK_PROPOSE_COMPLETION_TOOL_NAME:
+        return set()
+    if name == TASK_PROPOSE_START_TOOL_NAME:
+        return {"acceptance_criteria", "objective", "reason"}
+    if name == TASK_ACCEPT_ADMISSION_TOOL_NAME:
+        return {"admission_id"}
+    if name in {TASK_ACCEPT_PLAN_TOOL_NAME, TASK_CONFIRM_COMPLETION_TOOL_NAME}:
+        return {"task_id"}
     raise ValueError(f"unsupported tool: {name}")
 
 
@@ -315,6 +376,107 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
         if not isinstance(commit_id, str) or not GIT_OBJECT_ID_PATTERN.fullmatch(commit_id):
             raise ValueError("git_show commit_id is invalid")
         _validate_input_string(tool_input["path"], label="git_show path")
+        return
+
+    if name == TASK_PROPOSE_PLAN_TOOL_NAME:
+        steps = tool_input["steps"]
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 32:
+            raise ValueError("task_propose_plan steps are invalid")
+        for index, step in enumerate(steps):
+            _validate_input_string(
+                step,
+                label=f"task_propose_plan steps[{index}]",
+                max_characters=4096,
+                max_bytes=16 * 1024,
+            )
+        return
+
+    if name == TASK_REPORT_REFLECTION_TOOL_NAME:
+        recommendation = tool_input["recommendation"]
+        if recommendation not in {
+            "continue",
+            "correction",
+            "revise-plan",
+            "needs-human",
+            "fail",
+        }:
+            raise ValueError("task_report_reflection recommendation is invalid")
+        _validate_input_string(
+            tool_input["summary"],
+            label="task_report_reflection summary",
+            allow_whitespace=True,
+            max_characters=1024,
+            max_bytes=4096,
+        )
+        next_objective = tool_input["next_objective"]
+        if next_objective is not None:
+            _validate_input_string(
+                next_objective,
+                label="task_report_reflection next_objective",
+                max_characters=4096,
+                max_bytes=16 * 1024,
+            )
+        actionable = recommendation in {"continue", "correction", "revise-plan"}
+        if actionable != (next_objective is not None):
+            raise ValueError("task_report_reflection next_objective does not match recommendation")
+        return
+
+    if name == TASK_REPORT_BLOCKER_TOOL_NAME:
+        if tool_input["category"] not in {
+            "information",
+            "permission",
+            "human-evidence",
+            "external-condition",
+            "other",
+        }:
+            raise ValueError("task_report_blocker category is invalid")
+        _validate_input_string(
+            tool_input["summary"],
+            label="task_report_blocker summary",
+            allow_whitespace=True,
+            max_characters=1024,
+            max_bytes=4096,
+        )
+        return
+
+    if name == TASK_PROPOSE_COMPLETION_TOOL_NAME:
+        return
+
+    if name == TASK_PROPOSE_START_TOOL_NAME:
+        _validate_input_string(
+            tool_input["objective"],
+            label="task_propose_start objective",
+            max_characters=4096,
+            max_bytes=16 * 1024,
+        )
+        _validate_input_string(
+            tool_input["reason"],
+            label="task_propose_start reason",
+            max_characters=1024,
+            max_bytes=4096,
+        )
+        criteria = tool_input["acceptance_criteria"]
+        if not isinstance(criteria, list) or not 1 <= len(criteria) <= 16:
+            raise ValueError("task_propose_start acceptance_criteria are invalid")
+        for index, criterion in enumerate(criteria):
+            _validate_input_string(
+                criterion,
+                label=f"task_propose_start acceptance_criteria[{index}]",
+                max_characters=1024,
+                max_bytes=4096,
+            )
+        return
+
+    if name == TASK_ACCEPT_ADMISSION_TOOL_NAME:
+        from leonervis_code.core.task_admission import canonical_task_admission_id
+
+        canonical_task_admission_id(tool_input["admission_id"])
+        return
+
+    if name in {TASK_ACCEPT_PLAN_TOOL_NAME, TASK_CONFIRM_COMPLETION_TOOL_NAME}:
+        from leonervis_code.task_records import canonical_task_id
+
+        canonical_task_id(tool_input["task_id"])
         return
 
     for key in expected:

@@ -26,8 +26,13 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeResult,
 )
-from leonervis_code.core.contracts import ToolArguments
+from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.core.task_admission import (
+    TASK_PROPOSE_START_TOOL_NAME,
+    TaskAdmissionOutcome,
+    TaskAdmissionProposal,
+)
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
 from leonervis_code.session_store import (
     LatestUpdateStatus,
@@ -41,6 +46,7 @@ from leonervis_code.session_store import (
     SessionSearchResult,
     SessionStoreError,
     SessionTurnRange,
+    TaskAdmissionInfo,
     ToolLedgerQueryResult,
 )
 from leonervis_code.tools.glob import GlobTool
@@ -94,6 +100,30 @@ class Session:
         self.archived = False
         self.pinned = False
         self.tasks = []
+        proposal = TaskAdmissionProposal.from_request(
+            ToolUse(
+                "admission-1",
+                TASK_PROPOSE_START_TOOL_NAME,
+                ToolArguments.from_mapping(
+                    {
+                        "objective": "Implement a multi-stage feature",
+                        "reason": "Planning and verification are required.",
+                        "acceptance_criteria": ["Tests pass"],
+                    }
+                ),
+            ),
+            "ctx-v5-" + "a" * 64,
+        )
+        self.admissions = [
+            TaskAdmissionInfo(
+                proposal,
+                self.current,
+                self.name,
+                1,
+                1,
+                "2026-07-31T01:02:03.000004Z",
+            )
+        ]
 
     def status(self):
         return RuntimeStatus(
@@ -412,6 +442,64 @@ class Session:
                 return info
         raise SessionStoreError(f"task transcript does not exist: {task_id}")
 
+    def list_task_admissions(self):
+        return tuple(self.admissions)
+
+    def inspect_task_admission(self, admission_id):
+        for info in self.admissions:
+            if info.proposal.admission_id == admission_id:
+                return info
+        raise SessionStoreError("Task admission proposal was not found")
+
+    def preview_task_admission_acceptance(self, admission_id, configuration):
+        info = self.inspect_task_admission(admission_id)
+        return SimpleNamespace(
+            proposal=info.proposal,
+            name=configuration.name or info.proposal.objective,
+            budget=configuration.budget,
+            completion_policy=configuration.completion_policy,
+            criteria=tuple(
+                SimpleNamespace(description=value, kind=SimpleNamespace(value="human"))
+                for value in info.proposal.acceptance_criteria
+            ),
+            configuration_sha256="b" * 64,
+            confirmation_sha256="a" * 64,
+        )
+
+    def accept_task_admission(
+        self,
+        admission_id,
+        configuration,
+        *,
+        confirmation_sha256,
+    ):
+        assert confirmation_sha256 == "a" * 64
+        info = self.inspect_task_admission(admission_id)
+        task = self.create_task(info.proposal.objective, info.proposal.acceptance_criteria)
+        self.admissions[0] = replace(
+            info,
+            outcome=TaskAdmissionOutcome.ACCEPTED,
+            task_id=task.task_id,
+            resolved_at="2026-07-31T01:03:00.000000Z",
+        )
+        return task
+
+    def accepted_task_for_admission(self, admission_id):
+        info = self.inspect_task_admission(admission_id)
+        if info.task_id is None:
+            raise SessionStoreError("Task admission proposal has not been accepted")
+        return self.inspect_task(info.task_id)
+
+    def reject_task_admission(self, admission_id, reason=None):
+        info = self.inspect_task_admission(admission_id)
+        self.admissions[0] = replace(
+            info,
+            outcome=TaskAdmissionOutcome.REJECTED,
+            rejection_reason=reason,
+            resolved_at="2026-07-31T01:03:00.000000Z",
+        )
+        return self.admissions[0]
+
     def derive_task(self, parent_task_id, objective):
         parent = self.inspect_task(parent_task_id)
         child = self.create_task(objective)
@@ -586,7 +674,10 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     tool_details = ToolDetailSettings()
 
     assert "Session commands:" in dispatch_slash("/session", session).message
-    assert "Task commands:" in dispatch_slash("/task", session).message
+    task_help = dispatch_slash("/task", session).message
+    assert "Task commands:" in task_help
+    assert "/task proposal accept <admission-id> confirm <sha256>" in task_help
+    assert "/task proposal drive <admission-id> [1-16]" in task_help
     assert "Provider commands:" in dispatch_slash("/provider", session).message
     assert "Host command groups:" in dispatch_slash("/help", session).message
     assert "Tool and audit commands:" in dispatch_slash("/help tools", session).message
@@ -732,10 +823,10 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/tools details", session).message == "No committed turns yet."
     assert dispatch_slash("/tools details 10", session).message == "No committed turns yet."
     catalog = dispatch_slash("/tools catalog", session).message
-    assert "Model-visible tools: 21 in canonical order" in catalog
+    assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     run_command = dispatch_slash("/tools catalog run_command", session).message
-    assert "Tool 6/21: run_command" in run_command
+    assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
     assert "Linux sandbox required" in run_command
@@ -1065,6 +1156,65 @@ def test_task_commands_are_host_only_and_bind_creation_to_current_session(tmp_pa
         "Usage: /task list [1-100] [status=<status>] [active|archived] [name=<text>]"
     )
     assert dispatch_slash("/task show bad", session).message == "Usage: /task show <task-id>"
+
+
+def test_task_admission_commands_are_host_only_and_require_exact_id(tmp_path) -> None:
+    session = Session(tmp_path)
+    admission_id = session.admissions[0].proposal.admission_id
+
+    listed = dispatch_slash("/task proposals", session)
+    shown = dispatch_slash(f"/task proposal show {admission_id}", session)
+    preview = dispatch_slash(f"/task proposal accept {admission_id}", session)
+    assert session.tasks == []
+    accepted = dispatch_slash(
+        f"/task proposal accept {admission_id} confirm {'a' * 64}",
+        session,
+    )
+
+    assert listed.kind == "info"
+    assert admission_id in listed.message
+    assert "Status: pending" in shown.message
+    assert preview.kind == "info"
+    assert "no Task created" in preview.message
+    assert accepted.kind == "success"
+    assert "created durable Task" in accepted.message
+    assert session.admissions[0].status == "accepted"
+    driven = dispatch_slash(f"/task proposal drive {admission_id} 3", session)
+    assert driven.task_request is not None
+    assert driven.task_request.operation == "drive"
+    assert driven.task_request.max_stages == 3
+    assert session.prompts == []
+    assert dispatch_slash("/task proposal show bad", session).message == (
+        "Usage: /task proposal show <admission-id>"
+    )
+
+    rejected_session = Session(tmp_path)
+    rejected_id = rejected_session.admissions[0].proposal.admission_id
+    rejected = dispatch_slash(
+        f"/task proposal reject {rejected_id} defer this work",
+        rejected_session,
+    )
+    assert rejected.kind == "success"
+    assert "Rejection reason: defer this work" in rejected.message
+    assert rejected_session.list_tasks() == ()
+
+    pending_session = Session(tmp_path)
+    pending_id = pending_session.admissions[0].proposal.admission_id
+    not_accepted = dispatch_slash(f"/task proposal drive {pending_id}", pending_session)
+    assert not_accepted.kind == "error"
+    assert "has not been accepted" in not_accepted.message
+
+    configured_session = Session(tmp_path)
+    configured_id = configured_session.admissions[0].proposal.admission_id
+    configured = dispatch_slash(
+        f"/task proposal accept {configured_id} "
+        '\'{"name":"Reviewed Task","budget":{"max_stages":4}}\'',
+        configured_session,
+    )
+    assert configured.kind == "info"
+    assert "Task name: Reviewed Task" in configured.message
+    assert "stages=4" in configured.message
+    assert configured_session.list_tasks() == ()
 
 
 def test_task_execution_commands_are_deferred_and_host_management_stays_local(tmp_path) -> None:

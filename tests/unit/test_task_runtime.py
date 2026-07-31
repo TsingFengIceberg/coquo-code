@@ -11,6 +11,8 @@ from leonervis_code.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
+    TaskAdmissionProposed,
+    TaskLifecycleCommitted,
 )
 from leonervis_code.core.contracts import (
     AssistantText,
@@ -21,6 +23,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
+from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.errors import adapter_error
 from leonervis_code.providers.request_context import (
@@ -31,13 +34,14 @@ from leonervis_code.providers.streaming import ProviderResponseOutcome, Provider
 from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionStore
+from leonervis_code.session_store import SessionStore, SessionStoreError, SessionWriter
 from leonervis_code.task_records import (
     AcceptanceCheckOutcome,
     ReflectionRecommendation,
     StageFailureReason,
     StageKind,
     TaskBudget,
+    TaskBlockerCategory,
     TaskCompletionPolicy,
     TaskStatus,
 )
@@ -52,8 +56,24 @@ from leonervis_code.task_runtime import (
     build_task_stage_prompt,
     parse_task_response,
 )
-from leonervis_code.task_store import TaskStore, TaskStoreError
+from leonervis_code.task_store import (
+    TaskAdmissionConfiguration,
+    TaskAppendCommitError,
+    TaskStore,
+    TaskStoreError,
+    TaskWriter,
+)
 from leonervis_code.task_verification import TaskVerificationError
+from leonervis_code.tools.catalog import ORDINARY_TOOL_NAMES
+from leonervis_code.tools.task_coordination import (
+    TASK_ACCEPT_ADMISSION_TOOL_NAME,
+    TASK_ACCEPT_PLAN_TOOL_NAME,
+    TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_PLAN_TOOL_NAME,
+    TASK_REPORT_BLOCKER_TOOL_NAME,
+    TASK_REPORT_REFLECTION_TOOL_NAME,
+)
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -121,6 +141,532 @@ def open_task_session(
         provider_factory=lambda route, *, environment: provider,
         session_store_factory=session_store_factory(session_id),
     )
+
+
+def test_ordinary_prompt_can_propose_and_user_can_idempotently_accept_task(
+    tmp_path: Path,
+) -> None:
+    call = ToolUse(
+        "admission-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Build and verify a bounded demo",
+                "reason": "The work needs planning, implementation, and verification stages.",
+                "acceptance_criteria": ["The demo exists", "Deterministic tests pass"],
+            }
+        ),
+    )
+    provider = ScriptedTaskProvider([call, AssistantText("I proposed a durable Task.")])
+    session = open_task_session(tmp_path, provider)
+
+    events = []
+    assert session.prompt(
+        "Handle this as a durable multi-stage task", event_sink=events.append
+    ) == ("I proposed a durable Task.")
+    admissions = session.list_task_admissions()
+    assert len(admissions) == 1
+    assert admissions[0].status == "pending"
+    assert TASK_PROPOSE_START_TOOL_NAME in (provider.requests[0].enabled_tool_names or ())
+    assert TASK_PROPOSE_PLAN_TOOL_NAME not in (provider.requests[0].enabled_tool_names or ())
+    assert provider.requests[1].allow_tools is False
+    committed = next(event for event in events if isinstance(event, TaskAdmissionProposed))
+    assert committed.admission_id == admissions[0].proposal.admission_id
+    assert committed.acceptance_criteria_count == 2
+
+    preview = session.preview_task_admission_acceptance(
+        admissions[0].proposal.admission_id, TaskAdmissionConfiguration()
+    )
+    task = session.accept_task_admission(
+        admissions[0].proposal.admission_id,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+    repeated = session.accept_task_admission(
+        admissions[0].proposal.admission_id,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+    assert repeated.task_id == task.task_id
+    assert task.admission_origin is not None
+    assert task.admission_origin.admission_id == admissions[0].proposal.admission_id
+    assert session.inspect_task_admission(admissions[0].proposal.admission_id).status == "accepted"
+    assert len(session.list_tasks()) == 1
+    session.close()
+
+
+def test_natural_language_admission_acceptance_commits_then_requests_foreground_drive(
+    tmp_path: Path,
+) -> None:
+    admission_call = ToolUse(
+        "natural-admission",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Build and verify the natural Task demo",
+                "reason": "The work requires multiple bounded stages.",
+                "acceptance_criteria": ["The demo is complete"],
+            }
+        ),
+    )
+    provider = ScriptedTaskProvider(
+        [
+            admission_call,
+            AssistantText("The durable Task proposal is ready."),
+            AssistantText("placeholder"),
+            AssistantText("placeholder"),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    session.rename_session("Natural lifecycle")
+    assert session.prompt("Please use a durable Task") == "The durable Task proposal is ready."
+    admission_id = session.list_task_admissions()[0].proposal.admission_id
+    provider.responses = iter(
+        [
+            ToolUse(
+                "natural-accept-admission",
+                TASK_ACCEPT_ADMISSION_TOOL_NAME,
+                ToolArguments.from_mapping({"admission_id": admission_id}),
+            ),
+            AssistantText("Accepted. I will continue automatically."),
+        ]
+    )
+    events = []
+
+    assert session.prompt("同意，开始吧", event_sink=events.append) == (
+        "Accepted. I will continue automatically."
+    )
+
+    admission = session.inspect_task_admission(admission_id)
+    assert admission.status == "accepted"
+    assert admission.task_id is not None
+    handoff = next(event for event in events if isinstance(event, TaskLifecycleCommitted))
+    assert handoff.operation == "accept-admission"
+    assert handoff.task_id == admission.task_id
+    assert handoff.foreground_max_stages == 16
+    assert session.inspect_task(admission.task_id).status is TaskStatus.READY
+    session.close()
+
+
+def test_natural_language_plan_acceptance_commits_then_requests_foreground_drive(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedTaskProvider([])
+    session = open_task_session(tmp_path, provider)
+    session.rename_session("Natural plan acceptance")
+    task = session.create_task("Implement the planned demo", ("The demo works",))
+    provider.responses = iter(
+        [
+            ToolUse(
+                "natural-plan",
+                TASK_PROPOSE_PLAN_TOOL_NAME,
+                ToolArguments.from_mapping({"steps": ["Implement the demo"]}),
+            ),
+            AssistantText("The plan is ready."),
+            ToolUse(
+                "natural-accept-plan",
+                TASK_ACCEPT_PLAN_TOOL_NAME,
+                ToolArguments.from_mapping({"task_id": task.task_id}),
+            ),
+            AssistantText("The plan is accepted."),
+        ]
+    )
+    session.plan_task(task.task_id)
+    events = []
+
+    assert session.prompt("计划没问题，继续", event_sink=events.append) == "The plan is accepted."
+
+    current = session.inspect_task(task.task_id)
+    assert current.latest_plan is not None and current.latest_plan.accepted
+    handoff = next(event for event in events if isinstance(event, TaskLifecycleCommitted))
+    assert handoff.operation == "accept-plan"
+    assert handoff.task_id == task.task_id
+    assert handoff.foreground_max_stages == 16
+    session.close()
+
+
+def test_natural_language_completion_confirmation_verifies_only_human_criteria(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedTaskProvider([])
+    session = open_task_session(tmp_path, provider)
+    session.rename_session("Natural completion")
+    task = session.create_task("Complete the demo", ("The user accepts the result",))
+    provider.responses = iter(
+        [
+            ToolUse(
+                "natural-completion",
+                TASK_PROPOSE_COMPLETION_TOOL_NAME,
+                ToolArguments.from_mapping({}),
+            ),
+            AssistantText("The work appears complete."),
+            ToolUse(
+                "natural-confirm-completion",
+                TASK_CONFIRM_COMPLETION_TOOL_NAME,
+                ToolArguments.from_mapping({"task_id": task.task_id}),
+            ),
+            AssistantText("The durable Task is complete."),
+        ]
+    )
+    session.continue_task(task.task_id, "Finish the demo")
+    events = []
+
+    assert session.prompt("我确认验收通过", event_sink=events.append) == (
+        "The durable Task is complete."
+    )
+
+    current = session.inspect_task(task.task_id)
+    assert current.status is TaskStatus.COMPLETED
+    assert len(current.acceptance_verifications) == 1
+    assert current.acceptance_verifications[0].source.value == "user"
+    assert "tool-use=natural-confirm-completion" in current.acceptance_verifications[0].evidence
+    committed = next(event for event in events if isinstance(event, TaskLifecycleCommitted))
+    assert committed.operation == "confirm-completion"
+    assert committed.foreground_max_stages is None
+    session.close()
+
+
+def test_ordinary_prompt_can_observe_workspace_before_proposing_task(tmp_path: Path) -> None:
+    observe = ToolUse(
+        "admission-observe-1",
+        "list_directory",
+        ToolArguments.from_mapping({"path": "."}),
+    )
+    propose = ToolUse(
+        "admission-observe-2",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Build a bounded project after inspecting the workspace",
+                "reason": "The project requires multiple implementation and verification stages.",
+                "acceptance_criteria": ["The implementation and tests are complete"],
+            }
+        ),
+    )
+    provider = ScriptedTaskProvider(
+        [observe, propose, AssistantText("Workspace inspected and Task proposed.")]
+    )
+    session = open_task_session(tmp_path, provider)
+
+    assert session.prompt("Inspect this empty workspace, then propose the durable Task") == (
+        "Workspace inspected and Task proposed."
+    )
+
+    admissions = session.list_task_admissions()
+    assert len(admissions) == 1
+    assert admissions[0].proposal.tool_use_id == "admission-observe-2"
+    ledgers = session.tool_ledgers(1)
+    assert ledgers.turns[0].ledger is not None
+    assert [entry.tool_name for entry in ledgers.turns[0].ledger.entries] == [
+        "list_directory",
+        TASK_PROPOSE_START_TOOL_NAME,
+    ]
+    assert len(session.action_audits()) == 1
+    assert session.action_audits()[0].identity.tool_name == "list_directory"
+    session.close()
+
+
+def test_task_admission_preview_binds_structured_configuration_and_stale_candidate(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "protected.txt").write_text("before\n", encoding="utf-8")
+    call = ToolUse(
+        "admission-config-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Implement a configured durable Task",
+                "reason": "The operator needs deterministic acceptance.",
+                "acceptance_criteria": ["Protected input remains unchanged"],
+            }
+        ),
+    )
+    session = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([call, AssistantText("Proposal recorded.")]),
+    )
+    session.prompt("Propose a configured Task")
+    admission_id = session.list_task_admissions()[0].proposal.admission_id
+    configuration = TaskAdmissionConfiguration.from_mapping(
+        {
+            "name": "Configured admission",
+            "completion_policy": "auto-verified",
+            "budget": {
+                "max_stages": 6,
+                "max_provider_invocations": 40,
+                "max_tool_requests": 80,
+            },
+            "criteria": [
+                {
+                    "kind": "path-unchanged",
+                    "description": "Protected input remains unchanged",
+                    "path": "protected.txt",
+                }
+            ],
+        }
+    )
+
+    preview = session.preview_task_admission_acceptance(admission_id, configuration)
+    assert session.list_tasks() == ()
+    assert preview.name == "Configured admission"
+    assert preview.criteria[0].kind.value == "path-unchanged"
+    assert preview.budget.max_stages == 6
+
+    (tmp_path / "protected.txt").write_text("after\n", encoding="utf-8")
+    with pytest.raises(TaskStoreError, match="confirmation does not match"):
+        session.accept_task_admission(
+            admission_id,
+            configuration,
+            confirmation_sha256=preview.confirmation_sha256,
+        )
+    assert session.list_tasks() == ()
+
+    refreshed = session.preview_task_admission_acceptance(admission_id, configuration)
+    task = session.accept_task_admission(
+        admission_id,
+        configuration,
+        confirmation_sha256=refreshed.confirmation_sha256,
+    )
+    assert task.name == "Configured admission"
+    assert task.completion_policy is TaskCompletionPolicy.AUTO_VERIFIED
+    assert task.budget.max_stages == 6
+    assert task.criteria[0].expected_sha256 is not None
+    assert task.admission_origin is not None
+    assert task.admission_origin.configuration_sha256 == configuration.sha256
+    assert task.admission_origin.confirmation_sha256 == refreshed.confirmation_sha256
+    session.close()
+
+
+def test_task_admission_accept_recovers_one_task_after_resolution_append_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = ToolUse(
+        "admission-retry-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Create exactly one retry-safe Task",
+                "reason": "Acceptance crosses Task and Session durability boundaries.",
+                "acceptance_criteria": ["Only one sourced Task exists"],
+            }
+        ),
+    )
+    session = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([call, AssistantText("Proposal recorded.")]),
+    )
+    session.prompt("Propose a retry-safe durable Task")
+    admission_id = session.list_task_admissions()[0].proposal.admission_id
+    preview = session.preview_task_admission_acceptance(admission_id, TaskAdmissionConfiguration())
+    original = SessionWriter.resolve_task_admission
+    attempts = 0
+
+    def fail_once(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SessionStoreError("injected resolution append failure")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionWriter, "resolve_task_admission", fail_once)
+
+    with pytest.raises(SessionStoreError, match="injected resolution append failure"):
+        session.accept_task_admission(
+            admission_id,
+            confirmation_sha256=preview.confirmation_sha256,
+        )
+
+    created_before_retry = session.list_tasks()
+    assert len(created_before_retry) == 1
+    assert session.inspect_task_admission(admission_id).status == "pending"
+
+    with pytest.raises(TaskStoreError, match="configuration does not match"):
+        session.accept_task_admission(
+            admission_id,
+            TaskAdmissionConfiguration(name="Different retry"),
+            confirmation_sha256=preview.confirmation_sha256,
+        )
+
+    recovered = session.accept_task_admission(
+        admission_id,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+    assert recovered.task_id == created_before_retry[0].task_id
+    assert len(session.list_tasks()) == 1
+    assert session.inspect_task_admission(admission_id).status == "accepted"
+    session.close()
+
+
+def test_pending_task_admission_survives_resume_and_can_be_rejected(tmp_path: Path) -> None:
+    call = ToolUse(
+        "admission-restart-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Run a restart-safe task",
+                "reason": "The user should decide after restarting.",
+                "acceptance_criteria": ["No Task is created before acceptance"],
+            }
+        ),
+    )
+    first_provider = ScriptedTaskProvider([call, AssistantText("Proposal recorded.")])
+    first = open_task_session(tmp_path, first_provider)
+    first.prompt("Propose a Task and stop")
+    admission_id = first.list_task_admissions()[0].proposal.admission_id
+    first.close()
+
+    resumed = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([]),
+        session_id=SESSION_TWO,
+        resume=SESSION_ONE,
+    )
+    assert resumed.inspect_task_admission(admission_id).status == "pending"
+    rejected = resumed.reject_task_admission(admission_id, "Not needed now")
+    assert rejected.status == "rejected"
+    assert rejected.rejection_reason == "Not needed now"
+    assert resumed.list_tasks() == ()
+    resumed.close()
+
+
+def test_accepted_task_admission_survives_planning_failure_and_restart(
+    tmp_path: Path,
+) -> None:
+    admission = ToolUse(
+        "admission-planning-failure-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Recover one admitted Task after planning fails",
+                "reason": "The work needs a durable planning boundary.",
+                "acceptance_criteria": ["The bounded recovery is confirmed"],
+            }
+        ),
+    )
+    failure = adapter_error(
+        provider_id="custom",
+        model_id="task-model",
+        kind=ProviderFailureKind.PROVIDER_UNAVAILABLE,
+        code="test_admission_planning_failure",
+        message="planning provider failed safely",
+    )
+    first = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([admission, AssistantText("Task proposal recorded."), failure]),
+    )
+    first.prompt("Propose a recoverable durable Task")
+    admission_id = first.list_task_admissions()[0].proposal.admission_id
+    preview = first.preview_task_admission_acceptance(admission_id, TaskAdmissionConfiguration())
+    accepted = first.accept_task_admission(
+        admission_id,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+
+    with pytest.raises(type(failure), match="planning provider failed safely"):
+        first.drive_task(accepted.task_id, max_stages=1)
+
+    failed = first.inspect_task(accepted.task_id)
+    assert failed.status is TaskStatus.BLOCKED
+    assert len(failed.stages) == 1
+    assert failed.stages[0].kind is StageKind.PLANNING
+    assert failed.stages[0].failure_reason is StageFailureReason.PROVIDER_ERROR
+    assert first.inspect_task_admission(admission_id).status == "accepted"
+    assert len(first.list_tasks()) == 1
+    first.close()
+
+    planning = ToolUse(
+        "admission-planning-retry-1",
+        TASK_PROPOSE_PLAN_TOOL_NAME,
+        ToolArguments.from_mapping({"steps": ["Finish bounded recovery"]}),
+    )
+    resumed = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([planning, AssistantText("Recovery plan proposed.")]),
+        session_id=SESSION_TWO,
+        resume=SESSION_ONE,
+    )
+
+    assert resumed.inspect_task_admission(admission_id).status == "accepted"
+    assert resumed.accepted_task_for_admission(admission_id).task_id == accepted.task_id
+    with pytest.raises(TaskStoreError, match="no interrupted or unreconciled Stage"):
+        resumed.recover_task(accepted.task_id)
+    driven = resumed.drive_task(accepted.task_id, max_stages=1)
+
+    assert driven.stopped_reason is TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
+    assert len(driven.task.stages) == 2
+    assert driven.task.stages[0].failure_reason is StageFailureReason.PROVIDER_ERROR
+    assert driven.task.stages[1].kind is StageKind.PLANNING
+    assert driven.task.stages[1].outcome == "committed"
+    assert len(resumed.list_tasks()) == 1
+    resumed.close()
+
+
+def test_accepted_task_admission_recovers_committed_plan_without_duplication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admission = ToolUse(
+        "admission-plan-commit-1",
+        TASK_PROPOSE_START_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "objective": "Recover an admitted committed plan",
+                "reason": "Task and Session durability must remain independently recoverable.",
+                "acceptance_criteria": ["The recovered plan is reviewed"],
+            }
+        ),
+    )
+    plan = ToolUse(
+        "admission-plan-commit-2",
+        TASK_PROPOSE_PLAN_TOOL_NAME,
+        ToolArguments.from_mapping({"steps": ["Review recovered plan"]}),
+    )
+    first = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider(
+            [
+                admission,
+                AssistantText("Task proposal recorded."),
+                plan,
+                AssistantText("Plan proposal recorded."),
+            ]
+        ),
+    )
+    first.prompt("Propose a Task whose first plan can be recovered")
+    admission_id = first.list_task_admissions()[0].proposal.admission_id
+    preview = first.preview_task_admission_acceptance(admission_id, TaskAdmissionConfiguration())
+    accepted = first.accept_task_admission(
+        admission_id,
+        confirmation_sha256=preview.confirmation_sha256,
+    )
+    original = TaskWriter.propose_plan
+
+    def fail_plan_append(self, *args, **kwargs):
+        raise TaskAppendCommitError(
+            "injected admitted plan append failure", record_may_be_visible=False
+        )
+
+    monkeypatch.setattr(TaskWriter, "propose_plan", fail_plan_append)
+    with pytest.raises(TaskAppendCommitError, match="injected admitted plan append failure"):
+        first.drive_task(accepted.task_id, max_stages=1)
+    monkeypatch.setattr(TaskWriter, "propose_plan", original)
+    first.close()
+
+    resumed = open_task_session(
+        tmp_path,
+        ScriptedTaskProvider([]),
+        session_id=SESSION_TWO,
+        resume=SESSION_ONE,
+    )
+    recovered = resumed.recover_task(accepted.task_id)
+
+    assert recovered.latest_plan is not None
+    assert recovered.latest_plan.steps == ("Review recovered plan",)
+    assert recovered.latest_plan.proposal_tool_use_id == "admission-plan-commit-2"
+    assert len(recovered.stages) == 1
+    assert recovered.stages[0].outcome == "committed"
+    assert resumed.inspect_task_admission(admission_id).task_id == accepted.task_id
+    assert len(resumed.list_tasks()) == 1
+    resumed.close()
 
 
 def test_task_stage_reuses_ordinary_turn_tools_and_commits_bounded_evidence(
@@ -194,6 +740,174 @@ def test_task_stage_reuses_ordinary_turn_tools_and_commits_bounded_evidence(
     assert payload["current_stage"]["objective"] == "Read README.md exactly once"
     assert payload["cumulative_budget"]["max_stages"] == 4
     assert payload["remaining_budget_before_stage"]["provider_invocations"] == 20
+    session.close()
+
+
+def test_structured_plan_proposal_commits_after_stage_with_exact_tool_scope(
+    tmp_path: Path,
+) -> None:
+    call = ToolUse(
+        "task-plan-1",
+        TASK_PROPOSE_PLAN_TOOL_NAME,
+        ToolArguments.from_mapping({"steps": ["Inspect inputs", "Run tests"]}),
+    )
+    provider = ScriptedTaskProvider([call, AssistantText("Plan submitted.")])
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task("Plan a bounded change")
+
+    result = session.plan_task(task.task_id)
+
+    assert result.plan_steps == ("Inspect inputs", "Run tests")
+    assert result.task.latest_plan is not None
+    assert result.task.latest_plan.proposal_tool_use_id == "task-plan-1"
+    first = provider.requests[0]
+    assert first.enabled_tool_names is not None
+    assert TASK_PROPOSE_PLAN_TOOL_NAME in first.enabled_tool_names
+    assert TASK_REPORT_BLOCKER_TOOL_NAME in first.enabled_tool_names
+    assert "read_file" in first.enabled_tool_names
+    assert "write_file" not in first.enabled_tool_names
+    assert provider.requests[1].allow_tools is False
+    assert session.action_audits() == ()
+    session.close()
+
+
+def test_structured_completion_proposal_never_bypasses_acceptance(
+    tmp_path: Path,
+) -> None:
+    call = ToolUse(
+        "task-complete-1",
+        TASK_PROPOSE_COMPLETION_TOOL_NAME,
+        ToolArguments.from_mapping({}),
+    )
+    provider = ScriptedTaskProvider([call, AssistantText("Work appears complete.")])
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task("Finish with human acceptance", ("Human checks output",))
+
+    result = session.continue_task(task.task_id, "Perform the bounded work")
+
+    assert result.completion_proposed is True
+    assert result.task.status is TaskStatus.COMPLETION_PROPOSED
+    with pytest.raises(TaskStoreError, match="requires all acceptance criteria verified"):
+        session.complete_task(task.task_id)
+    assert set(provider.requests[0].enabled_tool_names or ()) == {
+        *ORDINARY_TOOL_NAMES,
+        TASK_REPORT_BLOCKER_TOOL_NAME,
+        TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    }
+    session.close()
+
+
+def test_structured_blocker_stops_driver_without_granting_permission(
+    tmp_path: Path,
+) -> None:
+    call = ToolUse(
+        "task-blocker-1",
+        TASK_REPORT_BLOCKER_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {"category": "permission", "summary": "A protected action needs user approval."}
+        ),
+    )
+    provider = ScriptedTaskProvider([call, AssistantText("Waiting for the user.")])
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task("Stop safely when permission is missing")
+
+    result = session.continue_task(task.task_id, "Attempt only permitted work")
+
+    assert result.blocker is not None
+    assert result.blocker.category is TaskBlockerCategory.PERMISSION
+    assert result.task.status is TaskStatus.BLOCKED
+    assert result.task.latest_blocker is not None
+    assert result.task.latest_blocker.proposal_tool_use_id == "task-blocker-1"
+    assert session.preview_task_next(task.task_id).reason is TaskDriverStopReason.MODEL_BLOCKED
+    assert session.action_audits() == ()
+    session.close()
+
+
+def test_structured_reflection_records_advice_without_execution_tools(
+    tmp_path: Path,
+) -> None:
+    completion = ToolUse(
+        "task-complete-reflection-1",
+        TASK_PROPOSE_COMPLETION_TOOL_NAME,
+        ToolArguments.from_mapping({}),
+    )
+    reflection = ToolUse(
+        "task-reflection-1",
+        TASK_REPORT_REFLECTION_TOOL_NAME,
+        ToolArguments.from_mapping(
+            {
+                "recommendation": "correction",
+                "summary": "Create the missing artifact.",
+                "next_objective": "Create artifact.txt.",
+            }
+        ),
+    )
+    provider = ScriptedTaskProvider(
+        [
+            completion,
+            AssistantText("Initial work appears complete."),
+            reflection,
+            AssistantText("A correction is required."),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Reflect on failed acceptance",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "artifact.txt exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+    )
+    session.continue_task(task.task_id, "Attempt the work")
+    session.verify_task_host(task.task_id)
+
+    result = session.reflect_task(task.task_id)
+
+    assert result.reflection is not None
+    assert result.reflection.recommendation is ReflectionRecommendation.CORRECTION
+    assert result.task.latest_reflection is not None
+    assert result.task.latest_reflection.proposal_tool_use_id == "task-reflection-1"
+    assert provider.requests[2].enabled_tool_names == (
+        TASK_REPORT_REFLECTION_TOOL_NAME,
+        TASK_REPORT_BLOCKER_TOOL_NAME,
+    )
+    assert session.action_audits() == ()
+    session.close()
+
+
+def test_committed_structured_plan_recovers_after_task_append_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = ToolUse(
+        "task-plan-recover-1",
+        TASK_PROPOSE_PLAN_TOOL_NAME,
+        ToolArguments.from_mapping({"steps": ["Recover this plan"]}),
+    )
+    provider = ScriptedTaskProvider([call, AssistantText("Plan is ready.")])
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task("Recover a committed structured proposal")
+    original = TaskWriter.propose_plan
+
+    def fail_plan_append(self, *args, **kwargs):
+        raise TaskAppendCommitError("injected append failure", record_may_be_visible=False)
+
+    monkeypatch.setattr(TaskWriter, "propose_plan", fail_plan_append)
+    with pytest.raises(TaskAppendCommitError, match="injected append failure"):
+        session.plan_task(task.task_id)
+    monkeypatch.setattr(TaskWriter, "propose_plan", original)
+
+    recovered = session.recover_task(task.task_id)
+
+    assert recovered.latest_plan is not None
+    assert recovered.latest_plan.steps == ("Recover this plan",)
+    assert recovered.latest_plan.proposal_tool_use_id == "task-plan-recover-1"
+    with pytest.raises(TaskStoreError, match="no interrupted or unreconciled"):
+        session.recover_task(task.task_id)
     session.close()
 
 
@@ -292,7 +1006,7 @@ def test_failed_stage_charges_provider_and_tool_usage_before_retry_admission(
     session.close()
 
 
-def test_missing_signal_keeps_the_committed_turn_and_rejects_task_metadata(
+def test_execution_without_a_proposal_commits_as_incomplete_stage(
     tmp_path: Path,
 ) -> None:
     invalid_provider = ScriptedTaskProvider([AssistantText("No protocol line")])
@@ -303,13 +1017,13 @@ def test_missing_signal_keeps_the_committed_turn_and_rejects_task_metadata(
     )
     invalid_task = session.create_task("Keep a committed Turn despite protocol failure")
 
-    with pytest.raises(TaskRuntimeError, match="completion proposal signal"):
-        session.continue_task(invalid_task.task_id, "Commit then reject the signal")
+    result = session.continue_task(invalid_task.task_id, "Commit without proposing completion")
 
     committed = session.inspect_task(invalid_task.task_id)
     assert committed.status is TaskStatus.PAUSED
     assert committed.stages[0].outcome == "committed"
     assert len(session.history) == 2
+    assert result.completion_proposed is False
     session.close()
 
 
@@ -611,7 +1325,11 @@ def test_adaptive_driver_projects_failed_feedback_then_reflects_and_corrects(
     assert driven.task.latest_checkpoint is not None
     assert len(driven.stages) == 3
     reflection_request = provider.requests[2]
-    assert reflection_request.allow_tools is False
+    assert reflection_request.allow_tools is True
+    assert reflection_request.enabled_tool_names == (
+        TASK_REPORT_REFLECTION_TOOL_NAME,
+        TASK_REPORT_BLOCKER_TOOL_NAME,
+    )
     reflection_prompt = reflection_request.history[-1]
     assert isinstance(reflection_prompt, UserMessage)
     reflection_payload = json.loads(reflection_prompt.text.splitlines()[2])

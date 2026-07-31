@@ -12,6 +12,8 @@ from leonervis_code.task_records import (
     MAX_TASK_OBJECTIVE_CHARACTERS,
     AcceptanceCriterionKind,
     AcceptancePathType,
+    CompletionProposalSource,
+    ReflectionRecommendation,
     StageCommitted,
     StageFailed,
     StageFailureReason,
@@ -21,8 +23,11 @@ from leonervis_code.task_records import (
     TaskArchived,
     TaskAcceptanceContract,
     TaskAcceptanceCriterion,
+    TaskAdmissionOrigin,
     TaskCompletionPolicy,
+    TaskCompletionProposed,
     TaskHeader,
+    TaskReflectionRecorded,
     TaskPlanAccepted,
     TaskPlanProposed,
     TaskRecordError,
@@ -65,6 +70,40 @@ def test_task_header_round_trips_as_closed_canonical_json(tmp_path: Path) -> Non
     assert payload.endswith(b"\n")
     assert decode_task_record(payload.removesuffix(b"\n")) == record
     assert json.loads(payload)["scope"] == "workspace"
+
+
+def test_task_admission_origin_round_trips_and_must_immediately_follow_header(
+    tmp_path: Path,
+) -> None:
+    origin = TaskAdmissionOrigin(
+        sequence=1,
+        admission_id="tap-v1-" + "a" * 64,
+        proposal_sha256="b" * 64,
+        configuration_sha256="c" * 64,
+        confirmation_sha256="d" * 64,
+        source_session_id=SESSION_ID,
+        source_turn_record_sequence=1,
+        proposal_tool_use_id="admission-1",
+        source_context_id="ctx-v5-" + "e" * 64,
+        recorded_at="2026-07-31T01:02:04.000000Z",
+    )
+
+    assert decode_task_record(encode_task_record(origin).rstrip(b"\n")) == origin
+    assert replay(tmp_path, [header(tmp_path), origin]).admission_origin == origin
+
+    with pytest.raises(TaskRecordError, match="source must match the owner Session"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                replace(origin, source_session_id="62345678-1234-4234-9234-123456789abc"),
+            ],
+        )
+    with pytest.raises(TaskRecordError, match="immediately after header"):
+        replay(
+            tmp_path,
+            [header(tmp_path), origin, replace(origin, sequence=2)],
+        )
 
 
 def test_structured_acceptance_contract_round_trips_and_legacy_header_maps_in_memory(
@@ -412,3 +451,94 @@ def test_legacy_plan_proposal_v1_remains_readable_without_revision_fields() -> N
     assert payload["schema_version"] == 1
     assert "predecessor_plan_id" not in payload
     assert decode_task_record(json.dumps(payload).encode()) == record
+
+
+def test_legacy_task_proposals_remain_readable_without_tool_call_identity() -> None:
+    records = (
+        TaskPlanProposed(
+            sequence=3,
+            plan_id=PLAN_ID,
+            stage_id=STAGE_ID,
+            stage_number=1,
+            steps=("One legacy v2 step",),
+            proposed_at="2026-07-31T01:05:00.000000Z",
+            schema_version=2,
+        ),
+        TaskCompletionProposed(
+            sequence=3,
+            stage_id=STAGE_ID,
+            stage_number=1,
+            source=CompletionProposalSource.MODEL,
+            proposed_at="2026-07-31T01:05:00.000000Z",
+            schema_version=1,
+        ),
+        TaskReflectionRecorded(
+            sequence=3,
+            reflection_id=OTHER_PLAN_ID,
+            stage_id=STAGE_ID,
+            stage_number=1,
+            recommendation=ReflectionRecommendation.NEEDS_HUMAN,
+            summary="Legacy reflection",
+            next_objective=None,
+            recorded_at="2026-07-31T01:05:00.000000Z",
+            schema_version=1,
+        ),
+    )
+
+    for record in records:
+        payload = encode_task_record(record)
+        decoded = decode_task_record(payload.rstrip(b"\n"))
+        assert decoded == record
+        assert decoded.proposal_tool_use_id is None
+        assert "proposal_tool_use_id" not in json.loads(payload)
+
+
+def test_replay_rejects_proposal_tool_call_identity_reused_across_stages(
+    tmp_path: Path,
+) -> None:
+    planning_start = replace(started(), kind=StageKind.PLANNING)
+    plan = TaskPlanProposed(
+        sequence=3,
+        plan_id=PLAN_ID,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        steps=("Execute one bounded step",),
+        proposed_at="2026-07-31T01:05:00.000000Z",
+        proposal_tool_use_id="task-proposal-1",
+    )
+    execution_stage_id = "62345678-1234-4234-9234-123456789abc"
+    execution_start = replace(
+        started(sequence=4, stage_number=2),
+        stage_id=execution_stage_id,
+        started_at="2026-07-31T01:05:30.000000Z",
+    )
+    execution_commit = replace(
+        committed(sequence=5, stage_number=2),
+        stage_id=execution_stage_id,
+        turn_number=2,
+        turn_record_sequence=2,
+        turn_record_sha256="b" * 64,
+        committed_at="2026-07-31T01:05:45.000000Z",
+    )
+    completion = TaskCompletionProposed(
+        sequence=6,
+        stage_id=execution_stage_id,
+        stage_number=2,
+        source=CompletionProposalSource.MODEL,
+        proposed_at="2026-07-31T01:06:00.000000Z",
+        proposal_tool_use_id="task-proposal-1",
+    )
+
+    with pytest.raises(TaskRecordError, match="tool-use IDs must be unique"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                planning_start,
+                committed(),
+                plan,
+                execution_start,
+                execution_commit,
+                completion,
+            ],
+        )

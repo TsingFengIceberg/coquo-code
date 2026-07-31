@@ -11,6 +11,8 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
+    TaskAdmissionProposed,
+    TaskLifecycleCommitted,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -118,6 +120,12 @@ SESSION_HELP = (
 TASK_HELP = (
     "Task commands:\n"
     "  /task start <objective>\n"
+    "  /task proposals [pending|accepted|rejected|all]\n"
+    "  /task proposal show <admission-id>\n"
+    "  /task proposal accept <admission-id> [<config-json>]\n"
+    "  /task proposal accept <admission-id> confirm <sha256> [<config-json>]\n"
+    "  /task proposal reject <admission-id> [reason]\n"
+    "  /task proposal drive <admission-id> [1-16]\n"
     "  /task list [1-100] [status=<status>] [active|archived] [name=<text>]\n"
     "  /task show <task-id> | /task timeline <task-id>\n"
     "  /task continue <task-id> <stage-objective> | /task recover <task-id>\n"
@@ -995,6 +1003,80 @@ def render_task_summary(info: TaskInfoView) -> str:
     )
 
 
+def render_task_admission_summary(info) -> str:
+    """Render one compact committed admission state without exposing hidden content."""
+    proposal = info.proposal
+    suffix = f", Task {info.task_id}" if info.task_id is not None else ""
+    return (
+        f"{proposal.admission_id}: {info.status}{suffix}, "
+        f"objective {_safe_inline(proposal.objective)!r}, Session turn #{info.turn_number}"
+    )
+
+
+def render_task_admission_info(info) -> str:
+    """Render exact user-reviewable proposal fields and durable source provenance."""
+    proposal = info.proposal
+    lines = [
+        f"Admission: {proposal.admission_id}",
+        f"Status: {info.status}",
+        f"Objective: {_safe_inline(proposal.objective)}",
+        f"Reason: {_safe_inline(proposal.reason)}",
+        f"Acceptance criteria: {len(proposal.acceptance_criteria)}",
+    ]
+    lines.extend(
+        f"  {index}. {_safe_inline(criterion)}"
+        for index, criterion in enumerate(proposal.acceptance_criteria, start=1)
+    )
+    lines.extend(
+        (
+            f"Source Session: {_safe_inline(info.session_name)} ({info.session_id})",
+            f"Source Turn: #{info.turn_number}, record #{info.turn_record_sequence}",
+            f"Source context: {proposal.context_id}",
+            f"Proposal tool-use ID: {_safe_inline(proposal.tool_use_id)}",
+            f"Committed: {info.committed_at}",
+        )
+    )
+    if info.task_id is not None:
+        lines.append(f"Created Task: {info.task_id}")
+    if info.rejection_reason is not None:
+        lines.append(f"Rejection reason: {_safe_inline(info.rejection_reason)}")
+    if info.resolved_at is not None:
+        lines.append(f"Resolved: {info.resolved_at}")
+    return "\n".join(lines)
+
+
+def render_task_admission_acceptance_preview(preview, confirmation_command: str) -> str:
+    """Render one exact no-write acceptance candidate and its confirmation command."""
+    budget = preview.budget
+    lines = [
+        "Task admission acceptance preview (no Task created):",
+        f"Admission: {preview.proposal.admission_id}",
+        f"Task name: {_safe_inline(preview.name)}",
+        f"Objective: {_safe_inline(preview.proposal.objective)}",
+        f"Completion policy: {preview.completion_policy.value}",
+        (
+            "Budget: "
+            f"stages={budget.max_stages}, provider-invocations={budget.max_provider_invocations}, "
+            f"tool-requests={budget.max_tool_requests}, input-tokens={budget.max_input_tokens}, "
+            f"output-tokens={budget.max_output_tokens}"
+        ),
+        f"Acceptance criteria: {len(preview.criteria)}",
+    ]
+    lines.extend(
+        f"  {index}. {_safe_inline(criterion.description)} [{criterion.kind.value}]"
+        for index, criterion in enumerate(preview.criteria, start=1)
+    )
+    lines.extend(
+        (
+            f"Configuration SHA-256: {preview.configuration_sha256}",
+            f"Confirmation SHA-256: {preview.confirmation_sha256}",
+            "Confirm this exact candidate with:",
+            confirmation_command,
+        )
+    )
+    return "\n".join(lines)
+
+
 def render_runtime_status(status: RuntimeStatusView) -> str:
     """Render redacted runtime status without credential names or values."""
     if status.mode == "fake":
@@ -1121,6 +1203,14 @@ _TOOL_POLICY_LABELS = {
     "git_diff": "workspace-read",
     "git_log": "workspace-read",
     "git_show": "workspace-read",
+    "task_propose_plan": "task-control",
+    "task_report_reflection": "task-control",
+    "task_report_blocker": "task-control",
+    "task_propose_completion": "task-control",
+    "task_propose_start": "task-admission",
+    "task_accept_admission": "task-lifecycle",
+    "task_accept_plan": "task-lifecycle",
+    "task_confirm_completion": "task-lifecycle",
 }
 
 _TOOL_HARD_BOUND_SUMMARIES = {
@@ -1145,6 +1235,14 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "git_diff": "Current staged or unstaged tracked patch only; literal path, no external diff, and 64 KiB output.",
     "git_log": "Current-HEAD-reachable history only; literal path, at most 50 commits, and 32 KiB output.",
     "git_show": "One full current-HEAD-reachable commit ID; bounded metadata/message and 64 KiB tracked patch.",
+    "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
+    "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
+    "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",
+    "task_propose_completion": "Execution or correction Stage only; proposal requires later Host acceptance evidence.",
+    "task_propose_start": "Ordinary Prompt only; creates a pending proposal, not a Task, permission grant, or execution.",
+    "task_accept_admission": "Ordinary Prompt only; exact current-Session pending admission and post-Turn stale revalidation required.",
+    "task_accept_plan": "Ordinary Prompt only; exact owner-Session latest unaccepted plan and post-Turn stale revalidation required.",
+    "task_confirm_completion": "Ordinary Prompt only; current completion proposal and all non-human criteria already verified.",
 }
 
 
@@ -1238,6 +1336,12 @@ def _tool_policy_availability(policy: str, status: ProjectStatusView) -> str:
     approval = getattr(status.approval_mode, "value", str(status.approval_mode))
     if policy == "workspace-read":
         return "available"
+    if policy == "task-control":
+        return "available only in a matching Task Stage"
+    if policy == "task-admission":
+        return "available only in an ordinary Prompt; explicit user acceptance required"
+    if policy == "task-lifecycle":
+        return "available only in an ordinary Prompt for the current user's explicit decision"
     if policy == "dangerous":
         if mode != "danger-full-access":
             return "denied by current permission mode"
@@ -1626,6 +1730,23 @@ def render_prompt_event(
             f"Token usage [{event.invocation_index}/{event.invocation_limit}]: {detail}",
             kind,
         )
+    if isinstance(event, TaskAdmissionProposed):
+        return (
+            "Task admission proposal committed:\n"
+            f"Admission: {event.admission_id}\n"
+            f"Objective: {event.objective_summary}\n"
+            f"Acceptance criteria: {event.acceptance_criteria_count}\n"
+            "Reply naturally when you want to accept it; no /task command is required.",
+            "info",
+        )
+    if isinstance(event, TaskLifecycleCommitted):
+        if event.operation == "accept-admission":
+            message = "Task admission accepted and committed. Continuing in the foreground."
+        elif event.operation == "accept-plan":
+            message = "Task plan accepted and committed. Continuing in the foreground."
+        else:
+            message = "Task completion confirmation committed. The durable Task is complete."
+        return f"{message}\nTask: {event.task_id}", "success"
     if isinstance(event, TurnUsageCompleted):
         return render_usage_summary(event.usage, compact=True), "info"
     if isinstance(event, TaskRunStopped):
@@ -1946,6 +2067,10 @@ def render_task_info(info: TaskInfoView) -> str:
         )
         if reflection.next_objective is not None:
             lines.append(f"Reflection next objective: {_safe_inline(reflection.next_objective)}")
+    blocker = getattr(info, "latest_blocker", None)
+    if blocker is not None:
+        lines.append(f"Latest blocker: {blocker.category.value} - {_safe_inline(blocker.summary)}")
+        lines.append(f"Blocker proposal tool: {_safe_inline(blocker.proposal_tool_use_id)}")
     checkpoint = getattr(info, "latest_checkpoint", None)
     if checkpoint is not None:
         lines.append(
@@ -2046,6 +2171,12 @@ def render_task_timeline(info: TaskInfoView) -> str:
         lines.append(
             f"Reflection {reflection.reflection_id}: {reflection.recommendation.value} - "
             f"{_safe_inline(reflection.summary)}"
+        )
+    blocker = getattr(info, "latest_blocker", None)
+    if blocker is not None:
+        lines.append(
+            f"Blocker for Stage #{blocker.stage_number}: {blocker.category.value} - "
+            f"{_safe_inline(blocker.summary)}"
         )
     checkpoint = getattr(info, "latest_checkpoint", None)
     if checkpoint is not None:

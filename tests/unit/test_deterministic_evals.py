@@ -24,6 +24,7 @@ def test_builtin_eval_case_order_and_baseline_are_stable() -> None:
         "controlled-write-success",
         "read-only-write-denied",
         "batch-stops-after-failure",
+        "task-admission-lifecycle",
     )
 
     first = run_eval_suite()
@@ -31,8 +32,8 @@ def test_builtin_eval_case_order_and_baseline_are_stable() -> None:
 
     assert first.suite_id == DETERMINISTIC_BASELINE_ID
     assert first.passed is True
-    assert first.passed_cases == 4
-    assert first.passed_checks == first.total_checks == 20
+    assert first.passed_cases == 5
+    assert first.passed_checks == first.total_checks == 30
     assert render_eval_result_json(first) == render_eval_result_json(second)
 
 
@@ -90,10 +91,10 @@ def test_eval_cli_lists_and_runs_text_and_json_reports(tmp_path) -> None:
     report = json.loads(json_output.getvalue())
     assert report["suite_id"] == DETERMINISTIC_BASELINE_ID
     assert report["summary"] == {
-        "passed_cases": 4,
-        "passed_checks": 20,
-        "total_cases": 4,
-        "total_checks": 20,
+        "passed_cases": 5,
+        "passed_checks": 30,
+        "total_cases": 5,
+        "total_checks": 30,
     }
     assert tuple(tmp_path.iterdir()) == ()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from types import SimpleNamespace
 
 import anthropic
@@ -56,6 +57,14 @@ from leonervis_code.providers.anthropic import (
     serialize_history,
     write_file_tool_definition,
     stat_path_tool_definition,
+    task_accept_admission_tool_definition,
+    task_accept_plan_tool_definition,
+    task_confirm_completion_tool_definition,
+    task_propose_completion_tool_definition,
+    task_propose_start_tool_definition,
+    task_propose_plan_tool_definition,
+    task_report_blocker_tool_definition,
+    task_report_reflection_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
@@ -639,6 +648,7 @@ def test_write_file_schema_is_exact_and_parser_preserves_path_and_content() -> N
                 },
                 "content": {
                     "type": "string",
+                    "maxLength": 4096,
                     "description": "Complete UTF-8 file content, at most 4096 bytes.",
                 },
             },
@@ -660,6 +670,22 @@ def test_write_file_schema_is_exact_and_parser_preserves_path_and_content() -> N
         "write-provider",
         "write_file",
         ToolArguments.from_mapping({"path": "notes.txt", "content": "hello\n"}),
+    )
+
+
+def test_parser_preserves_bounded_schema_invalid_write_for_host_rejection() -> None:
+    content = "x" * 4097
+    block = ToolUseBlock(
+        id="write-provider",
+        name="write_file",
+        input={"content": content, "path": "large.txt"},
+        type="tool_use",
+    )
+
+    assert parse_response(message(block, stop_reason="tool_use"), config=config()) == ToolUse(
+        "write-provider",
+        "write_file",
+        ToolArguments.from_mapping({"path": "large.txt", "content": content}),
     )
 
 
@@ -831,6 +857,39 @@ def test_anthropic_stream_parser_emits_text_and_assembles_fragmented_tool_input(
         "read_file",
         ToolArguments.from_mapping({"path": "README.md"}),
         assistant_text="I will inspect first.",
+    )
+
+
+def test_anthropic_stream_preserves_schema_invalid_write_for_host_rejection() -> None:
+    content = "x" * 4097
+    stream = [
+        anthropic_event("message_start", message=SimpleNamespace(role="assistant")),
+        anthropic_event(
+            "content_block_start",
+            index=0,
+            content_block=SimpleNamespace(
+                type="tool_use", id="write-stream", name="write_file", input={}
+            ),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            index=0,
+            delta=SimpleNamespace(
+                type="input_json_delta",
+                partial_json=json.dumps({"content": content, "path": "large.txt"}),
+            ),
+        ),
+        anthropic_event("content_block_stop", index=0),
+        anthropic_event("message_delta", delta=SimpleNamespace(stop_reason="tool_use")),
+        anthropic_event("message_stop"),
+    ]
+
+    assert parse_response_stream(
+        stream, config=config(), event_sink=lambda _event: None
+    ) == ToolUse(
+        "write-stream",
+        "write_file",
+        ToolArguments.from_mapping({"path": "large.txt", "content": content}),
     )
 
 
@@ -1157,8 +1216,6 @@ def test_anthropic_stream_enforces_event_and_identifier_bounds(monkeypatch) -> N
             ),
         ),
         message(ToolUseBlock(id="toolu_1", name="search", input={"path": "x"}, type="tool_use")),
-        message(ToolUseBlock(id="toolu_1", name="read_file", input={}, type="tool_use")),
-        message(ToolUseBlock(id="toolu_1", name="read_file", input={"path": 1}, type="tool_use")),
     ],
 )
 def test_parser_rejects_response_shapes_the_loop_cannot_represent(response: Message) -> None:
@@ -1228,6 +1285,14 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 git_diff_tool_definition(),
                 git_log_tool_definition(),
                 git_show_tool_definition(),
+                task_propose_plan_tool_definition(),
+                task_report_reflection_tool_definition(),
+                task_report_blocker_tool_definition(),
+                task_propose_completion_tool_definition(),
+                task_propose_start_tool_definition(),
+                task_accept_admission_tool_definition(),
+                task_accept_plan_tool_definition(),
+                task_confirm_completion_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -1646,6 +1711,21 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
             git_show_tool_definition,
             "git_show",
             {"commit_id": "a" * 40, "path": "src/app.py"},
+        ),
+        (
+            task_accept_admission_tool_definition,
+            "task_accept_admission",
+            {"admission_id": "tap-v1-" + "a" * 64},
+        ),
+        (
+            task_accept_plan_tool_definition,
+            "task_accept_plan",
+            {"task_id": "12345678-1234-4234-9234-123456789abc"},
+        ),
+        (
+            task_confirm_completion_tool_definition,
+            "task_confirm_completion",
+            {"task_id": "12345678-1234-4234-9234-123456789abc"},
         ),
     ],
 )

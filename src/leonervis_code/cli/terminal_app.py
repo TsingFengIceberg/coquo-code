@@ -314,6 +314,41 @@ class TerminalApplication:
             self._refresh_snapshots()
             if should_exit:
                 self._application.exit(result=None)
+            elif event.task_handoff is not None:
+                for _ in range(100):
+                    if not self._runner.busy:
+                        break
+                    await asyncio.sleep(0.001)
+                else:
+                    await self._write_turn_output(
+                        render_turn_trace(
+                            "Automatic Task continuation could not start because the prior worker did not finish.",
+                            "error",
+                            color=self._color,
+                            width=self._current_width(),
+                        )
+                        + "\n"
+                    )
+                    return
+                request = TaskTurnRequest(
+                    "drive",
+                    event.task_handoff.task_id,
+                    max_stages=event.task_handoff.max_stages,
+                )
+                turn_id = self._runner.start_task(
+                    request,
+                    include_tool_details=self._tool_details.mode == ToolDetailMode.FULL,
+                )
+                if turn_id is None:
+                    await self._write_turn_output(
+                        render_turn_trace(
+                            "Automatic Task continuation could not start because the worker is busy.",
+                            "error",
+                            color=self._color,
+                            width=self._current_width(),
+                        )
+                        + "\n"
+                    )
         elif isinstance(event, (TurnSubmitted, TurnCompleting)):
             return
 

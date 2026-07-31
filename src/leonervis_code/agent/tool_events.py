@@ -15,6 +15,7 @@ from leonervis_code.core.contracts import (
     ToolTurnLedger,
     ToolUse,
 )
+from leonervis_code.core.task_admission import TaskAdmissionProposal
 from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.providers.request_context import ContextFitReport
 from leonervis_code.providers.usage import ProviderTokenUsage
@@ -210,6 +211,65 @@ class ProviderInvocationUsageReceived:
             raise ValueError("provider invocation token usage is invalid")
 
 
+@dataclass(frozen=True)
+class TaskAdmissionProposed:
+    """Announce one proposal only after its containing Session Turn commits."""
+
+    admission_id: str
+    objective_summary: str
+    acceptance_criteria_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.admission_id, str) or not self.admission_id.startswith("tap-v1-"):
+            raise ValueError("Task admission event ID is invalid")
+        _validate_safe_text(self.objective_summary, "Task admission objective summary")
+        if type(self.acceptance_criteria_count) is not int or not (
+            1 <= self.acceptance_criteria_count <= 16
+        ):
+            raise ValueError("Task admission criterion count is invalid")
+
+    @classmethod
+    def from_proposal(cls, proposal: TaskAdmissionProposal) -> TaskAdmissionProposed:
+        if type(proposal) is not TaskAdmissionProposal:
+            raise ValueError("Task admission proposal event source is invalid")
+        return cls(
+            proposal.admission_id,
+            _safe_inline(proposal.objective),
+            len(proposal.acceptance_criteria),
+        )
+
+
+@dataclass(frozen=True)
+class TaskLifecycleCommitted:
+    """Announce one lifecycle mutation only after both durable commit boundaries."""
+
+    operation: str
+    task_id: str
+    foreground_max_stages: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            "accept-admission",
+            "accept-plan",
+            "confirm-completion",
+        }:
+            raise ValueError("Task lifecycle event operation is invalid")
+        try:
+            from uuid import UUID
+
+            parsed = UUID(self.task_id)
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("Task lifecycle event Task ID is invalid") from None
+        if parsed.version != 4 or str(parsed) != self.task_id:
+            raise ValueError("Task lifecycle event Task ID is invalid")
+        if self.foreground_max_stages is not None and (
+            type(self.foreground_max_stages) is not int or not 1 <= self.foreground_max_stages <= 16
+        ):
+            raise ValueError("Task lifecycle event foreground Stage limit is invalid")
+        if self.operation == "confirm-completion" and self.foreground_max_stages is not None:
+            raise ValueError("completed Task lifecycle event cannot request a foreground handoff")
+
+
 ToolPromptEvent = (
     ToolRequestStarted
     | ToolRequestFinished
@@ -228,6 +288,8 @@ AgentPromptEvent = (
     | ToolPromptEvent
     | ProviderInvocationPreflighted
     | ProviderInvocationUsageReceived
+    | TaskAdmissionProposed
+    | TaskLifecycleCommitted
 )
 
 
@@ -355,6 +417,21 @@ def safe_tool_request_summary(request: ToolUse) -> str:
             f"commit={_safe_argument(arguments.get('commit_id'))} "
             f"path={_safe_path(arguments.get('path'))}"
         )
+    elif name == "task_propose_plan":
+        steps = arguments.get("steps")
+        summary = f"steps={len(steps) if isinstance(steps, list) else '<invalid>'}"
+    elif name == "task_report_reflection":
+        summary = (
+            f"recommendation={_safe_argument(arguments.get('recommendation'))} "
+            f"summary_bytes={_utf8_size(arguments.get('summary'))}"
+        )
+    elif name == "task_report_blocker":
+        summary = (
+            f"category={_safe_argument(arguments.get('category'))} "
+            f"summary_bytes={_utf8_size(arguments.get('summary'))}"
+        )
+    elif name == "task_propose_completion":
+        summary = "current_stage=true"
     else:
         summary = "arguments=<redacted>"
     return summary[:MAX_TOOL_EVENT_SUMMARY_CHARACTERS]

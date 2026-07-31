@@ -64,6 +64,14 @@ from leonervis_code.providers.openai_compat import (
     serialize_history,
     write_file_tool_definition,
     stat_path_tool_definition,
+    task_accept_admission_tool_definition,
+    task_accept_plan_tool_definition,
+    task_confirm_completion_tool_definition,
+    task_propose_completion_tool_definition,
+    task_propose_start_tool_definition,
+    task_propose_plan_tool_definition,
+    task_report_blocker_tool_definition,
+    task_report_reflection_tool_definition,
 )
 from leonervis_code.providers.request_context import RequestTokenCountMethod
 from leonervis_code.providers.streaming import ProviderTextDelta
@@ -523,6 +531,7 @@ def test_write_file_schema_and_parser_preserve_path_and_content() -> None:
                 },
                 "content": {
                     "type": "string",
+                    "maxLength": 4096,
                     "description": "Complete UTF-8 file content, at most 4096 bytes.",
                 },
             },
@@ -541,6 +550,23 @@ def test_write_file_schema_and_parser_preserve_path_and_content() -> None:
         "write-provider",
         "write_file",
         ToolArguments.from_mapping({"path": "notes.txt", "content": "hello\n"}),
+    )
+
+
+def test_parser_preserves_bounded_schema_invalid_write_for_host_rejection() -> None:
+    content = "x" * 4097
+    call = tool_call(
+        call_id="write-provider",
+        name="write_file",
+        arguments=json.dumps({"content": content, "path": "large.txt"}),
+    )
+
+    assert parse_response(
+        completion(finish_reason="tool_calls", tool_calls=[call]), route=route()
+    ) == ToolUse(
+        "write-provider",
+        "write_file",
+        ToolArguments.from_mapping({"path": "large.txt", "content": content}),
     )
 
 
@@ -667,6 +693,29 @@ def test_stream_parser_emits_exact_text_and_assembles_fragmented_tool_call() -> 
         "read_file",
         ToolArguments.from_mapping({"path": "README.md"}),
         assistant_text="I will inspect first.",
+    )
+
+
+def test_stream_parser_preserves_schema_invalid_write_for_host_rejection() -> None:
+    content = "x" * 4097
+    arguments = json.dumps({"content": content, "path": "large.txt"})
+    stream = [
+        stream_chunk(
+            tool_calls=[
+                stream_tool_delta(
+                    call_id="write-stream",
+                    name="write_file",
+                    arguments=arguments,
+                )
+            ]
+        ),
+        stream_chunk(finish_reason="tool_calls"),
+    ]
+
+    assert parse_response_stream(stream, route=route(), event_sink=lambda _event: None) == ToolUse(
+        "write-stream",
+        "write_file",
+        ToolArguments.from_mapping({"path": "large.txt", "content": content}),
     )
 
 
@@ -919,7 +968,6 @@ def test_compatible_stream_enforces_chunk_and_identifier_bounds(monkeypatch) -> 
             tool_calls=[tool_call()],
         ),
         completion(finish_reason="tool_calls", tool_calls=[tool_call(arguments="not json")]),
-        completion(finish_reason="tool_calls", tool_calls=[tool_call(arguments='{"path":1}')]),
         completion(finish_reason="tool_calls", tool_calls=[tool_call(name="search")]),
     ],
 )
@@ -1104,6 +1152,32 @@ def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:
     }
 
 
+def test_adapter_backed_loop_returns_schema_invalid_known_tool_to_host(tmp_path) -> None:
+    client = RecordingChatClient(
+        [
+            completion(
+                finish_reason="tool_calls",
+                tool_calls=[tool_call(call_id="call_read", arguments='{"path":1}')],
+            ),
+            completion(content="I corrected the request."),
+        ]
+    )
+    loop = AgentLoop(
+        OpenAICompatibleConversationProvider(route(), client),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+
+    assert loop.run("Read a file") == "I corrected the request."
+    assert client.requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "content": "read_file input is malformed",
+    }
+
+
 def test_run_command_schema_and_parser_preserve_array_and_integer_arguments() -> None:
     definition = run_command_tool_definition()
     assert definition["function"]["name"] == "run_command"
@@ -1245,6 +1319,46 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
             git_show_tool_definition,
             "git_show",
             {"commit_id": "a" * 40, "path": "src/app.py"},
+        ),
+        (task_propose_plan_tool_definition, "task_propose_plan", {"steps": ["Inspect"]}),
+        (
+            task_report_reflection_tool_definition,
+            "task_report_reflection",
+            {
+                "recommendation": "needs-human",
+                "summary": "Human input is required.",
+                "next_objective": None,
+            },
+        ),
+        (
+            task_report_blocker_tool_definition,
+            "task_report_blocker",
+            {"category": "information", "summary": "More information is required."},
+        ),
+        (task_propose_completion_tool_definition, "task_propose_completion", {}),
+        (
+            task_propose_start_tool_definition,
+            "task_propose_start",
+            {
+                "objective": "Implement the feature",
+                "reason": "Multiple stages are needed.",
+                "acceptance_criteria": ["Tests pass"],
+            },
+        ),
+        (
+            task_accept_admission_tool_definition,
+            "task_accept_admission",
+            {"admission_id": "tap-v1-" + "a" * 64},
+        ),
+        (
+            task_accept_plan_tool_definition,
+            "task_accept_plan",
+            {"task_id": "12345678-1234-4234-9234-123456789abc"},
+        ),
+        (
+            task_confirm_completion_tool_definition,
+            "task_confirm_completion",
+            {"task_id": "12345678-1234-4234-9234-123456789abc"},
         ),
     ],
 )

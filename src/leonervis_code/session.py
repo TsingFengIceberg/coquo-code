@@ -12,9 +12,29 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
-from leonervis_code.agent.task_control import TaskProposalSink
+from leonervis_code.agent.task_control import (
+    TASK_LIFECYCLE_KIND_BY_TOOL,
+    TASK_PROPOSAL_KIND_BY_TOOL,
+    TaskControlDispatchResult,
+    TaskControlProposal,
+    TaskLifecycleKind,
+    TaskLifecycleRequest,
+    TaskProposal,
+    TaskProposalKind,
+    TaskProposalSink,
+    recover_task_control_request,
+)
+from leonervis_code.core.task_admission import (
+    TASK_PROPOSE_START_TOOL_NAME,
+    TaskAdmissionOutcome,
+    TaskAdmissionProposal,
+    canonical_task_admission_id,
+    task_admission_receipt,
+)
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
+    TaskAdmissionProposed,
+    TaskLifecycleCommitted,
     ToolDispatchResult,
     ToolEventStatus,
     ToolResultDetails,
@@ -133,6 +153,7 @@ from leonervis_code.session_store import (
     SessionNameConflictError,
     SessionResumeStaleError,
     SessionStore,
+    TaskAdmissionInfo,
     ToolLedgerQueryResult,
     query_tool_ledgers,
     SessionStoreError,
@@ -148,12 +169,19 @@ from leonervis_code.task_records import (
     StageKind,
     StageUsage,
     TaskBudget,
+    TaskBlockerCategory,
     TaskCompletionPolicy,
     TaskStatus,
     TaskTerminalOutcome,
+    canonical_plan_steps,
+    canonical_stage_objective,
+    canonical_task_id,
 )
 from leonervis_code.task_runtime import (
     TaskPlanExecutionResult,
+    TaskBlockerProposal,
+    ParsedTaskResponse,
+    TaskReflectionProposal,
     TaskReflectionExecutionResult,
     TaskDriveResult,
     TaskDriverStopReason,
@@ -167,6 +195,8 @@ from leonervis_code.task_runtime import (
     parse_task_response,
 )
 from leonervis_code.task_store import (
+    TaskAdmissionAcceptancePreview,
+    TaskAdmissionConfiguration,
     TaskAppendCommitError,
     TaskInfo,
     TaskStageInfo,
@@ -187,6 +217,17 @@ from leonervis_code.tools.delete_directory import (
     DeleteDirectoryPreparationError,
     DeleteDirectoryTool,
     PreparedDeleteDirectory,
+)
+from leonervis_code.tools.catalog import ORDINARY_PROMPT_TOOL_NAMES, ORDINARY_TOOL_NAMES
+from leonervis_code.tools.task_coordination import (
+    TASK_ACCEPT_ADMISSION_TOOL_NAME,
+    TASK_ACCEPT_PLAN_TOOL_NAME,
+    TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    TASK_CONTROL_TOOL_NAMES,
+    TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_PLAN_TOOL_NAME,
+    TASK_REPORT_BLOCKER_TOOL_NAME,
+    TASK_REPORT_REFLECTION_TOOL_NAME,
 )
 from leonervis_code.tools.copy_file import (
     COPY_FILE_TOOL_NAME,
@@ -287,6 +328,21 @@ from leonervis_code.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_CATALOG,
+)
+
+_TASK_PLANNING_READ_TOOL_NAMES = (
+    READ_FILE_TOOL_NAME,
+    GLOB_TOOL_NAME,
+    GREP_TOOL_NAME,
+    LIST_DIRECTORY_TOOL_NAME,
+    READ_FILE_LINES_TOOL_NAME,
+    STAT_PATH_TOOL_NAME,
+    LIST_TREE_TOOL_NAME,
+    GREP_REGEX_TOOL_NAME,
+    GIT_STATUS_TOOL_NAME,
+    GIT_DIFF_TOOL_NAME,
+    GIT_LOG_TOOL_NAME,
+    GIT_SHOW_TOOL_NAME,
 )
 
 
@@ -521,6 +577,14 @@ class _PreparedCompaction:
     trigger: CompactionTrigger
 
 
+@dataclass(frozen=True)
+class _TaskControlScope:
+    task_id: str
+    stage_id: str
+    stage_number: int
+    allowed_tool_names: tuple[str, ...]
+
+
 class AutoCompactionRequiredError(ContextPreflightError):
     """Raised when one mandatory automatic compaction cannot make the turn fit."""
 
@@ -686,12 +750,16 @@ class ProjectSession:
         self._active_cancellation: TurnCancellation | None = None
         self._active_event_sink: PromptEventSink | None = None
         self._active_session_title_source_text: str | None = None
+        self._active_task_control_scope: _TaskControlScope | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
         self._loop = loop or self._new_loop(writer)
         if loop is not None:
             self._loop.install_action_dispatcher(self._dispatch_action)
+            self._loop.install_task_control_dispatcher(
+                TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
+            )
         self._startup_resume_result = startup_resume_result
 
     @classmethod
@@ -1023,6 +1091,130 @@ class ProjectSession:
             self._ensure_open()
             return self._task_store.inspect(task_id)
 
+    def list_task_admissions(self) -> tuple[TaskAdmissionInfo, ...]:
+        """List committed proposals for the current Session without mutation."""
+        with self._lock:
+            self._ensure_open()
+            return self._session_store.task_admissions(self._writer.session_id)
+
+    def inspect_task_admission(self, admission_id: str) -> TaskAdmissionInfo:
+        """Inspect one current-Session admission proposal by exact deterministic ID."""
+        with self._lock:
+            self._ensure_open()
+            return self._task_admission_info(admission_id)
+
+    def preview_task_admission_acceptance(
+        self,
+        admission_id: str,
+        configuration: TaskAdmissionConfiguration = TaskAdmissionConfiguration(),
+    ) -> TaskAdmissionAcceptancePreview:
+        """Prepare one exact no-write Task candidate for explicit user confirmation."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            admission = self._task_admission_info(admission_id)
+            if admission.outcome is TaskAdmissionOutcome.REJECTED:
+                raise SessionStoreError("Task admission proposal was already rejected")
+            return self._task_store.prepare_admission_acceptance(
+                admission.proposal,
+                owner_session=self._writer.session_id,
+                source_turn_record_sequence=admission.turn_record_sequence,
+                configuration=configuration,
+            )
+
+    def accept_task_admission(
+        self,
+        admission_id: str,
+        configuration: TaskAdmissionConfiguration = TaskAdmissionConfiguration(),
+        *,
+        confirmation_sha256: str,
+    ) -> TaskInfo:
+        """Idempotently create one sourced Task, then commit the accepted resolution."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            admission = self._task_admission_info(admission_id)
+            if admission.outcome is TaskAdmissionOutcome.REJECTED:
+                raise SessionStoreError("Task admission proposal was already rejected")
+            existing = self._task_store.find_by_admission(admission.proposal.admission_id)
+            if admission.outcome is TaskAdmissionOutcome.ACCEPTED:
+                if existing is None or existing.task_id != admission.task_id:
+                    raise TaskStoreError("accepted Task admission provenance is unavailable")
+                self._task_store.validate_existing_admission_acceptance(
+                    existing,
+                    configuration,
+                    confirmation_sha256,
+                )
+                return existing
+            if existing is None:
+                existing = self._task_store.create_from_admission(
+                    admission.proposal,
+                    owner_session=self._writer.session_id,
+                    source_turn_record_sequence=admission.turn_record_sequence,
+                    configuration=configuration,
+                    confirmation_sha256=confirmation_sha256,
+                )
+            else:
+                self._task_store.validate_existing_admission_acceptance(
+                    existing,
+                    configuration,
+                    confirmation_sha256,
+                )
+            self._writer.resolve_task_admission(
+                admission.proposal.admission_id,
+                TaskAdmissionOutcome.ACCEPTED,
+                task_id=existing.task_id,
+            )
+            return existing
+
+    def accepted_task_for_admission(self, admission_id: str) -> TaskInfo:
+        """Resolve one accepted current-Session proposal to its exact sourced Task."""
+        with self._lock:
+            self._ensure_open()
+            admission = self._task_admission_info(admission_id)
+            if admission.outcome is not TaskAdmissionOutcome.ACCEPTED or admission.task_id is None:
+                raise SessionStoreError("Task admission proposal has not been accepted")
+            task = self._task_store.find_by_admission(admission.proposal.admission_id)
+            if task is None or task.task_id != admission.task_id:
+                raise TaskStoreError("accepted Task admission provenance is unavailable")
+            return task
+
+    def reject_task_admission(
+        self,
+        admission_id: str,
+        reason: str | None = None,
+    ) -> TaskAdmissionInfo:
+        """Durably reject one current-Session proposal without creating a Task."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            admission = self._task_admission_info(admission_id)
+            if admission.outcome is TaskAdmissionOutcome.ACCEPTED:
+                raise SessionStoreError("Task admission proposal was already accepted")
+            self._writer.resolve_task_admission(
+                admission.proposal.admission_id,
+                TaskAdmissionOutcome.REJECTED,
+                reason=reason,
+            )
+            return self._task_admission_info(admission.proposal.admission_id)
+
+    def _task_admission_info(self, admission_id: str) -> TaskAdmissionInfo:
+        try:
+            canonical = canonical_task_admission_id(admission_id)
+        except ValueError as error:
+            raise SessionStoreError(str(error)) from None
+        match = next(
+            (
+                item
+                for item in self._session_store.task_admissions(self._writer.session_id)
+                if item.proposal.admission_id == canonical
+            ),
+            None,
+        )
+        if match is None:
+            raise SessionStoreError("Task admission proposal was not found in the current Session")
+        return match
+
     def derive_task(
         self,
         parent_task_id: str,
@@ -1087,6 +1279,8 @@ class ProjectSession:
         )
         task = self._task_store.inspect(task_id)
         plan = task.latest_plan
+        if result.blocker is not None:
+            return TaskPlanExecutionResult(task, result.response, (), result.blocker)
         if plan is None:
             raise TaskRuntimeError("planning Stage committed without a durable plan proposal")
         return TaskPlanExecutionResult(task, result.response, plan.steps)
@@ -1116,6 +1310,9 @@ class ProjectSession:
             include_tool_details=include_tool_details,
             cancellation=cancellation,
         )
+        if result.blocker is not None:
+            current = self._task_store.inspect(task_id)
+            return TaskReflectionExecutionResult(current, result.response, None, result.blocker)
         if result.reflection is None:
             raise TaskRuntimeError("reflection Stage committed without a durable recommendation")
         current = self._task_store.inspect(task_id)
@@ -1186,6 +1383,8 @@ class ProjectSession:
         )
         current = self._task_store.inspect(task_id)
         plan = current.latest_plan
+        if result.blocker is not None:
+            return TaskPlanExecutionResult(current, result.response, (), result.blocker)
         if plan is None:
             raise TaskRuntimeError("plan revision Stage committed without a durable plan proposal")
         return TaskPlanExecutionResult(current, result.response, plan.steps)
@@ -1294,6 +1493,18 @@ class ProjectSession:
             return TaskNextAction(
                 TaskDriverStopReason.RECOVERY_REQUIRED,
                 "Interrupted Stage must be reconciled before further work.",
+                False,
+                False,
+            )
+        if (
+            task.latest_blocker is not None
+            and task.stages
+            and task.latest_blocker.stage_id == task.stages[-1].stage_id
+        ):
+            return TaskNextAction(
+                TaskDriverStopReason.MODEL_BLOCKED,
+                f"Model reported a {task.latest_blocker.category.value} blocker: "
+                f"{task.latest_blocker.summary}",
                 False,
                 False,
             )
@@ -1424,6 +1635,9 @@ class ProjectSession:
                 latest = planned.task.stages[-1]
                 completed.append(_task_result_from_info(planned.task, planned.response, latest))
                 self._checkpoint_after_driver_stage(task_id)
+                if planned.blocker is not None:
+                    reason = TaskDriverStopReason.MODEL_BLOCKED
+                    break
                 reason = TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
                 break
             if action.reason is TaskDriverStopReason.STAGE_INCOMPLETE:
@@ -1461,6 +1675,10 @@ class ProjectSession:
                     _task_result_from_info(reflection.task, reflection.response, latest)
                 )
                 self._checkpoint_after_driver_stage(task_id)
+                if reflection.blocker is not None:
+                    reason = TaskDriverStopReason.MODEL_BLOCKED
+                    break
+                assert reflection.reflection is not None
                 recommendation = reflection.reflection.recommendation
                 if recommendation is ReflectionRecommendation.CORRECTION:
                     if len(completed) >= max_stages:
@@ -1491,6 +1709,9 @@ class ProjectSession:
                     latest = revised.task.stages[-1]
                     completed.append(_task_result_from_info(revised.task, revised.response, latest))
                     self._checkpoint_after_driver_stage(task_id)
+                    if revised.blocker is not None:
+                        reason = TaskDriverStopReason.MODEL_BLOCKED
+                        break
                     reason = TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
                     break
                 if recommendation is ReflectionRecommendation.CONTINUE:
@@ -1550,6 +1771,11 @@ class ProjectSession:
         stage = state.stages[-1]
         terminal = stage.terminal
         assert isinstance(terminal, StageCommitted)
+        if (
+            state.latest_blocker is not None
+            and state.latest_blocker.stage_id == stage.started.stage_id
+        ):
+            return
         if stage.started.kind is StageKind.PLANNING:
             latest_plan = state.latest_plan
             if latest_plan is not None and latest_plan.stage_id == stage.started.stage_id:
@@ -1566,16 +1792,50 @@ class ProjectSession:
             and state.current_completion_proposal.stage_id == stage.started.stage_id
         ):
             return
-        turn = self._session_store.turn_range(
+        turn = self._session_store.committed_turn(
             state.header.owner_session_id,
-            terminal.turn_number,
-            1,
-        ).turns[0]
-        try:
-            parsed = parse_task_response(turn.assistant.text, kind=stage.started.kind)
-        except TaskRuntimeError:
-            return
-        if stage.started.kind is StageKind.PLANNING:
+            terminal.turn_record_sequence,
+        )
+        task_requests: list[ToolUse] = []
+        for item in turn.items:
+            if isinstance(item, ToolUse) and item.name in TASK_CONTROL_TOOL_NAMES:
+                task_requests.append(item)
+            elif isinstance(item, AssistantToolBatch):
+                task_requests.extend(
+                    request for request in item.tool_uses if request.name in TASK_CONTROL_TOOL_NAMES
+                )
+        proposal_tool_use_id: str | None = None
+        if task_requests:
+            if len(task_requests) != 1:
+                raise TaskStoreError("committed Task Stage has ambiguous control calls")
+            request = recover_task_control_request(turn, tool_name=task_requests[0].name)
+            if request.name not in _task_control_names_for_stage(stage.started.kind):
+                raise TaskStoreError("committed Task control call does not match its Stage")
+            proposal_kind = TASK_PROPOSAL_KIND_BY_TOOL[request.name]
+            parsed = _resolve_task_control_payload(
+                turn.assistant.text,
+                kind=stage.started.kind,
+                proposal_kind=proposal_kind,
+                values=request.arguments.as_mapping(),
+            )
+            proposal_tool_use_id = request.tool_use_id
+        else:
+            try:
+                parsed = _resolve_task_stage_response(
+                    turn.assistant.text,
+                    kind=stage.started.kind,
+                    proposal=None,
+                )
+            except TaskRuntimeError:
+                return
+        if parsed.blocker is not None:
+            assert proposal_tool_use_id is not None
+            writer.record_blocker(
+                parsed.blocker.category,
+                parsed.blocker.summary,
+                proposal_tool_use_id=proposal_tool_use_id,
+            )
+        elif stage.started.kind is StageKind.PLANNING:
             assert parsed.plan_steps is not None
             reflection = state.latest_reflection
             writer.propose_plan(
@@ -1594,6 +1854,7 @@ class ProjectSession:
                     and reflection.recommendation is ReflectionRecommendation.REVISE_PLAN
                     else None
                 ),
+                proposal_tool_use_id=proposal_tool_use_id,
             )
         elif stage.started.kind is StageKind.REFLECTION:
             assert parsed.reflection is not None
@@ -1601,9 +1862,10 @@ class ProjectSession:
                 parsed.reflection.recommendation,
                 parsed.reflection.summary,
                 parsed.reflection.next_objective,
+                proposal_tool_use_id=proposal_tool_use_id,
             )
         elif parsed.completion_proposed:
-            writer.propose_completion()
+            writer.propose_completion(proposal_tool_use_id=proposal_tool_use_id)
             self._auto_complete_verified_task(writer)
 
     def verify_task_acceptance(
@@ -1781,7 +2043,7 @@ class ProjectSession:
                 prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
                 session_record_before = self._writer.state.next_sequence - 1
                 turn_count_before = len(self._writer.state.turns)
-                writer.start_stage(
+                started = writer.start_stage(
                     stage_objective,
                     kind=kind,
                     session_record_sequence_before=session_record_before,
@@ -1789,6 +2051,7 @@ class ProjectSession:
                     prompt_sha256=prompt_sha256,
                 )
                 response: str | None = None
+                task_proposal: TaskControlProposal | None = None
                 failed_stage_usage: StageUsage | None = None
 
                 def capture_failure_usage(
@@ -1798,21 +2061,43 @@ class ProjectSession:
                     nonlocal failed_stage_usage
                     failed_stage_usage = _task_stage_usage(provider_usage, tool_usage)
 
+                def capture_task_proposal(proposal: TaskControlProposal) -> None:
+                    nonlocal task_proposal
+                    if task_proposal is not None:
+                        raise TaskRuntimeError("Task Stage produced more than one proposal")
+                    if (
+                        proposal.task_id != initial.task_id
+                        or proposal.stage_id != started.stage_id
+                        or proposal.stage_number != started.stage_number
+                    ):
+                        raise TaskRuntimeError("Task proposal does not match its active Stage")
+                    task_proposal = proposal
+
                 try:
                     task_event_sink = (
                         TaskProtocolEventFilter(event_sink, kind=kind)
                         if event_sink is not None
                         else None
                     )
-                    response = self.prompt(
-                        prompt,
-                        event_sink=task_event_sink,
-                        include_tool_details=include_tool_details,
-                        cancellation=cancellation,
-                        session_title_source_text=initial.objective,
-                        _allow_tools=kind is not StageKind.REFLECTION,
-                        _failure_usage_sink=capture_failure_usage,
+                    self._active_task_control_scope = _TaskControlScope(
+                        initial.task_id,
+                        started.stage_id,
+                        started.stage_number,
+                        _task_control_names_for_stage(kind),
                     )
+                    try:
+                        response = self.prompt(
+                            prompt,
+                            event_sink=task_event_sink,
+                            include_tool_details=include_tool_details,
+                            cancellation=cancellation,
+                            session_title_source_text=initial.objective,
+                            _enabled_tool_names=_task_tool_names_for_stage(kind),
+                            _task_proposal_sink=capture_task_proposal,
+                            _failure_usage_sink=capture_failure_usage,
+                        )
+                    finally:
+                        self._active_task_control_scope = None
                 except BaseException as error:
                     committed = _latest_turn_after(
                         self._writer.state.records, session_record_before
@@ -1833,13 +2118,27 @@ class ProjectSession:
                     stage_record = writer.commit_stage(committed.sequence)
                 except TaskAppendCommitError:
                     raise
-                parsed = parse_task_response(response, kind=kind)
-                if kind is StageKind.PLANNING:
+                parsed = _resolve_task_stage_response(
+                    response,
+                    kind=kind,
+                    proposal=task_proposal,
+                )
+                if parsed.blocker is not None:
+                    assert task_proposal is not None
+                    writer.record_blocker(
+                        parsed.blocker.category,
+                        parsed.blocker.summary,
+                        proposal_tool_use_id=task_proposal.tool_use_id,
+                    )
+                elif kind is StageKind.PLANNING:
                     assert parsed.plan_steps is not None
                     writer.propose_plan(
                         parsed.plan_steps,
                         revision_reason=plan_revision_reason,
                         reflection_id=plan_revision_reflection_id,
+                        proposal_tool_use_id=(
+                            task_proposal.tool_use_id if task_proposal is not None else None
+                        ),
                     )
                 elif kind is StageKind.REFLECTION:
                     assert parsed.reflection is not None
@@ -1847,9 +2146,16 @@ class ProjectSession:
                         parsed.reflection.recommendation,
                         parsed.reflection.summary,
                         parsed.reflection.next_objective,
+                        proposal_tool_use_id=(
+                            task_proposal.tool_use_id if task_proposal is not None else None
+                        ),
                     )
                 elif parsed.completion_proposed:
-                    writer.propose_completion()
+                    writer.propose_completion(
+                        proposal_tool_use_id=(
+                            task_proposal.tool_use_id if task_proposal is not None else None
+                        )
+                    )
                     self._auto_complete_verified_task(writer)
                 return TaskStageExecutionResult(
                     task=writer.info,
@@ -1859,6 +2165,7 @@ class ProjectSession:
                     session_turn_number=stage_record.turn_number,
                     session_turn_record_sequence=stage_record.turn_record_sequence,
                     reflection=parsed.reflection,
+                    blocker=parsed.blocker,
                 )
 
     def latest_session_info(self) -> SessionInfo:
@@ -2013,6 +2320,9 @@ class ProjectSession:
                     project_instructions_factory=self._project_instructions_loader.load,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
+                loop.install_task_control_dispatcher(
+                    TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
+                )
                 snapshot = loop.effective_context_snapshot()
                 with self._manager.provider_for_context_transition() as runtime:
                     assessment = runtime.assess_context(snapshot.to_conversation_request())
@@ -2079,10 +2389,13 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            enabled_tool_names = (
+                ORDINARY_PROMPT_TOOL_NAMES if _enabled_tool_names is None else _enabled_tool_names
+            )
             prepared = self._loop.prepare_turn(
                 text,
                 allow_tools=_allow_tools,
-                enabled_tool_names=_enabled_tool_names,
+                enabled_tool_names=(enabled_tool_names if _allow_tools else None),
             )
             loop = self._loop
             binding: BindingSnapshot | None = None
@@ -2143,7 +2456,11 @@ class ProjectSession:
                         tool_usage_sink=(
                             observe_tool_usage if _failure_usage_sink is not None else None
                         ),
-                        task_proposal_sink=_task_proposal_sink,
+                        task_proposal_sink=(
+                            _task_proposal_sink
+                            if _task_proposal_sink is not None
+                            else self._capture_task_admission_proposal
+                        ),
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:
@@ -2768,7 +3085,247 @@ class ProjectSession:
             project_instructions_factory=self._project_instructions_loader.load,
         )
         loop.install_action_dispatcher(self._dispatch_action)
+        loop.install_task_control_dispatcher(TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control)
         return loop
+
+    def _dispatch_task_control(
+        self, request: ToolUse, context_id: str
+    ) -> TaskControlDispatchResult:
+        """Validate one proposal without mutating Task or permission state."""
+        scope = self._active_task_control_scope
+        if request.name == TASK_PROPOSE_START_TOOL_NAME:
+            if scope is not None:
+                raise RuntimeError("Task admission cannot be proposed from an active Task Stage")
+            admission = TaskAdmissionProposal.from_request(request, context_id)
+            return TaskControlDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(request.tool_use_id, task_admission_receipt(admission)),
+                    ToolEventStatus.SUCCEEDED,
+                    "task_admission_proposed",
+                ),
+                admission,
+            )
+        lifecycle_kind = TASK_LIFECYCLE_KIND_BY_TOOL.get(request.name)
+        if lifecycle_kind is not None:
+            if scope is not None:
+                raise RuntimeError("Task lifecycle requests are unavailable inside a Task Stage")
+            lifecycle = self._prepare_task_lifecycle_request(
+                request,
+                context_id=context_id,
+                kind=lifecycle_kind,
+            )
+            return TaskControlDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(
+                        request.tool_use_id,
+                        '{"lifecycle_request":"accepted_for_turn_commit"}',
+                    ),
+                    ToolEventStatus.SUCCEEDED,
+                    "task_lifecycle_requested",
+                ),
+                lifecycle,
+            )
+        if scope is None or request.name not in scope.allowed_tool_names:
+            raise RuntimeError("Task control request is outside an active compatible Stage")
+        kind = TASK_PROPOSAL_KIND_BY_TOOL.get(request.name)
+        if kind is None:
+            raise RuntimeError("Task control request name is unsupported")
+        proposal = TaskControlProposal(
+            kind=kind,
+            task_id=scope.task_id,
+            stage_id=scope.stage_id,
+            stage_number=scope.stage_number,
+            context_id=context_id,
+            tool_use_id=request.tool_use_id,
+            payload=request.arguments,
+        )
+        return TaskControlDispatchResult(
+            ToolDispatchResult(
+                ToolResult(request.tool_use_id, '{"proposal":"received"}'),
+                ToolEventStatus.SUCCEEDED,
+                "task_proposal_received",
+            ),
+            proposal,
+        )
+
+    def _prepare_task_lifecycle_request(
+        self,
+        request: ToolUse,
+        *,
+        context_id: str,
+        kind: TaskLifecycleKind,
+    ) -> TaskLifecycleRequest:
+        values = request.arguments.as_mapping()
+        if kind is TaskLifecycleKind.ACCEPT_ADMISSION:
+            admission_id = values.get("admission_id")
+            if not isinstance(admission_id, str):
+                raise RuntimeError("Task admission acceptance ID is invalid")
+            admission = self.inspect_task_admission(admission_id)
+            if admission.outcome is not None:
+                raise RuntimeError("Task admission proposal is no longer pending")
+            preview = self.preview_task_admission_acceptance(admission_id)
+            subject_id = preview.proposal.admission_id
+            expected_identity = preview.confirmation_sha256
+        else:
+            task_id = values.get("task_id")
+            if not isinstance(task_id, str):
+                raise RuntimeError("Task lifecycle Task ID is invalid")
+            task = self.inspect_task(canonical_task_id(task_id))
+            if task.owner_session_id != self._writer.session_id:
+                raise RuntimeError("Task lifecycle request belongs to another Session")
+            if task.terminal_outcome is not None:
+                raise RuntimeError("Task lifecycle request cannot mutate a terminal Task")
+            subject_id = task.task_id
+            if kind is TaskLifecycleKind.ACCEPT_PLAN:
+                plan = task.latest_plan
+                if plan is None:
+                    raise RuntimeError("Task has no plan proposal to accept")
+                if plan.accepted:
+                    raise RuntimeError("latest Task plan is already accepted")
+                expected_identity = plan.plan_id
+            else:
+                with self._task_store.open(task.task_id) as writer:
+                    if writer.state.terminal is not None:
+                        raise RuntimeError("Task lifecycle request cannot mutate a terminal Task")
+                    proposal = writer.state.current_completion_proposal
+                    if proposal is None:
+                        raise RuntimeError("Task has no current completion proposal")
+                    unresolved_non_human = tuple(
+                        index
+                        for index, criterion in enumerate(writer.state.criteria, start=1)
+                        if index not in writer.state.verified_criteria
+                        and criterion.kind is not AcceptanceCriterionKind.HUMAN
+                    )
+                    if unresolved_non_human:
+                        joined = ",".join(str(index) for index in unresolved_non_human)
+                        raise RuntimeError(
+                            "Task completion still has unverified non-human criteria: " + joined
+                        )
+                    expected_identity = proposal.stage_id
+        return TaskLifecycleRequest(
+            kind=kind,
+            context_id=context_id,
+            tool_use_id=request.tool_use_id,
+            subject_id=subject_id,
+            expected_identity=expected_identity,
+        )
+
+    def _capture_task_admission_proposal(self, proposal: TaskProposal) -> None:
+        """Apply ordinary-Prompt Task requests only after the Session Turn commits."""
+        if type(proposal) is TaskAdmissionProposal:
+            self._emit_prompt_event(
+                self._active_event_sink,
+                TaskAdmissionProposed.from_proposal(proposal),
+            )
+            return
+        if type(proposal) is not TaskLifecycleRequest:
+            raise RuntimeError("ordinary Prompt produced a Stage-scoped Task proposal")
+        self._commit_task_lifecycle_request(proposal)
+
+    def _commit_task_lifecycle_request(self, request: TaskLifecycleRequest) -> None:
+        tool_name = {
+            TaskLifecycleKind.ACCEPT_ADMISSION: TASK_ACCEPT_ADMISSION_TOOL_NAME,
+            TaskLifecycleKind.ACCEPT_PLAN: TASK_ACCEPT_PLAN_TOOL_NAME,
+            TaskLifecycleKind.CONFIRM_COMPLETION: TASK_CONFIRM_COMPLETION_TOOL_NAME,
+        }[request.kind]
+        committed = next(
+            (
+                record
+                for record in reversed(self._writer.state.records)
+                if isinstance(record, TurnCommitted)
+                and any(
+                    getattr(item, "tool_use_id", None) == request.tool_use_id
+                    or (
+                        isinstance(item, AssistantToolBatch)
+                        and any(tool.tool_use_id == request.tool_use_id for tool in item.tool_uses)
+                    )
+                    for item in record.items
+                )
+            ),
+            None,
+        )
+        if committed is None:
+            raise RuntimeError("Task lifecycle request has no committed Session Turn")
+        recovered = recover_task_control_request(
+            CommittedTurn(
+                committed.items,
+                committed.items[0],
+                committed.items[-1],
+                committed.tool_ledger,
+            ),
+            tool_name=tool_name,
+        )
+        if recovered.tool_use_id != request.tool_use_id:
+            raise RuntimeError("Task lifecycle request does not match committed causality")
+
+        max_stages: int | None = None
+        if request.kind is TaskLifecycleKind.ACCEPT_ADMISSION:
+            admission = self.inspect_task_admission(request.subject_id)
+            if admission.outcome is not None:
+                raise RuntimeError("Task admission changed before lifecycle commit")
+            preview = self.preview_task_admission_acceptance(request.subject_id)
+            if preview.confirmation_sha256 != request.expected_identity:
+                raise RuntimeError("Task admission candidate changed before lifecycle commit")
+            task = self.accept_task_admission(
+                request.subject_id,
+                confirmation_sha256=request.expected_identity,
+            )
+            max_stages = min(16, task.budget.max_stages)
+        elif request.kind is TaskLifecycleKind.ACCEPT_PLAN:
+            task = self.inspect_task(request.subject_id)
+            plan = task.latest_plan
+            if (
+                task.owner_session_id != self._writer.session_id
+                or task.terminal_outcome is not None
+                or plan is None
+                or plan.accepted
+                or plan.plan_id != request.expected_identity
+            ):
+                raise RuntimeError("Task plan changed before lifecycle commit")
+            task = self.accept_task_plan(task.task_id)
+            max_stages = min(16, task.budget.max_stages - len(task.stages))
+            if max_stages < 1:
+                raise RuntimeError("Task has no remaining Stage budget after plan acceptance")
+        else:
+            with self._task_store.open(request.subject_id) as writer:
+                if writer.state.header.owner_session_id != self._writer.session_id:
+                    raise RuntimeError("Task completion belongs to another Session")
+                if writer.state.terminal is not None:
+                    raise RuntimeError("Task completed before lifecycle commit")
+                completion = writer.state.current_completion_proposal
+                if completion is None or completion.stage_id != request.expected_identity:
+                    raise RuntimeError("Task completion proposal changed before lifecycle commit")
+                unresolved_non_human = tuple(
+                    index
+                    for index, criterion in enumerate(writer.state.criteria, start=1)
+                    if index not in writer.state.verified_criteria
+                    and criterion.kind is not AcceptanceCriterionKind.HUMAN
+                )
+                if unresolved_non_human:
+                    raise RuntimeError("Task completion evidence changed before lifecycle commit")
+                evidence = (
+                    f"session={self._writer.session_id};turn-record={committed.sequence};"
+                    f"tool-use={request.tool_use_id};request={request.request_sha256}"
+                )
+                for index, criterion in enumerate(writer.state.criteria, start=1):
+                    if (
+                        criterion.kind is AcceptanceCriterionKind.HUMAN
+                        and index not in writer.state.verified_criteria
+                    ):
+                        writer.verify_acceptance(
+                            index,
+                            evidence,
+                            source=AcceptanceVerificationSource.USER,
+                        )
+                if len(writer.state.verified_criteria) != len(writer.state.criteria):
+                    raise RuntimeError("Task completion criteria are not fully verified")
+                writer.terminate(TaskTerminalOutcome.COMPLETED)
+                task = writer.info
+
+        self._emit_prompt_event(
+            self._active_event_sink,
+            TaskLifecycleCommitted(request.kind.value, task.task_id, max_stages),
+        )
 
     def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolDispatchResult:
         """Prepare and run one model tool request through the exact Host boundary."""
@@ -3510,6 +4067,110 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
     )
 
 
+def _task_control_names_for_stage(kind: StageKind) -> tuple[str, ...]:
+    if kind is StageKind.PLANNING:
+        return (TASK_PROPOSE_PLAN_TOOL_NAME, TASK_REPORT_BLOCKER_TOOL_NAME)
+    if kind is StageKind.REFLECTION:
+        return (TASK_REPORT_REFLECTION_TOOL_NAME, TASK_REPORT_BLOCKER_TOOL_NAME)
+    if kind in {StageKind.EXECUTION, StageKind.CORRECTION}:
+        return (TASK_REPORT_BLOCKER_TOOL_NAME, TASK_PROPOSE_COMPLETION_TOOL_NAME)
+    raise TaskRuntimeError("Task Stage kind is invalid")
+
+
+def _task_tool_names_for_stage(kind: StageKind) -> tuple[str, ...]:
+    controls = _task_control_names_for_stage(kind)
+    if kind is StageKind.PLANNING:
+        return _TASK_PLANNING_READ_TOOL_NAMES + controls
+    if kind is StageKind.REFLECTION:
+        return controls
+    return ORDINARY_TOOL_NAMES + controls
+
+
+def _resolve_task_stage_response(
+    response: str,
+    *,
+    kind: StageKind,
+    proposal: TaskControlProposal | None,
+) -> ParsedTaskResponse:
+    if proposal is None:
+        try:
+            return parse_task_response(response, kind=kind)
+        except TaskRuntimeError:
+            if kind in {StageKind.EXECUTION, StageKind.CORRECTION} and not any(
+                signal in response
+                for signal in (
+                    "TASK_COMPLETION_PROPOSAL:",
+                    "TASK_PLAN_JSON:",
+                    "TASK_REFLECTION_JSON:",
+                )
+            ):
+                return ParsedTaskResponse(response, False, None)
+            raise
+    return _resolve_task_control_payload(
+        response,
+        kind=kind,
+        proposal_kind=proposal.kind,
+        values=proposal.payload.as_mapping(),
+    )
+
+
+def _resolve_task_control_payload(
+    response: str,
+    *,
+    kind: StageKind,
+    proposal_kind: TaskProposalKind,
+    values: dict[str, object],
+) -> ParsedTaskResponse:
+    expected = {
+        StageKind.PLANNING: {TaskProposalKind.PLAN, TaskProposalKind.BLOCKER},
+        StageKind.REFLECTION: {TaskProposalKind.REFLECTION, TaskProposalKind.BLOCKER},
+        StageKind.EXECUTION: {TaskProposalKind.COMPLETION, TaskProposalKind.BLOCKER},
+        StageKind.CORRECTION: {TaskProposalKind.COMPLETION, TaskProposalKind.BLOCKER},
+    }
+    if proposal_kind not in expected[kind]:
+        raise TaskRuntimeError("Task proposal kind does not match its Stage")
+    if proposal_kind is TaskProposalKind.PLAN:
+        try:
+            steps = canonical_plan_steps(values["steps"])
+        except (KeyError, ValueError) as error:
+            raise TaskRuntimeError(f"Task plan proposal is invalid: {error}") from None
+        return ParsedTaskResponse(response, False, steps)
+    if proposal_kind is TaskProposalKind.REFLECTION:
+        try:
+            recommendation = ReflectionRecommendation(values["recommendation"])
+            summary = values["summary"]
+            next_objective = values["next_objective"]
+            if not isinstance(summary, str):
+                raise ValueError("summary is invalid")
+            if next_objective is not None:
+                next_objective = canonical_stage_objective(next_objective)
+        except (KeyError, TypeError, ValueError) as error:
+            raise TaskRuntimeError(f"Task reflection proposal is invalid: {error}") from None
+        return ParsedTaskResponse(
+            response,
+            False,
+            None,
+            TaskReflectionProposal(recommendation, summary, next_objective),
+        )
+    if proposal_kind is TaskProposalKind.BLOCKER:
+        try:
+            category = TaskBlockerCategory(values["category"])
+            summary = values["summary"]
+            if not isinstance(summary, str):
+                raise ValueError("summary is invalid")
+        except (KeyError, TypeError, ValueError) as error:
+            raise TaskRuntimeError(f"Task blocker proposal is invalid: {error}") from None
+        return ParsedTaskResponse(
+            response,
+            False,
+            None,
+            blocker=TaskBlockerProposal(category, summary),
+        )
+    if values:
+        raise TaskRuntimeError("Task completion proposal arguments are invalid")
+    return ParsedTaskResponse(response, True, None)
+
+
 def _latest_turn_after(
     records: tuple[SessionRecord, ...],
     record_sequence: int,
@@ -3538,6 +4199,11 @@ def _task_result_from_info(
         completion_proposed=task.status is TaskStatus.COMPLETION_PROPOSED,
         session_turn_number=stage.turn_number,
         session_turn_record_sequence=stage.turn_record_sequence,
+        blocker=(
+            TaskBlockerProposal(task.latest_blocker.category, task.latest_blocker.summary)
+            if task.latest_blocker is not None and task.latest_blocker.stage_id == stage.stage_id
+            else None
+        ),
     )
 
 

@@ -7,6 +7,8 @@ from leonervis_code.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
+    TaskAdmissionProposed,
+    TaskLifecycleCommitted,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -34,6 +36,37 @@ def test_terminal_event_sink_writes_and_flushes_one_stable_line() -> None:
 
     assert stream.getvalue() == "[tool 1/6] succeeded code=ok\n"
     assert stream.flush_count == 1
+
+
+def test_terminal_event_sink_announces_one_committed_task_admission() -> None:
+    stream = FlushingStream()
+
+    TerminalEventSink(stream, color=False)(
+        TaskAdmissionProposed("tap-v1-" + "a" * 64, "Build a durable feature", 2)
+    )
+
+    rendered = stream.getvalue()
+    assert "Task admission proposal committed:" in rendered
+    assert "Build a durable feature" in rendered
+    assert "Reply naturally when you want to accept it" in rendered
+    assert "/task proposal accept" not in rendered
+
+
+def test_terminal_event_sink_announces_natural_task_lifecycle_commit() -> None:
+    stream = FlushingStream()
+
+    TerminalEventSink(stream, color=False)(
+        TaskLifecycleCommitted(
+            "accept-plan",
+            "12345678-1234-4234-9234-123456789abc",
+            16,
+        )
+    )
+
+    rendered = stream.getvalue()
+    assert "Task plan accepted and committed" in rendered
+    assert "Continuing in the foreground" in rendered
+    assert "/task" not in rendered
 
 
 def test_terminal_event_sink_uses_existing_semantic_colors() -> None:

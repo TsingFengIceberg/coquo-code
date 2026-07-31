@@ -33,6 +33,7 @@ from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import FrontendEventQueue
 from leonervis_code.cli.terminal_app import TerminalApplication, supports_terminal_application
 from leonervis_code.cli.turn_runner import TaskTurnRequest
+from leonervis_code.agent.tool_events import TaskLifecycleCommitted
 
 
 def parse_history_count(command: str) -> int | None:
@@ -183,6 +184,7 @@ def run_repl(
         try:
             session_switch.clear()
             prompt_method = getattr(session, "prompt", None)
+            foreground_handoff: TaskTurnRequest | None = None
             event_sink = TerminalEventSink(
                 stdout,
                 color=color,
@@ -191,22 +193,58 @@ def run_repl(
                 show_waiting=terminal_ui,
                 tool_detail_mode=tool_details.mode,
             )
+            active_event_sink = event_sink
             event_sink.start_waiting()
+
+            def observe_event(event: object) -> None:
+                nonlocal foreground_handoff
+                event_sink(event)
+                if (
+                    isinstance(event, TaskLifecycleCommitted)
+                    and event.foreground_max_stages is not None
+                ):
+                    if foreground_handoff is not None:
+                        raise RuntimeError("turn emitted more than one foreground Task handoff")
+                    foreground_handoff = TaskTurnRequest(
+                        "drive",
+                        event.task_id,
+                        max_stages=event.foreground_max_stages,
+                    )
+
             if callable(prompt_method):
                 if tool_details.mode == ToolDetailMode.FULL:
                     response = prompt_method(
                         prompt,
-                        event_sink=event_sink,
+                        event_sink=observe_event,
                         include_tool_details=True,
                     )
                 else:
-                    response = prompt_method(prompt, event_sink=event_sink)
+                    response = prompt_method(prompt, event_sink=observe_event)
             else:
                 response = getattr(session, "run")(prompt)
             if not event_sink.final_text_was_streamed:
                 event_sink.write_final_text(response)
+            if foreground_handoff is not None:
+                task_sink = TerminalEventSink(
+                    stdout,
+                    color=color,
+                    render_markdown=render_markdown,
+                    show_role_markers=terminal_ui,
+                    show_waiting=terminal_ui,
+                    tool_detail_mode=tool_details.mode,
+                )
+                active_event_sink = task_sink
+                task_sink.start_waiting()
+                task_response = _run_task_request(
+                    session,
+                    foreground_handoff,
+                    event_sink=task_sink,
+                    include_tool_details=tool_details.mode == ToolDetailMode.FULL,
+                )
+                if task_response and not task_sink.final_text_was_streamed:
+                    task_sink.write_final_text(task_response)
         except KeyboardInterrupt:
-            if event_sink.abort_stream():
+            if active_event_sink.abort_stream():
                 stdout.write(
                     f"{render_message('Generation cancelled; partial assistant text was not committed.', 'warning', color=color)}\n"
                 )
@@ -217,7 +255,7 @@ def run_repl(
             stdout.flush()
             continue
         except Exception as error:
-            _report_aborted_stream(event_sink, stdout, color=color)
+            _report_aborted_stream(active_event_sink, stdout, color=color)
             stdout.write(f"{render_message(render_turn_failure(error), 'error', color=color)}\n")
         stdout.flush()
 

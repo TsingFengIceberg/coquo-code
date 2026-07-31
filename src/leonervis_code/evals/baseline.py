@@ -23,8 +23,18 @@ from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import ActionAuditStatus
 from leonervis_code.session_store import SessionStore
+from leonervis_code.task_records import StageKind, TaskStatus
+from leonervis_code.task_store import TaskInfo, TaskStore
+from leonervis_code.tools.task_coordination import (
+    TASK_ACCEPT_ADMISSION_TOOL_NAME,
+    TASK_ACCEPT_PLAN_TOOL_NAME,
+    TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    TASK_PROPOSE_PLAN_TOOL_NAME,
+)
+from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 
-DETERMINISTIC_BASELINE_ID = "host-baseline-v1"
+DETERMINISTIC_BASELINE_ID = "host-baseline-v2"
 _SESSION_STATE_DIRECTORY = ".leonervis-code"
 
 
@@ -79,6 +89,14 @@ class EvalActionExpectation:
 
 
 @dataclass(frozen=True)
+class EvalTaskExpectation:
+    """Expected durable Task facts for one admission lifecycle fixture."""
+
+    status: TaskStatus
+    stages: tuple[tuple[StageKind, str], ...]
+
+
+@dataclass(frozen=True)
 class DeterministicEvalCase:
     """One immutable offline task, scripted trajectory, and Host-fact oracle."""
 
@@ -93,6 +111,9 @@ class DeterministicEvalCase:
     expected_files: tuple[EvalWorkspaceFile, ...]
     expected_tool_outcomes: tuple[EvalToolExpectation, ...]
     expected_action_audits: tuple[EvalActionExpectation, ...]
+    expected_committed_turns: int = 1
+    task_admission_workflow: bool = False
+    expected_task: EvalTaskExpectation | None = None
 
     def __post_init__(self) -> None:
         if not self.case_id.isascii() or not self.case_id.replace("-", "").isalnum():
@@ -105,6 +126,13 @@ class DeterministicEvalCase:
             raise ValueError("Eval initial file paths must be unique")
         if len(expected_paths) != len(set(expected_paths)):
             raise ValueError("Eval expected file paths must be unique")
+        if (
+            type(self.expected_committed_turns) is not int
+            or not 1 <= (self.expected_committed_turns) <= 20
+        ):
+            raise ValueError("Eval expected committed Turns must be between 1 and 20")
+        if self.task_admission_workflow != (self.expected_task is not None):
+            raise ValueError("Eval Task admission workflow expectation is inconsistent")
 
 
 @dataclass(frozen=True)
@@ -298,6 +326,82 @@ _BUILTIN_CASES = (
             EvalActionExpectation("read_file", ActionAuditStatus.FAILED, "allow", "tool_error"),
         ),
     ),
+    DeterministicEvalCase(
+        case_id="task-admission-lifecycle",
+        summary="Accept and complete one model-proposed durable Task through foreground Stages.",
+        prompt="Propose this bounded multi-stage work as a durable Task.",
+        permission_mode=PermissionMode.READ_ONLY,
+        approval_mode=ApprovalMode.AUTO,
+        initial_files=(),
+        provider_script=(
+            _tool(
+                "eval-admission-1",
+                TASK_PROPOSE_START_TOOL_NAME,
+                {
+                    "objective": "Finish bounded Eval work",
+                    "reason": "The work requires planning and execution Stages.",
+                    "acceptance_criteria": ["The Eval lifecycle is complete"],
+                },
+            ),
+            AssistantText("A durable Task was proposed for user review."),
+            _tool(
+                "eval-plan-1",
+                TASK_PROPOSE_PLAN_TOOL_NAME,
+                {"steps": ["Finish bounded Eval work"]},
+            ),
+            AssistantText("The bounded plan is ready for acceptance."),
+            _tool(
+                "eval-completion-1",
+                TASK_PROPOSE_COMPLETION_TOOL_NAME,
+                {},
+            ),
+            AssistantText("The admitted Task appears complete."),
+        ),
+        expected_final_text="A durable Task was proposed for user review.",
+        expected_files=(),
+        expected_tool_outcomes=(
+            EvalToolExpectation(
+                TASK_PROPOSE_START_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_admission_proposed",
+            ),
+            EvalToolExpectation(
+                TASK_ACCEPT_ADMISSION_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_lifecycle_requested",
+            ),
+            EvalToolExpectation(
+                TASK_PROPOSE_PLAN_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_proposal_received",
+            ),
+            EvalToolExpectation(
+                TASK_ACCEPT_PLAN_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_lifecycle_requested",
+            ),
+            EvalToolExpectation(
+                TASK_PROPOSE_COMPLETION_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_proposal_received",
+            ),
+            EvalToolExpectation(
+                TASK_CONFIRM_COMPLETION_TOOL_NAME,
+                ToolRequestOutcome.SUCCEEDED,
+                "task_lifecycle_requested",
+            ),
+        ),
+        expected_action_audits=(),
+        expected_committed_turns=6,
+        task_admission_workflow=True,
+        expected_task=EvalTaskExpectation(
+            TaskStatus.COMPLETED,
+            (
+                (StageKind.PLANNING, "committed"),
+                (StageKind.EXECUTION, "committed"),
+            ),
+        ),
+    ),
 )
 
 
@@ -321,6 +425,8 @@ def run_eval_case(case: DeterministicEvalCase) -> EvalCaseResult:
         session: ProjectSession | None = None
         session_id: str | None = None
         final_text: str | None = None
+        workflow_task: TaskInfo | None = None
+        workflow_admission_id: str | None = None
         execution_error: Exception | None = None
         try:
             session = ProjectSession.open(
@@ -334,6 +440,10 @@ def run_eval_case(case: DeterministicEvalCase) -> EvalCaseResult:
             )
             session_id = session.session_id
             final_text = session.prompt(case.prompt)
+            if case.task_admission_workflow:
+                workflow_admission_id, workflow_task = _run_task_admission_workflow(
+                    session, provider
+                )
         except Exception as error:
             execution_error = error
         finally:
@@ -354,12 +464,15 @@ def run_eval_case(case: DeterministicEvalCase) -> EvalCaseResult:
 
         store = SessionStore(workspace)
         info = store.inspect(session_id)
-        ledgers = store.tool_ledgers(session_id, 1)
-        ledger = ledgers.turns[0].ledger if ledgers.turns else None
+        ledgers = store.tool_ledgers(session_id, case.expected_committed_turns)
         audits = store.action_audits(session_id)
-        checks = (
+        checks = [
             _check("final_text", _text_fact(case.expected_final_text), _text_fact(final_text)),
-            _check("committed_turns", "1", str(info.turn_count)),
+            _check(
+                "committed_turns",
+                str(case.expected_committed_turns),
+                str(info.turn_count),
+            ),
             _check(
                 "workspace_entries",
                 _expected_workspace_fact(case.expected_files),
@@ -368,15 +481,109 @@ def run_eval_case(case: DeterministicEvalCase) -> EvalCaseResult:
             _check(
                 "tool_ledger",
                 _expected_tool_fact(case.expected_tool_outcomes),
-                _observed_tool_fact(ledger),
+                _observed_tool_fact(ledgers),
             ),
             _check(
                 "action_audit",
                 _expected_action_fact(case.expected_action_audits),
                 _observed_action_fact(audits),
             ),
+        ]
+        if case.expected_task is not None:
+            task_store = TaskStore(workspace)
+            tasks = task_store.list()
+            admission = (
+                None
+                if workflow_admission_id is None
+                else next(
+                    (
+                        item
+                        for item in store.task_admissions(session_id)
+                        if item.proposal.admission_id == workflow_admission_id
+                    ),
+                    None,
+                )
+            )
+            observed_task = tasks[0] if len(tasks) == 1 else workflow_task
+            origin_valid = (
+                observed_task is not None
+                and admission is not None
+                and observed_task.admission_origin is not None
+                and admission.task_id == observed_task.task_id
+                and observed_task.admission_origin.admission_id == admission.proposal.admission_id
+                and observed_task.admission_origin.source_session_id == session_id
+                and observed_task.admission_origin.source_turn_record_sequence
+                == admission.turn_record_sequence
+            )
+            checks.extend(
+                (
+                    _check("task_count", "1", str(len(tasks))),
+                    _check(
+                        "task_admission",
+                        "accepted",
+                        admission.status if admission is not None else "unavailable",
+                    ),
+                    _check("task_origin", "valid", "valid" if origin_valid else "invalid"),
+                    _check(
+                        "task_status",
+                        case.expected_task.status.value,
+                        observed_task.status.value if observed_task is not None else "unavailable",
+                    ),
+                    _check(
+                        "task_stages",
+                        _expected_task_stage_fact(case.expected_task),
+                        _observed_task_stage_fact(observed_task),
+                    ),
+                )
+            )
+        return EvalCaseResult(case.case_id, case.summary, tuple(checks))
+
+
+def _run_task_admission_workflow(
+    session: ProjectSession,
+    provider: ScriptedFakeProvider,
+) -> tuple[str, TaskInfo]:
+    admissions = session.list_task_admissions()
+    if len(admissions) != 1 or admissions[0].status != "pending":
+        raise RuntimeError("Eval Task admission proposal was not uniquely pending")
+    admission_id = admissions[0].proposal.admission_id
+    provider.insert_next(
+        (
+            _tool(
+                "eval-accept-admission-1",
+                TASK_ACCEPT_ADMISSION_TOOL_NAME,
+                {"admission_id": admission_id},
+            ),
+            AssistantText("The admission was accepted from direct user confirmation."),
         )
-        return EvalCaseResult(case.case_id, case.summary, checks)
+    )
+    session.prompt("I explicitly accept this Task admission. Start it now.")
+    task = session.accepted_task_for_admission(admission_id)
+    session.drive_task(task.task_id, max_stages=1)
+    provider.insert_next(
+        (
+            _tool(
+                "eval-accept-plan-1",
+                TASK_ACCEPT_PLAN_TOOL_NAME,
+                {"task_id": task.task_id},
+            ),
+            AssistantText("The plan was accepted from direct user confirmation."),
+        )
+    )
+    session.prompt("I explicitly accept the current Task plan. Continue.")
+    session.drive_task(task.task_id, max_stages=1)
+    provider.insert_next(
+        (
+            _tool(
+                "eval-confirm-completion-1",
+                TASK_CONFIRM_COMPLETION_TOOL_NAME,
+                {"task_id": task.task_id},
+            ),
+            AssistantText("The Task was completed from direct user confirmation."),
+        )
+    )
+    session.prompt("I explicitly confirm that the current Task completion is accepted.")
+    return admission_id, session.inspect_task(task.task_id)
 
 
 def run_eval_suite(selector: str = "all") -> EvalSuiteResult:
@@ -491,14 +698,31 @@ def _expected_tool_fact(expected: tuple[EvalToolExpectation, ...]) -> str:
     return json.dumps(values, separators=(",", ":"))
 
 
-def _observed_tool_fact(ledger) -> str:
-    if ledger is None:
+def _observed_tool_fact(ledgers) -> str:
+    if not ledgers.turns or any(turn.ledger is None for turn in ledgers.turns):
         return "unavailable"
     values = [
         f"{item.tool_name}:{item.outcome.value}:{item.result_code or '-'}"
-        for item in ledger.entries
+        for turn in ledgers.turns
+        for item in turn.ledger.entries
     ]
     return json.dumps(values, separators=(",", ":"))
+
+
+def _expected_task_stage_fact(expected: EvalTaskExpectation) -> str:
+    return json.dumps(
+        [f"{kind.value}:{outcome}" for kind, outcome in expected.stages],
+        separators=(",", ":"),
+    )
+
+
+def _observed_task_stage_fact(task: TaskInfo | None) -> str:
+    if task is None:
+        return "unavailable"
+    return json.dumps(
+        [f"{stage.kind.value}:{stage.outcome}" for stage in task.stages],
+        separators=(",", ":"),
+    )
 
 
 def _expected_action_fact(expected: tuple[EvalActionExpectation, ...]) -> str:

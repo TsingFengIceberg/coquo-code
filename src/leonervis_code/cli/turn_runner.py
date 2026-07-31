@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import (
+    ForegroundTaskHandoff,
     FrontendEventQueue,
     PromptActivity,
     TurnCompleting,
@@ -14,6 +15,7 @@ from leonervis_code.cli.frontend import (
     TurnFinished,
     TurnSubmitted,
 )
+from leonervis_code.agent.tool_events import TaskLifecycleCommitted
 from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 
@@ -111,14 +113,30 @@ class TurnRunner:
     ) -> None:
         try:
             prompt_method = getattr(self._session, "prompt")
+            task_handoff: ForegroundTaskHandoff | None = None
+
+            def observe_event(event: object) -> None:
+                nonlocal task_handoff
+                self._queue.put(PromptActivity(turn_id, event))
+                if (
+                    isinstance(event, TaskLifecycleCommitted)
+                    and event.foreground_max_stages is not None
+                ):
+                    if task_handoff is not None:
+                        raise RuntimeError("turn emitted more than one foreground Task handoff")
+                    task_handoff = ForegroundTaskHandoff(
+                        event.task_id,
+                        event.foreground_max_stages,
+                    )
+
             response = prompt_method(
                 prompt,
-                event_sink=lambda event: self._queue.put(PromptActivity(turn_id, event)),
+                event_sink=observe_event,
                 include_tool_details=include_tool_details,
                 cancellation=cancellation,
             )
             self._queue.put(TurnCompleting(turn_id))
-            self._queue.put(TurnFinished(turn_id, response))
+            self._queue.put(TurnFinished(turn_id, response, task_handoff))
         except TurnCancelled:
             self._queue.put(
                 TurnFailed(

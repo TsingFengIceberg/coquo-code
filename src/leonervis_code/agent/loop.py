@@ -27,7 +27,7 @@ from leonervis_code.agent.tool_events import (
 from leonervis_code.agent.task_control import (
     TaskControlDispatcher,
     TaskControlDispatchResult,
-    TaskControlProposal,
+    TaskProposal,
     TaskProposalSink,
 )
 from leonervis_code.core.actions import ActionLease
@@ -358,7 +358,7 @@ class AgentLoop:
         ledger_summary_attached = False
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
         attempt_usage = ToolAttemptUsage()
-        pending_task_proposal: TaskControlProposal | None = None
+        pending_task_proposal: TaskProposal | None = None
         self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:

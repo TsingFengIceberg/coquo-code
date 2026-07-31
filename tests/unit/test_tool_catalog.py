@@ -7,8 +7,10 @@ from leonervis_code.tools.catalog import (
     TOOL_CATALOG,
     model_tool_definitions,
     select_tool_definitions,
+    tool_input_for_provider_history,
     tool_input_from_use,
     tool_use_from_input,
+    tool_use_from_provider_input,
 )
 
 
@@ -35,6 +37,14 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "git_diff",
         "git_log",
         "git_show",
+        "task_propose_plan",
+        "task_report_reflection",
+        "task_report_blocker",
+        "task_propose_completion",
+        "task_propose_start",
+        "task_accept_admission",
+        "task_accept_plan",
+        "task_confirm_completion",
     ]
     request = tool_use_from_input(
         "edit-1",
@@ -61,6 +71,103 @@ def test_catalog_selects_exact_tools_in_global_canonical_order() -> None:
         "grep",
         "git_show",
     )
+
+
+def test_provider_input_defers_bounded_ordinary_tool_validation_only() -> None:
+    deferred = tool_use_from_provider_input(
+        "write-1",
+        "write_file",
+        {"path": "large.txt", "content": "x" * 4097},
+    )
+
+    assert deferred.arguments.as_mapping()["content"] == "x" * 4097
+    assert tool_input_for_provider_history(deferred)["content"] == "x" * 4097
+    with pytest.raises(ValueError, match="exceeds the supported size"):
+        tool_input_from_use(deferred)
+    with pytest.raises(ValueError):
+        tool_use_from_provider_input("task-1", "task_accept_plan", {"task_id": "bad"})
+    with pytest.raises(ValueError):
+        tool_use_from_provider_input("unknown-1", "unknown", {})
+
+
+def test_catalog_validates_closed_task_coordination_inputs() -> None:
+    plan = tool_use_from_input(
+        "plan-1",
+        "task_propose_plan",
+        {"steps": ["Inspect", "Verify"]},
+    )
+    reflection = tool_use_from_input(
+        "reflection-1",
+        "task_report_reflection",
+        {
+            "recommendation": "correction",
+            "summary": "One bounded correction is needed.",
+            "next_objective": "Apply the correction.",
+        },
+    )
+    blocker = tool_use_from_input(
+        "blocker-1",
+        "task_report_blocker",
+        {"category": "human-evidence", "summary": "User evidence is required."},
+    )
+    completion = tool_use_from_input("completion-1", "task_propose_completion", {})
+    admission = tool_use_from_input(
+        "admission-1",
+        "task_propose_start",
+        {
+            "objective": "Implement the feature",
+            "reason": "Several bounded stages are needed.",
+            "acceptance_criteria": ["Tests pass"],
+        },
+    )
+    accept_admission = tool_use_from_input(
+        "accept-admission-1",
+        "task_accept_admission",
+        {"admission_id": "tap-v1-" + "a" * 64},
+    )
+    accept_plan = tool_use_from_input(
+        "accept-plan-1",
+        "task_accept_plan",
+        {"task_id": "12345678-1234-4234-9234-123456789abc"},
+    )
+    confirm_completion = tool_use_from_input(
+        "confirm-completion-1",
+        "task_confirm_completion",
+        {"task_id": "12345678-1234-4234-9234-123456789abc"},
+    )
+
+    assert tool_input_from_use(plan) == {"steps": ["Inspect", "Verify"]}
+    assert tool_input_from_use(reflection)["recommendation"] == "correction"
+    assert tool_input_from_use(blocker)["category"] == "human-evidence"
+    assert tool_input_from_use(completion) == {}
+    assert tool_input_from_use(admission)["acceptance_criteria"] == ["Tests pass"]
+    assert tool_input_from_use(accept_admission)["admission_id"].startswith("tap-v1-")
+    assert tool_input_from_use(accept_plan) == {"task_id": "12345678-1234-4234-9234-123456789abc"}
+    assert tool_input_from_use(confirm_completion) == tool_input_from_use(accept_plan)
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("task_propose_plan", {"steps": []}),
+        (
+            "task_report_reflection",
+            {
+                "recommendation": "continue",
+                "summary": "Continue.",
+                "next_objective": None,
+            },
+        ),
+        ("task_report_blocker", {"category": "unknown", "summary": "Blocked."}),
+        ("task_propose_completion", {"claim": True}),
+        ("task_accept_admission", {"admission_id": "bad"}),
+        ("task_accept_plan", {"task_id": "bad"}),
+        ("task_confirm_completion", {"task_id": "bad"}),
+    ],
+)
+def test_catalog_rejects_invalid_task_coordination_inputs(name, arguments) -> None:
+    with pytest.raises(ValueError):
+        tool_use_from_input("task-1", name, arguments)
     assert tuple(item["name"] for item in model_tool_definitions(("git_show", "grep"))) == (
         "grep",
         "git_show",

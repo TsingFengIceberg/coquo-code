@@ -33,6 +33,7 @@ from leonervis_code.core.compaction import (
 from leonervis_code.core.contracts import (
     AssistantToolBatch,
     AssistantText,
+    CommittedTurn,
     ConversationItem,
     ConversationTurn,
     ToolArguments,
@@ -42,6 +43,12 @@ from leonervis_code.core.contracts import (
     ToolTurnLedger,
     ToolUse,
     UserMessage,
+)
+from leonervis_code.core.task_admission import (
+    TaskAdmissionOutcome,
+    TaskAdmissionProposal,
+    canonical_task_admission_id,
+    recover_task_admission_proposal,
 )
 from leonervis_code.core.permissions import (
     ApprovalMode,
@@ -491,6 +498,26 @@ class SessionClosed:
     schema_version: int = SCHEMA_VERSION
 
 
+@dataclass(frozen=True)
+class TaskAdmissionResolved:
+    sequence: int
+    occurred_at: str
+    admission_id: str
+    outcome: TaskAdmissionOutcome
+    task_id: str | None = None
+    reason: str | None = None
+    record_type: str = "task_admission_resolved"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TaskAdmissionSource:
+    proposal: TaskAdmissionProposal
+    turn_record_sequence: int
+    turn_number: int
+    committed_at: str
+
+
 SessionRecord: TypeAlias = (
     SessionHeader
     | TurnCommitted
@@ -509,6 +536,7 @@ SessionRecord: TypeAlias = (
     | Recovery
     | ContextCompacted
     | CompactionFailed
+    | TaskAdmissionResolved
     | SessionClosed
 )
 AuditRecord: TypeAlias = (
@@ -526,6 +554,7 @@ AuditRecord: TypeAlias = (
     | SessionResumed
     | Recovery
     | CompactionFailed
+    | TaskAdmissionResolved
     | SessionClosed
 )
 
@@ -542,6 +571,8 @@ class ReplayState:
     effective_source: str
     latest_checkpoint: ContextCompacted | None
     action_audits: tuple[ActionAuditState, ...]
+    task_admissions: tuple[TaskAdmissionSource, ...]
+    task_admission_resolutions: tuple[TaskAdmissionResolved, ...]
     turns: tuple[ConversationTurn, ...]
     latest_name: SessionNamed | None
     archived: bool
@@ -690,6 +721,8 @@ def replay_records(
     seen_tool_ids: set[str] = set()
     action_states: dict[str, ActionAuditState] = {}
     action_order: list[str] = []
+    task_admissions: list[TaskAdmissionSource] = []
+    task_admission_resolutions: list[TaskAdmissionResolved] = []
     grant_ids: set[str] = set()
     live_action_request_id: str | None = None
     validated: list[SessionRecord] = []
@@ -711,6 +744,30 @@ def replay_records(
             _validate_turn(record.items, seen_tool_ids)
             _validate_turn_ledger(record)
             _validate_turn_session_name(record)
+            committed = CommittedTurn(
+                record.items,
+                record.items[0],  # type: ignore[arg-type]
+                record.items[-1],  # type: ignore[arg-type]
+                record.tool_ledger,
+            )
+            try:
+                admission = recover_task_admission_proposal(committed)
+            except ValueError as error:
+                raise SessionRecordError(f"invalid Task admission proposal: {error}") from None
+            if admission is not None:
+                if any(
+                    source.proposal.admission_id == admission.admission_id
+                    for source in task_admissions
+                ):
+                    raise SessionRecordError("Task admission ID is duplicated")
+                task_admissions.append(
+                    TaskAdmissionSource(
+                        admission,
+                        record.sequence,
+                        len(turns) + 1,
+                        record.committed_at,
+                    )
+                )
             if record.session_name is not None and (turns or latest_name is not None):
                 raise SessionRecordError(
                     "turn_committed Session name is only valid on an unnamed first turn"
@@ -914,6 +971,18 @@ def replay_records(
             _validate_compaction_failed(record)
             if record.binding != binding:
                 raise SessionRecordError("compaction_failed binding does not match current runtime")
+        elif isinstance(record, TaskAdmissionResolved):
+            _require_no_live_action(live_action_request_id, "task_admission_resolved")
+            _validate_task_admission_resolved(record)
+            if not any(
+                source.proposal.admission_id == record.admission_id for source in task_admissions
+            ):
+                raise SessionRecordError("Task admission resolution references an unknown proposal")
+            if any(
+                prior.admission_id == record.admission_id for prior in task_admission_resolutions
+            ):
+                raise SessionRecordError("Task admission proposal is already resolved")
+            task_admission_resolutions.append(record)
         elif isinstance(record, SessionClosed):
             _require_no_live_action(live_action_request_id, "session_closed")
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -931,6 +1000,8 @@ def replay_records(
         effective_source=effective_source,
         latest_checkpoint=latest_checkpoint,
         action_audits=tuple(action_states[request_id] for request_id in action_order),
+        task_admissions=tuple(task_admissions),
+        task_admission_resolutions=tuple(task_admission_resolutions),
         turns=tuple(turns),
         latest_name=latest_name,
         archived=archived,
@@ -1285,6 +1356,15 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
                 expected_kind=ProviderInvocationKind.COMPACTION,
                 label="compaction_failed",
             ),
+        )
+    elif isinstance(record, TaskAdmissionResolved):
+        _validate_task_admission_resolved(record)
+        common.update(
+            occurred_at=record.occurred_at,
+            admission_id=record.admission_id,
+            outcome=record.outcome.value,
+            task_id=record.task_id,
+            reason=record.reason,
         )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -1831,6 +1911,19 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             reason=_required_field_text(value, "reason", record_type, allow_empty=True),
         )
+    if record_type == "task_admission_resolved":
+        fields = simple_fields | {"admission_id", "outcome", "task_id", "reason"}
+        _closed_fields(value, fields, record_type)
+        record = TaskAdmissionResolved(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            admission_id=_required_field_text(value, "admission_id", record_type),
+            outcome=_enum_field(value, "outcome", record_type, TaskAdmissionOutcome),
+            task_id=_nullable_field_text(value, "task_id", record_type),
+            reason=_nullable_field_text(value, "reason", record_type),
+        )
+        _validate_task_admission_resolved(record)
+        return record
     raise SessionRecordError(f"unknown session record type: {record_type}")
 
 
@@ -2488,6 +2581,27 @@ def _validate_record_version(record: SessionRecord) -> None:
         return
     if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")
+
+
+def _validate_task_admission_resolved(record: TaskAdmissionResolved) -> None:
+    _validate_timestamp(record.occurred_at, "task_admission_resolved occurred_at")
+    try:
+        canonical_task_admission_id(record.admission_id)
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+    if type(record.outcome) is not TaskAdmissionOutcome:
+        raise SessionRecordError("Task admission outcome is invalid")
+    if record.outcome is TaskAdmissionOutcome.ACCEPTED:
+        if record.task_id is None or record.reason is not None:
+            raise SessionRecordError("accepted Task admission requires only its Task ID")
+        try:
+            canonical_uuid4(record.task_id, "Task ID")
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+    elif record.task_id is not None:
+        raise SessionRecordError("rejected Task admission cannot contain a Task ID")
+    if record.reason is not None:
+        _required_text(record.reason, "Task admission rejection reason")
 
 
 def _validate_context_compacted_fields(record: ContextCompacted) -> None:

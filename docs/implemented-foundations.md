@@ -32,6 +32,8 @@
 - [Task Planning、Acceptance、Budgets 与 Management](#task-planningacceptancebudgets-与-management)
 - [Structured Task Acceptance 与 Independent Review](#structured-task-acceptance-与-independent-review)
 - [Task Proposal Control Boundary](#task-proposal-control-boundary)
+- [自然语言 Task 生命周期交接](#自然语言-task-生命周期交接)
+- [可恢复的 Provider Tool 参数校验](#可恢复的-provider-tool-参数校验)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -449,9 +451,9 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 
 ## 确定性离线 Host Eval 基线
 
-`leonervis-code eval`提供首个版本化考试集`host-baseline-v1`。四个内置案例分别覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
+`leonervis-code eval`当前提供版本化考试集`host-baseline-v2`。前四个内置案例覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作；第五个案例覆盖模型提议Task、用户精确确认、前台planning/execution、人工验收与完成。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
 
-评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、逐请求durable tool ledger和Action Audit lifecycle。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
+评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、跨全部相关Turn按时间排序的durable tool ledger和Action Audit lifecycle。Task案例还验证accepted admission、唯一且来源匹配的Task、最终状态及Stage kind/outcome。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
 
 这是Host correctness baseline，不是pytest替代品，也不是对真实模型规划质量、随机性或泛化能力的评估。它不运行credential、网络、API费用、command sandbox、性能benchmark、排行榜或外部fixture；scripted trajectory通过只说明固定Harness路径仍符合已声明不变量。该Host-only入口没有改变model-visible tool、system prompt v23、adapter contract v26、Effective Context、Session或Action Audit schema。详见[0084：Deterministic Offline Host Eval Baseline](./decisions/0084-deterministic-offline-host-eval-baseline.md)。
 
@@ -1073,6 +1075,44 @@ AgentLoop新增与`ActionDispatcher`分开的Task-control dispatch seam。Contro
 
 内部`TaskControlProposal`固定绑定proposal kind、Task/Stage identity、pinned Effective Context ID、tool-use ID与有界ToolArguments。成功dispatch必须携带匹配proposal；AgentLoop只有在完整Session Turn已成功commit后才调用Host proposal sink。恢复时不相信assistant或ToolResult正文，而要求committed Turn内存在唯一匹配control call，且Host ledger对相同ID和tool name记录`succeeded`。当前尚未加入任何公开Task coordination tool，因此普通模型行为、21-tool catalog与system prompt v26不变；provider adapter contract因精确子集投影升级为v27，`ctx-v5`/`ctx-v6`、Session/Task/Action Audit schema与8/32/24预算不变。详见[0094：Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md)。
 
+## 模型可见 Task 协调工具
+
+完整canonical catalog现在在原21个普通工具后追加`task_propose_plan`、`task_report_reflection`、`task_report_blocker`和`task_propose_completion`。普通prompt仍只曝光原21个工具；planning Stage只获得有界read/Git观察加plan/blocker，reflection Stage只获得reflection/blocker，execution与correction Stage获得21个普通工具加completion/blocker。Provider若请求不属于当前Stage精确子集的工具，会在dispatch前失败。
+
+四个工具只提交提议，不是filesystem Action：它们不取得Action lease、不经过PermissionGate、也不创建Action Audit，但仍进入ToolUse/ToolResult因果、共享Turn预算、Session transcript与Host tool ledger。Control call必须独占一个assistant response，处理后只允许text-only finalization。Blocker使用封闭category，令当前Task进入blocked并让Driver以`model-blocked`停止，但不能授予权限、补齐证据、终止或完成Task。
+
+Proposal sink只暂存与Task、Stage、context、tool-use ID和规范参数绑定的immutable值。耐久顺序固定为`stage_started -> Session Turn append+fsync -> stage_committed -> Task proposal record`；因此Session/Stage提交失败不会写Task proposal，而Task最后append失败可从精确committed Turn与成功Host ledger恢复。同一tool-use ID和相同规范参数的恢复是幂等的，参数变化、跨Task重复ID或同Stage不同proposal会拒绝。新plan/completion/reflection/blocker记录分别使用schema v3/v2/v2/v1；旧plan v1/v2、completion v1与reflection v1继续读取且不重写。旧`TASK_PLAN_JSON`、`TASK_REFLECTION_JSON`及`TASK_COMPLETION_PROPOSAL`只保留历史Stage恢复兼容。
+
+Canonical system prompt升级为v27，provider adapter contract升级为v28。Effective Context representation仍为`ctx-v5`/`ctx-v6`，catalog内容变化使无项目指令的empty full-context ID更新为`ctx-v5-63362449120e69a39d2a03b22c8c1937ee66d2fd67d065d4e3ccfd3466d88aa7`。ToolArguments v1、Session/Action Audit/compaction/Task Stage schema、8/32/24预算、acceptance policy及workspace硬边界不变。详见[0095：Model-visible Task Coordination Tools](./decisions/0095-model-visible-task-coordination-tools.md)。
+
+## 模型提议的 Task Admission
+
+普通Prompt现在在原21个工具后额外曝光`task_propose_start(objective, reason, acceptance_criteria)`，模型可说明一项工作为何需要多个有界Stage。该调用只形成proposal：它不创建或接受Task、不执行Stage、不取得Action lease、不经过PermissionGate且不创建Action Audit。它必须独占assistant tool response、共享8/32/24预算，并在receipt后强制text-only结束；四个既有Stage协调工具在普通Prompt中仍不可用，Task Stage也不获得`task_propose_start`。
+
+Immutable `TaskAdmissionProposal`把目标、原因、1-16条验收条件、pinned Effective Context ID和tool-use ID绑定到deterministic `tap-v1-...` identity。Pending状态不另写重复record，而是只从durable committed Turn派生：replay要求exact ToolUse、匹配的non-error ToolResult receipt及相同ID/name的Host ledger `succeeded`事实。Assistant文字、未提交turn或失败ledger都不能制造proposal。
+
+用户通过`/task proposals [pending|accepted|rejected|all]`与`/task proposal show|accept|reject|drive`只管理current Session的proposal。`accept`第一次调用只读预览规范name、budget、completion policy、prepared criteria以及configuration/confirmation SHA-256；携digest再次确认且candidate仍一致时，才创建带`task_admission_origin` v1的Task并向源Session追加`task_admission_resolved` v1。Origin同时持久化两个digest；若Task创建成功但Session append失败，完全相同的重试会找回同一个Task并补写resolution，不同配置或confirmation则拒绝。接受不调用provider，`drive`才把已接受proposal交给现有有界前台Driver。Reject只追加可选原因的rejected resolution且不创建Task；pending/rejected proposal不能drive。
+
+Canonical catalog现在共26个定义，普通Prompt曝光22个，Task Stage精确子集不变。知情接受与Driver交接是Host/terminal生命周期变化，因此system prompt保持v28、provider adapter contract保持v29，Effective Context仍为`ctx-v5`/`ctx-v6`，无项目指令的empty full-context ID保持`ctx-v5-0112c304e7ae0718fad6efdc4e7f5b258d267d9922854d3846fe76f1e594abf0`。`turn_committed` v8、ToolArguments v1、Action Audit、compaction、预算及旧Session/Task transcript均不变且不重写。Provider启动失败保留accepted admission和准确failed Stage；重启后可继续drive。若Session Turn已提交但Task proposal append失败，`/task recover`只从精确committed ToolUse与成功Host ledger补写，不重跑provider或重复Stage。自动接受、accept后自动Driver和跨Session隐式修改仍未实现。详见[0097：Informed Task Admission and Foreground Handoff](./decisions/0097-informed-task-admission-and-foreground-handoff.md)。
+
+## 自然语言 Task 生命周期交接
+
+普通Prompt新增`task_accept_admission`、`task_accept_plan`和`task_confirm_completion`，把当前用户的明确自然语言决定转换成封闭结构化请求。模型不生成slash command，Host也不对“OK”“同意”等文本做关键词匹配；模型负责理解语言，Host只接受精确pending admission、latest unaccepted plan或current completion proposal。模糊话语、模型自身建议、项目指令、文件、工具结果和summary都不能充当人工授权。
+
+生命周期工具dispatch时不修改Task。Host先把请求绑定到current Session、pinned Effective Context、tool-use ID、subject及confirmation SHA-256/plan ID/completion Stage ID；AgentLoop提交完整普通Session Turn和成功tool ledger后，post-commit sink再恢复精确因果、复核stale状态并调用既有Task API。Admission与plan接受随后产生typed foreground handoff：常驻终端在旧worker有界清理后自动启动同一个`drive_task`，普通REPL在`prompt()`返回后接续；两者都不伪造user message或slash command。One-shot只提交生命周期状态，不读取stdin或偷偷进入交互循环。
+
+Completion confirmation只能用该直接user Turn为未解决的`human` criteria写入证据；任何未验证Host-check或independent-reviewer条件都会在成功tool receipt前拒绝。三个工具均不能授予filesystem权限、批准Action、绕过Task预算或伪造验收来源。`/task`继续用于自定义admission配置、精确预览、审计、拒绝、暂停、恢复、independent review及高级控制，但不再是普通成功路径的必经入口。
+
+Catalog由26增至29个定义，普通Prompt由22增至25个工具；Task Stage最小子集不变。Canonical system prompt升级为v29，provider adapter contract升级为v30，无项目指令的empty full-context ID更新为`ctx-v5-d7662f867a8ebb6f1be1be18eaa0090ef96fb22547cd3a9d7104dc2f69a0328e`。Effective Context representation、ToolArguments v1、8/32/24预算、Session/Task/Action Audit schema及旧transcript不变且不重写。详见[0098：Natural-language Task Lifecycle Handoffs](./decisions/0098-natural-language-task-lifecycle-handoffs.md)。
+
+## 可恢复的 Provider Tool 参数校验
+
+Anthropic与OpenAI-compatible adapter现在区分“无法安全表示的provider响应”和“可规范保存但违反普通工具具体schema的参数”。前者包括坏JSON、非object、未知工具、重复或无效ID、超过全局16 KiB的参数，以及无效Task协调参数，仍以`response_invalid`安全终止且不提交Turn。后者会先冻结为ToolArguments，再由既有Host工具边界返回匹配的错误ToolResult；下一次continuation原样回传该ToolUse/ToolResult因果，让模型在同一Turn缩短或修正调用。
+
+该变化不放宽任何执行边界。`write_file`的provider schema新增`maxLength: 4096`提示，而Host仍同时强制4096 characters和4096 UTF-8 bytes；PermissionGate和approval不能提高限制。Task proposal/lifecycle工具继续在adapter层完整校验，不能用错误参数接近Task耐久状态机。
+
+Provider adapter contract升级为v31；canonical system prompt保持v29。Catalog数量和顺序不变，但`write_file` exact schema使无项目指令的empty full-context ID更新为`ctx-v5-e681ce5f35a3bd5b4d0591912d49119c767e97ad87b9ecad6806777c3a6caecd`。Effective Context representation、ToolArguments v1、Session/Task/Action Audit schema、8/32/24预算和旧transcript均不变且不重写。详见[0099：Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)。
+
 ## TTY Host 包装与进程内命令历史
 
 常驻TTY现在把灰色Host block和Turn内`  │ `轨迹按当前显示宽度转换为有界视觉行，再为每一行应用相同缩进或轨迹前缀。超长context、tool、usage、failure与slash结果因此不会依赖终端在右边缘自行折行后回到第0列；非TTY、重定向输出、assistant Markdown及approval内部样式保持原路径。
@@ -1175,3 +1215,8 @@ Prompt history启动时仍从当前Session最多1000条已提交user prompt建�
 92. [0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)
 93. [0093：TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)
 94. [0094：Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md)
+95. [0095：Model-visible Task Coordination Tools](./decisions/0095-model-visible-task-coordination-tools.md)
+96. [0096：Model-proposed Task Admission](./decisions/0096-model-proposed-task-admission.md)
+97. [0097：Informed Task Admission and Foreground Handoff](./decisions/0097-informed-task-admission-and-foreground-handoff.md)
+98. [0098：Natural-language Task Lifecycle Handoffs](./decisions/0098-natural-language-task-lifecycle-handoffs.md)
+99. [0099：Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)

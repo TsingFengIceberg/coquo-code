@@ -404,6 +404,7 @@ def write_file_model_definition() -> dict[str, object]:
                 },
                 "content": {
                     "type": "string",
+                    "maxLength": MAX_WRITE_CONTENT_CHARACTERS,
                     "description": (
                         f"Complete UTF-8 file content, at most {MAX_WRITE_CONTENT_BYTES} bytes."
                     ),

@@ -58,8 +58,8 @@ from leonervis_code.providers.usage import (
 from leonervis_code.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     model_tool_definitions,
-    tool_input_from_use,
-    tool_use_from_input,
+    tool_input_for_provider_history,
+    tool_use_from_provider_input,
 )
 
 PROVIDER_ID = "anthropic"
@@ -523,6 +523,38 @@ def git_show_tool_definition() -> dict[str, object]:
     return model_tool_definitions()[20]
 
 
+def task_propose_plan_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[21]
+
+
+def task_report_reflection_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[22]
+
+
+def task_report_blocker_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[23]
+
+
+def task_propose_completion_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[24]
+
+
+def task_propose_start_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[25]
+
+
+def task_accept_admission_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[26]
+
+
+def task_accept_plan_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[27]
+
+
+def task_confirm_completion_tool_definition() -> dict[str, object]:
+    return model_tool_definitions()[28]
+
+
 def serialize_history(
     history: tuple[ConversationItem, ...],
     *,
@@ -559,7 +591,7 @@ def serialize_history(
             if expected != "assistant":
                 raise _invalid_history(config, "tool use is out of causal order")
             try:
-                tool_input = tool_input_from_use(item)
+                tool_input = tool_input_for_provider_history(item)
             except ValueError:
                 raise _invalid_history(
                     config, f"unsupported tool in history: {item.name}"
@@ -599,7 +631,7 @@ def serialize_history(
                 content.append({"type": "text", "text": item.assistant_text})
             for request in item.tool_uses:
                 try:
-                    tool_input = tool_input_from_use(request)
+                    tool_input = tool_input_for_provider_history(request)
                 except ValueError:
                     raise _invalid_history(
                         config, f"unsupported tool in history: {request.name}"
@@ -829,7 +861,7 @@ def parse_response(
         if not isinstance(tool_input, dict):
             raise _invalid_response(config, f"Anthropic {name} input was malformed")
         try:
-            requests.append(tool_use_from_input(tool_use_id, name, tool_input))
+            requests.append(tool_use_from_provider_input(tool_use_id, name, tool_input))
         except ValueError:
             raise _invalid_response(config, f"Anthropic {name} input was malformed") from None
     joined_text = "".join(text_parts)
@@ -1107,7 +1139,9 @@ def parse_response_stream(
         if not isinstance(tool_input, dict):
             raise _invalid_response(config, "Anthropic stream tool input was malformed")
         try:
-            requests.append(tool_use_from_input(tool.tool_use_id, tool.tool_name, tool_input))
+            requests.append(
+                tool_use_from_provider_input(tool.tool_use_id, tool.tool_name, tool_input)
+            )
         except ValueError:
             raise _invalid_response(
                 config,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import get_close_matches
+import json
+import shlex
 from typing import Protocol
 
 from leonervis_code.cli.presentation import (
@@ -57,6 +59,9 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_session_turn_range,
     render_task_info,
+    render_task_admission_info,
+    render_task_admission_acceptance_preview,
+    render_task_admission_summary,
     render_task_next_action,
     render_task_summary,
     render_task_timeline,
@@ -69,6 +74,7 @@ from leonervis_code.cli.presentation import (
 )
 from leonervis_code.core.compaction import CompactionError
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.core.task_admission import canonical_task_admission_id
 from leonervis_code.cli.failure_guidance import command_failure_guidance
 from leonervis_code.cli.turn_runner import TaskTurnRequest
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -88,6 +94,7 @@ from leonervis_code.session_records import (
     canonical_session_id,
 )
 from leonervis_code.task_records import TaskRecordError, TaskStatus, canonical_task_id
+from leonervis_code.task_store import TaskAdmissionConfiguration
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 from leonervis_code.tools.catalog import TOOL_CATALOG
@@ -206,6 +213,11 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session switch", "Build or use a recent Session picker"),
     SlashCompletionSpec("/session switch list", "Refresh the Session picker with filters"),
     SlashCompletionSpec("/task start", "Create a Task owned by the current Session"),
+    SlashCompletionSpec("/task proposals", "List current-Session Task admission proposals"),
+    SlashCompletionSpec("/task proposal show", "Show one Task admission proposal"),
+    SlashCompletionSpec("/task proposal accept", "Accept and create one proposed Task"),
+    SlashCompletionSpec("/task proposal reject", "Reject one Task admission proposal"),
+    SlashCompletionSpec("/task proposal drive", "Drive one accepted Task proposal"),
     SlashCompletionSpec("/task list", "List workspace Tasks"),
     SlashCompletionSpec("/task show", "Show one workspace Task"),
     SlashCompletionSpec("/task continue", "Execute one bounded Task Stage"),
@@ -326,6 +338,26 @@ class ReplSession(Protocol):
     def list_tasks(self): ...
 
     def inspect_task(self, task_id: str): ...
+
+    def list_task_admissions(self): ...
+
+    def inspect_task_admission(self, admission_id: str): ...
+
+    def preview_task_admission_acceptance(
+        self, admission_id: str, configuration: TaskAdmissionConfiguration
+    ): ...
+
+    def accept_task_admission(
+        self,
+        admission_id: str,
+        configuration: TaskAdmissionConfiguration,
+        *,
+        confirmation_sha256: str,
+    ): ...
+
+    def accepted_task_for_admission(self, admission_id: str): ...
+
+    def reject_task_admission(self, admission_id: str, reason: str | None = None): ...
 
     def derive_task(self, parent_task_id: str, objective: str): ...
 
@@ -543,6 +575,16 @@ def dispatch_slash(
         return SlashResult(handled=True, message=TASK_HELP, kind="info")
     if command == "/task start" or command.startswith("/task start "):
         return _task_start(command, session)
+    if command == "/task proposals" or command.startswith("/task proposals "):
+        return _task_proposals(command, session)
+    if command == "/task proposal show" or command.startswith("/task proposal show "):
+        return _task_proposal_show(command, session)
+    if command == "/task proposal accept" or command.startswith("/task proposal accept "):
+        return _task_proposal_accept(command, session)
+    if command == "/task proposal reject" or command.startswith("/task proposal reject "):
+        return _task_proposal_reject(command, session)
+    if command == "/task proposal drive" or command.startswith("/task proposal drive "):
+        return _task_proposal_drive(command, session)
     if command == "/task list" or command.startswith("/task list "):
         return _task_list(command, session)
     if command == "/task show" or command.startswith("/task show "):
@@ -601,6 +643,8 @@ def dispatch_slash(
             subcommand,
             (
                 "start",
+                "proposals",
+                "proposal",
                 "list",
                 "show",
                 "continue",
@@ -1206,6 +1250,185 @@ def _task_start(command: str, session: ReplSession) -> SlashResult:
         kind="success",
         failure_prefix="Task creation failed",
     )
+
+
+def _task_proposals(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {2, 3}:
+        return _usage("Usage: /task proposals [pending|accepted|rejected|all]")
+    status = parts[2] if len(parts) == 3 else "pending"
+    if status not in {"pending", "accepted", "rejected", "all"}:
+        return _usage("Usage: /task proposals [pending|accepted|rejected|all]")
+
+    def render() -> str:
+        proposals = session.list_task_admissions()
+        if status != "all":
+            proposals = tuple(item for item in proposals if item.status == status)
+        if not proposals:
+            return f"No {status} Task admission proposals in the current Session."
+        return "\n".join(render_task_admission_summary(item) for item in proposals)
+
+    return _call(render, kind="info", failure_prefix="Task admission listing failed")
+
+
+def _task_proposal_show(command: str, session: ReplSession) -> SlashResult:
+    admission_id = _task_admission_id_from_command(command, "show")
+    if admission_id is None:
+        return _usage("Usage: /task proposal show <admission-id>")
+    return _call(
+        lambda: render_task_admission_info(session.inspect_task_admission(admission_id)),
+        kind="info",
+        failure_prefix="Task admission inspection failed",
+    )
+
+
+def _task_proposal_accept(command: str, session: ReplSession) -> SlashResult:
+    usage = (
+        "Usage: /task proposal accept <admission-id> [<config-json>] | "
+        "/task proposal accept <admission-id> confirm <sha256> [<config-json>]"
+    )
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return _usage(usage)
+    if len(parts) not in {4, 5, 6, 7} or parts[:3] != ["/task", "proposal", "accept"]:
+        return _usage(usage)
+    try:
+        admission_id = canonical_task_admission_id(parts[3])
+    except ValueError:
+        return _usage(usage)
+    confirming = len(parts) >= 5 and parts[4] == "confirm"
+    if confirming:
+        if len(parts) not in {6, 7} or not _is_sha256(parts[5]):
+            return _usage(usage)
+        confirmation_sha256 = parts[5]
+        raw_configuration = parts[6] if len(parts) == 7 else None
+    else:
+        if len(parts) not in {4, 5}:
+            return _usage(usage)
+        confirmation_sha256 = None
+        raw_configuration = parts[4] if len(parts) == 5 else None
+    try:
+        configuration = _task_admission_configuration(raw_configuration)
+    except Exception as error:
+        return _command_error(error, failure_prefix="Task admission configuration invalid")
+    if confirming:
+        return _call(
+            lambda: _render_accepted_task_admission(
+                admission_id,
+                session.accept_task_admission(
+                    admission_id,
+                    configuration,
+                    confirmation_sha256=confirmation_sha256,
+                ),
+            ),
+            kind="success",
+            failure_prefix="Task admission acceptance failed",
+        )
+
+    def preview() -> str:
+        candidate = session.preview_task_admission_acceptance(admission_id, configuration)
+        command_suffix = ""
+        if configuration != TaskAdmissionConfiguration():
+            canonical = json.dumps(
+                configuration.as_mapping(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            command_suffix = f" {shlex.quote(canonical)}"
+        confirmation_command = (
+            f"/task proposal accept {admission_id} confirm "
+            f"{candidate.confirmation_sha256}{command_suffix}"
+        )
+        return render_task_admission_acceptance_preview(candidate, confirmation_command)
+
+    return _call(preview, kind="info", failure_prefix="Task admission preview failed")
+
+
+def _task_admission_configuration(raw: str | None) -> TaskAdmissionConfiguration:
+    if raw is None:
+        return TaskAdmissionConfiguration()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"configuration is not valid JSON: {error.msg}") from None
+    return TaskAdmissionConfiguration.from_mapping(value)
+
+
+def _render_accepted_task_admission(admission_id: str, task) -> str:
+    return (
+        "Accepted Task admission and created durable Task:\n"
+        + render_task_info(task)
+        + "\nNext decision: /task next "
+        + task.task_id
+        + "\nStart bounded foreground driving: /task proposal drive "
+        + admission_id
+    )
+
+
+def _is_sha256(value: str) -> bool:
+    return (
+        len(value) == 64
+        and value.isascii()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _task_proposal_reject(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=4)
+    if len(parts) not in {4, 5} or parts[:3] != ["/task", "proposal", "reject"]:
+        return _usage("Usage: /task proposal reject <admission-id> [reason]")
+    try:
+        admission_id = canonical_task_admission_id(parts[3])
+    except ValueError:
+        return _usage("Usage: /task proposal reject <admission-id> [reason]")
+    reason = parts[4].strip() if len(parts) == 5 else None
+    if reason == "":
+        return _usage("Usage: /task proposal reject <admission-id> [reason]")
+    return _call(
+        lambda: (
+            "Rejected Task admission:\n"
+            + render_task_admission_info(session.reject_task_admission(admission_id, reason))
+        ),
+        kind="success",
+        failure_prefix="Task admission rejection failed",
+    )
+
+
+def _task_proposal_drive(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    usage = "Usage: /task proposal drive <admission-id> [1-16]"
+    if len(parts) not in {4, 5} or parts[:3] != ["/task", "proposal", "drive"]:
+        return _usage(usage)
+    try:
+        admission_id = canonical_task_admission_id(parts[3])
+    except ValueError:
+        return _usage(usage)
+    limit = 16
+    if len(parts) == 5:
+        if not parts[4].isascii() or not parts[4].isdigit() or not 1 <= int(parts[4]) <= 16:
+            return _usage(usage)
+        limit = int(parts[4])
+    try:
+        task = session.accepted_task_for_admission(admission_id)
+    except Exception as error:
+        return _command_error(error, failure_prefix="Task admission drive failed")
+    return SlashResult(
+        handled=True,
+        task_request=TaskTurnRequest("drive", task.task_id, max_stages=limit),
+    )
+
+
+def _task_admission_id_from_command(command: str, operation: str) -> str | None:
+    parts = command.split()
+    if len(parts) != 4 or parts[:3] != ["/task", "proposal", operation]:
+        return None
+    try:
+        return canonical_task_admission_id(parts[3])
+    except ValueError:
+        return None
 
 
 def _task_list(command: str, session: ReplSession) -> SlashResult:
