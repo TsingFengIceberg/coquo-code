@@ -30,6 +30,7 @@
 - [Durable Stage Lifecycle and Turn Evidence](#durable-stage-lifecycle-and-turn-evidence)
 - [Foreground Task Stage Execution and Recovery](#foreground-task-stage-execution-and-recovery)
 - [Task Planning, Acceptance, Budgets, and Management](#task-planning-acceptance-budgets-and-management)
+- [Structured Task Acceptance and Independent Review](#structured-task-acceptance-and-independent-review)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -496,6 +497,16 @@ Default cumulative Stage/provider/tool allowances are 32/768/1,024, with optiona
 A model `yes` appends only `completion-proposed`. `/task verify` binds human evidence to the current proposal's Stage and one acceptance criterion. If later work invalidates that proposal, old evidence does not carry forward. `/task complete` requires a current proposal and every criterion. Tasks also support closed completed/cancelled/failed outcomes, rename, reversible archive, complete timeline, list filtering, and independent derivation with immutable parent provenance. These Host management commands never enter ordinary model conversation.
 
 New configuration, plan proposal/acceptance, completion proposal, acceptance verification, terminal, rename, and archive records each use schema v1 without changing Session, Action Audit, provider projection, or compaction schemas. Background workers, schedulers, SubAgents, teams, worktree orchestration, parallel Stages, and Task-level blanket approval remain unavailable. See [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md).
+
+## Structured Task Acceptance and Independent Review
+
+A new Task may append a schema-v1 `task_acceptance_contract` before its first Stage, classifying at most 16 criteria as `human`, `path-exists`, `path-unchanged`, `command-succeeds`, `action-audit-certain`, or `independent-reviewer`, with a `manual` or `auto-verified` completion policy. Legacy header-only Tasks are not rewritten and continue to replay as human acceptance with manual completion. Every criterion kind has one trusted source: explicit human evidence, deterministic Host checks, or an independent reviewer; the wrong source cannot satisfy it.
+
+`/task verify host` invokes no model. It performs no-follow path type checks, creation-time file SHA-256 baselines, owner-Session Action Audit certainty, or bounded command checks. Command checks reuse production `RunCommandTool` bubblewrap, seccomp, environment, timeout, output, and cleanup boundaries, but mount the workspace read-only and fail closed when the sandbox is unavailable. Every Host/reviewer attempt appends a schema-v1 `task_acceptance_checked`; only `passed` appends acceptance verification with the matching source.
+
+`/task review` reuses the current provider/API/model route but constructs a separate no-tools request without Executor Session history. The reviewer sees only explicitly declared regular-file snapshots and bounded Host facts; `.git`, `.leonervis-code`, and every `.env*` component are rejected. Its response must be strict JSON covering every requested criterion. Review usage is counted separately from ordinary Turns and compaction, and neither its response nor an error enters the Executor Session transcript.
+
+Even `auto-verified` appends `completed` only after a current committed execution Stage has a model completion proposal and every criterion for that proposal has matching verification. A later Stage makes the old proposal, checks, and verifications ineffective for completion without deleting history. The canonical system prompt advances to v25; provider adapter v26, all 21 tool schemas, Session, Action Audit, and Effective Context representations remain unchanged. The no-project-instructions empty full-context ID becomes `ctx-v5-7fefaa42ca4226a17e7312fc723ecb3add2b6e8c96a0ac02671e69048156d401`. See [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1124,3 +1135,4 @@ This slice establishes capacity facts only. It does not count current request to
 87. [0087: Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)
 88. [0088: Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
 89. [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
+90. [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)

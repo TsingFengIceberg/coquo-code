@@ -59,6 +59,7 @@ from leonervis_code.cli.presentation import (
     render_task_info,
     render_task_summary,
     render_task_timeline,
+    render_task_verification_result,
     render_switch_rejection,
     render_tool_ledgers,
     render_tool_catalog,
@@ -212,6 +213,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task run", "Run accepted plan stages in the foreground"),
     SlashCompletionSpec("/task recover", "Reconcile an interrupted Stage"),
     SlashCompletionSpec("/task verify", "Verify one acceptance criterion"),
+    SlashCompletionSpec("/task verify host", "Run deterministic Host acceptance checks"),
+    SlashCompletionSpec("/task review", "Run an independent no-tools acceptance review"),
     SlashCompletionSpec("/task complete", "Complete a fully accepted Task"),
     SlashCompletionSpec("/task cancel", "Cancel a Task"),
     SlashCompletionSpec("/task fail", "Fail a Task explicitly"),
@@ -322,6 +325,10 @@ class ReplSession(Protocol):
     def accept_task_plan(self, task_id: str): ...
 
     def verify_task_acceptance(self, task_id: str, criterion_index: int, evidence: str): ...
+
+    def verify_task_host(self, task_id: str): ...
+
+    def review_task_acceptance(self, task_id: str): ...
 
     def complete_task(self, task_id: str): ...
 
@@ -535,8 +542,12 @@ def dispatch_slash(
         return _task_run(command)
     if command == "/task recover" or command.startswith("/task recover "):
         return _task_recover(command, session)
+    if command == "/task verify host" or command.startswith("/task verify host "):
+        return _task_verify_host(command, session)
     if command == "/task verify" or command.startswith("/task verify "):
         return _task_verify(command, session)
+    if command == "/task review" or command.startswith("/task review "):
+        return _task_review(command, session)
     if command == "/task complete" or command.startswith("/task complete "):
         return _task_simple_mutation(command, session, "complete")
     if command == "/task cancel" or command.startswith("/task cancel "):
@@ -566,6 +577,7 @@ def dispatch_slash(
                 "run",
                 "recover",
                 "verify",
+                "review",
                 "complete",
                 "cancel",
                 "fail",
@@ -1300,6 +1312,28 @@ def _task_verify(command: str, session: ReplSession) -> SlashResult:
         ),
         kind="success",
         failure_prefix="Task acceptance verification failed",
+    )
+
+
+def _task_verify_host(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 4 or (task_id := _task_id_or_none(parts[3])) is None:
+        return _usage("Usage: /task verify host <task-id>")
+    return _call(
+        lambda: render_task_verification_result(session.verify_task_host(task_id)),
+        kind="success",
+        failure_prefix="Task Host verification failed",
+    )
+
+
+def _task_review(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "review")
+    if task_id is None:
+        return _usage("Usage: /task review <task-id>")
+    return _call(
+        lambda: render_task_verification_result(session.review_task_acceptance(task_id)),
+        kind="success",
+        failure_prefix="Task independent review failed",
     )
 
 

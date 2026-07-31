@@ -140,6 +140,22 @@ def build_task_stage_prompt(
     usage = task.usage
     payload = {
         "acceptance_criteria": list(task.acceptance_criteria),
+        "acceptance_contract": [
+            {
+                "argv": list(criterion.argv),
+                "cwd": criterion.cwd,
+                "description": criterion.description,
+                "expected_sha256": criterion.expected_sha256,
+                "kind": criterion.kind.value,
+                "path": criterion.path,
+                "path_type": (
+                    criterion.path_type.value if criterion.path_type is not None else None
+                ),
+                "review_paths": list(criterion.review_paths),
+                "timeout_seconds": criterion.timeout_seconds,
+            }
+            for criterion in task.criteria
+        ],
         "accepted_plan": (
             {
                 "completed_steps": plan.completed_steps,
@@ -168,6 +184,7 @@ def build_task_stage_prompt(
             "number": stage_number,
             "objective": stage_objective,
         },
+        "completion_policy": task.completion_policy.value,
         "overall_objective": task.objective,
         "parent_task_id": task.parent_task_id,
         "prior_stages": history,
@@ -183,7 +200,11 @@ def build_task_stage_prompt(
         "task_name": task.name,
         "task_id": task.task_id,
         "verified_acceptance_criteria": [
-            verification.criterion_index for verification in task.acceptance_verifications
+            {
+                "criterion_index": verification.criterion_index,
+                "source": verification.source.value,
+            }
+            for verification in task.acceptance_verifications
         ],
     }
     encoded = json.dumps(

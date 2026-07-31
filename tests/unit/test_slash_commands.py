@@ -50,7 +50,15 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
 from leonervis_code.tools.run_command import CommandSandboxInspection
 from leonervis_code.tools.catalog import TOOL_CATALOG
-from leonervis_code.task_records import TaskBudget, TaskScope, TaskStatus, TaskTerminalOutcome
+from leonervis_code.task_records import (
+    AcceptanceCheckOutcome,
+    AcceptanceVerificationSource,
+    TaskBudget,
+    TaskCompletionPolicy,
+    TaskScope,
+    TaskStatus,
+    TaskTerminalOutcome,
+)
 
 
 @dataclass
@@ -382,6 +390,9 @@ class Session:
             budget_exhausted=(),
             latest_plan=None,
             acceptance_verifications=(),
+            criteria=(),
+            completion_policy=TaskCompletionPolicy.MANUAL,
+            acceptance_checks=(),
             terminal_outcome=None,
             terminal_reason=None,
         )
@@ -425,9 +436,40 @@ class Session:
                 criterion_index=criterion_index,
                 evidence=evidence,
                 verified_at="2026-07-31T01:03:00.000000Z",
+                source=AcceptanceVerificationSource.USER,
             ),
         )
         return info
+
+    def verify_task_host(self, task_id):
+        info = self.inspect_task(task_id)
+        return SimpleNamespace(
+            task=info,
+            checks=(
+                SimpleNamespace(
+                    criterion_index=1,
+                    source=AcceptanceVerificationSource.HOST_CHECK,
+                    outcome=AcceptanceCheckOutcome.PASSED,
+                    evidence="path=artifact.txt expected=file observed=file",
+                ),
+            ),
+            auto_completed=False,
+        )
+
+    def review_task_acceptance(self, task_id):
+        info = self.inspect_task(task_id)
+        return SimpleNamespace(
+            task=info,
+            checks=(
+                SimpleNamespace(
+                    criterion_index=1,
+                    source=AcceptanceVerificationSource.INDEPENDENT_REVIEWER,
+                    outcome=AcceptanceCheckOutcome.NEEDS_HUMAN,
+                    evidence="The bounded snapshot is insufficient.",
+                ),
+            ),
+            auto_completed=False,
+        )
 
     def complete_task(self, task_id):
         info = self.inspect_task(task_id)
@@ -1020,6 +1062,12 @@ def test_task_execution_commands_are_deferred_and_host_management_stays_local(tm
     assert dispatch_slash(f"/task plan accept {task_id}", session).kind == "success"
     assert dispatch_slash(f"/task recover {task_id}", session).kind == "success"
     assert dispatch_slash(f"/task verify {task_id} 1 pytest-passed", session).kind == "success"
+    host = dispatch_slash(f"/task verify host {task_id}", session)
+    assert host.kind == "success"
+    assert "passed by host-check" in host.message
+    review = dispatch_slash(f"/task review {task_id}", session)
+    assert review.kind == "success"
+    assert "needs-human by independent-reviewer" in review.message
     assert dispatch_slash(f"/task rename {task_id} Release-ready", session).kind == "success"
     assert dispatch_slash(f"/task archive {task_id}", session).kind == "success"
     assert "Release-ready" in dispatch_slash("/task list archived name=release", session).message
@@ -1051,6 +1099,10 @@ def test_task_terminal_commands_and_usage_errors_are_explicit(tmp_path) -> None:
     assert dispatch_slash("/task continue bad objective", session).kind == "warning"
     assert dispatch_slash(f"/task run {task_id} 17", session).kind == "warning"
     assert dispatch_slash(f"/task verify {task_id} 0 evidence", session).kind == "warning"
+    assert dispatch_slash("/task verify host bad", session).message == (
+        "Usage: /task verify host <task-id>"
+    )
+    assert dispatch_slash("/task review bad", session).message == "Usage: /task review <task-id>"
     assert dispatch_slash(f"/task cancel {task_id}", session).kind == "warning"
     assert session.prompts == []
 

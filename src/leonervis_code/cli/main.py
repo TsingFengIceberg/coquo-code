@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -105,6 +106,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
 )
 from leonervis_code.task_store import TaskStore, TaskStoreError
+from leonervis_code.task_records import TaskCompletionPolicy
 from leonervis_code.task_records import TaskBudget, TaskStatus
 from leonervis_code.tools.delete_directory import DeleteDirectoryTool
 from leonervis_code.tools.delete_file import DeleteFileTool
@@ -477,6 +479,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="acceptance criterion; repeat for multiple criteria",
+    )
+    task_create.add_argument(
+        "--criterion",
+        dest="structured_criteria",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help="structured acceptance criterion JSON object; repeat for multiple criteria",
+    )
+    task_create.add_argument(
+        "--completion-policy",
+        choices=[policy.value for policy in TaskCompletionPolicy],
+        default=TaskCompletionPolicy.MANUAL.value,
+        help="manual or Host auto-completion after verified acceptance",
     )
     task_create.add_argument("--name", type=nonblank_prompt, help="bounded display name")
     task_create.add_argument("--parent", dest="parent_task_id", help="parent Task UUID")
@@ -882,10 +898,23 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     store = TaskStore(workspace)
     if arguments.task_command == "create":
         defaults = TaskBudget()
+        structured_criteria: list[dict[str, object]] = []
+        for raw_criterion in arguments.structured_criteria:
+            try:
+                value = json.loads(raw_criterion)
+            except json.JSONDecodeError as error:
+                raise TaskStoreError(
+                    f"structured acceptance criterion is not valid JSON: {error.msg}"
+                ) from None
+            if not isinstance(value, dict):
+                raise TaskStoreError("structured acceptance criterion must be a JSON object")
+            structured_criteria.append(value)
         info = store.create(
             arguments.objective,
             owner_session=arguments.owner_session,
             acceptance_criteria=tuple(arguments.acceptance_criteria),
+            structured_criteria=tuple(structured_criteria),
+            completion_policy=TaskCompletionPolicy(arguments.completion_policy),
             name=arguments.name,
             parent_task_id=arguments.parent_task_id,
             budget=TaskBudget(

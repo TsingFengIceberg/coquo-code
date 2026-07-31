@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 from typing import TypeAlias
 from uuid import UUID
@@ -19,6 +19,7 @@ from leonervis_code.session_records import (
 
 TASK_HEADER_SCHEMA_VERSION = 1
 TASK_CONFIGURATION_SCHEMA_VERSION = 1
+TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION = 1
 STAGE_STARTED_SCHEMA_VERSION = 2
 STAGE_COMMITTED_SCHEMA_VERSION = 2
 STAGE_FAILED_SCHEMA_VERSION = 2
@@ -26,6 +27,7 @@ TASK_PLAN_PROPOSED_SCHEMA_VERSION = 1
 TASK_PLAN_ACCEPTED_SCHEMA_VERSION = 1
 TASK_COMPLETION_PROPOSED_SCHEMA_VERSION = 1
 TASK_ACCEPTANCE_VERIFIED_SCHEMA_VERSION = 1
+TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION = 1
 TASK_TERMINATED_SCHEMA_VERSION = 1
 TASK_RENAMED_SCHEMA_VERSION = 1
 TASK_ARCHIVED_SCHEMA_VERSION = 1
@@ -37,6 +39,8 @@ MAX_ACCEPTANCE_CRITERIA = 16
 MAX_ACCEPTANCE_CRITERION_CHARACTERS = 1024
 MAX_ACCEPTANCE_CRITERION_BYTES = 4096
 MAX_TASK_TEXT_BYTES = 32 * 1024
+MAX_ACCEPTANCE_COMMAND_ARGUMENTS = 64
+MAX_ACCEPTANCE_REVIEW_PATHS = 32
 MAX_TASK_NAME_CHARACTERS = 80
 MAX_TASK_NAME_BYTES = 256
 MAX_PLAN_STEPS = 32
@@ -98,6 +102,47 @@ class CompletionProposalSource(StrEnum):
 
 class AcceptanceVerificationSource(StrEnum):
     USER = "user"
+    HOST_CHECK = "host-check"
+    INDEPENDENT_REVIEWER = "independent-reviewer"
+
+
+class AcceptanceCriterionKind(StrEnum):
+    HUMAN = "human"
+    PATH_EXISTS = "path-exists"
+    PATH_UNCHANGED = "path-unchanged"
+    COMMAND_SUCCEEDS = "command-succeeds"
+    ACTION_AUDIT_CERTAIN = "action-audit-certain"
+    INDEPENDENT_REVIEWER = "independent-reviewer"
+
+
+class AcceptancePathType(StrEnum):
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
+class TaskCompletionPolicy(StrEnum):
+    MANUAL = "manual"
+    AUTO_VERIFIED = "auto-verified"
+
+
+class AcceptanceCheckOutcome(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    NEEDS_HUMAN = "needs-human"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class TaskAcceptanceCriterion:
+    kind: AcceptanceCriterionKind
+    description: str
+    path: str | None = None
+    path_type: AcceptancePathType | None = None
+    expected_sha256: str | None = None
+    argv: tuple[str, ...] = ()
+    cwd: str | None = None
+    timeout_seconds: int | None = None
+    review_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,6 +192,16 @@ class TaskConfiguration:
     parent_task_id: str | None = None
     record_type: str = "task_configuration"
     schema_version: int = TASK_CONFIGURATION_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TaskAcceptanceContract:
+    sequence: int
+    criteria: tuple[TaskAcceptanceCriterion, ...]
+    completion_policy: TaskCompletionPolicy
+    configured_at: str
+    record_type: str = "task_acceptance_contract"
+    schema_version: int = TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -237,6 +292,19 @@ class TaskAcceptanceVerified:
 
 
 @dataclass(frozen=True)
+class TaskAcceptanceChecked:
+    sequence: int
+    completion_stage_id: str
+    criterion_index: int
+    source: AcceptanceVerificationSource
+    outcome: AcceptanceCheckOutcome
+    evidence: str
+    checked_at: str
+    record_type: str = "task_acceptance_checked"
+    schema_version: int = TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TaskTerminated:
     sequence: int
     outcome: TaskTerminalOutcome
@@ -268,6 +336,7 @@ StageTerminal: TypeAlias = StageCommitted | StageFailed
 TaskRecord: TypeAlias = (
     TaskHeader
     | TaskConfiguration
+    | TaskAcceptanceContract
     | StageStarted
     | StageCommitted
     | StageFailed
@@ -275,6 +344,7 @@ TaskRecord: TypeAlias = (
     | TaskPlanAccepted
     | TaskCompletionProposed
     | TaskAcceptanceVerified
+    | TaskAcceptanceChecked
     | TaskTerminated
     | TaskRenamed
     | TaskArchived
@@ -293,10 +363,12 @@ class TaskReplayState:
     records: tuple[TaskRecord, ...]
     stages: tuple[TaskStageState, ...] = ()
     configuration: TaskConfiguration | None = None
+    acceptance_contract: TaskAcceptanceContract | None = None
     plan_proposals: tuple[TaskPlanProposed, ...] = ()
     accepted_plan_id: str | None = None
     completion_proposals: tuple[TaskCompletionProposed, ...] = ()
     acceptance_verifications: tuple[TaskAcceptanceVerified, ...] = ()
+    acceptance_checks: tuple[TaskAcceptanceChecked, ...] = ()
     terminal: TaskTerminated | None = None
     renamed: tuple[TaskRenamed, ...] = ()
     archived_events: tuple[TaskArchived, ...] = ()
@@ -316,6 +388,21 @@ class TaskReplayState:
     @property
     def budget(self) -> TaskBudget:
         return self.configuration.budget if self.configuration is not None else TaskBudget()
+
+    @property
+    def criteria(self) -> tuple[TaskAcceptanceCriterion, ...]:
+        if self.acceptance_contract is not None:
+            return self.acceptance_contract.criteria
+        return tuple(
+            TaskAcceptanceCriterion(AcceptanceCriterionKind.HUMAN, description)
+            for description in self.header.acceptance_criteria
+        )
+
+    @property
+    def completion_policy(self) -> TaskCompletionPolicy:
+        if self.acceptance_contract is None:
+            return TaskCompletionPolicy.MANUAL
+        return self.acceptance_contract.completion_policy
 
     @property
     def parent_task_id(self) -> str | None:
@@ -460,6 +547,129 @@ def canonical_acceptance_criteria(values: object) -> tuple[str, ...]:
     return criteria
 
 
+def canonical_task_acceptance_contract(
+    criteria: object,
+    completion_policy: object,
+) -> tuple[TaskAcceptanceCriterion, ...]:
+    if not isinstance(criteria, (tuple, list)):
+        raise TaskRecordError("structured acceptance criteria must be an array")
+    if len(criteria) > MAX_ACCEPTANCE_CRITERIA:
+        raise TaskRecordError(
+            f"structured acceptance criteria exceed the {MAX_ACCEPTANCE_CRITERIA}-item limit"
+        )
+    if type(completion_policy) is not TaskCompletionPolicy:
+        raise TaskRecordError("Task completion policy is invalid")
+    canonical = tuple(canonical_acceptance_criterion(value) for value in criteria)
+    descriptions = canonical_acceptance_criteria(
+        tuple(criterion.description for criterion in canonical)
+    )
+    if len(descriptions) != len(canonical):
+        raise TaskRecordError("structured acceptance criteria are invalid")
+    return canonical
+
+
+def canonical_acceptance_criterion(value: object) -> TaskAcceptanceCriterion:
+    if not isinstance(value, TaskAcceptanceCriterion):
+        raise TaskRecordError("structured acceptance criterion is invalid")
+    if type(value.kind) is not AcceptanceCriterionKind:
+        raise TaskRecordError("acceptance criterion kind is invalid")
+    _bounded_text(
+        value.description,
+        "acceptance criterion description",
+        max_characters=MAX_ACCEPTANCE_CRITERION_CHARACTERS,
+        max_bytes=MAX_ACCEPTANCE_CRITERION_BYTES,
+    )
+    empty_command = not value.argv and value.cwd is None and value.timeout_seconds is None
+    empty_path = value.path is None and value.path_type is None and value.expected_sha256 is None
+    if value.kind is AcceptanceCriterionKind.HUMAN:
+        if not empty_command or not empty_path or value.review_paths:
+            raise TaskRecordError("human acceptance criterion contains unsupported fields")
+    elif value.kind is AcceptanceCriterionKind.PATH_EXISTS:
+        _criterion_path(value.path, "acceptance path")
+        if type(value.path_type) is not AcceptancePathType:
+            raise TaskRecordError("path-exists criterion requires a path type")
+        if value.expected_sha256 is not None or not empty_command or value.review_paths:
+            raise TaskRecordError("path-exists acceptance criterion contains unsupported fields")
+    elif value.kind is AcceptanceCriterionKind.PATH_UNCHANGED:
+        _criterion_path(value.path, "protected acceptance path")
+        if value.path_type is not AcceptancePathType.FILE:
+            raise TaskRecordError("path-unchanged criterion requires a regular file")
+        _required_sha256(value.expected_sha256, "protected acceptance path SHA-256")
+        if not empty_command or value.review_paths:
+            raise TaskRecordError("path-unchanged acceptance criterion contains unsupported fields")
+    elif value.kind is AcceptanceCriterionKind.COMMAND_SUCCEEDS:
+        if not empty_path or value.review_paths:
+            raise TaskRecordError("command acceptance criterion contains unsupported fields")
+        _criterion_command(value.argv, value.cwd, value.timeout_seconds)
+    elif value.kind is AcceptanceCriterionKind.ACTION_AUDIT_CERTAIN:
+        if not empty_command or not empty_path or value.review_paths:
+            raise TaskRecordError("Action Audit criterion contains unsupported fields")
+    elif value.kind is AcceptanceCriterionKind.INDEPENDENT_REVIEWER:
+        if not empty_command or not empty_path:
+            raise TaskRecordError("reviewer acceptance criterion contains unsupported fields")
+        if len(value.review_paths) > MAX_ACCEPTANCE_REVIEW_PATHS:
+            raise TaskRecordError(
+                f"reviewer acceptance paths exceed the {MAX_ACCEPTANCE_REVIEW_PATHS}-item limit"
+            )
+        for path in value.review_paths:
+            _criterion_path(path, "reviewer acceptance path")
+        if len(set(value.review_paths)) != len(value.review_paths):
+            raise TaskRecordError("reviewer acceptance paths must not contain duplicates")
+    return value
+
+
+def _criterion_command(argv: object, cwd: object, timeout_seconds: object) -> None:
+    if not isinstance(argv, tuple) or not 1 <= len(argv) <= MAX_ACCEPTANCE_COMMAND_ARGUMENTS:
+        raise TaskRecordError(
+            f"acceptance command argv must contain 1 to {MAX_ACCEPTANCE_COMMAND_ARGUMENTS} items"
+        )
+    total_bytes = 0
+    for index, argument in enumerate(argv):
+        if not isinstance(argument, str) or "\x00" in argument:
+            raise TaskRecordError(f"acceptance command argv[{index}] is invalid")
+        try:
+            encoded = argument.encode("utf-8")
+        except UnicodeEncodeError:
+            raise TaskRecordError(f"acceptance command argv[{index}] is invalid") from None
+        if len(encoded) > 1024:
+            raise TaskRecordError(f"acceptance command argv[{index}] exceeds 1024 bytes")
+        total_bytes += len(encoded)
+    if not argv[0].strip() or total_bytes > 8192:
+        raise TaskRecordError("acceptance command argv is invalid or oversized")
+    if not isinstance(cwd, str):
+        raise TaskRecordError("acceptance command cwd is invalid")
+    _criterion_path(cwd, "acceptance command cwd", allow_root=True)
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300:
+        raise TaskRecordError("acceptance command timeout must be from 1 to 300 seconds")
+
+
+def _criterion_path(value: object, label: str, *, allow_root: bool = False) -> str:
+    if not isinstance(value, str):
+        raise TaskRecordError(f"{label} must be a portable workspace-relative path")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise TaskRecordError(f"{label} must be valid UTF-8") from None
+    if allow_root and value == ".":
+        return value
+    parts = value.split("/")
+    if (
+        not value
+        or value != value.strip()
+        or "\x00" in value
+        or "\\" in value
+        or Path(value).is_absolute()
+        or PureWindowsPath(value).drive
+        or len(value) > 4096
+        or len(encoded) > 4096
+        or len(parts) > 64
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(len(part.encode("utf-8")) > 255 for part in parts)
+    ):
+        raise TaskRecordError(f"{label} must be a portable workspace-relative path")
+    return value
+
+
 def canonical_plan_steps(values: object) -> tuple[str, ...]:
     if not isinstance(values, (tuple, list)) or not values:
         raise TaskRecordError("task plan steps must be a non-empty array")
@@ -547,12 +757,14 @@ def replay_task_records(
         raise TaskRecordError("task workspace fingerprint does not match the current workspace")
 
     configuration: TaskConfiguration | None = None
+    acceptance_contract: TaskAcceptanceContract | None = None
     stages: list[TaskStageState] = []
     active: StageStarted | None = None
     plan_proposals: list[TaskPlanProposed] = []
     accepted_plan_id: str | None = None
     completion_proposals: list[TaskCompletionProposed] = []
     verifications: list[TaskAcceptanceVerified] = []
+    checks: list[TaskAcceptanceChecked] = []
     terminal: TaskTerminated | None = None
     renamed: list[TaskRenamed] = []
     archived: list[TaskArchived] = []
@@ -581,6 +793,17 @@ def replay_task_records(
             if record.parent_task_id == header.task_id:
                 raise TaskRecordError("Task cannot derive from itself")
             configuration = record
+            continue
+        if isinstance(record, TaskAcceptanceContract):
+            if acceptance_contract is not None or stages:
+                raise TaskRecordError(
+                    "task_acceptance_contract must appear once before the first Stage"
+                )
+            if tuple(item.description for item in record.criteria) != header.acceptance_criteria:
+                raise TaskRecordError(
+                    "structured acceptance contract must match task_header descriptions"
+                )
+            acceptance_contract = record
             continue
         if isinstance(record, (TaskRenamed, TaskArchived)):
             if active is not None:
@@ -666,7 +889,7 @@ def replay_task_records(
                 raise TaskRecordError("Task Stage may propose completion only once")
             completion_proposals.append(record)
             continue
-        if isinstance(record, TaskAcceptanceVerified):
+        if isinstance(record, (TaskAcceptanceVerified, TaskAcceptanceChecked)):
             if not 1 <= record.criterion_index <= len(header.acceptance_criteria):
                 raise TaskRecordError("Task acceptance verification index is outside the contract")
             current_proposal = completion_proposals[-1] if completion_proposals else None
@@ -678,7 +901,23 @@ def replay_task_records(
                 or record.completion_stage_id != current_proposal.stage_id
             ):
                 raise TaskRecordError(
-                    "Task acceptance verification requires the current completion proposal"
+                    "Task acceptance evidence requires the current completion proposal"
+                )
+            if isinstance(record, TaskAcceptanceChecked):
+                checks.append(record)
+                continue
+            criteria = (
+                acceptance_contract.criteria
+                if acceptance_contract is not None
+                else tuple(
+                    TaskAcceptanceCriterion(AcceptanceCriterionKind.HUMAN, description)
+                    for description in header.acceptance_criteria
+                )
+            )
+            expected_source = _criterion_verification_source(criteria[record.criterion_index - 1])
+            if record.source is not expected_source:
+                raise TaskRecordError(
+                    "Task acceptance verification source does not match criterion"
                 )
             key = (record.completion_stage_id, record.criterion_index)
             if key in verified_keys:
@@ -716,10 +955,12 @@ def replay_task_records(
         records=tuple(records),
         stages=tuple(stages),
         configuration=configuration,
+        acceptance_contract=acceptance_contract,
         plan_proposals=tuple(plan_proposals),
         accepted_plan_id=accepted_plan_id,
         completion_proposals=tuple(completion_proposals),
         acceptance_verifications=tuple(verifications),
+        acceptance_checks=tuple(checks),
         terminal=terminal,
         renamed=tuple(renamed),
         archived_events=tuple(archived),
@@ -748,6 +989,15 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             "configured_at": record.configured_at,
             "name": record.name,
             "parent_task_id": record.parent_task_id,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+        }
+    if isinstance(record, TaskAcceptanceContract):
+        return {
+            "completion_policy": record.completion_policy.value,
+            "configured_at": record.configured_at,
+            "criteria": [_criterion_to_dict(item) for item in record.criteria],
             "record_type": record.record_type,
             "schema_version": record.schema_version,
             "sequence": record.sequence,
@@ -832,6 +1082,16 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             source=record.source.value,
             verified_at=record.verified_at,
         )
+    if isinstance(record, TaskAcceptanceChecked):
+        return _simple_record(
+            record,
+            checked_at=record.checked_at,
+            completion_stage_id=record.completion_stage_id,
+            criterion_index=record.criterion_index,
+            evidence=record.evidence,
+            outcome=record.outcome.value,
+            source=record.source.value,
+        )
     if isinstance(record, TaskTerminated):
         return _simple_record(
             record,
@@ -902,6 +1162,32 @@ def _decode_configuration(value: dict[str, object]) -> TaskConfiguration:
         parent_task_id=value.get("parent_task_id"),
     )
     _validate_configuration(record)
+    return record
+
+
+def _decode_acceptance_contract(value: dict[str, object]) -> TaskAcceptanceContract:
+    _fields(
+        value,
+        "task_acceptance_contract",
+        "completion_policy",
+        "configured_at",
+        "criteria",
+    )
+    _version(value, TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION, "task_acceptance_contract")
+    raw_criteria = value.get("criteria")
+    if not isinstance(raw_criteria, list):
+        raise TaskRecordError("structured acceptance criteria must be an array")
+    try:
+        policy = TaskCompletionPolicy(value.get("completion_policy"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("Task completion policy is invalid") from None
+    record = TaskAcceptanceContract(
+        sequence=value.get("sequence"),
+        criteria=tuple(_criterion_from_value(item) for item in raw_criteria),
+        completion_policy=policy,
+        configured_at=value.get("configured_at"),
+    )
+    _validate_acceptance_contract(record)
     return record
 
 
@@ -1106,6 +1392,36 @@ def _decode_acceptance_verified(value: dict[str, object]) -> TaskAcceptanceVerif
     return record
 
 
+def _decode_acceptance_checked(value: dict[str, object]) -> TaskAcceptanceChecked:
+    _fields(
+        value,
+        "task_acceptance_checked",
+        "checked_at",
+        "completion_stage_id",
+        "criterion_index",
+        "evidence",
+        "outcome",
+        "source",
+    )
+    _version(value, TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION, "task_acceptance_checked")
+    try:
+        source = AcceptanceVerificationSource(value.get("source"))
+        outcome = AcceptanceCheckOutcome(value.get("outcome"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("unsupported acceptance check source or outcome") from None
+    record = TaskAcceptanceChecked(
+        sequence=value.get("sequence"),
+        completion_stage_id=value.get("completion_stage_id"),
+        criterion_index=value.get("criterion_index"),
+        source=source,
+        outcome=outcome,
+        evidence=value.get("evidence"),
+        checked_at=value.get("checked_at"),
+    )
+    _validate_acceptance_checked(record)
+    return record
+
+
 def _decode_terminated(value: dict[str, object]) -> TaskTerminated:
     _fields(value, "task_terminated", "outcome", "reason", "terminated_at")
     _version(value, TASK_TERMINATED_SCHEMA_VERSION, "task_terminated")
@@ -1139,6 +1455,7 @@ def _decode_archived(value: dict[str, object]) -> TaskArchived:
 _DECODERS = {
     "task_header": _decode_header,
     "task_configuration": _decode_configuration,
+    "task_acceptance_contract": _decode_acceptance_contract,
     "stage_started": _decode_stage_started,
     "stage_committed": _decode_stage_committed,
     "stage_failed": _decode_stage_failed,
@@ -1146,6 +1463,7 @@ _DECODERS = {
     "task_plan_accepted": _decode_plan_accepted,
     "task_completion_proposed": _decode_completion_proposed,
     "task_acceptance_verified": _decode_acceptance_verified,
+    "task_acceptance_checked": _decode_acceptance_checked,
     "task_terminated": _decode_terminated,
     "task_renamed": _decode_renamed,
     "task_archived": _decode_archived,
@@ -1156,6 +1474,7 @@ def _validate_record(record: object) -> None:
     validators = {
         TaskHeader: _validate_header,
         TaskConfiguration: _validate_configuration,
+        TaskAcceptanceContract: _validate_acceptance_contract,
         StageStarted: _validate_stage_started,
         StageCommitted: _validate_stage_committed,
         StageFailed: _validate_stage_failed,
@@ -1163,6 +1482,7 @@ def _validate_record(record: object) -> None:
         TaskPlanAccepted: _validate_plan_accepted,
         TaskCompletionProposed: _validate_completion_proposed,
         TaskAcceptanceVerified: _validate_acceptance_verified,
+        TaskAcceptanceChecked: _validate_acceptance_checked,
         TaskTerminated: _validate_terminated,
         TaskRenamed: _validate_renamed,
         TaskArchived: _validate_archived,
@@ -1211,6 +1531,19 @@ def _validate_configuration(record: object) -> None:
     if record.parent_task_id is not None:
         canonical_task_id(record.parent_task_id)
     _validate_timestamp(record.configured_at, "Task configured_at")
+
+
+def _validate_acceptance_contract(record: object) -> None:
+    if not isinstance(record, TaskAcceptanceContract):
+        raise TaskRecordError("unsupported task_acceptance_contract record")
+    _positive_sequence(record.sequence, "task_acceptance_contract sequence")
+    _record_identity(
+        record,
+        "task_acceptance_contract",
+        TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION,
+    )
+    canonical_task_acceptance_contract(record.criteria, record.completion_policy)
+    _validate_timestamp(record.configured_at, "Task acceptance contract configured_at")
 
 
 def _validate_stage_started(record: object) -> None:
@@ -1330,6 +1663,24 @@ def _validate_acceptance_verified(record: object) -> None:
     _validate_timestamp(record.verified_at, "Task acceptance verified_at")
 
 
+def _validate_acceptance_checked(record: object) -> None:
+    if not isinstance(record, TaskAcceptanceChecked):
+        raise TaskRecordError("unsupported task_acceptance_checked record")
+    _positive_sequence(record.sequence, "task_acceptance_checked sequence")
+    _record_identity(record, "task_acceptance_checked", TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION)
+    canonical_stage_id(record.completion_stage_id)
+    _positive(record.criterion_index, "acceptance criterion index")
+    if record.source not in {
+        AcceptanceVerificationSource.HOST_CHECK,
+        AcceptanceVerificationSource.INDEPENDENT_REVIEWER,
+    }:
+        raise TaskRecordError("acceptance checks require a Host or reviewer source")
+    if type(record.outcome) is not AcceptanceCheckOutcome:
+        raise TaskRecordError("acceptance check outcome is invalid")
+    _bounded_text(record.evidence, "acceptance check evidence", max_characters=1024, max_bytes=4096)
+    _validate_timestamp(record.checked_at, "Task acceptance checked_at")
+
+
 def _validate_terminated(record: object) -> None:
     if not isinstance(record, TaskTerminated):
         raise TaskRecordError("unsupported task_terminated record")
@@ -1387,6 +1738,7 @@ def _validate_stage_usage(usage: object) -> None:
 def _record_timestamp(record: TaskRecord) -> str:
     for name in (
         "configured_at",
+        "checked_at",
         "started_at",
         "committed_at",
         "failed_at",
@@ -1426,6 +1778,69 @@ def _fields(value: dict[str, object], label: str, *specific: str) -> None:
 def _version(value: dict[str, object], expected: int, label: str) -> None:
     if value.get("schema_version") != expected:
         raise TaskRecordError(f"unsupported {label} schema version")
+
+
+def _criterion_to_dict(criterion: TaskAcceptanceCriterion) -> dict[str, object]:
+    canonical_acceptance_criterion(criterion)
+    return {
+        "argv": list(criterion.argv),
+        "cwd": criterion.cwd,
+        "description": criterion.description,
+        "expected_sha256": criterion.expected_sha256,
+        "kind": criterion.kind.value,
+        "path": criterion.path,
+        "path_type": criterion.path_type.value if criterion.path_type is not None else None,
+        "review_paths": list(criterion.review_paths),
+        "timeout_seconds": criterion.timeout_seconds,
+    }
+
+
+def _criterion_from_value(value: object) -> TaskAcceptanceCriterion:
+    fields = {
+        "argv",
+        "cwd",
+        "description",
+        "expected_sha256",
+        "kind",
+        "path",
+        "path_type",
+        "review_paths",
+        "timeout_seconds",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise TaskRecordError("structured acceptance criterion has unknown or missing fields")
+    try:
+        kind = AcceptanceCriterionKind(value.get("kind"))
+        raw_path_type = value.get("path_type")
+        path_type = None if raw_path_type is None else AcceptancePathType(raw_path_type)
+    except (TypeError, ValueError):
+        raise TaskRecordError("structured acceptance criterion enum is invalid") from None
+    argv = value.get("argv")
+    review_paths = value.get("review_paths")
+    if not isinstance(argv, list) or not isinstance(review_paths, list):
+        raise TaskRecordError("structured acceptance criterion arrays are invalid")
+    record = TaskAcceptanceCriterion(
+        kind=kind,
+        description=value.get("description"),
+        path=value.get("path"),
+        path_type=path_type,
+        expected_sha256=value.get("expected_sha256"),
+        argv=tuple(argv),
+        cwd=value.get("cwd"),
+        timeout_seconds=value.get("timeout_seconds"),
+        review_paths=tuple(review_paths),
+    )
+    return canonical_acceptance_criterion(record)
+
+
+def _criterion_verification_source(
+    criterion: TaskAcceptanceCriterion,
+) -> AcceptanceVerificationSource:
+    if criterion.kind is AcceptanceCriterionKind.HUMAN:
+        return AcceptanceVerificationSource.USER
+    if criterion.kind is AcceptanceCriterionKind.INDEPENDENT_REVIEWER:
+        return AcceptanceVerificationSource.INDEPENDENT_REVIEWER
+    return AcceptanceVerificationSource.HOST_CHECK
 
 
 def _budget_to_dict(budget: TaskBudget) -> dict[str, object]:

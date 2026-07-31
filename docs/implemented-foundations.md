@@ -30,6 +30,7 @@
 - [Durable Stage Lifecycle 与 Turn Evidence](#durable-stage-lifecycle-与-turn-evidence)
 - [Foreground Task Stage Execution 与 Recovery](#foreground-task-stage-execution-与-recovery)
 - [Task Planning、Acceptance、Budgets 与 Management](#task-planningacceptancebudgets-与-management)
+- [Structured Task Acceptance 与 Independent Review](#structured-task-acceptance-与-independent-review)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -496,6 +497,16 @@ Task默认Stage/provider/tool累计额度为32/768/1024，并可配置input/outp
 模型`yes`只追加`completion-proposed`，不等于完成。`/task verify`把人工证据绑定到当前proposal对应的Stage和验收条件；之后若继续工作使proposal失效，旧证据不会复用。`/task complete`要求current proposal及全部条件通过。Task另外支持completed/cancelled/failed三种closed终态、rename、可逆archive、完整timeline、list过滤和带immutable parent provenance的独立derive；这些Host管理命令不进入普通模型对话。
 
 新增configuration、plan proposal/acceptance、completion proposal、acceptance verification、terminal、rename和archive record均使用各自schema v1，不改Session、Action Audit、provider projection或compaction schema。当前仍不支持background worker、scheduler、SubAgent、team、worktree orchestration、并行Stage或Task级blanket approval。详见[0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)。
+
+## Structured Task Acceptance 与 Independent Review
+
+新Task可在首个Stage前追加schema-v1 `task_acceptance_contract`，把最多16条条件分为`human`、`path-exists`、`path-unchanged`、`command-succeeds`、`action-audit-certain`或`independent-reviewer`，并选择`manual`或`auto-verified`完成策略。旧header-only Task不重写，replay时继续解释为人工验收与手动完成。每种条件固定一种可信来源：人工证据、确定性Host检查或independent reviewer，错误来源不能满足条件。
+
+`/task verify host`不调用模型：它执行no-follow路径类型、创建时文件SHA-256基线、owner Session Action Audit certainty或受限命令检查。命令检查复用生产`RunCommandTool`的bubblewrap、seccomp、环境、timeout、输出与cleanup边界，但workspace改为只读挂载；沙箱不可用时fail closed。每次Host/reviewer尝试写入schema-v1 `task_acceptance_checked`，只有`passed`才写匹配source的acceptance verification。
+
+`/task review`复用current provider/API/model route，但构造独立、无工具、没有Executor Session history的request。Reviewer只能看到Task显式声明的普通文件快照与有界Host事实，`.git`、`.leonervis-code`和任意`.env*` component被拒绝；返回必须是覆盖全部目标条件的严格JSON verdict。Review用量与普通Turn/compaction分开计量，response或错误不进入Executor Session transcript。
+
+`auto-verified`也只有在current committed execution Stage已有model completion proposal，且当前proposal的全部条件都由规定来源验证后，Host才追加`completed`。后续Stage会让旧proposal、check与verification失去完成效力，但不会删除历史。Canonical system prompt升级为v25；provider adapter保持v26，21个tool schema、Session、Action Audit与Effective Context representation不变。无项目指令的empty full-context ID更新为`ctx-v5-7fefaa42ca4226a17e7312fc723ecb3add2b6e8c96a0ac02671e69048156d401`。详见[0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1124,3 +1135,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 87. [0087：Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)
 88. [0088：Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
 89. [0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
+90. [0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)

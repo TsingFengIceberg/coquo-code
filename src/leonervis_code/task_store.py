@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -21,6 +22,9 @@ from leonervis_code.session_records import workspace_fingerprint
 from leonervis_code.session_store import SessionStore, SessionStoreError, SessionTurnEvidence
 from leonervis_code.task_records import (
     MAX_TASK_RECORDS,
+    AcceptanceCheckOutcome,
+    AcceptanceCriterionKind,
+    AcceptancePathType,
     AcceptanceVerificationSource,
     CompletionProposalSource,
     StageCommitted,
@@ -30,10 +34,14 @@ from leonervis_code.task_records import (
     StageStarted,
     StageUsage,
     TaskAcceptanceVerified,
+    TaskAcceptanceChecked,
+    TaskAcceptanceContract,
+    TaskAcceptanceCriterion,
     TaskArchived,
     TaskBudget,
     TaskCompletionProposed,
     TaskConfiguration,
+    TaskCompletionPolicy,
     TaskHeader,
     TaskPlanAccepted,
     TaskPlanProposed,
@@ -46,6 +54,7 @@ from leonervis_code.task_records import (
     TaskTerminalOutcome,
     TaskTerminated,
     canonical_acceptance_criteria,
+    canonical_task_acceptance_contract,
     canonical_plan_id,
     canonical_plan_steps,
     canonical_stage_id,
@@ -59,9 +68,15 @@ from leonervis_code.task_records import (
     encode_task_record,
     replay_task_records,
 )
+from leonervis_code.tools._workspace_paths import (
+    WorkspacePathFailure,
+    open_parent_directory,
+    validate_workspace_path,
+)
 
 MAX_TASK_TRANSCRIPT_BYTES = 1024 * 1024
 MAX_TASK_DIRECTORY_ENTRIES = 10_000
+MAX_PROTECTED_ACCEPTANCE_FILE_BYTES = 1024 * 1024
 _EMPTY_STAGE_USAGE = StageUsage(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
@@ -136,6 +151,17 @@ class TaskAcceptanceInfo:
     criterion_index: int
     evidence: str
     verified_at: str
+    source: AcceptanceVerificationSource = AcceptanceVerificationSource.USER
+
+
+@dataclass(frozen=True)
+class TaskAcceptanceCheckInfo:
+    completion_stage_id: str
+    criterion_index: int
+    source: AcceptanceVerificationSource
+    outcome: AcceptanceCheckOutcome
+    evidence: str
+    checked_at: str
 
 
 @dataclass(frozen=True)
@@ -162,6 +188,9 @@ class TaskInfo:
     budget_exhausted: tuple[str, ...] = ()
     latest_plan: TaskPlanInfo | None = None
     acceptance_verifications: tuple[TaskAcceptanceInfo, ...] = ()
+    criteria: tuple[TaskAcceptanceCriterion, ...] = ()
+    completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL
+    acceptance_checks: tuple[TaskAcceptanceCheckInfo, ...] = ()
     terminal_outcome: TaskTerminalOutcome | None = None
     terminal_reason: str | None = None
 
@@ -208,6 +237,8 @@ class TaskStore:
         *,
         owner_session: str = "latest",
         acceptance_criteria: tuple[str, ...] = (),
+        structured_criteria: tuple[dict[str, object], ...] = (),
+        completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL,
         name: str | None = None,
         budget: TaskBudget = TaskBudget(),
         parent_task_id: str | None = None,
@@ -215,7 +246,14 @@ class TaskStore:
         """Atomically create one ready Task owned by an existing Session."""
         try:
             canonical_objective = canonical_task_objective(objective)
-            canonical_criteria = canonical_acceptance_criteria(acceptance_criteria)
+            canonical_human_criteria = canonical_acceptance_criteria(acceptance_criteria)
+            contract_criteria = _prepare_acceptance_criteria(
+                self.workspace,
+                canonical_human_criteria,
+                structured_criteria,
+                completion_policy,
+            )
+            canonical_criteria = tuple(item.description for item in contract_criteria)
             canonical_name = canonical_task_name(name or default_task_name(canonical_objective))
             canonical_budget = canonical_task_budget(budget)
             canonical_parent = (
@@ -252,10 +290,22 @@ class TaskStore:
             if name is not None or canonical_budget != TaskBudget() or canonical_parent is not None
             else None
         )
+        contract = (
+            TaskAcceptanceContract(
+                sequence=2 if configuration is not None else 1,
+                criteria=contract_criteria,
+                completion_policy=completion_policy,
+                configured_at=timestamp,
+            )
+            if structured_criteria or completion_policy is not TaskCompletionPolicy.MANUAL
+            else None
+        )
         try:
             payload = encode_task_record(header)
             if configuration is not None:
                 payload += encode_task_record(configuration)
+            if contract is not None:
+                payload += encode_task_record(contract)
         except TaskRecordError as error:
             raise TaskStoreError(str(error)) from None
         self._ensure_root()
@@ -264,6 +314,8 @@ class TaskStore:
         records: list[TaskRecord] = [header]
         if configuration is not None:
             records.append(configuration)
+        if contract is not None:
+            records.append(contract)
         state = self._replay(path, records)
         return _task_info(path, state)
 
@@ -274,6 +326,8 @@ class TaskStore:
         *,
         owner_session: str = "latest",
         acceptance_criteria: tuple[str, ...] = (),
+        structured_criteria: tuple[dict[str, object], ...] = (),
+        completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL,
         name: str | None = None,
         budget: TaskBudget = TaskBudget(),
     ) -> TaskInfo:
@@ -283,6 +337,8 @@ class TaskStore:
             objective,
             owner_session=owner_session,
             acceptance_criteria=acceptance_criteria,
+            structured_criteria=structured_criteria,
+            completion_policy=completion_policy,
             name=name,
             budget=budget,
             parent_task_id=parent.task_id,
@@ -596,20 +652,65 @@ class TaskWriter:
         self._append(record)
         return record
 
-    def verify_acceptance(self, criterion_index: int, evidence: str) -> TaskAcceptanceVerified:
+    def verify_acceptance(
+        self,
+        criterion_index: int,
+        evidence: str,
+        *,
+        source: AcceptanceVerificationSource = AcceptanceVerificationSource.USER,
+    ) -> TaskAcceptanceVerified:
         self._ensure_writable()
         proposal = self._state.current_completion_proposal
         if proposal is None:
             raise TaskStoreError(
                 "Task acceptance verification requires the current completion proposal"
             )
+        if not 1 <= criterion_index <= len(self._state.criteria):
+            raise TaskStoreError("Task acceptance verification index is outside the contract")
+        criterion = self._state.criteria[criterion_index - 1]
+        expected_source = _criterion_source(criterion)
+        if source is not expected_source:
+            raise TaskStoreError(
+                f"Task acceptance criterion requires {expected_source.value} verification"
+            )
         record = TaskAcceptanceVerified(
             sequence=self._state.next_sequence,
             completion_stage_id=proposal.stage_id,
             criterion_index=criterion_index,
             evidence=evidence,
-            source=AcceptanceVerificationSource.USER,
+            source=source,
             verified_at=self._store._clock(),
+        )
+        self._append(record)
+        return record
+
+    def record_acceptance_check(
+        self,
+        criterion_index: int,
+        source: AcceptanceVerificationSource,
+        outcome: AcceptanceCheckOutcome,
+        evidence: str,
+    ) -> TaskAcceptanceChecked:
+        self._ensure_writable()
+        proposal = self._state.current_completion_proposal
+        if proposal is None:
+            raise TaskStoreError("Task acceptance check requires the current completion proposal")
+        if not 1 <= criterion_index <= len(self._state.criteria):
+            raise TaskStoreError("Task acceptance check index is outside the contract")
+        criterion = self._state.criteria[criterion_index - 1]
+        if (
+            source is not _criterion_source(criterion)
+            or source is AcceptanceVerificationSource.USER
+        ):
+            raise TaskStoreError("Task acceptance check source does not match criterion")
+        record = TaskAcceptanceChecked(
+            sequence=self._state.next_sequence,
+            completion_stage_id=proposal.stage_id,
+            criterion_index=criterion_index,
+            source=source,
+            outcome=outcome,
+            evidence=evidence,
+            checked_at=self._store._clock(),
         )
         self._append(record)
         return record
@@ -693,6 +794,179 @@ class TaskWriter:
             raise TaskStoreError(
                 "Task writer durability is uncertain; release and inspect before continuing"
             )
+
+
+def _prepare_acceptance_criteria(
+    workspace: Path,
+    human_criteria: tuple[str, ...],
+    structured_specs: tuple[dict[str, object], ...],
+    completion_policy: TaskCompletionPolicy,
+) -> tuple[TaskAcceptanceCriterion, ...]:
+    if not isinstance(structured_specs, tuple) or any(
+        not isinstance(spec, dict) for spec in structured_specs
+    ):
+        raise TaskStoreError("structured acceptance criteria must be JSON objects")
+    if type(completion_policy) is not TaskCompletionPolicy:
+        raise TaskStoreError("Task completion policy is invalid")
+    criteria = [
+        TaskAcceptanceCriterion(AcceptanceCriterionKind.HUMAN, description)
+        for description in human_criteria
+    ]
+    try:
+        for spec in structured_specs:
+            criteria.append(_prepare_acceptance_criterion(workspace, spec))
+        return canonical_task_acceptance_contract(tuple(criteria), completion_policy)
+    except (TaskRecordError, WorkspacePathFailure) as error:
+        raise TaskStoreError(str(error)) from None
+
+
+def _prepare_acceptance_criterion(
+    workspace: Path,
+    spec: dict[str, object],
+) -> TaskAcceptanceCriterion:
+    kind_value = spec.get("kind")
+    description = spec.get("description")
+    try:
+        kind = AcceptanceCriterionKind(kind_value)
+    except (TypeError, ValueError):
+        raise TaskRecordError("structured acceptance criterion kind is invalid") from None
+    if kind is AcceptanceCriterionKind.HUMAN:
+        _criterion_spec_fields(spec, {"kind", "description"})
+        return TaskAcceptanceCriterion(kind, description)
+    if kind is AcceptanceCriterionKind.PATH_EXISTS:
+        _criterion_spec_fields(spec, {"kind", "description", "path", "path_type"})
+        try:
+            path_type = AcceptancePathType(spec.get("path_type"))
+        except (TypeError, ValueError):
+            raise TaskRecordError("path-exists criterion path_type is invalid") from None
+        return TaskAcceptanceCriterion(
+            kind,
+            description,
+            path=spec.get("path"),
+            path_type=path_type,
+        )
+    if kind is AcceptanceCriterionKind.PATH_UNCHANGED:
+        _criterion_spec_fields(spec, {"kind", "description", "path"})
+        path = spec.get("path")
+        if not isinstance(path, str):
+            raise TaskRecordError("path-unchanged criterion path is invalid")
+        digest = _protected_file_sha256(workspace, path)
+        return TaskAcceptanceCriterion(
+            kind,
+            description,
+            path=path,
+            path_type=AcceptancePathType.FILE,
+            expected_sha256=digest,
+        )
+    if kind is AcceptanceCriterionKind.COMMAND_SUCCEEDS:
+        _criterion_spec_fields(
+            spec,
+            {"kind", "description", "argv", "cwd", "timeout_seconds"},
+        )
+        argv = spec.get("argv")
+        if not isinstance(argv, list):
+            raise TaskRecordError("command-succeeds criterion argv must be an array")
+        return TaskAcceptanceCriterion(
+            kind,
+            description,
+            argv=tuple(argv),
+            cwd=spec.get("cwd"),
+            timeout_seconds=spec.get("timeout_seconds"),
+        )
+    if kind is AcceptanceCriterionKind.ACTION_AUDIT_CERTAIN:
+        _criterion_spec_fields(spec, {"kind", "description"})
+        return TaskAcceptanceCriterion(kind, description)
+    _criterion_spec_fields(spec, {"kind", "description", "paths"})
+    paths = spec.get("paths")
+    if not isinstance(paths, list):
+        raise TaskRecordError("independent-reviewer criterion paths must be an array")
+    return TaskAcceptanceCriterion(kind, description, review_paths=tuple(paths))
+
+
+def _criterion_spec_fields(spec: dict[str, object], expected: set[str]) -> None:
+    if set(spec) != expected:
+        raise TaskRecordError("structured acceptance criterion has unknown or missing fields")
+
+
+def _protected_file_sha256(workspace: Path, relative_path: str) -> str:
+    parts = validate_workspace_path(
+        relative_path,
+        tool_name="task_acceptance",
+        allow_root=False,
+    )
+    parent, name = open_parent_directory(
+        workspace,
+        parts,
+        tool_name="task_acceptance",
+    )
+    descriptor: int | None = None
+    try:
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except OSError:
+            raise TaskRecordError("protected acceptance path is unavailable") from None
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise TaskRecordError("protected acceptance path must be a regular file")
+        if info.st_size > MAX_PROTECTED_ACCEPTANCE_FILE_BYTES:
+            raise TaskRecordError(
+                f"protected acceptance file exceeds {MAX_PROTECTED_ACCEPTANCE_FILE_BYTES} bytes"
+            )
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except OSError:
+            raise TaskRecordError("protected acceptance path changed while being opened") from None
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != info.st_dev
+            or opened.st_ino != info.st_ino
+        ):
+            raise TaskRecordError("protected acceptance path changed while being opened")
+        content = bytearray()
+        while len(content) <= MAX_PROTECTED_ACCEPTANCE_FILE_BYTES:
+            chunk = os.read(
+                descriptor, min(64 * 1024, MAX_PROTECTED_ACCEPTANCE_FILE_BYTES + 1 - len(content))
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > MAX_PROTECTED_ACCEPTANCE_FILE_BYTES:
+            raise TaskRecordError(
+                f"protected acceptance file exceeds {MAX_PROTECTED_ACCEPTANCE_FILE_BYTES} bytes"
+            )
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+            or after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise TaskRecordError("protected acceptance path changed while being read")
+        visible = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if visible.st_dev != opened.st_dev or visible.st_ino != opened.st_ino:
+            raise TaskRecordError("protected acceptance path changed while being read")
+        return hashlib.sha256(content).hexdigest()
+    except OSError:
+        raise TaskRecordError("protected acceptance path became unavailable") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _criterion_source(
+    criterion: TaskAcceptanceCriterion,
+) -> AcceptanceVerificationSource:
+    if criterion.kind is AcceptanceCriterionKind.HUMAN:
+        return AcceptanceVerificationSource.USER
+    if criterion.kind is AcceptanceCriterionKind.INDEPENDENT_REVIEWER:
+        return AcceptanceVerificationSource.INDEPENDENT_REVIEWER
+    return AcceptanceVerificationSource.HOST_CHECK
 
 
 def _factory_task_id(factory: Callable[[], UUID | str]) -> str:
@@ -819,8 +1093,24 @@ def _task_info(
                 record.criterion_index,
                 record.evidence,
                 record.verified_at,
+                record.source,
             )
             for record in state.verified_criteria.values()
+        ),
+        criteria=state.criteria,
+        completion_policy=state.completion_policy,
+        acceptance_checks=tuple(
+            TaskAcceptanceCheckInfo(
+                record.completion_stage_id,
+                record.criterion_index,
+                record.source,
+                record.outcome,
+                record.evidence,
+                record.checked_at,
+            )
+            for record in state.acceptance_checks
+            if state.current_completion_proposal is not None
+            and record.completion_stage_id == state.current_completion_proposal.stage_id
         ),
         terminal_outcome=terminal.outcome if terminal is not None else None,
         terminal_reason=terminal.reason if terminal is not None else None,

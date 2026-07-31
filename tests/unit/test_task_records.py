@@ -10,6 +10,8 @@ from leonervis_code.session_records import workspace_fingerprint
 from leonervis_code.task_records import (
     MAX_ACCEPTANCE_CRITERIA,
     MAX_TASK_OBJECTIVE_CHARACTERS,
+    AcceptanceCriterionKind,
+    AcceptancePathType,
     StageCommitted,
     StageFailed,
     StageFailureReason,
@@ -17,6 +19,9 @@ from leonervis_code.task_records import (
     StageStarted,
     StageUsage,
     TaskArchived,
+    TaskAcceptanceContract,
+    TaskAcceptanceCriterion,
+    TaskCompletionPolicy,
     TaskHeader,
     TaskPlanAccepted,
     TaskPlanProposed,
@@ -60,6 +65,46 @@ def test_task_header_round_trips_as_closed_canonical_json(tmp_path: Path) -> Non
     assert payload.endswith(b"\n")
     assert decode_task_record(payload.removesuffix(b"\n")) == record
     assert json.loads(payload)["scope"] == "workspace"
+
+
+def test_structured_acceptance_contract_round_trips_and_legacy_header_maps_in_memory(
+    tmp_path: Path,
+) -> None:
+    legacy = replay(tmp_path, [header(tmp_path)])
+    assert [criterion.kind for criterion in legacy.criteria] == [
+        AcceptanceCriterionKind.HUMAN,
+        AcceptanceCriterionKind.HUMAN,
+    ]
+    assert legacy.completion_policy is TaskCompletionPolicy.MANUAL
+
+    contract = TaskAcceptanceContract(
+        sequence=1,
+        criteria=(
+            TaskAcceptanceCriterion(
+                AcceptanceCriterionKind.PATH_EXISTS,
+                "Task survives process restart",
+                path="result.txt",
+                path_type=AcceptancePathType.FILE,
+            ),
+            TaskAcceptanceCriterion(
+                AcceptanceCriterionKind.INDEPENDENT_REVIEWER,
+                "No provider call is made",
+                review_paths=("result.txt",),
+            ),
+        ),
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+        configured_at="2026-07-31T01:02:04.000000Z",
+    )
+
+    assert decode_task_record(encode_task_record(contract).rstrip(b"\n")) == contract
+    state = replay(tmp_path, [header(tmp_path), contract])
+    assert state.criteria == contract.criteria
+    assert state.completion_policy is TaskCompletionPolicy.AUTO_VERIFIED
+
+    malformed = json.loads(encode_task_record(contract))
+    malformed["criteria"][0]["extra"] = True
+    with pytest.raises(TaskRecordError, match="unknown or missing"):
+        decode_task_record(json.dumps(malformed).encode())
 
 
 @pytest.mark.parametrize(

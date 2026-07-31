@@ -30,6 +30,7 @@ class ProviderTokenUsage:
 class ProviderInvocationKind(StrEnum):
     TURN = "turn"
     COMPACTION = "compaction"
+    REVIEW = "review"
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,12 @@ class RuntimeUsageSnapshot:
     latest_context: ContextFitReport | None
     latest_invocation: ProviderInvocationUsage | None
     latest_compaction: ProviderInvocationUsage | None
+    latest_review: ProviderInvocationUsage | None
     latest_turn: tuple[ProviderInvocationUsage, ...]
     turn_totals: ProviderUsageTotals
     profile_turn_totals: ProviderUsageTotals
     profile_compaction_totals: ProviderUsageTotals
+    profile_review_totals: ProviderUsageTotals
 
 
 class RuntimeUsageTracker:
@@ -165,11 +168,14 @@ class RuntimeUsageTracker:
     def _snapshot_locked(self) -> RuntimeUsageSnapshot:
         turn_profile = ProviderUsageTotals()
         compaction_profile = ProviderUsageTotals()
+        review_profile = ProviderUsageTotals()
         for record in self._records:
             if record.kind == ProviderInvocationKind.TURN:
                 turn_profile = turn_profile.add(record.usage)
-            else:
+            elif record.kind == ProviderInvocationKind.COMPACTION:
                 compaction_profile = compaction_profile.add(record.usage)
+            else:
+                review_profile = review_profile.add(record.usage)
         latest_turn_totals = ProviderUsageTotals()
         for record in self._latest_turn:
             latest_turn_totals = latest_turn_totals.add(record.usage)
@@ -181,15 +187,25 @@ class RuntimeUsageTracker:
             ),
             None,
         )
+        latest_review = next(
+            (
+                record
+                for record in reversed(self._records)
+                if record.kind == ProviderInvocationKind.REVIEW
+            ),
+            None,
+        )
         return RuntimeUsageSnapshot(
             runtime_generation=self._generation,
             latest_context=self._latest_context,
             latest_invocation=self._records[-1] if self._records else None,
             latest_compaction=latest_compaction,
+            latest_review=latest_review,
             latest_turn=self._latest_turn,
             turn_totals=latest_turn_totals,
             profile_turn_totals=turn_profile,
             profile_compaction_totals=compaction_profile,
+            profile_review_totals=review_profile,
         )
 
 

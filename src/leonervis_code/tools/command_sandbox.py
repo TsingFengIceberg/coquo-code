@@ -123,11 +123,15 @@ class LinuxBubblewrapCommandSandbox:
         seccomp_filter_factory: Callable[[], int] | None = None,
         platform: str | None = None,
         masked_read_paths: tuple[Path, ...] = (),
+        workspace_writable: bool = True,
     ) -> None:
         self._bubblewrap_path = Path(bubblewrap_path)
         self._seccomp_filter_factory = seccomp_filter_factory or _create_network_seccomp_filter
         self._platform = sys.platform if platform is None else platform
         self._masked_read_paths = tuple(Path(path) for path in masked_read_paths)
+        if type(workspace_writable) is not bool:
+            raise ValueError("workspace writable option must be boolean")
+        self._workspace_writable = workspace_writable
 
     def prepare_launch(
         self,
@@ -182,7 +186,13 @@ class LinuxBubblewrapCommandSandbox:
                 "/tmp",
             ]
             command.extend(masked_read_mounts)
-            command.extend(("--bind", str(workspace), str(workspace)))
+            command.extend(
+                (
+                    "--bind" if self._workspace_writable else "--ro-bind",
+                    str(workspace),
+                    str(workspace),
+                )
+            )
             command.extend(sensitive_mounts)
             for directory in _PRIVATE_DIRECTORIES:
                 if directory != SANDBOX_PRIVATE_TMP:

@@ -104,6 +104,34 @@ def test_bubblewrap_launch_has_fixed_mount_namespace_environment_and_seccomp_ord
         _close_launch(launch)
 
 
+def test_bubblewrap_can_bind_the_workspace_read_only_for_host_verification(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    sandbox = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+        workspace_writable=False,
+    )
+
+    launch = sandbox.prepare_launch(
+        workspace=workspace,
+        cwd=workspace,
+        argv=("/usr/bin/true",),
+        environment={"PATH": "/usr/bin"},
+    )
+    try:
+        assert _subsequence(launch.argv, ("--ro-bind", str(workspace), str(workspace)))
+        assert not _subsequence(launch.argv, ("--bind", str(workspace), str(workspace)))
+    finally:
+        _close_launch(launch)
+
+
 def test_bubblewrap_masks_eval_sources_before_rebinding_nested_workspace(tmp_path: Path) -> None:
     source_checkout = tmp_path / "source"
     workspace = source_checkout / "task"
@@ -332,6 +360,32 @@ def test_real_sandbox_allows_workspace_write_but_blocks_host_write_and_network(
     assert not outside.exists()
     assert "outside-denied" in data["stdout"]["text"]
     assert "socket 1\n" in data["stdout"]["text"]
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or shutil.which("bwrap") is None
+    or ctypes.util.find_library("seccomp") is None,
+    reason="Linux bubblewrap and libseccomp are required",
+)
+def test_real_read_only_sandbox_prevents_verifier_workspace_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    protected = workspace / "protected.txt"
+    protected.write_text("before\n", encoding="utf-8")
+    sandbox = LinuxBubblewrapCommandSandbox(workspace_writable=False)
+    tool = RunCommandTool(
+        workspace,
+        environment={"PATH": "/usr/bin"},
+        command_sandbox=sandbox,
+    )
+    code = "from pathlib import Path; Path('protected.txt').write_text('after\\n')"
+
+    result = tool.execute_detailed(tool.prepare(_request(["/usr/bin/python3", "-c", code])))
+
+    assert result.result_code == "command_exited_nonzero"
+    assert result.observation.exit_code != 0
+    assert protected.read_text(encoding="utf-8") == "before\n"
 
 
 @pytest.mark.skipif(

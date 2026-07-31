@@ -33,9 +33,11 @@ from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore
 from leonervis_code.task_records import (
+    AcceptanceCheckOutcome,
     StageFailureReason,
     StageKind,
     TaskBudget,
+    TaskCompletionPolicy,
     TaskStatus,
 )
 from leonervis_code.task_runtime import (
@@ -48,6 +50,7 @@ from leonervis_code.task_runtime import (
     parse_task_response,
 )
 from leonervis_code.task_store import TaskStore, TaskStoreError
+from leonervis_code.task_verification import TaskVerificationError
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -171,6 +174,20 @@ def test_task_stage_reuses_ordinary_turn_tools_and_commits_bounded_evidence(
     assert payload["overall_objective"] == "Inspect the workspace evidence"
     assert payload["task_name"] == "Evidence task"
     assert payload["acceptance_criteria"] == ["README was inspected"]
+    assert payload["acceptance_contract"] == [
+        {
+            "argv": [],
+            "cwd": None,
+            "description": "README was inspected",
+            "expected_sha256": None,
+            "kind": "human",
+            "path": None,
+            "path_type": None,
+            "review_paths": [],
+            "timeout_seconds": None,
+        }
+    ]
+    assert payload["completion_policy"] == "manual"
     assert payload["current_stage"]["objective"] == "Read README.md exactly once"
     assert payload["cumulative_budget"]["max_stages"] == 4
     assert payload["remaining_budget_before_stage"]["provider_invocations"] == 20
@@ -325,6 +342,176 @@ def test_completion_requires_current_model_proposal_and_human_acceptance(
     assert completed.terminal_reason is None
     with pytest.raises(TaskStoreError, match="terminal"):
         session.continue_task(task.task_id, "Must not reopen")
+    session.close()
+
+
+def test_host_verification_auto_completes_only_after_current_model_proposal(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "artifact.txt").write_text("ready\n", encoding="utf-8")
+    provider = ScriptedTaskProvider(
+        [AssistantText(f"Artifact is ready.\n{TASK_COMPLETION_SIGNAL} yes")]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Create the required artifact",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "Artifact exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+    )
+
+    with pytest.raises(TaskStoreError, match="current completion proposal"):
+        session.verify_task_host(task.task_id)
+    stage = session.continue_task(task.task_id, "Confirm the artifact is ready")
+    assert stage.task.status is TaskStatus.COMPLETION_PROPOSED
+    with pytest.raises(TaskStoreError, match="requires host-check verification"):
+        session.verify_task_acceptance(task.task_id, 1, "I saw the file")
+
+    verified = session.verify_task_host(task.task_id)
+
+    assert verified.auto_completed is True
+    assert verified.checks[0].outcome is AcceptanceCheckOutcome.PASSED
+    assert verified.task.status is TaskStatus.COMPLETED
+    assert verified.task.acceptance_verifications[0].source.value == "host-check"
+    session.close()
+
+
+def test_independent_reviewer_uses_no_tools_separate_history_and_auto_completes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "result.txt").write_text("correct\n", encoding="utf-8")
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f"Implementation finished.\n{TASK_COMPLETION_SIGNAL} yes"),
+            AssistantText(
+                '{"verdicts":[{"criterion_index":1,"verdict":"passed",'
+                '"evidence":"result.txt contains the required output."}]}'
+            ),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Produce a correct result",
+        structured_criteria=(
+            {
+                "kind": "independent-reviewer",
+                "description": "Result is technically correct",
+                "paths": ["result.txt"],
+            },
+        ),
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+    )
+    session.continue_task(task.task_id, "Finish the implementation")
+    executor_history = session.history
+
+    reviewed = session.review_task_acceptance(task.task_id)
+
+    assert reviewed.auto_completed is True
+    assert reviewed.task.status is TaskStatus.COMPLETED
+    assert session.history == executor_history
+    review_request = provider.requests[-1]
+    assert review_request.allow_tools is False
+    assert len(review_request.history) == 1
+    assert isinstance(review_request.history[0], UserMessage)
+    assert "[Leonervis durable Task Stage]" not in review_request.history[0].text
+    usage = session.usage()
+    assert usage.profile_review_totals.input_tokens == 100
+    assert usage.profile_review_totals.output_tokens == 10
+    session.close()
+
+
+def test_invalid_reviewer_response_records_error_without_verification_or_completion(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "result.txt").write_text("candidate\n", encoding="utf-8")
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f"Candidate finished.\n{TASK_COMPLETION_SIGNAL} yes"),
+            AssistantText("not valid reviewer JSON"),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Review one candidate",
+        structured_criteria=(
+            {
+                "kind": "independent-reviewer",
+                "description": "Candidate is correct",
+                "paths": ["result.txt"],
+            },
+        ),
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+    )
+    session.continue_task(task.task_id, "Produce the candidate")
+    session_history = session.history
+
+    with pytest.raises(TaskVerificationError, match="valid JSON"):
+        session.review_task_acceptance(task.task_id)
+
+    inspected = session.inspect_task(task.task_id)
+    assert inspected.status is TaskStatus.COMPLETION_PROPOSED
+    assert inspected.acceptance_verifications == ()
+    assert inspected.acceptance_checks[0].outcome is AcceptanceCheckOutcome.ERROR
+    assert inspected.acceptance_checks[0].evidence == "review-error=TaskVerificationError"
+    assert session.history == session_history
+    session.close()
+
+
+def test_verification_from_an_older_completion_proposal_cannot_complete_a_new_stage(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "artifact.txt").write_text("ready\n", encoding="utf-8")
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f"First proposal.\n{TASK_COMPLETION_SIGNAL} yes"),
+            AssistantText(f"Second proposal.\n{TASK_COMPLETION_SIGNAL} yes"),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Keep acceptance causal",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "Artifact exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+    )
+    session.continue_task(task.task_id, "First completion attempt")
+    first = session.verify_task_host(task.task_id)
+    assert len(first.task.acceptance_verifications) == 1
+
+    second_stage = session.continue_task(task.task_id, "Make one more change")
+
+    assert second_stage.task.acceptance_verifications == ()
+    with pytest.raises(TaskStoreError, match="all acceptance criteria"):
+        session.complete_task(task.task_id)
+    session.close()
+
+
+def test_auto_verified_task_with_no_criteria_completes_at_the_current_proposal(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedTaskProvider(
+        [AssistantText(f"No acceptance checks required.\n{TASK_COMPLETION_SIGNAL} yes")]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Finish an empty contract",
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+    )
+
+    result = session.continue_task(task.task_id, "Finish now")
+
+    assert result.task.status is TaskStatus.COMPLETED
     session.close()
 
 

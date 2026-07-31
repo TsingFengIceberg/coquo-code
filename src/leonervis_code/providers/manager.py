@@ -356,6 +356,41 @@ class TurnRuntimeSnapshot:
             preflight_sink=None,
         ).response
 
+    def review(self, request: ConversationRequest) -> ProviderResponse:
+        """Run one independent no-tools review without entering Session history."""
+        if request.allow_tools:
+            raise ValueError("independent review request must disable tools")
+        if self.route is None:
+            return respond_with_streaming(
+                self.provider,
+                request,
+                event_sink=lambda _delta: None,
+                prefer_stream=False,
+            ).response
+        report = assess_context_fit(
+            provider=self.provider,
+            route=self.route,
+            capability=self.capability,
+            request=request,
+        )
+        raise_for_context_fit(report)
+        self.usage_tracker.record_context(report)
+        try:
+            outcome = respond_with_streaming(
+                self.provider,
+                request,
+                event_sink=lambda _delta: None,
+                prefer_stream=False,
+            )
+        except ProviderAdapterError as error:
+            self.usage_tracker.record(ProviderInvocationKind.REVIEW, error.usage)
+            raise
+        except BaseException:
+            self.usage_tracker.record(ProviderInvocationKind.REVIEW, None)
+            raise
+        self.usage_tracker.record(ProviderInvocationKind.REVIEW, outcome.usage)
+        return outcome.response
+
     def respond_stream(
         self,
         request: ConversationRequest,
@@ -885,6 +920,12 @@ class RuntimeProviderManager:
         finally:
             with self._lock:
                 self._turn_active = False
+
+    @contextmanager
+    def provider_for_review(self) -> Iterator[TurnRuntimeSnapshot]:
+        """Pin the current runtime for one independent no-tools review."""
+        with self.provider_for_turn() as runtime:
+            yield runtime
 
     def use_profile(
         self,

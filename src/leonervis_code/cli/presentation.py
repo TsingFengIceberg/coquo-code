@@ -121,7 +121,8 @@ TASK_HELP = (
     "  /task show <task-id> | /task timeline <task-id>\n"
     "  /task continue <task-id> <stage-objective> | /task recover <task-id>\n"
     "  /task plan <task-id> | /task plan accept <task-id> | /task run <task-id> [1-16]\n"
-    "  /task verify <task-id> <criterion-number> <evidence> | /task complete <task-id>\n"
+    "  /task verify <task-id> <criterion-number> <evidence>\n"
+    "  /task verify host <task-id> | /task review <task-id> | /task complete <task-id>\n"
     "  /task cancel <task-id> <reason> | /task fail <task-id> <reason>\n"
     "  /task rename <task-id> <name> | /task archive <task-id> | /task unarchive <task-id>\n"
     "  /task derive <parent-task-id> <objective>\n"
@@ -326,6 +327,9 @@ class TaskInfoView(Protocol):
     budget_exhausted: tuple[str, ...]
     latest_plan: object | None
     acceptance_verifications: tuple[object, ...]
+    criteria: tuple[object, ...]
+    completion_policy: object
+    acceptance_checks: tuple[object, ...]
     terminal_outcome: object | None
     terminal_reason: str | None
 
@@ -947,9 +951,10 @@ def render_task_summary(info: TaskInfoView) -> str:
         if plan is not None and plan.accepted
         else ""
     )
+    policy = getattr(getattr(info, "completion_policy", None), "value", "manual")
     return (
         f"{name!r} ({info.task_id}): {info.status.value}{archived}, {len(info.stages)} stages"
-        f"{progress}, owner {info.owner_session_id}, created {info.created_at}"
+        f"{progress}, completion {policy}, owner {info.owner_session_id}, created {info.created_at}"
     )
 
 
@@ -1805,13 +1810,30 @@ def render_task_info(info: TaskInfoView) -> str:
         f"Records: {info.record_count}",
         f"Stages: {len(info.stages)}",
         f"Acceptance criteria: {len(info.acceptance_criteria)}",
+        "Completion policy: "
+        f"{getattr(getattr(info, 'completion_policy', None), 'value', 'manual')}",
     ]
     if getattr(info, "parent_task_id", None) is not None:
         lines.append(f"Derived from: {info.parent_task_id}")
-    lines.extend(
-        f"  {index}. {_safe_inline(criterion)}"
-        for index, criterion in enumerate(info.acceptance_criteria, start=1)
-    )
+    structured = getattr(info, "criteria", ())
+    if len(structured) == len(info.acceptance_criteria):
+        for index, criterion in enumerate(structured, start=1):
+            kind = getattr(getattr(criterion, "kind", None), "value", "human")
+            source = (
+                "user"
+                if kind == "human"
+                else "independent-reviewer"
+                if kind == "independent-reviewer"
+                else "host-check"
+            )
+            lines.append(
+                f"  {index}. {_safe_inline(criterion.description)} [{kind}; verify={source}]"
+            )
+    else:
+        lines.extend(
+            f"  {index}. {_safe_inline(criterion)} [human; verify=user]"
+            for index, criterion in enumerate(info.acceptance_criteria, start=1)
+        )
     if info.stages:
         latest = info.stages[-1]
         lines.extend(
@@ -1868,13 +1890,40 @@ def render_task_info(info: TaskInfoView) -> str:
             f"Latest plan: {plan.plan_id}, {'accepted' if plan.accepted else 'proposed'}, "
             f"progress {plan.completed_steps}/{len(plan.steps)}"
         )
-    verified = {item.criterion_index for item in getattr(info, "acceptance_verifications", ())}
+    verifications = getattr(info, "acceptance_verifications", ())
+    verified = {item.criterion_index for item in verifications}
     if info.acceptance_criteria:
         lines.append(f"Acceptance verified: {len(verified)}/{len(info.acceptance_criteria)}")
+    for verification in verifications:
+        source = getattr(getattr(verification, "source", None), "value", "user")
+        lines.append(
+            f"  Criterion {verification.criterion_index}: verified by {source} - "
+            f"{_safe_inline(verification.evidence)}"
+        )
+    for check in getattr(info, "acceptance_checks", ()):
+        lines.append(
+            f"  Check {check.criterion_index}: {check.outcome.value} by {check.source.value} - "
+            f"{_safe_inline(check.evidence)}"
+        )
     if getattr(info, "terminal_outcome", None) is not None:
         lines.append(f"Terminal outcome: {info.terminal_outcome.value}")
         if getattr(info, "terminal_reason", None) is not None:
             lines.append(f"Terminal reason: {_safe_inline(info.terminal_reason)}")
+    return "\n".join(lines)
+
+
+def render_task_verification_result(result) -> str:
+    """Render one bounded Host/reviewer check operation and resulting Task state."""
+    lines = ["Acceptance check results:"]
+    if not result.checks:
+        lines.append("  No eligible unverified criteria were checked.")
+    for check in result.checks:
+        lines.append(
+            f"  {check.criterion_index}. {check.outcome.value} by {check.source.value}: "
+            f"{_safe_inline(check.evidence)}"
+        )
+    lines.append(f"Auto-completed: {'yes' if result.auto_completed else 'no'}")
+    lines.append(render_task_info(result.task))
     return "\n".join(lines)
 
 
@@ -1965,6 +2014,7 @@ def render_usage_summary(usage: RuntimeUsageSnapshot, *, compact: bool = False) 
             f"Turn usage: {_totals_inline(usage.turn_totals)}\n"
             f"Profile usage: {_totals_inline(usage.profile_turn_totals)}"
             f" · compaction {_totals_inline(usage.profile_compaction_totals)}"
+            f" · review {_totals_inline(usage.profile_review_totals)}"
         )
     latest_text = (
         "unknown"
@@ -2001,10 +2051,24 @@ def render_usage_summary(usage: RuntimeUsageSnapshot, *, compact: bool = False) 
             )
         )
         lines.append(f"Latest compaction invocation: #{latest_compaction.sequence} {detail}")
+    latest_review = usage.latest_review
+    if latest_review is None:
+        lines.append("Latest review invocation: none in current runtime")
+    else:
+        detail = (
+            "unknown"
+            if latest_review.usage is None
+            else (
+                f"{_format_tokens(latest_review.usage.input_tokens)} in / "
+                f"{_format_tokens(latest_review.usage.output_tokens)} out"
+            )
+        )
+        lines.append(f"Latest review invocation: #{latest_review.sequence} {detail}")
     lines.extend(
         (
             f"Current profile turns: {_totals_inline(usage.profile_turn_totals)}",
             f"Current profile compaction: {_totals_inline(usage.profile_compaction_totals)}",
+            f"Current profile review: {_totals_inline(usage.profile_review_totals)}",
             "Scope: current process and runtime target; /provider use or /model resets totals.",
         )
     )

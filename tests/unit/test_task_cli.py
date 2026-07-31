@@ -7,7 +7,11 @@ from leonervis_code.cli.main import main
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore
 from leonervis_code.task_store import TaskStore
-from leonervis_code.task_records import StageFailureReason
+from leonervis_code.task_records import (
+    AcceptanceCriterionKind,
+    StageFailureReason,
+    TaskCompletionPolicy,
+)
 
 
 def invoke(tmp_path: Path, arguments: list[str]) -> tuple[int, str, str]:
@@ -79,6 +83,58 @@ def test_task_cli_create_requires_an_existing_owner_session(tmp_path: Path) -> N
     assert output == ""
     assert "task error: owner Session is invalid or unavailable" in errors
     assert not (tmp_path / ".leonervis-code").exists()
+
+
+def test_task_cli_accepts_strict_structured_criteria_and_completion_policy(
+    tmp_path: Path,
+) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    writer.release()
+    (tmp_path / "artifact.txt").write_text("ready\n", encoding="utf-8")
+
+    status, output, errors = invoke(
+        tmp_path,
+        [
+            "task",
+            "create",
+            "Verify one artifact",
+            "--criterion",
+            '{"kind":"path-exists","description":"Artifact exists","path":"artifact.txt","path_type":"file"}',
+            "--criterion",
+            '{"kind":"path-unchanged","description":"Artifact remains unchanged","path":"artifact.txt"}',
+            "--completion-policy",
+            "auto-verified",
+        ],
+    )
+
+    assert status == 0
+    assert errors == ""
+    assert "Completion policy: auto-verified" in output
+    assert "[path-exists; verify=host-check]" in output
+    task = TaskStore(tmp_path).list()[0]
+    assert task.completion_policy is TaskCompletionPolicy.AUTO_VERIFIED
+    assert [criterion.kind for criterion in task.criteria] == [
+        AcceptanceCriterionKind.PATH_EXISTS,
+        AcceptanceCriterionKind.PATH_UNCHANGED,
+    ]
+    assert task.criteria[1].expected_sha256 is not None
+
+
+def test_task_cli_rejects_invalid_criterion_json_without_creating_a_task(
+    tmp_path: Path,
+) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    writer.release()
+
+    status, output, errors = invoke(
+        tmp_path,
+        ["task", "create", "Invalid", "--criterion", "[]"],
+    )
+
+    assert status == 2
+    assert output == ""
+    assert "task error: structured acceptance criterion must be a JSON object" in errors
+    assert TaskStore(tmp_path).list() == ()
 
 
 def test_task_cli_list_is_read_only_when_no_task_storage_exists(tmp_path: Path) -> None:

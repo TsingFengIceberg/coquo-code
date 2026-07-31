@@ -138,11 +138,15 @@ from leonervis_code.session_store import (
     SessionWriter,
 )
 from leonervis_code.task_records import (
+    AcceptanceCheckOutcome,
+    AcceptanceCriterionKind,
+    AcceptanceVerificationSource,
     StageCommitted,
     StageFailureReason,
     StageKind,
     StageUsage,
     TaskBudget,
+    TaskCompletionPolicy,
     TaskStatus,
     TaskTerminalOutcome,
 )
@@ -162,6 +166,13 @@ from leonervis_code.task_store import (
     TaskStore,
     TaskStoreError,
     TaskWriter,
+)
+from leonervis_code.task_verification import (
+    AcceptanceCheckResult,
+    TaskVerificationResult,
+    build_task_review_request,
+    parse_task_review_response,
+    run_host_acceptance_checks,
 )
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
@@ -974,6 +985,8 @@ class ProjectSession:
         objective: str,
         acceptance_criteria: tuple[str, ...] = (),
         *,
+        structured_criteria: tuple[dict[str, object], ...] = (),
+        completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL,
         name: str | None = None,
         budget: TaskBudget = TaskBudget(),
     ) -> TaskInfo:
@@ -985,6 +998,8 @@ class ProjectSession:
                 objective,
                 owner_session=self._writer.session_id,
                 acceptance_criteria=acceptance_criteria,
+                structured_criteria=structured_criteria,
+                completion_policy=completion_policy,
                 name=name,
                 budget=budget,
             )
@@ -1007,6 +1022,8 @@ class ProjectSession:
         objective: str,
         *,
         acceptance_criteria: tuple[str, ...] = (),
+        structured_criteria: tuple[dict[str, object], ...] = (),
+        completion_policy: TaskCompletionPolicy = TaskCompletionPolicy.MANUAL,
         name: str | None = None,
         budget: TaskBudget = TaskBudget(),
     ) -> TaskInfo:
@@ -1019,6 +1036,8 @@ class ProjectSession:
                 objective,
                 owner_session=self._writer.session_id,
                 acceptance_criteria=acceptance_criteria,
+                structured_criteria=structured_criteria,
+                completion_policy=completion_policy,
                 name=name,
                 budget=budget,
             )
@@ -1171,6 +1190,7 @@ class ProjectSession:
             writer.propose_plan(parsed.plan_steps)
         elif parsed.completion_proposed:
             writer.propose_completion()
+            self._auto_complete_verified_task(writer)
 
     def verify_task_acceptance(
         self,
@@ -1181,7 +1201,100 @@ class ProjectSession:
         with self._lock, self._task_store.open(task_id) as writer:
             self._ensure_open()
             writer.verify_acceptance(criterion_index, evidence)
+            self._auto_complete_verified_task(writer)
             return writer.info
+
+    def verify_task_host(self, task_id: str) -> TaskVerificationResult:
+        """Run deterministic acceptance checks and persist only Host-observed evidence."""
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            already_verified = set(writer.state.verified_criteria)
+            observed = run_host_acceptance_checks(
+                self._task_store.workspace,
+                writer.info,
+            )
+            recorded: list[AcceptanceCheckResult] = []
+            for result in observed:
+                if result.criterion_index in already_verified:
+                    continue
+                writer.record_acceptance_check(
+                    result.criterion_index,
+                    result.source,
+                    result.outcome,
+                    result.evidence,
+                )
+                recorded.append(result)
+                if result.outcome is AcceptanceCheckOutcome.PASSED:
+                    writer.verify_acceptance(
+                        result.criterion_index,
+                        result.evidence,
+                        source=AcceptanceVerificationSource.HOST_CHECK,
+                    )
+            auto_completed = self._auto_complete_verified_task(writer)
+            return TaskVerificationResult(writer.info, tuple(recorded), auto_completed)
+
+    def review_task_acceptance(self, task_id: str) -> TaskVerificationResult:
+        """Run one independent no-tools provider review outside Executor Session history."""
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if writer.state.current_completion_proposal is None:
+                raise TaskStoreError("Task review requires the current completion proposal")
+            already_verified = set(writer.state.verified_criteria)
+            indices = tuple(
+                index
+                for index, criterion in enumerate(writer.state.criteria, start=1)
+                if criterion.kind is AcceptanceCriterionKind.INDEPENDENT_REVIEWER
+                and index not in already_verified
+            )
+            if not indices:
+                raise TaskStoreError("Task has no unverified independent-reviewer criteria")
+            request = build_task_review_request(
+                writer.info,
+                self._task_store.workspace,
+                reviewer_indices=indices,
+            )
+            try:
+                with self._manager.provider_for_review() as runtime:
+                    response = runtime.review(request)
+                observed = parse_task_review_response(response, expected_indices=indices)
+            except BaseException as error:
+                evidence = f"review-error={type(error).__name__}"
+                for index in indices:
+                    writer.record_acceptance_check(
+                        index,
+                        AcceptanceVerificationSource.INDEPENDENT_REVIEWER,
+                        AcceptanceCheckOutcome.ERROR,
+                        evidence,
+                    )
+                raise
+            for result in observed:
+                writer.record_acceptance_check(
+                    result.criterion_index,
+                    result.source,
+                    result.outcome,
+                    result.evidence,
+                )
+                if result.outcome is AcceptanceCheckOutcome.PASSED:
+                    writer.verify_acceptance(
+                        result.criterion_index,
+                        result.evidence,
+                        source=AcceptanceVerificationSource.INDEPENDENT_REVIEWER,
+                    )
+            auto_completed = self._auto_complete_verified_task(writer)
+            return TaskVerificationResult(writer.info, observed, auto_completed)
+
+    def _auto_complete_verified_task(self, writer: TaskWriter) -> bool:
+        state = writer.state
+        if state.completion_policy is not TaskCompletionPolicy.AUTO_VERIFIED:
+            return False
+        if state.current_completion_proposal is None:
+            return False
+        if len(state.verified_criteria) != len(state.criteria):
+            return False
+        writer.terminate(TaskTerminalOutcome.COMPLETED)
+        return True
 
     def complete_task(self, task_id: str) -> TaskInfo:
         return self._terminate_task(task_id, TaskTerminalOutcome.COMPLETED)
@@ -1309,6 +1422,7 @@ class ProjectSession:
                     writer.propose_plan(parsed.plan_steps)
                 elif parsed.completion_proposed:
                     writer.propose_completion()
+                    self._auto_complete_verified_task(writer)
                 return TaskStageExecutionResult(
                     task=writer.info,
                     stage_number=stage_record.stage_number,
