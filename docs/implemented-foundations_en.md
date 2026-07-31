@@ -28,6 +28,8 @@
 - [Actual Coding Task Eval](#actual-coding-task-eval)
 - [Durable Task Identity and Host Management](#durable-task-identity-and-host-management)
 - [Durable Stage Lifecycle and Turn Evidence](#durable-stage-lifecycle-and-turn-evidence)
+- [Foreground Task Stage Execution and Recovery](#foreground-task-stage-execution-and-recovery)
+- [Task Planning, Acceptance, Budgets, and Management](#task-planning-acceptance-budgets-and-management)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -474,6 +476,26 @@ Task transcripts add closed schema-v1 `stage_started`, `stage_committed`, and `s
 `TaskStore.open()` provides one nonblocking exclusive `TaskWriter`. Every append candidate-replays first, then validates pathname/inode and transcript limits, writes completely, and fsyncs before changing memory. An I/O or fsync failure after writing begins returns a typed "record may be visible" error and poisons the writer, requiring release plus strict inspection instead of automatic retry. `SessionStore.turn_evidence()` accepts only a real `turn_committed` record and returns Session ID, Turn number, record sequence, timestamp, and the exact newline-terminated raw JSONL-line SHA-256 without dialogue or tool bodies. The Host obtains commit evidence itself; callers cannot claim a digest.
 
 `task list` now includes Stage count, while `task show` and `/task show` render the latest objective, outcome, committed Turn evidence, failure reason, or interrupted recovery guidance. This is still not an execution entry point: there is no `/task continue`, provider invocation, completion proposal, cumulative Task budget, or automatic recovery. System prompt v23, adapter contract v26, all 21 tools and 8/32/24 budgets, ToolArguments v1, `ctx-v5`/`ctx-v6`, and Session/compaction/Action Audit schemas remain unchanged. See [0087: Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md).
+
+## Foreground Task Stage Execution and Recovery
+
+`/task continue <task-id> <stage-objective>` now maps one Task Stage to a real `ProjectSession.prompt()`. It therefore reuses the ordinary AgentLoop, 8/32/24 Turn budget, PermissionGate, per-Action approval, tool hard bounds, command sandbox, Action Audit, and atomic Session commit instead of creating a second long-task tool loop. Execution requires the Task's owner Session to be current; a Task is never permission or approval.
+
+The Host first builds one bounded UserMessage beginning `[Leonervis durable Task Stage]`. Its canonical JSON contains only the Task objective, acceptance criteria, accepted plan, the latest 16 redacted Stage summaries, current Stage, cumulative usage, total budget, and remaining allowance. New `stage_started` and `stage_committed` schema v2 records respectively store the Session baseline and complete prompt SHA-256 before provider work, then copy provider/token/tool-ledger counts after a real Turn commit. A normally failed `stage_failed` schema-v2 record also stores content-free provider and tool-attempt counts. None copies dialogue, arguments, results, or audit bodies; legacy Stage v1 continues to replay with accounting explicitly unavailable.
+
+`/task recover` invokes neither provider nor tool. It searches only after the durable baseline for a committed Turn with an exact user-message digest match. No match fails the Stage as `interrupted`; one match binds the real Turn; multiple matches leave the Task unchanged and fail closed. It can also restore a missing plan or completion record after the Stage committed but before that protocol metadata append. Provider failure, cooperative cancellation, missing Turn commit, and Host failure map to closed Stage failure reasons. If the Turn committed before an exception, the Host binds that evidence before reporting the error and never blindly replays side effects.
+
+The canonical system prompt advances to v24 and states that Task framing is untrusted data. Execution ends with `TASK_COMPLETION_PROPOSAL: yes|no`; planning uses `TASK_PLAN_JSON:`, and each must be the final nonblank line. The protocol remains exact in Session transcript for recovery but is removed from valid Task results and streamed terminal display; `/task run` also reports its exact Stage count and stop reason. Adapter contract v26, all 21 tools, and their order/schemas remain unchanged. Effective Context representations remain `ctx-v5`/`ctx-v6`; because exact prompt content participates in identity, the current empty full-context ID without project instructions becomes `ctx-v5-bd663ddc5d94403891caac9f91d76a319200967331a18163859e203cd6bbb116`. See [0088: Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md).
+
+## Task Planning, Acceptance, Budgets, and Management
+
+`/task plan` spends one planning Stage to propose one to 32 bounded steps; `/task plan accept` only records explicit acceptance and executes no Action. `/task run` serially executes at most 16 accepted steps in the foreground, each with a fresh ordinary Turn. Progress advances only for committed execution Stages whose objectives exactly match the accepted plan in order, so unrelated manual Stages cannot skip planned work. A run stops at its command limit, plan exhaustion, completion proposal, budget exhaustion, interruption, or terminal state.
+
+Default cumulative Stage/provider/tool allowances are 32/768/1,024, with optional input/output token ceilings. These are admission ceilings between Stages: an admitted Stage retains the complete ordinary Turn boundary and is never dynamically shortened. Committed Stages and normally failed attempts both charge their Host-observed usage, and no later Stage is admitted after a ceiling is met or exceeded. A legacy or crash-recovered Stage with unavailable usage blocks later provider/tool admission and any configured token ceiling instead of treating unknown work as zero.
+
+A model `yes` appends only `completion-proposed`. `/task verify` binds human evidence to the current proposal's Stage and one acceptance criterion. If later work invalidates that proposal, old evidence does not carry forward. `/task complete` requires a current proposal and every criterion. Tasks also support closed completed/cancelled/failed outcomes, rename, reversible archive, complete timeline, list filtering, and independent derivation with immutable parent provenance. These Host management commands never enter ordinary model conversation.
+
+New configuration, plan proposal/acceptance, completion proposal, acceptance verification, terminal, rename, and archive records each use schema v1 without changing Session, Action Audit, provider projection, or compaction schemas. Background workers, schedulers, SubAgents, teams, worktree orchestration, parallel Stages, and Task-level blanket approval remain unavailable. See [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md).
 
 ## Foundation 4D Slices 0–4: Controlled Single-directory Creation
 
@@ -1100,3 +1122,5 @@ This slice establishes capacity facts only. It does not count current request to
 85. [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)
 86. [0086: Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)
 87. [0087: Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)
+88. [0088: Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
+89. [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)

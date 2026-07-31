@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v23-3858281d3354288e15dd51569d896fe22c6e4842d8c8b5192dc4a2e296792a55"
+EXPECTED_FINGERPRINT = "v24-13d080166d18609edf6ab07b9b1b6f159643a682072319fa65137c93291a0671"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 23
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 24
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -37,6 +37,11 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "workspace-root `AGENTS.md`" in prompt.text
     assert "current direct user request" in prompt.text
     assert "cannot grant permissions" in prompt.text
+    assert "[Leonervis durable Task Stage]" in prompt.text
+    assert "TASK_COMPLETION_PROPOSAL: yes" in prompt.text
+    assert "TASK_PLAN_JSON:" in prompt.text
+    assert "only a model proposal" in prompt.text
+    assert "Do not emit either protocol line during ordinary non-Task prompts" in prompt.text
     assert "does not provide an OS filesystem" not in prompt.text
     assert build_system_prompt() == prompt
 

@@ -44,6 +44,7 @@ from leonervis_code.cli.presentation import (
     render_session_title_fallback_reason,
     render_task_info,
     render_task_summary,
+    render_task_timeline,
     render_tool_ledgers,
 )
 from leonervis_code.cli.repl import run_repl
@@ -104,6 +105,7 @@ from leonervis_code.session_store import (
     SessionStoreError,
 )
 from leonervis_code.task_store import TaskStore, TaskStoreError
+from leonervis_code.task_records import TaskBudget, TaskStatus
 from leonervis_code.tools.delete_directory import DeleteDirectoryTool
 from leonervis_code.tools.delete_file import DeleteFileTool
 from leonervis_code.tools.glob import GlobTool
@@ -197,6 +199,21 @@ def positive_turn_number(value: str) -> int:
     if not value.isascii() or not value.isdigit() or int(value) < 1:
         raise argparse.ArgumentTypeError("turn number must be a positive integer")
     return int(value)
+
+
+def positive_task_limit(value: str) -> int:
+    """Accept one positive ASCII Task budget or list limit."""
+    if not value.isascii() or not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError("Task limit must be a positive integer")
+    return int(value)
+
+
+def task_list_limit(value: str) -> int:
+    """Accept one bounded ASCII Task listing count."""
+    limit = positive_task_limit(value)
+    if limit > 100:
+        raise argparse.ArgumentTypeError("Task list limit must be between 1 and 100")
+    return limit
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -461,9 +478,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="acceptance criterion; repeat for multiple criteria",
     )
-    task_commands.add_parser("list", help="list durable Tasks")
+    task_create.add_argument("--name", type=nonblank_prompt, help="bounded display name")
+    task_create.add_argument("--parent", dest="parent_task_id", help="parent Task UUID")
+    task_create.add_argument("--max-stages", type=positive_task_limit)
+    task_create.add_argument("--max-provider-invocations", type=positive_task_limit)
+    task_create.add_argument("--max-tool-requests", type=positive_task_limit)
+    task_create.add_argument("--max-input-tokens", type=positive_task_limit)
+    task_create.add_argument("--max-output-tokens", type=positive_task_limit)
+    task_list = task_commands.add_parser("list", help="list durable Tasks")
+    task_list.add_argument("--limit", type=task_list_limit, default=100)
+    task_list.add_argument("--status", choices=[status.value for status in TaskStatus])
+    task_list.add_argument("--archive", choices=("all", "active", "archived"), default="all")
+    task_list.add_argument(
+        "--name",
+        dest="name_query",
+        type=nonblank_prompt,
+        help="case-insensitive name substring",
+    )
     task_show = task_commands.add_parser("show", help="show one durable Task")
     task_show.add_argument("task_id")
+    task_timeline = task_commands.add_parser("timeline", help="show one Task Stage timeline")
+    task_timeline.add_argument("task_id")
     return parser
 
 
@@ -846,17 +881,41 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     """Create or inspect durable Tasks without invoking a provider."""
     store = TaskStore(workspace)
     if arguments.task_command == "create":
+        defaults = TaskBudget()
         info = store.create(
             arguments.objective,
             owner_session=arguments.owner_session,
             acceptance_criteria=tuple(arguments.acceptance_criteria),
+            name=arguments.name,
+            parent_task_id=arguments.parent_task_id,
+            budget=TaskBudget(
+                max_stages=arguments.max_stages or defaults.max_stages,
+                max_provider_invocations=(
+                    arguments.max_provider_invocations or defaults.max_provider_invocations
+                ),
+                max_tool_requests=arguments.max_tool_requests or defaults.max_tool_requests,
+                max_input_tokens=arguments.max_input_tokens,
+                max_output_tokens=arguments.max_output_tokens,
+            ),
         )
         stdout.write(f"{render_task_info(info)}\n")
         return 0
     if arguments.task_command == "show":
         stdout.write(f"{render_task_info(store.inspect(arguments.task_id))}\n")
         return 0
+    if arguments.task_command == "timeline":
+        stdout.write(f"{render_task_timeline(store.inspect(arguments.task_id))}\n")
+        return 0
     tasks = store.list()
+    if arguments.status is not None:
+        tasks = tuple(task for task in tasks if task.status.value == arguments.status)
+    if arguments.archive != "all":
+        archived = arguments.archive == "archived"
+        tasks = tuple(task for task in tasks if task.archived is archived)
+    if arguments.name_query is not None:
+        query = arguments.name_query.casefold()
+        tasks = tuple(task for task in tasks if query in task.name.casefold())
+    tasks = tasks[: arguments.limit]
     if not tasks:
         stdout.write("No durable Tasks found.\n")
         return 0

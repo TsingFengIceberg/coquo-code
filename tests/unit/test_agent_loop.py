@@ -944,10 +944,14 @@ def test_host_ledger_accounts_for_failed_batch_skips_successes_and_over_budget_c
 
     loop.install_action_dispatcher(dispatch)
     events = []
+    usage = []
 
     assert (
         loop.run_prepared(
-            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+            prepared.with_action_lease(lease),
+            provider=provider,
+            event_sink=events.append,
+            tool_usage_sink=usage.append,
         )
         == "reported arithmetic"
     )
@@ -967,6 +971,13 @@ def test_host_ledger_accounts_for_failed_batch_skips_successes_and_over_budget_c
     assert "tool_requests_closed=true" in final_result.content
     assert isinstance(events[-1], ToolTurnSummaryCommitted)
     assert events[-1].ledger == ledger
+    assert (
+        usage[-1].requested,
+        usage[-1].admitted,
+        usage[-1].dispatched,
+        usage[-1].succeeded,
+        usage[-1].unsuccessful,
+    ) == (40, 32, 25, 24, 1)
 
 
 def test_forced_finalization_closes_tools_despite_one_unused_admission_slot(tmp_path) -> None:
@@ -1069,10 +1080,14 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
 
     loop.install_action_dispatcher(dispatch)
     events = []
+    usage = []
 
     assert (
         loop.run_prepared(
-            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+            prepared.with_action_lease(lease),
+            provider=provider,
+            event_sink=events.append,
+            tool_usage_sink=usage.append,
         )
         == "done"
     )
@@ -1140,10 +1155,14 @@ def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -
         lambda _request, _lease: (_ for _ in ()).throw(RuntimeError("audit failed"))
     )
     events = []
+    usage = []
 
     with pytest.raises(RuntimeError, match="audit failed"):
         loop.run_prepared(
-            prepared.with_action_lease(lease), provider=provider, event_sink=events.append
+            prepared.with_action_lease(lease),
+            provider=provider,
+            event_sink=events.append,
+            tool_usage_sink=usage.append,
         )
 
     assert events == [
@@ -1152,6 +1171,9 @@ def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -
             "read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.OUTCOME_UNKNOWN
         ),
     ]
+    assert usage[-1].requested == usage[-1].admitted == usage[-1].dispatched == 1
+    assert usage[-1].succeeded == 0
+    assert usage[-1].unsuccessful == 1
     assert loop.history == ()
 
 

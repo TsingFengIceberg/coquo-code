@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from threading import Lock, Thread, current_thread
+from dataclasses import dataclass
 
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import (
@@ -15,6 +16,16 @@ from leonervis_code.cli.frontend import (
 )
 from leonervis_code.cli.failure_guidance import render_turn_failure
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
+
+
+@dataclass(frozen=True)
+class TaskTurnRequest:
+    """One parsed foreground Task operation for the shared terminal worker."""
+
+    operation: str
+    task_id: str
+    stage_objective: str | None = None
+    max_stages: int = 16
 
 
 class TurnRunner:
@@ -40,6 +51,25 @@ class TurnRunner:
             return self._thread is not None
 
     def start(self, prompt: str, *, include_tool_details: bool = False) -> int | None:
+        return self._start_worker(
+            self._run,
+            (prompt, include_tool_details),
+        )
+
+    def start_task(
+        self,
+        request: TaskTurnRequest,
+        *,
+        include_tool_details: bool = False,
+    ) -> int | None:
+        if not isinstance(request, TaskTurnRequest):
+            raise ValueError("Task turn request is invalid")
+        return self._start_worker(
+            self._run_task,
+            (request, include_tool_details),
+        )
+
+    def _start_worker(self, target, arguments: tuple[object, ...]) -> int | None:
         with self._lock:
             if self._thread is not None:
                 return None
@@ -47,8 +77,8 @@ class TurnRunner:
             self._next_turn_id += 1
             cancellation = TurnCancellation()
             thread = Thread(
-                target=self._run,
-                args=(turn_id, prompt, include_tool_details, cancellation),
+                target=target,
+                args=(turn_id, *arguments, cancellation),
                 name=f"leonervis-turn-{turn_id}",
                 daemon=False,
             )
@@ -94,6 +124,60 @@ class TurnRunner:
                 TurnFailed(
                     turn_id,
                     "Generation cancelled; partial assistant text was not committed.",
+                    cancelled=True,
+                )
+            )
+            self._queue.put(TurnFinished(turn_id, ""))
+        except BaseException as error:
+            self._queue.put(TurnFailed(turn_id, render_turn_failure(error)))
+            self._queue.put(TurnFinished(turn_id, ""))
+        finally:
+            self._approval_broker.deactivate(turn_id)
+            with self._lock:
+                if self._thread is current_thread():
+                    self._thread = None
+                    self._cancellation = None
+
+    def _run_task(
+        self,
+        turn_id: int,
+        request: TaskTurnRequest,
+        include_tool_details: bool,
+        cancellation: TurnCancellation,
+    ) -> None:
+        try:
+            common = {
+                "event_sink": lambda event: self._queue.put(PromptActivity(turn_id, event)),
+                "include_tool_details": include_tool_details,
+                "cancellation": cancellation,
+            }
+            if request.operation == "continue":
+                assert request.stage_objective is not None
+                result = getattr(self._session, "continue_task")(
+                    request.task_id,
+                    request.stage_objective,
+                    **common,
+                )
+                response = result.response
+            elif request.operation == "plan":
+                result = getattr(self._session, "plan_task")(request.task_id, **common)
+                response = result.response
+            elif request.operation == "run":
+                result = getattr(self._session, "run_task")(
+                    request.task_id,
+                    max_stages=request.max_stages,
+                    **common,
+                )
+                response = "\n\n".join(stage.response for stage in result.stages if stage.response)
+            else:
+                raise ValueError("unsupported Task turn operation")
+            self._queue.put(TurnCompleting(turn_id))
+            self._queue.put(TurnFinished(turn_id, response))
+        except TurnCancelled:
+            self._queue.put(
+                TurnFailed(
+                    turn_id,
+                    "Task execution cancelled; inspect the durable Stage outcome before continuing.",
                     cancelled=True,
                 )
             )

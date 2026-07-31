@@ -39,6 +39,7 @@ from leonervis_code.session import (
     SessionTitleFallbackApplied,
     TurnUsageCompleted,
 )
+from leonervis_code.task_runtime import TaskRunStopped
 from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
@@ -83,14 +84,15 @@ HELP_TOPICS = ("session", "task", "tools", "git", "context", "provider", "policy
 HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
-    "  /help task      Durable Task identity and inspection\n"
+    "  /help task      Durable Task execution and lifecycle\n"
     "  /help tools     Action Audit and durable tool outcomes\n"
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
     "  /help provider  Provider and model selection\n"
     "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
-    "Use /help <group> for commands. Slash commands are Host-only and do not call the model."
+    "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
+    "execution commands call the provider."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -115,10 +117,17 @@ SESSION_HELP = (
 TASK_HELP = (
     "Task commands:\n"
     "  /task start <objective>\n"
-    "  /task list\n"
-    "  /task show <task-id>\n"
-    "Tasks are durable Host-owned objectives. This first slice records identity only; it does "
-    "not execute Stages or grant tool permissions."
+    "  /task list [1-100] [status=<status>] [active|archived] [name=<text>]\n"
+    "  /task show <task-id> | /task timeline <task-id>\n"
+    "  /task continue <task-id> <stage-objective> | /task recover <task-id>\n"
+    "  /task plan <task-id> | /task plan accept <task-id> | /task run <task-id> [1-16]\n"
+    "  /task verify <task-id> <criterion-number> <evidence> | /task complete <task-id>\n"
+    "  /task cancel <task-id> <reason> | /task fail <task-id> <reason>\n"
+    "  /task rename <task-id> <name> | /task archive <task-id> | /task unarchive <task-id>\n"
+    "  /task derive <parent-task-id> <objective>\n"
+    "Each Stage is one ordinary foreground Turn with normal budgets, permissions, approvals, "
+    "sandboxing, Action Audit, cancellation, and Session durability. Model completion is only a "
+    "proposal; /task complete requires explicit acceptance evidence."
 )
 TOOLS_HELP = (
     "Tool and audit commands:\n"
@@ -309,6 +318,16 @@ class TaskInfoView(Protocol):
     status: object
     record_count: int
     stages: tuple[TaskStageInfoView, ...]
+    name: str
+    archived: bool
+    parent_task_id: str | None
+    budget: object
+    usage: object
+    budget_exhausted: tuple[str, ...]
+    latest_plan: object | None
+    acceptance_verifications: tuple[object, ...]
+    terminal_outcome: object | None
+    terminal_reason: str | None
 
 
 class TaskStageInfoView(Protocol):
@@ -322,6 +341,8 @@ class TaskStageInfoView(Protocol):
     turn_record_sequence: int | None
     turn_record_sha256: str | None
     failure_reason: object | None
+    kind: object
+    usage: object | None
 
 
 class ConversationTurnView(Protocol):
@@ -918,10 +939,17 @@ def render_session_summary(
 
 def render_task_summary(info: TaskInfoView) -> str:
     """Render compact durable Task metadata without terminal control injection."""
-    objective = _safe_inline(info.objective)
+    name = _safe_inline(getattr(info, "name", info.objective))
+    archived = ", archived" if getattr(info, "archived", False) else ""
+    plan = getattr(info, "latest_plan", None)
+    progress = (
+        f", plan {plan.completed_steps}/{len(plan.steps)}"
+        if plan is not None and plan.accepted
+        else ""
+    )
     return (
-        f"{objective!r} ({info.task_id}): {info.status.value}, {len(info.stages)} stages, "
-        f"owner {info.owner_session_id}, created {info.created_at}"
+        f"{name!r} ({info.task_id}): {info.status.value}{archived}, {len(info.stages)} stages"
+        f"{progress}, owner {info.owner_session_id}, created {info.created_at}"
     )
 
 
@@ -1558,6 +1586,11 @@ def render_prompt_event(
         )
     if isinstance(event, TurnUsageCompleted):
         return render_usage_summary(event.usage, compact=True), "info"
+    if isinstance(event, TaskRunStopped):
+        return (
+            f"Task run stopped: reason={event.reason}, completed_stages={event.completed_stages}",
+            "info",
+        )
     if isinstance(event, SessionTitleFallbackApplied):
         return (
             "Session naming used a Host fallback: "
@@ -1760,8 +1793,10 @@ def render_session_info(info: SessionInfoView) -> str:
 def render_task_info(info: TaskInfoView) -> str:
     """Render one durable Task and its bounded acceptance contract."""
     lines = [
+        f"Task name: {_safe_inline(getattr(info, 'name', info.objective))}",
         f"Task: {_safe_inline(info.objective)}",
         f"Status: {info.status.value}",
+        f"Archived: {'yes' if getattr(info, 'archived', False) else 'no'}",
         f"Task ID: {info.task_id}",
         f"Owner Session: {info.owner_session_id}",
         f"Scope: {info.scope.value}",
@@ -1771,6 +1806,8 @@ def render_task_info(info: TaskInfoView) -> str:
         f"Stages: {len(info.stages)}",
         f"Acceptance criteria: {len(info.acceptance_criteria)}",
     ]
+    if getattr(info, "parent_task_id", None) is not None:
+        lines.append(f"Derived from: {info.parent_task_id}")
     lines.extend(
         f"  {index}. {_safe_inline(criterion)}"
         for index, criterion in enumerate(info.acceptance_criteria, start=1)
@@ -1780,6 +1817,7 @@ def render_task_info(info: TaskInfoView) -> str:
         lines.extend(
             (
                 f"Latest Stage: #{latest.stage_number} {latest.outcome}",
+                f"Stage kind: {getattr(getattr(latest, 'kind', None), 'value', 'execution')}",
                 f"Stage ID: {latest.stage_id}",
                 f"Stage objective: {_safe_inline(latest.objective)}",
                 f"Stage started: {latest.started_at}",
@@ -1793,7 +1831,101 @@ def render_task_info(info: TaskInfoView) -> str:
         elif latest.failure_reason is not None:
             lines.append(f"Stage failure: {latest.failure_reason.value}")
         elif latest.outcome == "interrupted":
-            lines.append("Recovery: interrupted Stage requires an explicit terminal decision.")
+            lines.append("Recovery: run /task recover before any new Stage.")
+        stage_usage = getattr(latest, "usage", None)
+        if stage_usage is not None:
+            lines.append(
+                "Stage usage: "
+                f"{stage_usage.provider_invocations} provider calls, "
+                f"{stage_usage.tool_requests} tool requests, "
+                f"{stage_usage.input_tokens} input and "
+                f"{stage_usage.output_tokens} output tokens"
+            )
+    budget = getattr(info, "budget", None)
+    usage = getattr(info, "usage", None)
+    if budget is not None and usage is not None:
+        lines.extend(
+            (
+                "Budget: "
+                f"stages {len(info.stages)}/{budget.max_stages}, provider calls "
+                f"{usage.provider_invocations}/{budget.max_provider_invocations}, tool requests "
+                f"{usage.tool_requests}/{budget.max_tool_requests}",
+                "Task usage: "
+                f"{usage.input_tokens} input tokens, {usage.output_tokens} output tokens, "
+                f"{usage.known_token_invocations} known and {usage.unknown_token_invocations} unknown "
+                f"provider calls, {usage.unavailable_stages} legacy/unavailable stages",
+                "Token ceilings: input "
+                f"{budget.max_input_tokens if budget.max_input_tokens is not None else 'unbounded'}, "
+                "output "
+                f"{budget.max_output_tokens if budget.max_output_tokens is not None else 'unbounded'}",
+            )
+        )
+    if getattr(info, "budget_exhausted", ()):
+        lines.append("Budget blockers: " + ", ".join(info.budget_exhausted))
+    plan = getattr(info, "latest_plan", None)
+    if plan is not None:
+        lines.append(
+            f"Latest plan: {plan.plan_id}, {'accepted' if plan.accepted else 'proposed'}, "
+            f"progress {plan.completed_steps}/{len(plan.steps)}"
+        )
+    verified = {item.criterion_index for item in getattr(info, "acceptance_verifications", ())}
+    if info.acceptance_criteria:
+        lines.append(f"Acceptance verified: {len(verified)}/{len(info.acceptance_criteria)}")
+    if getattr(info, "terminal_outcome", None) is not None:
+        lines.append(f"Terminal outcome: {info.terminal_outcome.value}")
+        if getattr(info, "terminal_reason", None) is not None:
+            lines.append(f"Terminal reason: {_safe_inline(info.terminal_reason)}")
+    return "\n".join(lines)
+
+
+def render_task_timeline(info: TaskInfoView) -> str:
+    """Render all bounded Stage outcomes without Session dialogue or tool bodies."""
+    lines = [
+        f"Task timeline: {_safe_inline(getattr(info, 'name', info.objective))}",
+        f"Task ID: {info.task_id}",
+        f"Status: {info.status.value}",
+    ]
+    if not info.stages:
+        lines.append("No Stages recorded.")
+    for stage in info.stages:
+        line = (
+            f"#{stage.stage_number} "
+            f"[{getattr(getattr(stage, 'kind', None), 'value', 'execution')}] {stage.outcome}: "
+            f"{_safe_inline(stage.objective)}"
+        )
+        if stage.turn_number is not None:
+            line += f" -> Session turn #{stage.turn_number}"
+        elif stage.failure_reason is not None:
+            line += f" -> {stage.failure_reason.value}"
+        lines.append(line)
+        usage = getattr(stage, "usage", None)
+        if usage is not None:
+            lines.append(
+                "  Usage: "
+                f"{usage.provider_invocations} provider, {usage.tool_requests} tools, "
+                f"{usage.input_tokens} input, {usage.output_tokens} output tokens"
+            )
+    plan = getattr(info, "latest_plan", None)
+    if plan is not None:
+        lines.append(
+            f"Plan {plan.plan_id}: {'accepted' if plan.accepted else 'proposed'}, "
+            f"{plan.completed_steps}/{len(plan.steps)} steps committed"
+        )
+        lines.extend(
+            f"  {index}. {_safe_inline(step)}" for index, step in enumerate(plan.steps, start=1)
+        )
+    for verification in getattr(info, "acceptance_verifications", ()):
+        lines.append(
+            f"Acceptance #{verification.criterion_index} for Stage "
+            f"{getattr(verification, 'completion_stage_id', '<legacy>')}: "
+            f"verified at {verification.verified_at}"
+        )
+    if getattr(info, "budget_exhausted", ()):
+        lines.append("Budget blockers: " + ", ".join(info.budget_exhausted))
+    if getattr(info, "terminal_outcome", None) is not None:
+        lines.append(f"Terminal outcome: {info.terminal_outcome.value}")
+        if getattr(info, "terminal_reason", None) is not None:
+            lines.append(f"Terminal reason: {_safe_inline(info.terminal_reason)}")
     return "\n".join(lines)
 
 

@@ -28,6 +28,8 @@
 - [Actual Coding Task Eval](#actual-coding-task-eval)
 - [Durable Task Identity 与 Host Management](#durable-task-identity-与-host-management)
 - [Durable Stage Lifecycle 与 Turn Evidence](#durable-stage-lifecycle-与-turn-evidence)
+- [Foreground Task Stage Execution 与 Recovery](#foreground-task-stage-execution-与-recovery)
+- [Task Planning、Acceptance、Budgets 与 Management](#task-planningacceptancebudgets-与-management)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -474,6 +476,26 @@ Task transcript新增closed schema-v1 `stage_started`、`stage_committed`和`sta
 `TaskStore.open()`提供非阻塞独占`TaskWriter`。每次append先candidate replay，再检查pathname/inode与transcript上限，完整写入并fsync后才更新内存。写入开始后发生I/O或fsync失败会返回“record可能可见”的typed错误并poison当前writer，调用方必须release后strict inspect，不能自动重试。`SessionStore.turn_evidence()`只接受真实`turn_committed` record，返回Session ID、Turn编号、record sequence、时间与原始newline-terminated JSONL行SHA-256，不暴露对话或工具正文；Stage commit由Host自己获取证据，调用方不能自报hash。
 
 `task list`现在显示Stage数，`task show`和`/task show`显示最近Stage目标、结果、commit Turn evidence、failure reason或interrupted recovery提示。这仍不是执行入口：当前没有`/task continue`、provider调用、completion proposal、累计Task预算或自动恢复。System prompt v23、adapter contract v26、21个工具、8/32/24预算、ToolArguments v1、`ctx-v5`/`ctx-v6`以及Session/compaction/Action Audit schema均不变。详见[0087：Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)。
+
+## Foreground Task Stage Execution 与 Recovery
+
+`/task continue <task-id> <stage-objective>`现在把一个Task Stage映射为一个真实`ProjectSession.prompt()`，因此直接复用普通AgentLoop、8/32/24 Turn预算、PermissionGate、逐Action approval、tool hard bounds、command sandbox、Action Audit和atomic Session commit，不存在第二套“长任务工具循环”。执行前必须切换到Task的owner Session；Task本身不是权限或approval。
+
+Host先生成以`[Leonervis durable Task Stage]`开头的有界UserMessage，其中canonical JSON只携带Task目标、验收条件、accepted plan、最近16个脱敏Stage摘要、当前Stage、累计usage、总预算和剩余额度。新`stage_started`与`stage_committed` schema v2分别在provider调用前保存Session baseline和完整prompt SHA-256，并在真实Turn提交后复制provider/token/tool ledger计数；正常失败的`stage_failed` schema v2也保存不含内容的provider/tool-attempt计数。它们都不复制对话、参数、结果或审计正文；旧Stage v1继续replay并明确显示accounting unavailable。
+
+`/task recover`不调用provider或工具：它只在durable baseline之后查找user-message digest精确匹配的committed Turn。零匹配会把Stage记为`interrupted`失败；唯一匹配绑定真实Turn；多匹配保持原Task并fail closed。它还能补上“Stage已经commit、但plan/completion proposal尚未append”窗口中的协议记录。Provider failure、cooperative cancellation、未提交Turn和Host failure分别落入closed Stage failure reason；若异常发生前Turn已经提交，则先绑定证据再报错，绝不盲目重放副作用。
+
+Canonical system prompt升级为v24并明确Task framing是不可信数据，execution最终协议为`TASK_COMPLETION_PROPOSAL: yes|no`，planning为`TASK_PLAN_JSON:`，两者都必须是最终非空行。协议行原样保留在Session transcript供恢复，但从有效Task结果和streaming终端显示中移除；`/task run`还会显示准确的Stage数量与停止原因。Adapter contract保持v26，21个工具及顺序/schema不变，Effective Context representation仍为`ctx-v5`/`ctx-v6`；因为prompt exact content参与identity，无项目指令的current empty full-context ID更新为`ctx-v5-bd663ddc5d94403891caac9f91d76a319200967331a18163859e203cd6bbb116`。详见[0088：Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)。
+
+## Task Planning、Acceptance、Budgets 与 Management
+
+`/task plan`用一个planning Stage生成1至32个有界步骤；`/task plan accept`只写人工接受记录，不执行Action。`/task run`一次最多前台顺序执行16个accepted步骤，每步获得新的普通Turn；只有objective按accepted plan顺序精确匹配且已committed的execution Stage才推进progress，手动插入的无关Stage不会跳过计划工作。Run会在命令上限、plan耗尽、完成提议、预算耗尽、interrupted或terminal状态停止。
+
+Task默认Stage/provider/tool累计额度为32/768/1024，并可配置input/output token ceiling。这些是Stage之间的admission ceiling：已准入Stage保留完整普通Turn边界，不会被动态截短；committed Stage与正常失败尝试都计入Host观察到的实际用量，达到或超过ceiling后拒绝下一Stage。Legacy或崩溃恢复Stage若无法证明用量，会同时阻止后续provider/tool admission以及已配置token ceiling，而不是把未知工作当成零。
+
+模型`yes`只追加`completion-proposed`，不等于完成。`/task verify`把人工证据绑定到当前proposal对应的Stage和验收条件；之后若继续工作使proposal失效，旧证据不会复用。`/task complete`要求current proposal及全部条件通过。Task另外支持completed/cancelled/failed三种closed终态、rename、可逆archive、完整timeline、list过滤和带immutable parent provenance的独立derive；这些Host管理命令不进入普通模型对话。
+
+新增configuration、plan proposal/acceptance、completion proposal、acceptance verification、terminal、rename和archive record均使用各自schema v1，不改Session、Action Audit、provider projection或compaction schema。当前仍不支持background worker、scheduler、SubAgent、team、worktree orchestration、并行Stage或Task级blanket approval。详见[0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)。
 
 ## Foundation 4D Slice 0–4：Controlled Single-directory Creation
 
@@ -1100,3 +1122,5 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 85. [0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)
 86. [0086：Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)
 87. [0087：Durable Stage Lifecycle and Turn Evidence](./decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)
+88. [0088：Foreground Task Stage Execution and Recovery](./decisions/0088-foreground-task-stage-execution-and-recovery.md)
+89. [0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)

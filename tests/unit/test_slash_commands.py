@@ -50,7 +50,7 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
 from leonervis_code.tools.run_command import CommandSandboxInspection
 from leonervis_code.tools.catalog import TOOL_CATALOG
-from leonervis_code.task_records import TaskScope, TaskStatus
+from leonervis_code.task_records import TaskBudget, TaskScope, TaskStatus, TaskTerminalOutcome
 
 
 @dataclass
@@ -366,6 +366,24 @@ class Session:
             status=TaskStatus.READY,
             record_count=1,
             stages=(),
+            name=objective,
+            archived=False,
+            parent_task_id=None,
+            budget=TaskBudget(),
+            usage=SimpleNamespace(
+                provider_invocations=0,
+                input_tokens=0,
+                output_tokens=0,
+                known_token_invocations=0,
+                unknown_token_invocations=0,
+                tool_requests=0,
+                unavailable_stages=0,
+            ),
+            budget_exhausted=(),
+            latest_plan=None,
+            acceptance_verifications=(),
+            terminal_outcome=None,
+            terminal_reason=None,
         )
         self.tasks.append(info)
         return info
@@ -378,6 +396,68 @@ class Session:
             if info.task_id == task_id:
                 return info
         raise SessionStoreError(f"task transcript does not exist: {task_id}")
+
+    def derive_task(self, parent_task_id, objective):
+        parent = self.inspect_task(parent_task_id)
+        child = self.create_task(objective)
+        child.task_id = "52345678-1234-4234-9234-123456789abc"
+        child.parent_task_id = parent.task_id
+        return child
+
+    def recover_task(self, task_id):
+        return self.inspect_task(task_id)
+
+    def accept_task_plan(self, task_id):
+        info = self.inspect_task(task_id)
+        info.latest_plan = SimpleNamespace(
+            plan_id="62345678-1234-4234-9234-123456789abc",
+            steps=("First",),
+            accepted=True,
+            completed_steps=0,
+        )
+        return info
+
+    def verify_task_acceptance(self, task_id, criterion_index, evidence):
+        info = self.inspect_task(task_id)
+        info.acceptance_verifications = (
+            *info.acceptance_verifications,
+            SimpleNamespace(
+                criterion_index=criterion_index,
+                evidence=evidence,
+                verified_at="2026-07-31T01:03:00.000000Z",
+            ),
+        )
+        return info
+
+    def complete_task(self, task_id):
+        info = self.inspect_task(task_id)
+        info.status = TaskStatus.COMPLETED
+        info.terminal_outcome = TaskTerminalOutcome.COMPLETED
+        return info
+
+    def cancel_task(self, task_id, reason):
+        info = self.inspect_task(task_id)
+        info.status = TaskStatus.CANCELLED
+        info.terminal_outcome = TaskTerminalOutcome.CANCELLED
+        info.terminal_reason = reason
+        return info
+
+    def fail_task(self, task_id, reason):
+        info = self.inspect_task(task_id)
+        info.status = TaskStatus.FAILED
+        info.terminal_outcome = TaskTerminalOutcome.FAILED
+        info.terminal_reason = reason
+        return info
+
+    def rename_task(self, task_id, name):
+        info = self.inspect_task(task_id)
+        info.name = name
+        return info
+
+    def set_task_archived(self, task_id, archived):
+        info = self.inspect_task(task_id)
+        info.archived = archived
+        return info
 
     def new_session(self):
         self.current = "22345678-1234-4234-9234-123456789abc"
@@ -908,8 +988,71 @@ def test_task_commands_are_host_only_and_bind_creation_to_current_session(tmp_pa
     assert "Status: ready" in shown.message
     assert session.prompts == []
     assert dispatch_slash("/task start", session).message == "Usage: /task start <objective>"
-    assert dispatch_slash("/task list extra", session).message == "Usage: /task list"
+    assert dispatch_slash("/task list extra", session).message == (
+        "Usage: /task list [1-100] [status=<status>] [active|archived] [name=<text>]"
+    )
+    assert dispatch_slash("/task list 20 30", session).message == (
+        "Usage: /task list [1-100] [status=<status>] [active|archived] [name=<text>]"
+    )
     assert dispatch_slash("/task show bad", session).message == "Usage: /task show <task-id>"
+
+
+def test_task_execution_commands_are_deferred_and_host_management_stays_local(tmp_path) -> None:
+    session = Session(tmp_path)
+    task_id = (
+        dispatch_slash("/task start Ship the Task runtime", session)
+        .message.split("Task ID: ", 1)[1]
+        .splitlines()[0]
+    )
+
+    continued = dispatch_slash(f"/task continue {task_id} Implement one Stage", session)
+    planned = dispatch_slash(f"/task plan {task_id}", session)
+    run = dispatch_slash(f"/task run {task_id} 4", session)
+
+    assert continued.task_request.operation == "continue"
+    assert continued.task_request.task_id == task_id
+    assert continued.task_request.stage_objective == "Implement one Stage"
+    assert planned.task_request.operation == "plan"
+    assert run.task_request.operation == "run"
+    assert run.task_request.max_stages == 4
+    assert session.prompts == []
+
+    assert dispatch_slash(f"/task plan accept {task_id}", session).kind == "success"
+    assert dispatch_slash(f"/task recover {task_id}", session).kind == "success"
+    assert dispatch_slash(f"/task verify {task_id} 1 pytest-passed", session).kind == "success"
+    assert dispatch_slash(f"/task rename {task_id} Release-ready", session).kind == "success"
+    assert dispatch_slash(f"/task archive {task_id}", session).kind == "success"
+    assert "Release-ready" in dispatch_slash("/task list archived name=release", session).message
+    assert dispatch_slash(f"/task unarchive {task_id}", session).kind == "success"
+    assert dispatch_slash(f"/task timeline {task_id}", session).kind == "info"
+    derived = dispatch_slash(f"/task derive {task_id} Follow-up checks", session)
+    assert derived.kind == "success"
+    assert f"Derived from: {task_id}" in derived.message
+    assert session.prompts == []
+
+
+def test_task_terminal_commands_and_usage_errors_are_explicit(tmp_path) -> None:
+    session = Session(tmp_path)
+    dispatch_slash("/task start Terminal Task", session)
+    task_id = session.tasks[0].task_id
+
+    completed = dispatch_slash(f"/task complete {task_id}", session)
+    assert completed.kind == "success"
+    assert "Terminal outcome: completed" in completed.message
+
+    other = session.create_task("Other Task")
+    cancelled = dispatch_slash(f"/task cancel {other.task_id} superseded", session)
+    assert "Terminal outcome: cancelled" in cancelled.message
+    other.status = TaskStatus.READY
+    other.terminal_outcome = None
+    failed = dispatch_slash(f"/task fail {other.task_id} unrecoverable", session)
+    assert "Terminal outcome: failed" in failed.message
+
+    assert dispatch_slash("/task continue bad objective", session).kind == "warning"
+    assert dispatch_slash(f"/task run {task_id} 17", session).kind == "warning"
+    assert dispatch_slash(f"/task verify {task_id} 0 evidence", session).kind == "warning"
+    assert dispatch_slash(f"/task cancel {task_id}", session).kind == "warning"
+    assert session.prompts == []
 
 
 def test_valid_provider_commands_and_history(tmp_path) -> None:

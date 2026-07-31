@@ -32,6 +32,7 @@ from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, d
 from leonervis_code.cli.approval import TerminalApprovalBroker
 from leonervis_code.cli.frontend import FrontendEventQueue
 from leonervis_code.cli.terminal_app import TerminalApplication, supports_terminal_application
+from leonervis_code.cli.turn_runner import TaskTurnRequest
 
 
 def parse_history_count(command: str) -> int | None:
@@ -143,6 +144,32 @@ def run_repl(
             stdout.flush()
             continue
         if result.handled:
+            if result.task_request is not None:
+                event_sink = TerminalEventSink(
+                    stdout,
+                    color=color,
+                    render_markdown=render_markdown,
+                    show_role_markers=terminal_ui,
+                    show_waiting=terminal_ui,
+                    tool_detail_mode=tool_details.mode,
+                )
+                event_sink.start_waiting()
+                try:
+                    response = _run_task_request(
+                        session,
+                        result.task_request,
+                        event_sink=event_sink,
+                        include_tool_details=tool_details.mode == ToolDetailMode.FULL,
+                    )
+                    if response and not event_sink.final_text_was_streamed:
+                        event_sink.write_final_text(response)
+                except Exception as error:
+                    _report_aborted_stream(event_sink, stdout, color=color)
+                    stdout.write(
+                        f"{render_message(render_turn_failure(error), 'error', color=color)}\n"
+                    )
+                stdout.flush()
+                continue
             if result.clear_screen:
                 stdout.write(CLEAR_SCREEN)
                 stdout.flush()
@@ -241,3 +268,25 @@ def _report_aborted_stream(
         stdout.write(
             f"{render_message('Partial assistant text was not committed.', 'warning', color=color)}\n"
         )
+
+
+def _run_task_request(
+    session: object,
+    request: TaskTurnRequest,
+    *,
+    event_sink: TerminalEventSink,
+    include_tool_details: bool,
+) -> str:
+    common = {
+        "event_sink": event_sink,
+        "include_tool_details": include_tool_details,
+    }
+    if request.operation == "continue":
+        assert request.stage_objective is not None
+        return session.continue_task(request.task_id, request.stage_objective, **common).response
+    if request.operation == "plan":
+        return session.plan_task(request.task_id, **common).response
+    if request.operation == "run":
+        result = session.run_task(request.task_id, max_stages=request.max_stages, **common)
+        return "\n\n".join(stage.response for stage in result.stages if stage.response)
+    raise ValueError("unsupported Task turn operation")

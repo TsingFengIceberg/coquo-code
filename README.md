@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、确定性离线Host Eval与实际Coding Task Eval，以及21个受限工具。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。Git只读观察可区分staged、unstaged和untracked状态、查看有界tracked patch，并读取当前HEAD可达的近期历史与单个完整ID提交。Anthropic与OpenAI-compatible可把单次provider回复中的有序多工具调用转换为统一batch，Host完整验证后仍逐个经过PermissionGate、approval与Action Audit，绝不并行。持久tool ledger、compaction checkpoint与provider usage audit可安全查看，context压力和当前进程Token用量也即时可见。当前三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、确定性离线Host Eval与实际Coding Task Eval、可跨重启继续的前台多Stage Task，以及21个受限工具。每个Task Stage复用普通Turn、PermissionGate、approval、Action Audit与Session提交，支持计划、精确恢复、累计预算、人工验收和明确终态。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时命令不会降级到Host直接执行。当前普通Turn三层预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
 
 ## 目录
 
@@ -25,6 +25,7 @@ Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding 
   - [配置 Provider](#配置-provider)
   - [检查 Route 与 Context Window](#检查-route-与-context-window)
   - [管理 Session](#管理-session)
+  - [管理 Task](#管理-task)
   - [REPL 命令](#repl-命令)
 - [配置与本地状态](#配置与本地状态)
 - [开发与验证](#开发与验证)
@@ -64,6 +65,7 @@ uv run python -m leonervis_code --help
 uv run leonervis-code --help
 uv run leonervis-code provider --help
 uv run leonervis-code session --help
+uv run leonervis-code task --help
 ```
 
 ### 执行任务与启动 REPL
@@ -182,13 +184,16 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 ```bash
 uv run leonervis-code task create "实现可恢复的多阶段任务" \
+  --name "Task runtime" \
   --accept "每个Stage使用普通Turn预算" \
-  --accept "每个Action保留权限与审计"
-uv run leonervis-code task list
+  --accept "每个Action保留权限与审计" \
+  --max-stages 12 --max-provider-invocations 288 --max-tool-requests 384
+uv run leonervis-code task list --status ready --archive active --name runtime
 uv run leonervis-code task show <task-uuid>
+uv run leonervis-code task timeline <task-uuid>
 ```
 
-Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。底层现已支持严格的Stage开始/提交/失败记录、独占writer与真实Session Turn证据，但当前用户入口仍只有创建、列表和查看；尚无`/task continue`，不会调用provider、执行Stage或授予后续Action权限。
+Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。Standalone命令负责创建与只读检查；进入owner Session的REPL后，可显式继续一个Stage、生成并接受计划、前台连续运行、恢复中断、验证验收条件和写入终态。每个Stage仍是普通Turn，因此不会获得跨Stage的blanket approval，也不会绕过工具、沙箱、审计或Session durability边界。
 
 ### REPL 命令
 
@@ -237,8 +242,14 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 | `/session archive`、`/session unarchive` | 可逆地标记或取消归档当前Session；不改变history、runtime、latest或resume身份 |
 | `/session pin`、`/session unpin` | 可逆地收藏或取消收藏当前Session；不改变history、runtime、latest或resume身份 |
 | `/task start <目标>` | 创建绑定当前Session的持久Task；不调用模型或执行Stage |
-| `/task list` | 只读列出当前workspace的持久Task |
-| `/task show <task-id>` | 严格回放并显示一个Task的目标、owner与验收条件 |
+| `/task list [1-100] [status=<状态>] [active\|archived] [name=<文本>]` | 只读筛选当前workspace的持久Task |
+| `/task show <task-id>`、`/task timeline <task-id>` | 严格回放Task详情或完整Stage时间线，不显示对话与工具正文 |
+| `/task continue <task-id> <Stage目标>`、`/task recover <task-id>` | 执行一个普通Turn，或只用已提交Session证据恢复而不重跑provider/工具 |
+| `/task plan <task-id>`、`/task plan accept <task-id>`、`/task run <task-id> [1-16]` | 生成提议、人工接受，并在前台按顺序执行有界Stage；run会显示停止原因 |
+| `/task verify <task-id> <条件编号> <证据>`、`/task complete <task-id>` | 将人工证据绑定当前模型完成提议；全部条件满足后才能完成 |
+| `/task cancel <task-id> <原因>`、`/task fail <task-id> <原因>` | 写入明确的cancelled或failed终态 |
+| `/task rename <task-id> <名称>`、`/task archive <task-id>`、`/task unarchive <task-id>` | 管理显示名称和可逆归档状态 |
+| `/task derive <parent-task-id> <目标>` | 创建有父级来源但生命周期、预算与权限独立的新Task |
 | `/resume <latest\|id>` | 保持当前 runtime，切换 Session |
 | `/clear` | 只清空当前终端画面，不修改 Session 或 history |
 | `/exit`、`/quit` | 正常退出 |
@@ -353,6 +364,8 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md)：实际代码结果、受保护文件、Host私有测试、显式真实provider opt-in与命令沙箱边界。
 - [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md)：Task/Stage/Turn/Action层次、独立持久身份与Host-only管理边界。
 - [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)：Stage start/terminal状态机、独占writer、重启中断语义与Session Turn证据。
+- [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md)：普通AgentLoop复用、Task framing、精确崩溃恢复、失败映射与终端接入。
+- [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md)：计划执行、累计Stage间预算、完成提议、人工验收与生命周期管理。
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md)：safe-block streaming、TTY layout、raw redirect与terminal control边界。
@@ -426,4 +439,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Foundation 5A只读取workspace根目录唯一规范名称`AGENTS.md`：missing表示无项目指令；现有文件必须是non-symlink、strict UTF-8普通文件，不含NUL且最多32 KiB。Host在每个user turn准备时读取并冻结一次，工具continuation始终复用该快照，下一turn才重载；不搜索parent或subdirectory，也不自动加载`CLAUDE.md`或`LEONERVIS.md`。项目指令作为独立provider block参与token计量和Effective Context identity，但不写Session transcript；它从属于canonical Host策略与当前直接user request，不能放宽permission、approval、workspace、symlink、budget、audit、sandbox或durability边界。`/instructions`只显示元数据且不调用provider或修改Session。
 
-Provider batch、结构化tool outcome ledger及持久查看、默认脱敏且可显式展开command argv与可信命令结果统计的live activity、mixed response、streaming、TTY Markdown rendering、process-local输出预算控制、Session命名/归档/收藏/筛选/快速切换/预览/搜索/turn定位/导出/fork/doctor/repair/usage audit、Git只读变更/历史观察、fail-closed Linux command sandbox、Foundation 5A项目指令加载与`host-baseline-v1`确定性离线Eval现已完成。当前版本为canonical system prompt v23、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`session_header` v1/v2 replay且新记录使用v2、`session_named` v1、`session_archive_changed` v1、`session_pin_changed` v1、`session_forked` v1、`turn_committed` schema v8并兼容v1-v7、`turn_failed` schema v2、Action Audit schema v1、`context_compacted` v2/v3 replay且新记录使用v4，以及current `ctx-v5`/`ctx-v6`representation；旧Session与`ctx-v1`至`ctx-v4`identity/checkpoint继续兼容，缺失项目指令时的empty full-context identity为`ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`。Linked worktree、任意Git argv、缩写/任意revision、ref或不可达object读取、untracked patch、递归项目指令继承、recursive copy/delete、ignore-aware或indexed search、fuzzy/free-form patch、directory move、non-empty delete、recursive mkdir、shell source string、interactive PTY、network tool、network allowlist、resource quota、Host sandbox bypass、Session合并/导入/远程同步、自动通用retry、并行工具、多Agent、真实模型Eval排行榜与远程服务仍不可用。项目指令设计见[ADR 0083](./docs/decisions/0083-foundation-5a-root-agents-project-instructions.md)，Eval边界见[ADR 0084](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md)。
+Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval及前台durable Task现已完成。当前版本为canonical system prompt v24、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v8、`turn_failed` schema v2、Action Audit schema v1、`context_compacted`新记录v4、Task Stage新记录v2，以及current `ctx-v5`/`ctx-v6`representation；旧Session、Task Stage v1与历史context identity/checkpoint继续兼容，缺失项目指令时的current empty full-context identity为`ctx-v5-bd663ddc5d94403891caac9f91d76a319200967331a18163859e203cd6bbb116`。后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动通用retry、network tool、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。Task执行与恢复见[ADR 0088](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md)，计划和验收见[ADR 0089](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md)。

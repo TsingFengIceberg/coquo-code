@@ -13,9 +13,15 @@ from leonervis_code.task_records import (
     StageCommitted,
     StageFailed,
     StageFailureReason,
+    StageKind,
     StageStarted,
+    StageUsage,
+    TaskArchived,
     TaskHeader,
+    TaskPlanAccepted,
+    TaskPlanProposed,
     TaskRecordError,
+    TaskRenamed,
     TaskStatus,
     canonical_acceptance_criteria,
     canonical_task_id,
@@ -29,6 +35,8 @@ TASK_ID = "12345678-1234-4234-9234-123456789abc"
 SESSION_ID = "22345678-1234-4234-9234-123456789abc"
 CREATED_AT = "2026-07-31T01:02:03.000004Z"
 STAGE_ID = "32345678-1234-4234-9234-123456789abc"
+PLAN_ID = "42345678-1234-4234-9234-123456789abc"
+OTHER_PLAN_ID = "52345678-1234-4234-9234-123456789abc"
 
 
 def header(workspace: Path) -> TaskHeader:
@@ -188,6 +196,7 @@ def test_stage_records_round_trip_and_derive_interrupted_paused_and_blocked(
         stage_number=1,
         reason=StageFailureReason.PROVIDER_ERROR,
         failed_at="2026-07-31T01:04:00.000000Z",
+        usage=StageUsage(1, 100, 10, 1, 0, 2, 2, 1, 1, 0),
     )
 
     assert decode_task_record(encode_task_record(start).rstrip(b"\n")) == start
@@ -196,6 +205,32 @@ def test_stage_records_round_trip_and_derive_interrupted_paused_and_blocked(
     assert replay(tmp_path, [header(tmp_path), start]).status is TaskStatus.INTERRUPTED
     assert replay(tmp_path, [header(tmp_path), start, commit]).status is TaskStatus.PAUSED
     assert replay(tmp_path, [header(tmp_path), start, failure]).status is TaskStatus.BLOCKED
+
+
+def test_legacy_stage_v1_records_replay_without_transcript_rewrite(tmp_path: Path) -> None:
+    legacy_start = replace(started(), schema_version=1)
+    legacy_commit = replace(committed(), schema_version=1)
+    legacy_failure = StageFailed(
+        sequence=2,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        reason=StageFailureReason.PROVIDER_ERROR,
+        failed_at="2026-07-31T01:04:00.000000Z",
+        schema_version=1,
+    )
+
+    decoded_start = decode_task_record(encode_task_record(legacy_start).rstrip(b"\n"))
+    decoded_commit = decode_task_record(encode_task_record(legacy_commit).rstrip(b"\n"))
+    decoded_failure = decode_task_record(encode_task_record(legacy_failure).rstrip(b"\n"))
+    state = replay(tmp_path, [header(tmp_path), decoded_start, decoded_commit])
+
+    assert decoded_start.schema_version == 1
+    assert decoded_start.prompt_sha256 is None
+    assert decoded_commit.schema_version == 1
+    assert decoded_commit.usage is None
+    assert decoded_failure.schema_version == 1
+    assert decoded_failure.usage is None
+    assert state.status is TaskStatus.PAUSED
 
 
 def test_stage_replay_requires_contiguous_alternating_identity(tmp_path: Path) -> None:
@@ -235,5 +270,82 @@ def test_stage_replay_rejects_wrong_owner_invalid_evidence_and_time_regression(
             [
                 header(tmp_path),
                 replace(started(), started_at="2026-07-31T00:00:00.000000Z"),
+            ],
+        )
+
+
+def test_replay_rejects_unimplemented_stage_kind_and_metadata_inside_active_stage(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(encode_task_record(started()))
+    document["kind"] = "verification"
+    with pytest.raises(TaskRecordError, match="unsupported Stage kind"):
+        decode_task_record(json.dumps(document).encode())
+
+    with pytest.raises(TaskRecordError, match="metadata cannot advance"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                started(),
+                TaskRenamed(
+                    sequence=2,
+                    name="Renamed too early",
+                    renamed_at="2026-07-31T01:03:30.000000Z",
+                ),
+            ],
+        )
+    with pytest.raises(TaskRecordError, match="metadata cannot advance"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                started(),
+                TaskArchived(
+                    sequence=2,
+                    archived=True,
+                    changed_at="2026-07-31T01:03:30.000000Z",
+                ),
+            ],
+        )
+
+
+def test_replay_rejects_overcommitted_duplicate_or_reaccepted_plan(tmp_path: Path) -> None:
+    planning_start = replace(started(), kind=StageKind.PLANNING)
+    planning_commit = committed()
+    overcommitted = TaskPlanProposed(
+        sequence=3,
+        plan_id=PLAN_ID,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        steps=tuple(f"Step {index}" for index in range(32)),
+        proposed_at="2026-07-31T01:05:00.000000Z",
+    )
+    with pytest.raises(TaskRecordError, match="remaining cumulative Stage budget"):
+        replay(tmp_path, [header(tmp_path), planning_start, planning_commit, overcommitted])
+
+    proposal = replace(overcommitted, steps=("One bounded step",))
+    duplicate = replace(proposal, sequence=4, plan_id=OTHER_PLAN_ID)
+    with pytest.raises(TaskRecordError, match="may propose a plan only once"):
+        replay(
+            tmp_path,
+            [header(tmp_path), planning_start, planning_commit, proposal, duplicate],
+        )
+
+    accepted = TaskPlanAccepted(
+        sequence=4,
+        plan_id=PLAN_ID,
+        accepted_at="2026-07-31T01:06:00.000000Z",
+    )
+    with pytest.raises(TaskRecordError, match="already accepted"):
+        replay(
+            tmp_path,
+            [
+                header(tmp_path),
+                planning_start,
+                planning_commit,
+                proposal,
+                accepted,
+                replace(accepted, sequence=5),
             ],
         )

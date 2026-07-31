@@ -37,6 +37,7 @@ from leonervis_code.core.contracts import (
     ConversationTurn,
     SystemPromptSnapshot,
     ToolOutcomeEntry,
+    ToolAttemptUsage,
     ToolRequestOutcome,
     ToolResult,
     ToolTurnLedger,
@@ -79,6 +80,7 @@ SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
+ToolUsageSink = Callable[[ToolAttemptUsage], None]
 
 
 def _no_project_instructions() -> None:
@@ -274,6 +276,7 @@ class AgentLoop:
         event_sink: AgentEventSink | None = None,
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
+        tool_usage_sink: ToolUsageSink | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
@@ -282,6 +285,7 @@ class AgentLoop:
             event_sink=event_sink,
             include_tool_details=include_tool_details,
             cancellation=cancellation,
+            tool_usage_sink=tool_usage_sink,
         )
 
     def run_prepared(
@@ -292,6 +296,7 @@ class AgentLoop:
         event_sink: AgentEventSink | None = None,
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
+        tool_usage_sink: ToolUsageSink | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         if type(include_tool_details) is not bool:
@@ -308,6 +313,8 @@ class AgentLoop:
         ledger_entries: list[ToolOutcomeEntry] = []
         ledger_summary_attached = False
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
+        attempt_usage = ToolAttemptUsage()
+        self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:
             if cancellation is not None:
@@ -371,6 +378,14 @@ class AgentLoop:
             self._emit_invocation_usage(event_sink, provider_invocations, outcome)
             pending += (response,)
             if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
+                attempt_usage = ToolAttemptUsage(
+                    requested=attempt_usage.requested + len(requests),
+                    admitted=attempt_usage.admitted,
+                    dispatched=attempt_usage.dispatched,
+                    succeeded=attempt_usage.succeeded,
+                    unsuccessful=attempt_usage.unsuccessful,
+                )
+                self._emit_tool_usage(tool_usage_sink, attempt_usage)
                 for offset, request in enumerate(requests, start=1):
                     request_index = len(ledger_entries) + 1
                     self._emit_prompt_event(
@@ -403,6 +418,14 @@ class AgentLoop:
 
             first_call_index = tool_requests + 1
             tool_requests += len(requests)
+            attempt_usage = ToolAttemptUsage(
+                requested=attempt_usage.requested + len(requests),
+                admitted=attempt_usage.admitted + len(requests),
+                dispatched=attempt_usage.dispatched,
+                succeeded=attempt_usage.succeeded,
+                unsuccessful=attempt_usage.unsuccessful,
+            )
+            self._emit_tool_usage(tool_usage_sink, attempt_usage)
             stop_remaining = False
             for offset, request in enumerate(requests):
                 if cancellation is not None:
@@ -447,7 +470,15 @@ class AgentLoop:
                 )
                 try:
                     dispatch = self._execute(request, prepared.action_lease)
-                except Exception:
+                except BaseException:
+                    attempt_usage = ToolAttemptUsage(
+                        requested=attempt_usage.requested,
+                        admitted=attempt_usage.admitted,
+                        dispatched=attempt_usage.dispatched + 1,
+                        succeeded=attempt_usage.succeeded,
+                        unsuccessful=attempt_usage.unsuccessful + 1,
+                    )
+                    self._emit_tool_usage(tool_usage_sink, attempt_usage)
                     self._emit_prompt_event(
                         event_sink,
                         ToolRequestFinished(
@@ -458,6 +489,15 @@ class AgentLoop:
                         ),
                     )
                     raise
+                succeeded = dispatch.status == ToolEventStatus.SUCCEEDED
+                attempt_usage = ToolAttemptUsage(
+                    requested=attempt_usage.requested,
+                    admitted=attempt_usage.admitted,
+                    dispatched=attempt_usage.dispatched + 1,
+                    succeeded=attempt_usage.succeeded + int(succeeded),
+                    unsuccessful=attempt_usage.unsuccessful + int(not succeeded),
+                )
+                self._emit_tool_usage(tool_usage_sink, attempt_usage)
                 self._emit_prompt_event(
                     event_sink,
                     ToolRequestFinished(
@@ -470,9 +510,6 @@ class AgentLoop:
                         dispatch.result_details,
                     ),
                 )
-                if cancellation is not None:
-                    cancellation.check()
-                pending += (dispatch.tool_result,)
                 ledger_entries.append(
                     ToolOutcomeEntry(
                         request.tool_use_id,
@@ -482,6 +519,9 @@ class AgentLoop:
                         safe_result_code(dispatch.result_code),
                     )
                 )
+                if cancellation is not None:
+                    cancellation.check()
+                pending += (dispatch.tool_result,)
                 if len(requests) > 1 and dispatch.status != ToolEventStatus.SUCCEEDED:
                     stop_remaining = True
 
@@ -624,6 +664,15 @@ class AgentLoop:
             return
         try:
             sink(event)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _emit_tool_usage(sink: ToolUsageSink | None, usage: ToolAttemptUsage) -> None:
+        if sink is None:
+            return
+        try:
+            sink(usage)
         except Exception:
             pass
 

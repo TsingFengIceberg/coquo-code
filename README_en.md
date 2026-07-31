@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, workspace-root `AGENTS.md` project instructions, deterministic offline Host Eval, actual Coding Task Eval, and 21 bounded tools are implemented. On Linux, `run_command` requires bubblewrap and seccomp isolation: the workspace is the only Host-persistent writable area and network sockets are denied; an unavailable sandbox never degrades to direct Host execution. Read-only Git observation distinguishes staged, unstaged, and untracked state, returns bounded tracked patches, and reads recent current-HEAD history or one complete-ID reachable commit. Anthropic and OpenAI-compatible providers normalize ordered calls from one provider response into a neutral batch; after complete validation, the Host still sends each action through PermissionGate, approval, and Action Audit without parallel execution. Persisted tool ledgers, compaction checkpoints, and provider usage audits are inspectable, while context pressure and current-process token usage remain immediately visible. The three-layer budget is eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation.
+> **Current status:** named provider profiles, real/offline runtimes, resumable Sessions, workspace-root `AGENTS.md` project instructions, deterministic offline Host Eval, actual Coding Task Eval, foreground durable multi-Stage Tasks, and 21 bounded tools are implemented. Each Task Stage reuses the ordinary Turn, PermissionGate, approval, Action Audit, and Session commit path, with planning, exact recovery, cumulative budgets, human acceptance, and explicit terminal outcomes. On Linux, `run_command` requires bubblewrap and seccomp isolation: the workspace is the only Host-persistent writable area and network sockets are denied; an unavailable sandbox never degrades to direct Host execution. The ordinary Turn budget remains eight calls per response, 32 tool requests per user turn, and 24 provider invocations with a final text-only invocation.
 
 ## Contents
 
@@ -25,6 +25,7 @@ Leonervis Code is a learning-first coding-agent CLI prototype for local, single-
   - [Configure providers](#configure-providers)
   - [Inspect routes and context windows](#inspect-routes-and-context-windows)
   - [Manage Sessions](#manage-sessions)
+  - [Manage Tasks](#manage-tasks)
   - [REPL commands](#repl-commands)
 - [Configuration and local state](#configuration-and-local-state)
 - [Development and verification](#development-and-verification)
@@ -64,6 +65,7 @@ The command's own help is always the authoritative parameter reference:
 uv run leonervis-code --help
 uv run leonervis-code provider --help
 uv run leonervis-code session --help
+uv run leonervis-code task --help
 ```
 
 ### Run tasks and start the REPL
@@ -182,13 +184,16 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 
 ```bash
 uv run leonervis-code task create "Implement resumable multi-stage work" \
+  --name "Task runtime" \
   --accept "Each Stage uses an ordinary Turn budget" \
-  --accept "Every Action retains permission and audit"
-uv run leonervis-code task list
+  --accept "Every Action retains permission and audit" \
+  --max-stages 12 --max-provider-invocations 288 --max-tool-requests 384
+uv run leonervis-code task list --status ready --archive active --name runtime
 uv run leonervis-code task show <task-uuid>
+uv run leonervis-code task timeline <task-uuid>
 ```
 
-A Task is a durable objective above an ordinary Turn, stored separately in the workspace and owned by one existing Session. The Host can now strictly record Stage start/commit/failure, hold an exclusive writer, and link real Session Turn evidence, but user entry points remain create, list, and show only. There is no `/task continue` yet, so they do not invoke a provider, execute a Stage, or grant permission for future Actions.
+A Task is a durable objective above an ordinary Turn, stored separately in the workspace and owned by one existing Session. Standalone commands create and inspect Tasks. In the owner Session's REPL, users can explicitly continue one Stage, propose and accept a plan, run several foreground Stages, recover interrupted work, verify acceptance criteria, and commit a terminal outcome. Every Stage remains an ordinary Turn, so it gains no cross-Stage blanket approval and bypasses none of the tool, sandbox, audit, or Session-durability boundaries.
 
 ### REPL commands
 
@@ -237,8 +242,14 @@ A Task is a durable objective above an ordinary Turn, stored separately in the w
 | `/session archive`, `/session unarchive` | Reversibly archive or unarchive the current Session without changing history, runtime, latest, or resume identity |
 | `/session pin`, `/session unpin` | Reversibly pin or unpin the current Session without changing history, runtime, latest, or resume identity |
 | `/task start <objective>` | Create a durable Task owned by the current Session without invoking the model or executing a Stage |
-| `/task list` | Read-only list durable Tasks in the current workspace |
-| `/task show <task-id>` | Strictly replay and show one Task's objective, owner, and acceptance criteria |
+| `/task list [1-100] [status=<status>] [active\|archived] [name=<text>]` | Read-only filter durable Tasks in the current workspace |
+| `/task show <task-id>`, `/task timeline <task-id>` | Strictly replay Task details or the complete Stage timeline without dialogue or tool bodies |
+| `/task continue <task-id> <Stage objective>`, `/task recover <task-id>` | Execute one ordinary Turn, or reconcile committed Session evidence without rerunning a provider or tool |
+| `/task plan <task-id>`, `/task plan accept <task-id>`, `/task run <task-id> [1-16]` | Propose, explicitly accept, and serially execute bounded foreground Stages; run reports its stop reason |
+| `/task verify <task-id> <criterion> <evidence>`, `/task complete <task-id>` | Bind human evidence to the current model proposal and complete only after all criteria pass |
+| `/task cancel <task-id> <reason>`, `/task fail <task-id> <reason>` | Commit an explicit cancelled or failed terminal outcome |
+| `/task rename <task-id> <name>`, `/task archive <task-id>`, `/task unarchive <task-id>` | Manage display name and reversible archive state |
+| `/task derive <parent-task-id> <objective>` | Create an independently governed Task with immutable parent provenance |
 | `/resume <latest\|id>` | Switch Sessions while preserving the runtime |
 | `/clear` | Clear only the current terminal screen without changing Session or history |
 | `/exit`, `/quit` | Exit normally |
@@ -353,6 +364,8 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md): actual code outcomes, protected files, Host-private tests, explicit real-provider opt-in, and command-sandbox boundaries.
 - [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md): the Task/Stage/Turn/Action hierarchy, independent durable identity, and Host-only management boundary.
 - [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md): the Stage start/terminal state machine, exclusive writer, restart interruption semantics, and Session Turn evidence.
+- [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md): ordinary AgentLoop reuse, Task framing, exact crash recovery, failure mapping, and terminal integration.
+- [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md): plan execution, cumulative inter-Stage budgets, completion proposals, human acceptance, and lifecycle management.
 - [AgentLoop and Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md): mixed-response execution order, live presentation, failure atomicity, and Session recovery.
 - [AgentLoop, Runtime, and Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md): stream preflight, complete tool assembly, live REPL display, and durable final confirmation.
 - [TTY Markdown Rendering](./docs/decisions/0051-tty-markdown-rendering.md): safe-block streaming, TTY layout, raw redirects, and terminal-control boundaries.
@@ -426,4 +439,4 @@ The fixed model-visible order is `read_file, glob, grep, write_file, edit_file, 
 
 Foundation 5A reads only the canonical workspace-root name `AGENTS.md`: missing means no project instructions; an existing entry must be a non-symlink strict-UTF-8 regular file without NUL and no larger than 32 KiB. The Host reads and freezes it once while preparing each user turn, reuses that snapshot for every tool continuation, and reloads only on the next turn. It does not search parents or subdirectories and never automatically loads `CLAUDE.md` or `LEONERVIS.md`. Project instructions use a dedicated provider block and participate in token counting and Effective Context identity, but are not written to the Session transcript. They remain subordinate to canonical Host policy and the current direct user request and cannot relax permission, approval, workspace, symlink, budget, audit, sandbox, or durability boundaries. `/instructions` displays metadata only and neither invokes a provider nor mutates the Session.
 
-Provider batching, the structured tool outcome ledger and durable inspection, default-redacted live activity with explicit command-argv expansion and trusted command-result statistics, mixed responses, streaming, TTY Markdown rendering, process-local output-budget control, Session naming/archive/pinning/filtering/quick switching/preview/search/turn navigation/export/fork/doctor/repair/provider-usage audit, read-only Git change/history observation, the fail-closed Linux command sandbox, Foundation 5A project instruction loading, and the `host-baseline-v1` deterministic offline Eval are complete. Current versions are canonical system prompt v23, provider adapter contract v26, ToolArguments v1, ActionIdentity v1, `session_header` v1/v2 replay with new records using v2, `session_named` v1, `session_archive_changed` v1, `session_pin_changed` v1, `session_forked` v1, `turn_committed` schema v8 with v1-v7 replay, `turn_failed` schema v2, Action Audit schema v1, `context_compacted` v2/v3 replay with new records using v4, and current `ctx-v5`/`ctx-v6` representations. Legacy Sessions and `ctx-v1` through `ctx-v4` identities/checkpoints remain compatible; the empty full-context identity without project instructions is `ctx-v5-0700acbf613c3896f65ea82d5fa78f7139406f50e9b5227bcabedf223708d39b`. Linked worktrees, arbitrary Git argv, abbreviated/arbitrary revisions, refs, unreachable object reads, untracked patches, recursive project-instruction inheritance, recursive copying/deletion, ignore-aware or indexed search, fuzzy/free-form patching, directory movement, non-empty deletion, recursive mkdir, shell source strings, interactive PTYs, network tools, network allowlists, resource quotas, Host sandbox bypass, Session merge/import/remote sync, general automatic retry, parallel tools, multiple agents, real-model Eval leaderboards, and remote services remain unavailable. See [ADR 0083](./docs/decisions/0083-foundation-5a-root-agents-project-instructions.md) for project instructions and [ADR 0084](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md) for Eval boundaries.
+Provider batching, structured tool ledgers, streaming/Markdown terminal output, Session management and usage audit, read-only Git observation, the fail-closed command sandbox, Foundation 5A, both Eval layers, and foreground durable Tasks are complete. Current versions are canonical system prompt v24, provider adapter contract v26, ToolArguments v1, ActionIdentity v1, `turn_committed` schema v8, `turn_failed` schema v2, Action Audit schema v1, new `context_compacted` records at v4, new Task Stage records at v2, and current `ctx-v5`/`ctx-v6` representations. Legacy Sessions, Task Stage v1, and historical context identities/checkpoints remain compatible; the current empty full-context identity without project instructions is `ctx-v5-bd663ddc5d94403891caac9f91d76a319200967331a18163859e203cd6bbb116`. Background Tasks, scheduling, SubAgents, teams, worktree orchestration, parallel Stages/Actions, general automatic retry, network tools, resource quotas, Host sandbox bypass, real-model Eval leaderboards, and remote services remain unavailable. See [ADR 0088](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md) for Task execution and recovery and [ADR 0089](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md) for planning and acceptance.

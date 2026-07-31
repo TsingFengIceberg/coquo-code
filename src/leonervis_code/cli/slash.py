@@ -58,6 +58,7 @@ from leonervis_code.cli.presentation import (
     render_session_turn_range,
     render_task_info,
     render_task_summary,
+    render_task_timeline,
     render_switch_rejection,
     render_tool_ledgers,
     render_tool_catalog,
@@ -67,6 +68,7 @@ from leonervis_code.cli.presentation import (
 from leonervis_code.core.compaction import CompactionError
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.cli.failure_guidance import command_failure_guidance
+from leonervis_code.cli.turn_runner import TaskTurnRequest
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.manager import (
     RuntimeProviderStateError,
@@ -83,7 +85,7 @@ from leonervis_code.session_records import (
     SessionRecordError,
     canonical_session_id,
 )
-from leonervis_code.task_records import TaskRecordError, canonical_task_id
+from leonervis_code.task_records import TaskRecordError, TaskStatus, canonical_task_id
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 from leonervis_code.tools.catalog import TOOL_CATALOG
@@ -129,7 +131,7 @@ class SlashCompletionSpec:
 SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help", "Show Host commands", True),
     SlashCompletionSpec("/help session", "Session history, browsing, and resume"),
-    SlashCompletionSpec("/help task", "Durable Task identity and inspection"),
+    SlashCompletionSpec("/help task", "Durable Task execution and lifecycle"),
     SlashCompletionSpec("/help tools", "Action Audit and tool outcomes"),
     SlashCompletionSpec("/help git", "Read-only Git observation"),
     SlashCompletionSpec("/help context", "Context, usage, and compaction"),
@@ -204,6 +206,20 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task start", "Create a Task owned by the current Session"),
     SlashCompletionSpec("/task list", "List workspace Tasks"),
     SlashCompletionSpec("/task show", "Show one workspace Task"),
+    SlashCompletionSpec("/task continue", "Execute one bounded Task Stage"),
+    SlashCompletionSpec("/task plan", "Generate a bounded Task plan proposal"),
+    SlashCompletionSpec("/task plan accept", "Accept the latest Task plan"),
+    SlashCompletionSpec("/task run", "Run accepted plan stages in the foreground"),
+    SlashCompletionSpec("/task recover", "Reconcile an interrupted Stage"),
+    SlashCompletionSpec("/task verify", "Verify one acceptance criterion"),
+    SlashCompletionSpec("/task complete", "Complete a fully accepted Task"),
+    SlashCompletionSpec("/task cancel", "Cancel a Task"),
+    SlashCompletionSpec("/task fail", "Fail a Task explicitly"),
+    SlashCompletionSpec("/task rename", "Rename a Task"),
+    SlashCompletionSpec("/task archive", "Archive a Task"),
+    SlashCompletionSpec("/task unarchive", "Unarchive a Task"),
+    SlashCompletionSpec("/task timeline", "Show the complete Task timeline"),
+    SlashCompletionSpec("/task derive", "Derive a new Task with provenance"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -299,6 +315,24 @@ class ReplSession(Protocol):
 
     def inspect_task(self, task_id: str): ...
 
+    def derive_task(self, parent_task_id: str, objective: str): ...
+
+    def recover_task(self, task_id: str): ...
+
+    def accept_task_plan(self, task_id: str): ...
+
+    def verify_task_acceptance(self, task_id: str, criterion_index: int, evidence: str): ...
+
+    def complete_task(self, task_id: str): ...
+
+    def cancel_task(self, task_id: str, reason: str): ...
+
+    def fail_task(self, task_id: str, reason: str): ...
+
+    def rename_task(self, task_id: str, name: str): ...
+
+    def set_task_archived(self, task_id: str, archived: bool): ...
+
     def rename_session(self, name: str | None = None): ...
 
     def set_session_archived(self, archived: bool): ...
@@ -325,6 +359,7 @@ class SlashResult:
     message: str | None = None
     kind: MessageKind = "plain"
     clear_screen: bool = False
+    task_request: TaskTurnRequest | None = None
 
 
 _NOT_HANDLED = SlashResult(handled=False)
@@ -490,12 +525,60 @@ def dispatch_slash(
         return _task_list(command, session)
     if command == "/task show" or command.startswith("/task show "):
         return _task_show(command, session)
+    if command == "/task continue" or command.startswith("/task continue "):
+        return _task_continue(command)
+    if command == "/task plan accept" or command.startswith("/task plan accept "):
+        return _task_plan_accept(command, session)
+    if command == "/task plan" or command.startswith("/task plan "):
+        return _task_plan(command)
+    if command == "/task run" or command.startswith("/task run "):
+        return _task_run(command)
+    if command == "/task recover" or command.startswith("/task recover "):
+        return _task_recover(command, session)
+    if command == "/task verify" or command.startswith("/task verify "):
+        return _task_verify(command, session)
+    if command == "/task complete" or command.startswith("/task complete "):
+        return _task_simple_mutation(command, session, "complete")
+    if command == "/task cancel" or command.startswith("/task cancel "):
+        return _task_reasoned_terminal(command, session, "cancel")
+    if command == "/task fail" or command.startswith("/task fail "):
+        return _task_reasoned_terminal(command, session, "fail")
+    if command == "/task rename" or command.startswith("/task rename "):
+        return _task_rename(command, session)
+    if command == "/task archive" or command.startswith("/task archive "):
+        return _task_archive(command, session, True)
+    if command == "/task unarchive" or command.startswith("/task unarchive "):
+        return _task_archive(command, session, False)
+    if command == "/task timeline" or command.startswith("/task timeline "):
+        return _task_timeline(command, session)
+    if command == "/task derive" or command.startswith("/task derive "):
+        return _task_derive(command, session)
     if command.startswith("/task "):
         subcommand = command.split(maxsplit=2)[1]
-        suggestion = _suggest_token(subcommand, ("start", "list", "show"))
+        suggestion = _suggest_token(
+            subcommand,
+            (
+                "start",
+                "list",
+                "show",
+                "continue",
+                "plan",
+                "run",
+                "recover",
+                "verify",
+                "complete",
+                "cancel",
+                "fail",
+                "rename",
+                "archive",
+                "unarchive",
+                "timeline",
+                "derive",
+            ),
+        )
         return _usage(
             "Unknown task command: "
-            f"{subcommand}{_suggestion_line(suggestion)}\nUsage: /task <start|list|show>"
+            f"{subcommand}{_suggestion_line(suggestion)}\nType /help task for commands."
         )
     if command == "/session show" or command.startswith("/session show "):
         return _session_show(command, session)
@@ -1075,16 +1158,48 @@ def _task_start(command: str, session: ReplSession) -> SlashResult:
 
 
 def _task_list(command: str, session: ReplSession) -> SlashResult:
-    if command != "/task list":
-        return _usage("Usage: /task list")
+    arguments = command.split()[2:]
+    limit = 20
+    limit_seen = False
+    status: str | None = None
+    archived: bool | None = None
+    name_query: str | None = None
+    for argument in arguments:
+        if argument.isascii() and argument.isdigit() and not limit_seen:
+            limit = int(argument)
+            limit_seen = True
+        elif argument.startswith("status=") and status is None:
+            status = argument.removeprefix("status=")
+        elif argument in {"active", "archived"} and archived is None:
+            archived = argument == "archived"
+        elif argument.startswith("name=") and name_query is None:
+            name_query = argument.removeprefix("name=").casefold()
+        else:
+            return _task_list_usage()
+    if not 1 <= limit <= 100 or (
+        status is not None and status not in {item.value for item in TaskStatus}
+    ):
+        return _task_list_usage()
+    if name_query == "":
+        return _task_list_usage()
 
     def render() -> str:
         tasks = session.list_tasks()
+        if status is not None:
+            tasks = tuple(task for task in tasks if task.status.value == status)
+        if archived is not None:
+            tasks = tuple(task for task in tasks if task.archived is archived)
+        if name_query is not None:
+            tasks = tuple(task for task in tasks if name_query in task.name.casefold())
         if not tasks:
             return "No durable Tasks found."
-        return "\n".join(render_task_summary(info) for info in tasks)
+        return "\n".join(render_task_summary(info) for info in tasks[:limit])
 
     return _call(render, kind="info", failure_prefix="Task listing failed")
+
+
+def _task_list_usage() -> SlashResult:
+    return _usage("Usage: /task list [1-100] [status=<status>] [active|archived] [name=<text>]")
 
 
 def _task_show(command: str, session: ReplSession) -> SlashResult:
@@ -1100,6 +1215,183 @@ def _task_show(command: str, session: ReplSession) -> SlashResult:
         kind="info",
         failure_prefix="Task inspection failed",
     )
+
+
+def _task_continue(command: str) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) != 4:
+        return _usage("Usage: /task continue <task-id> <stage-objective>")
+    task_id = _task_id_or_none(parts[2])
+    if task_id is None or not parts[3].strip():
+        return _usage("Usage: /task continue <task-id> <stage-objective>")
+    return SlashResult(
+        handled=True,
+        task_request=TaskTurnRequest("continue", task_id, parts[3]),
+    )
+
+
+def _task_plan(command: str) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /task plan <task-id> | /task plan accept <task-id>")
+    task_id = _task_id_or_none(parts[2])
+    if task_id is None:
+        return _usage("Usage: /task plan <task-id>")
+    return SlashResult(handled=True, task_request=TaskTurnRequest("plan", task_id))
+
+
+def _task_plan_accept(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 4:
+        return _usage("Usage: /task plan accept <task-id>")
+    task_id = _task_id_or_none(parts[3])
+    if task_id is None:
+        return _usage("Usage: /task plan accept <task-id>")
+    return _call(
+        lambda: (
+            "Accepted latest Task plan:\n" + render_task_info(session.accept_task_plan(task_id))
+        ),
+        kind="success",
+        failure_prefix="Task plan acceptance failed",
+    )
+
+
+def _task_run(command: str) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {3, 4}:
+        return _usage("Usage: /task run <task-id> [1-16]")
+    task_id = _task_id_or_none(parts[2])
+    if task_id is None:
+        return _usage("Usage: /task run <task-id> [1-16]")
+    limit = 16
+    if len(parts) == 4:
+        if not parts[3].isascii() or not parts[3].isdigit() or not 1 <= int(parts[3]) <= 16:
+            return _usage("Usage: /task run <task-id> [1-16]")
+        limit = int(parts[3])
+    return SlashResult(handled=True, task_request=TaskTurnRequest("run", task_id, max_stages=limit))
+
+
+def _task_recover(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "recover")
+    if task_id is None:
+        return _usage("Usage: /task recover <task-id>")
+    return _call(
+        lambda: (
+            "Recovered interrupted Task Stage:\n" + render_task_info(session.recover_task(task_id))
+        ),
+        kind="success",
+        failure_prefix="Task recovery failed",
+    )
+
+
+def _task_verify(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=4)
+    if (
+        len(parts) != 5
+        or (task_id := _task_id_or_none(parts[2])) is None
+        or not _positive_ascii_integer(parts[3])
+        or not parts[4].strip()
+    ):
+        return _usage("Usage: /task verify <task-id> <criterion-number> <evidence>")
+    return _call(
+        lambda: (
+            "Verified Task acceptance criterion:\n"
+            + render_task_info(session.verify_task_acceptance(task_id, int(parts[3]), parts[4]))
+        ),
+        kind="success",
+        failure_prefix="Task acceptance verification failed",
+    )
+
+
+def _task_simple_mutation(command: str, session: ReplSession, operation: str) -> SlashResult:
+    task_id = _single_task_id(command, operation)
+    if task_id is None:
+        return _usage(f"Usage: /task {operation} <task-id>")
+    return _call(
+        lambda: "Completed durable Task:\n" + render_task_info(session.complete_task(task_id)),
+        kind="success",
+        failure_prefix="Task completion failed",
+    )
+
+
+def _task_reasoned_terminal(command: str, session: ReplSession, operation: str) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) != 4 or (task_id := _task_id_or_none(parts[2])) is None or not parts[3].strip():
+        return _usage(f"Usage: /task {operation} <task-id> <reason>")
+    method = session.cancel_task if operation == "cancel" else session.fail_task
+    label = "cancelled" if operation == "cancel" else "failed"
+    return _call(
+        lambda: f"Task {label}:\n" + render_task_info(method(task_id, parts[3])),
+        kind="success",
+        failure_prefix=f"Task {operation} failed",
+    )
+
+
+def _task_rename(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) != 4 or (task_id := _task_id_or_none(parts[2])) is None or not parts[3].strip():
+        return _usage("Usage: /task rename <task-id> <name>")
+    return _call(
+        lambda: (
+            "Renamed durable Task:\n" + render_task_info(session.rename_task(task_id, parts[3]))
+        ),
+        kind="success",
+        failure_prefix="Task rename failed",
+    )
+
+
+def _task_archive(command: str, session: ReplSession, archived: bool) -> SlashResult:
+    operation = "archive" if archived else "unarchive"
+    task_id = _single_task_id(command, operation)
+    if task_id is None:
+        return _usage(f"Usage: /task {operation} <task-id>")
+    return _call(
+        lambda: (
+            ("Archived" if archived else "Unarchived")
+            + " durable Task:\n"
+            + render_task_info(session.set_task_archived(task_id, archived))
+        ),
+        kind="success",
+        failure_prefix=f"Task {operation} failed",
+    )
+
+
+def _task_timeline(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "timeline")
+    if task_id is None:
+        return _usage("Usage: /task timeline <task-id>")
+    return _call(
+        lambda: render_task_timeline(session.inspect_task(task_id)),
+        kind="info",
+        failure_prefix="Task timeline failed",
+    )
+
+
+def _task_derive(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) != 4 or (task_id := _task_id_or_none(parts[2])) is None or not parts[3].strip():
+        return _usage("Usage: /task derive <parent-task-id> <objective>")
+    return _call(
+        lambda: (
+            "Derived durable Task:\n" + render_task_info(session.derive_task(task_id, parts[3]))
+        ),
+        kind="success",
+        failure_prefix="Task derivation failed",
+    )
+
+
+def _single_task_id(command: str, operation: str) -> str | None:
+    parts = command.split()
+    if len(parts) != 3 or parts[:2] != ["/task", operation]:
+        return None
+    return _task_id_or_none(parts[2])
+
+
+def _task_id_or_none(value: str) -> str | None:
+    try:
+        return canonical_task_id(value)
+    except TaskRecordError:
+        return None
 
 
 def _session_list(command: str, session: ReplSession) -> SlashResult:

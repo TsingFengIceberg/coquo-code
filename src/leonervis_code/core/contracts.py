@@ -261,6 +261,26 @@ class ToolTurnLedger:
 
 
 @dataclass(frozen=True)
+class ToolAttemptUsage:
+    """Content-free counters retained even when an ordinary Turn does not commit."""
+
+    requested: int = 0
+    admitted: int = 0
+    dispatched: int = 0
+    succeeded: int = 0
+    unsuccessful: int = 0
+
+    def __post_init__(self) -> None:
+        for field, value in self.__dict__.items():
+            if type(value) is not int or value < 0:
+                raise ValueError(f"tool attempt {field} must be a nonnegative integer")
+        if not (
+            self.succeeded + self.unsuccessful == self.dispatched <= self.admitted <= self.requested
+        ):
+            raise ValueError("tool attempt usage counts are inconsistent")
+
+
+@dataclass(frozen=True)
 class ConversationTurn:
     """One completed user/final-assistant pair for REPL history display."""
 

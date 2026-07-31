@@ -60,7 +60,7 @@ from leonervis_code.cli.presentation import (
 )
 from leonervis_code.cli.prompt_editor import SlashCommandCompleter, validate_prompt_text
 from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
-from leonervis_code.cli.turn_runner import TurnRunner
+from leonervis_code.cli.turn_runner import TaskTurnRequest, TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
 from leonervis_code.session import SessionTitleGenerationStarted, TurnCommitStarted
 
@@ -381,7 +381,9 @@ class TerminalApplication:
                 tool_details=self._tool_details,
                 session_switch=self._session_switch,
             )
-            if result.clear_screen:
+            if result.task_request is not None:
+                self._start_task_request(text, result.task_request)
+            elif result.clear_screen:
                 self._schedule_write(CLEAR_SCREEN)
             elif result.message is not None:
                 self._schedule_write(self._render_slash_block(text, result.message, result.kind))
@@ -397,6 +399,57 @@ class TerminalApplication:
                     "error",
                 )
             )
+
+    def _start_task_request(self, text: str, request: TaskTurnRequest) -> None:
+        include_details = self._tool_details.mode == ToolDetailMode.FULL
+        self._renderer.configure(self._tool_details.mode, width=self._current_width())
+        self._turn_output_started = False
+        self._turn_starting = True
+        self._cancel_pending_start = False
+        self._state = replace(self._state, status="Preparing Task Stage")
+        self._application.create_background_task(
+            self._start_task_after_echo(
+                text,
+                request,
+                include_tool_details=include_details,
+            )
+        )
+
+    async def _start_task_after_echo(
+        self,
+        text: str,
+        request: TaskTurnRequest,
+        *,
+        include_tool_details: bool,
+    ) -> None:
+        width = self._current_width()
+        rendered = render_plain_document(
+            text,
+            width=width,
+            first_prefix=render_prompt(
+                self._status,
+                self._session_info,
+                color=self._color,
+                readline=False,
+            ),
+            continuation_prefix="  ",
+            prefix_width=2,
+        )
+        await self._write(f"\n{rendered}")
+        if self._cancel_pending_start:
+            self._turn_starting = False
+            self._cancel_pending_start = False
+            self._state = replace(self._state, status="Ready")
+            self._application.invalidate()
+            return
+        turn_id = self._runner.start_task(
+            request,
+            include_tool_details=include_tool_details,
+        )
+        self._turn_starting = False
+        if turn_id is None:
+            self._state = replace(self._state, status="Busy; draft retained")
+        self._application.invalidate()
 
     def _render_slash_block(self, text: str, message: str, kind: MessageKind) -> str:
         width = self._current_width()

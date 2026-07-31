@@ -32,6 +32,7 @@ from leonervis_code.core.contracts import (
     ToolResult,
     ToolTurnLedger,
     ToolUse,
+    UserMessage,
 )
 from leonervis_code.core.permissions import (
     ApprovalMode,
@@ -144,13 +145,26 @@ class SessionTurnRange:
 
 @dataclass(frozen=True)
 class SessionTurnEvidence:
-    """Content-free identity for one exact committed Session Turn record."""
+    """Content-free identity and bounded accounting for one committed Turn record."""
 
     session_id: str
     turn_number: int
     record_sequence: int
     record_sha256: str
     committed_at: str
+    user_message_sha256: str
+    provider_usage_available: bool
+    provider_invocations: int
+    input_tokens: int
+    output_tokens: int
+    known_token_invocations: int
+    unknown_token_invocations: int
+    tool_usage_available: bool
+    tool_requests: int
+    tool_admitted: int
+    tool_dispatched: int
+    tool_succeeded: int
+    tool_unsuccessful: int
 
 
 @dataclass(frozen=True)
@@ -585,23 +599,39 @@ class SessionStore:
             raise SessionStoreError(
                 f"Session Turn record sequence exceeds the {len(state.records) - 1} records"
             )
-        record = state.records[record_sequence]
-        if not isinstance(record, TurnCommitted):
+        if not isinstance(state.records[record_sequence], TurnCommitted):
             raise SessionStoreError("selected Session record is not a committed Turn")
-        lines = data.splitlines(keepends=True)
-        if len(lines) != len(state.records):
-            raise SessionStoreError("Session transcript record boundaries are inconsistent")
-        turn_number = sum(
-            isinstance(candidate, TurnCommitted)
-            for candidate in state.records[: record_sequence + 1]
-        )
-        return SessionTurnEvidence(
-            session_id=state.header.session_id,
-            turn_number=turn_number,
-            record_sequence=record_sequence,
-            record_sha256=hashlib.sha256(lines[record_sequence]).hexdigest(),
-            committed_at=record.committed_at,
-        )
+        return _session_turn_evidence(data, state, record_sequence)
+
+    def find_turn_evidence(
+        self,
+        selector: str | Path,
+        *,
+        after_record_sequence: int,
+        user_message_sha256: str,
+    ) -> tuple[SessionTurnEvidence, ...]:
+        """Find exact committed Turns after a durable baseline by pending-user digest."""
+        if type(after_record_sequence) is not int or after_record_sequence < 0:
+            raise SessionStoreError("Session record baseline must be a nonnegative integer")
+        if (
+            not isinstance(user_message_sha256, str)
+            or len(user_message_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in user_message_sha256)
+        ):
+            raise SessionStoreError("Session user-message SHA-256 is invalid")
+        path = self._resolve_existing_path(selector)
+        data, state = self._strict_snapshot(path)
+        matches: list[SessionTurnEvidence] = []
+        for sequence, record in enumerate(state.records):
+            if sequence <= after_record_sequence or not isinstance(record, TurnCommitted):
+                continue
+            user = next((item for item in record.items if isinstance(item, UserMessage)), None)
+            if user is None:
+                raise SessionStoreError("committed Turn has no canonical user message")
+            digest = hashlib.sha256(user.text.encode("utf-8")).hexdigest()
+            if digest == user_message_sha256:
+                matches.append(_session_turn_evidence(data, state, sequence))
+        return tuple(matches)
 
     def conversation_export(self, selector: str | Path) -> SessionConversationExport:
         """Return a complete bounded final-text projection suitable for stdout export."""
@@ -2360,6 +2390,65 @@ def _fork_session_name(source_name: str, session_id: str) -> str:
         256 - len(suffix.encode("utf-8")),
     )
     return canonical_session_name(base + suffix)
+
+
+def _session_turn_evidence(
+    data: bytes,
+    state: ReplayState,
+    record_sequence: int,
+) -> SessionTurnEvidence:
+    record = state.records[record_sequence]
+    if not isinstance(record, TurnCommitted):
+        raise SessionStoreError("selected Session record is not a committed Turn")
+    lines = data.splitlines(keepends=True)
+    if len(lines) != len(state.records):
+        raise SessionStoreError("Session transcript record boundaries are inconsistent")
+    user = next((item for item in record.items if isinstance(item, UserMessage)), None)
+    if user is None:
+        raise SessionStoreError("committed Turn has no canonical user message")
+    provider_usage = record.provider_usage
+    provider_available = provider_usage is not None
+    provider_invocations = len(provider_usage) if provider_usage is not None else 0
+    input_tokens = 0
+    output_tokens = 0
+    known = 0
+    unknown = 0
+    for invocation in provider_usage or ():
+        if invocation.usage is None:
+            unknown += 1
+        else:
+            known += 1
+            input_tokens += invocation.usage.input_tokens
+            output_tokens += invocation.usage.output_tokens
+    ledger_available = record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION
+    ledger = record.tool_ledger
+    tool_requests = ledger.requested if ledger_available else 0
+    tool_admitted = ledger.admitted if ledger_available else 0
+    tool_dispatched = ledger.dispatched if ledger_available else 0
+    tool_succeeded = ledger.count(ToolRequestOutcome.SUCCEEDED) if ledger_available else 0
+    return SessionTurnEvidence(
+        session_id=state.header.session_id,
+        turn_number=sum(
+            isinstance(candidate, TurnCommitted)
+            for candidate in state.records[: record_sequence + 1]
+        ),
+        record_sequence=record_sequence,
+        record_sha256=hashlib.sha256(lines[record_sequence]).hexdigest(),
+        committed_at=record.committed_at,
+        user_message_sha256=hashlib.sha256(user.text.encode("utf-8")).hexdigest(),
+        provider_usage_available=provider_available,
+        provider_invocations=provider_invocations,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        known_token_invocations=known,
+        unknown_token_invocations=unknown,
+        tool_usage_available=ledger_available,
+        tool_requests=tool_requests,
+        tool_admitted=tool_admitted,
+        tool_dispatched=tool_dispatched,
+        tool_succeeded=tool_succeeded,
+        tool_unsuccessful=tool_dispatched - tool_succeeded,
+    )
 
 
 def _copied_tool_ledger(record: TurnCommitted) -> ToolTurnLedger:

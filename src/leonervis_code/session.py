@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
+import hashlib
 import os
 from pathlib import Path
 from threading import RLock
@@ -46,7 +47,7 @@ from leonervis_code.core.compaction import (
     decide_auto_compaction,
     plan_compaction,
 )
-from leonervis_code.core.cancellation import TurnCancellation
+from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 from leonervis_code.core.session_title import (
     SESSION_TITLE_MAX_ATTEMPTS,
     SessionTitleCandidateError,
@@ -62,6 +63,7 @@ from leonervis_code.core.contracts import (
     ConversationItem,
     ConversationProvider,
     ConversationTurn,
+    ToolAttemptUsage,
     ToolResult,
     ToolUse,
 )
@@ -135,7 +137,32 @@ from leonervis_code.session_store import (
     SessionStoreError,
     SessionWriter,
 )
-from leonervis_code.task_store import TaskInfo, TaskStore
+from leonervis_code.task_records import (
+    StageCommitted,
+    StageFailureReason,
+    StageKind,
+    StageUsage,
+    TaskBudget,
+    TaskStatus,
+    TaskTerminalOutcome,
+)
+from leonervis_code.task_runtime import (
+    TaskPlanExecutionResult,
+    TaskProtocolEventFilter,
+    TaskRunResult,
+    TaskRuntimeError,
+    TaskStageExecutionResult,
+    TaskRunStopped,
+    build_task_stage_prompt,
+    parse_task_response,
+)
+from leonervis_code.task_store import (
+    TaskAppendCommitError,
+    TaskInfo,
+    TaskStore,
+    TaskStoreError,
+    TaskWriter,
+)
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
     DeleteDirectoryOutcome,
@@ -454,6 +481,7 @@ PromptEvent = (
     | SessionTitleFallbackApplied
     | TurnCommitStarted
     | TurnUsageCompleted
+    | TaskRunStopped
     | AgentPromptEvent
 )
 PromptEventSink = Callable[[PromptEvent], None]
@@ -639,6 +667,7 @@ class ProjectSession:
         self._active_turn_runtime: TurnRuntimeSnapshot | None = None
         self._active_cancellation: TurnCancellation | None = None
         self._active_event_sink: PromptEventSink | None = None
+        self._active_session_title_source_text: str | None = None
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
@@ -944,6 +973,9 @@ class ProjectSession:
         self,
         objective: str,
         acceptance_criteria: tuple[str, ...] = (),
+        *,
+        name: str | None = None,
+        budget: TaskBudget = TaskBudget(),
     ) -> TaskInfo:
         """Create a durable Task owned by the current Session without model invocation."""
         with self._lock:
@@ -953,6 +985,8 @@ class ProjectSession:
                 objective,
                 owner_session=self._writer.session_id,
                 acceptance_criteria=acceptance_criteria,
+                name=name,
+                budget=budget,
             )
 
     def list_tasks(self) -> tuple[TaskInfo, ...]:
@@ -966,6 +1000,323 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._task_store.inspect(task_id)
+
+    def derive_task(
+        self,
+        parent_task_id: str,
+        objective: str,
+        *,
+        acceptance_criteria: tuple[str, ...] = (),
+        name: str | None = None,
+        budget: TaskBudget = TaskBudget(),
+    ) -> TaskInfo:
+        """Create an independent current-Session Task with immutable parent provenance."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._task_store.derive(
+                parent_task_id,
+                objective,
+                owner_session=self._writer.session_id,
+                acceptance_criteria=acceptance_criteria,
+                name=name,
+                budget=budget,
+            )
+
+    def continue_task(
+        self,
+        task_id: str,
+        stage_objective: str,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskStageExecutionResult:
+        """Execute exactly one foreground ordinary Turn as one durable Task Stage."""
+        return self._execute_task_stage(
+            task_id,
+            stage_objective,
+            kind=StageKind.EXECUTION,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
+            cancellation=cancellation,
+        )
+
+    def plan_task(
+        self,
+        task_id: str,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskPlanExecutionResult:
+        """Ask the current provider for one bounded plan and persist it as a proposal."""
+        result = self._execute_task_stage(
+            task_id,
+            "Propose a bounded execution plan for this Task.",
+            kind=StageKind.PLANNING,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
+            cancellation=cancellation,
+        )
+        task = self._task_store.inspect(task_id)
+        plan = task.latest_plan
+        if plan is None:
+            raise TaskRuntimeError("planning Stage committed without a durable plan proposal")
+        return TaskPlanExecutionResult(task, result.response, plan.steps)
+
+    def accept_task_plan(self, task_id: str) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.accept_plan()
+            return writer.info
+
+    def run_task(
+        self,
+        task_id: str,
+        *,
+        max_stages: int = 16,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskRunResult:
+        """Run accepted plan steps serially, one fresh ordinary Turn per Stage."""
+        if type(max_stages) is not int or not 1 <= max_stages <= 16:
+            raise ValueError("Task run Stage limit must be between 1 and 16")
+        completed: list[TaskStageExecutionResult] = []
+        reason = "run-limit"
+        for _ in range(max_stages):
+            if cancellation is not None:
+                cancellation.check()
+            task = self._task_store.inspect(task_id)
+            if task.status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.CANCELLED,
+                TaskStatus.FAILED,
+                TaskStatus.COMPLETION_PROPOSED,
+            }:
+                reason = task.status.value
+                break
+            if task.status is TaskStatus.INTERRUPTED:
+                reason = "recovery-required"
+                break
+            plan = task.latest_plan
+            if plan is None or not plan.accepted:
+                raise TaskRuntimeError("Task run requires an accepted latest plan")
+            if plan.completed_steps >= len(plan.steps):
+                reason = "plan-exhausted"
+                break
+            if task.budget_exhausted:
+                reason = "budget-exhausted"
+                break
+            stage = self.continue_task(
+                task_id,
+                plan.steps[plan.completed_steps],
+                event_sink=event_sink,
+                include_tool_details=include_tool_details,
+                cancellation=cancellation,
+            )
+            completed.append(stage)
+            if stage.completion_proposed:
+                reason = "completion-proposed"
+                break
+        final = self._task_store.inspect(task_id)
+        if reason == "run-limit":
+            plan = final.latest_plan
+            if plan is not None and plan.accepted and plan.completed_steps >= len(plan.steps):
+                reason = "plan-exhausted"
+            elif final.budget_exhausted:
+                reason = "budget-exhausted"
+        self._emit_prompt_event(event_sink, TaskRunStopped(len(completed), reason))
+        return TaskRunResult(final, tuple(completed), reason)
+
+    def recover_task(self, task_id: str) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            sequence_before = writer.state.next_sequence
+            if writer.state.active_stage is not None:
+                writer.recover_stage()
+            self._reconcile_task_stage_signal(writer)
+            if writer.state.next_sequence == sequence_before:
+                raise TaskStoreError("Task has no interrupted or unreconciled Stage to recover")
+            return writer.info
+
+    def _reconcile_task_stage_signal(self, writer: TaskWriter) -> None:
+        state = writer.state
+        if not state.stages or not isinstance(state.stages[-1].terminal, StageCommitted):
+            return
+        stage = state.stages[-1]
+        terminal = stage.terminal
+        assert isinstance(terminal, StageCommitted)
+        if stage.started.kind is StageKind.PLANNING:
+            latest_plan = state.latest_plan
+            if latest_plan is not None and latest_plan.stage_id == stage.started.stage_id:
+                return
+        elif (
+            state.current_completion_proposal is not None
+            and state.current_completion_proposal.stage_id == stage.started.stage_id
+        ):
+            return
+        turn = self._session_store.turn_range(
+            state.header.owner_session_id,
+            terminal.turn_number,
+            1,
+        ).turns[0]
+        try:
+            parsed = parse_task_response(turn.assistant.text, kind=stage.started.kind)
+        except TaskRuntimeError:
+            return
+        if stage.started.kind is StageKind.PLANNING:
+            assert parsed.plan_steps is not None
+            writer.propose_plan(parsed.plan_steps)
+        elif parsed.completion_proposed:
+            writer.propose_completion()
+
+    def verify_task_acceptance(
+        self,
+        task_id: str,
+        criterion_index: int,
+        evidence: str,
+    ) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.verify_acceptance(criterion_index, evidence)
+            return writer.info
+
+    def complete_task(self, task_id: str) -> TaskInfo:
+        return self._terminate_task(task_id, TaskTerminalOutcome.COMPLETED)
+
+    def cancel_task(self, task_id: str, reason: str) -> TaskInfo:
+        return self._terminate_task(task_id, TaskTerminalOutcome.CANCELLED, reason)
+
+    def fail_task(self, task_id: str, reason: str) -> TaskInfo:
+        return self._terminate_task(task_id, TaskTerminalOutcome.FAILED, reason)
+
+    def rename_task(self, task_id: str, name: str) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.rename(name)
+            return writer.info
+
+    def set_task_archived(self, task_id: str, archived: bool) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.set_archived(archived)
+            return writer.info
+
+    def _terminate_task(
+        self,
+        task_id: str,
+        outcome: TaskTerminalOutcome,
+        reason: str | None = None,
+    ) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.terminate(outcome, reason)
+            return writer.info
+
+    def _execute_task_stage(
+        self,
+        task_id: str,
+        stage_objective: str,
+        *,
+        kind: StageKind,
+        event_sink: PromptEventSink | None,
+        include_tool_details: bool,
+        cancellation: TurnCancellation | None,
+    ) -> TaskStageExecutionResult:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            initial = self._task_store.inspect(task_id)
+            if initial.owner_session_id != self._writer.session_id:
+                raise TaskStoreError(
+                    "Task owner Session is not current; switch to the owner Session before execution"
+                )
+            if initial.status is TaskStatus.INTERRUPTED:
+                raise TaskStoreError("Task has an interrupted Stage; recover it before continuing")
+            if initial.status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.CANCELLED,
+                TaskStatus.FAILED,
+            }:
+                raise TaskStoreError("Task is terminal and cannot continue")
+            with self._task_store.open(task_id) as writer:
+                stage_number = writer.state.next_stage_number
+                prompt = build_task_stage_prompt(
+                    writer.info,
+                    stage_objective,
+                    stage_number=stage_number,
+                    kind=kind,
+                )
+                prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                session_record_before = self._writer.state.next_sequence - 1
+                turn_count_before = len(self._writer.state.turns)
+                writer.start_stage(
+                    stage_objective,
+                    kind=kind,
+                    session_record_sequence_before=session_record_before,
+                    session_turn_count_before=turn_count_before,
+                    prompt_sha256=prompt_sha256,
+                )
+                response: str | None = None
+                failed_stage_usage: StageUsage | None = None
+
+                def capture_failure_usage(
+                    provider_usage: tuple[ProviderInvocationUsage, ...],
+                    tool_usage: ToolAttemptUsage,
+                ) -> None:
+                    nonlocal failed_stage_usage
+                    failed_stage_usage = _task_stage_usage(provider_usage, tool_usage)
+
+                try:
+                    task_event_sink = (
+                        TaskProtocolEventFilter(event_sink, kind=kind)
+                        if event_sink is not None
+                        else None
+                    )
+                    response = self.prompt(
+                        prompt,
+                        event_sink=task_event_sink,
+                        include_tool_details=include_tool_details,
+                        cancellation=cancellation,
+                        session_title_source_text=initial.objective,
+                        _failure_usage_sink=capture_failure_usage,
+                    )
+                except BaseException as error:
+                    committed = _latest_turn_after(
+                        self._writer.state.records, session_record_before
+                    )
+                    if committed is not None:
+                        writer.commit_stage(committed.sequence)
+                    else:
+                        writer.fail_stage(
+                            _task_stage_failure_reason(error),
+                            usage=failed_stage_usage,
+                        )
+                    raise
+                committed = _latest_turn_after(self._writer.state.records, session_record_before)
+                if committed is None:
+                    writer.fail_stage(StageFailureReason.TURN_NOT_COMMITTED)
+                    raise TaskRuntimeError("Task Stage returned without a committed Session Turn")
+                try:
+                    stage_record = writer.commit_stage(committed.sequence)
+                except TaskAppendCommitError:
+                    raise
+                parsed = parse_task_response(response, kind=kind)
+                if kind is StageKind.PLANNING:
+                    assert parsed.plan_steps is not None
+                    writer.propose_plan(parsed.plan_steps)
+                elif parsed.completion_proposed:
+                    writer.propose_completion()
+                return TaskStageExecutionResult(
+                    task=writer.info,
+                    stage_number=stage_record.stage_number,
+                    response=parsed.display_text,
+                    completion_proposed=parsed.completion_proposed,
+                    session_turn_number=stage_record.turn_number,
+                    session_turn_record_sequence=stage_record.turn_record_sequence,
+                )
 
     def latest_session_info(self) -> SessionInfo:
         """Return the Session referenced by this workspace's latest pointer."""
@@ -1160,12 +1511,19 @@ class ProjectSession:
         event_sink: PromptEventSink | None = None,
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
+        session_title_source_text: str | None = None,
+        _failure_usage_sink: Callable[[tuple[ProviderInvocationUsage, ...], ToolAttemptUsage], None]
+        | None = None,
     ) -> str:
         """Run one serialized preflighted turn with one exact prepared-action lease."""
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
         if cancellation is not None and type(cancellation) is not TurnCancellation:
             raise ValueError("turn cancellation token is invalid")
+        if session_title_source_text is not None and (
+            not isinstance(session_title_source_text, str) or not session_title_source_text.strip()
+        ):
+            raise ValueError("Session title source text must be nonblank text")
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
@@ -1173,9 +1531,16 @@ class ProjectSession:
             loop = self._loop
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
+            tool_attempt_usage = ToolAttemptUsage()
+
+            def observe_tool_usage(usage: ToolAttemptUsage) -> None:
+                nonlocal tool_attempt_usage
+                tool_attempt_usage = usage
+
             self._active_usage_cursor = usage_cursor
             self._active_cancellation = cancellation
             self._active_event_sink = event_sink
+            self._active_session_title_source_text = session_title_source_text
             try:
                 if cancellation is not None:
                     cancellation.check()
@@ -1219,6 +1584,9 @@ class ProjectSession:
                         event_sink=event_sink,
                         include_tool_details=include_tool_details,
                         cancellation=cancellation,
+                        tool_usage_sink=(
+                            observe_tool_usage if _failure_usage_sink is not None else None
+                        ),
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:
@@ -1226,13 +1594,19 @@ class ProjectSession:
                 return response
             except BaseException as error:
                 self._manager.finish_turn_usage(usage_cursor)
+                provider_usage = self._manager.usage_since(
+                    usage_cursor,
+                    kind=ProviderInvocationKind.TURN,
+                )
+                if _failure_usage_sink is not None:
+                    try:
+                        _failure_usage_sink(provider_usage, tool_attempt_usage)
+                    except Exception:
+                        pass
                 self._record_failure(
                     binding or binding_from_status(self._manager.status()),
                     error,
-                    provider_usage=self._manager.usage_since(
-                        usage_cursor,
-                        kind=ProviderInvocationKind.TURN,
-                    ),
+                    provider_usage=provider_usage,
                 )
                 raise
             finally:
@@ -1243,6 +1617,7 @@ class ProjectSession:
                 self._active_turn_runtime = None
                 self._active_cancellation = None
                 self._active_event_sink = None
+                self._active_session_title_source_text = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -2287,6 +2662,7 @@ class ProjectSession:
         runtime: TurnRuntimeSnapshot,
         usage_cursor: int,
     ) -> None:
+        title_source_text = self._active_session_title_source_text or turn.user.text
         rejected: list[str] = []
         fallback_base: str | None = None
         fallback_reason = SessionTitleFallbackReason.INVOCATION_BUDGET
@@ -2307,7 +2683,7 @@ class ProjectSession:
             try:
                 response = runtime.generate_session_title(
                     build_session_title_request(
-                        turn.user.text,
+                        title_source_text,
                         rejected_titles=tuple(rejected),
                     )
                 )
@@ -2343,7 +2719,7 @@ class ProjectSession:
                 if candidate not in rejected:
                     rejected.append(candidate)
 
-        base = fallback_base or fallback_session_title(turn.user.text)
+        base = fallback_base or fallback_session_title(title_source_text)
         for number in range(1, MAX_RECORDS + 2):
             candidate = base if number == 1 else numbered_session_title(base, number)
             try:
@@ -2574,6 +2950,59 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
         generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
+    )
+
+
+def _latest_turn_after(
+    records: tuple[SessionRecord, ...],
+    record_sequence: int,
+) -> TurnCommitted | None:
+    matches = tuple(
+        record
+        for record in records
+        if isinstance(record, TurnCommitted) and record.sequence > record_sequence
+    )
+    if len(matches) > 1:
+        raise TaskRuntimeError("Task Stage produced more than one committed Session Turn")
+    return matches[0] if matches else None
+
+
+def _task_stage_failure_reason(error: BaseException) -> StageFailureReason:
+    if isinstance(error, TurnCancelled):
+        return StageFailureReason.CANCELLED
+    if isinstance(error, ProviderAdapterError):
+        return StageFailureReason.PROVIDER_ERROR
+    if isinstance(error, SessionStoreError):
+        return StageFailureReason.TURN_NOT_COMMITTED
+    return StageFailureReason.HOST_ERROR
+
+
+def _task_stage_usage(
+    provider_usage: tuple[ProviderInvocationUsage, ...],
+    tool_usage: ToolAttemptUsage,
+) -> StageUsage:
+    input_tokens = 0
+    output_tokens = 0
+    known = 0
+    unknown = 0
+    for invocation in provider_usage:
+        if invocation.usage is None:
+            unknown += 1
+        else:
+            known += 1
+            input_tokens += invocation.usage.input_tokens
+            output_tokens += invocation.usage.output_tokens
+    return StageUsage(
+        provider_invocations=len(provider_usage),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        known_token_invocations=known,
+        unknown_token_invocations=unknown,
+        tool_requests=tool_usage.requested,
+        tool_admitted=tool_usage.admitted,
+        tool_dispatched=tool_usage.dispatched,
+        tool_succeeded=tool_usage.succeeded,
+        tool_unsuccessful=tool_usage.unsuccessful,
     )
 
 

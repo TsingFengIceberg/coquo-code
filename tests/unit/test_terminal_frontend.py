@@ -229,6 +229,50 @@ class _FailingSession:
         raise RuntimeError("provider unavailable")
 
 
+class _TaskTerminalSession:
+    def __init__(self) -> None:
+        self.requests = []
+
+    @property
+    def turns(self):
+        return ()
+
+    def continue_task(
+        self,
+        task_id,
+        stage_objective,
+        *,
+        event_sink,
+        include_tool_details,
+        cancellation,
+    ):
+        del include_tool_details
+        cancellation.check()
+        self.requests.append(("continue", task_id, stage_objective))
+        event_sink(AssistantResponseTextDeltaReceived("Task Stage complete"))
+        event_sink(AssistantFinalTextStreamCommitted("Task Stage complete"))
+        return SimpleNamespace(response="Task Stage complete")
+
+    def run_task(
+        self,
+        task_id,
+        *,
+        max_stages,
+        event_sink,
+        include_tool_details,
+        cancellation,
+    ):
+        del event_sink, include_tool_details
+        cancellation.check()
+        self.requests.append(("run", task_id, max_stages))
+        return SimpleNamespace(
+            stages=(
+                SimpleNamespace(response="First Stage complete"),
+                SimpleNamespace(response="Second Stage complete"),
+            )
+        )
+
+
 class _HistorySession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
@@ -357,6 +401,81 @@ def test_persistent_application_keeps_failure_inside_turn_trace(tmp_path: Path) 
     rendered = stdout.getvalue()
     assert "  │ Turn failed: RuntimeError: provider unavailable" in rendered
     assert rendered.index("  │ Turn failed") < rendered.index(f"  {'─' * 24}")
+
+
+def test_persistent_application_runs_task_stage_through_shared_background_worker(
+    tmp_path: Path,
+) -> None:
+    session = _TaskTerminalSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    task_id = "42345678-1234-4234-9234-123456789abc"
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text(f"/task continue {task_id} Implement one Stage\r")
+        _wait_until(lambda: not terminal.state.busy and "Task Stage complete" in stdout.getvalue())
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert session.requests == [("continue", task_id, "Implement one Stage")]
+    rendered = stdout.getvalue()
+    assert f"› /task continue {task_id} Implement one Stage" in rendered
+    assert rendered.count("Task Stage complete") == 1
+    assert "\n• Task Stage complete\n" in rendered
+    assert rendered.count(f"  {'─' * 24}") == 1
+
+
+def test_persistent_task_run_keeps_all_nonstreamed_stage_responses(tmp_path: Path) -> None:
+    session = _TaskTerminalSession()
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    task_id = "42345678-1234-4234-9234-123456789abc"
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            session,
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        thread = Thread(target=terminal.run)
+        thread.start()
+        pipe.send_text(f"/task run {task_id} 2\r")
+        _wait_until(
+            lambda: not terminal.state.busy and "Second Stage complete" in stdout.getvalue()
+        )
+        pipe.send_text("\x04")
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert session.requests == [("run", task_id, 2)]
+    rendered = stdout.getvalue()
+    assert rendered.count("First Stage complete") == 1
+    assert rendered.count("Second Stage complete") == 1
+    assert rendered.index("First Stage complete") < rendered.index("Second Stage complete")
 
 
 def test_persistent_application_clear_writes_terminal_reset_without_session_mutation(
