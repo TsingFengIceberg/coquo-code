@@ -351,10 +351,21 @@ class ConversationRequest:
     effective_summary: EffectiveContextSummary | None = None
     allow_tools: bool = True
     project_instructions: ProjectInstructionsSnapshot | None = None
+    enabled_tool_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.allow_tools) is not bool:
             raise ValueError("conversation request allow_tools must be boolean")
+        if self.enabled_tool_names is not None:
+            if not self.allow_tools:
+                raise ValueError("disabled-tool request cannot select enabled tools")
+            if not isinstance(self.enabled_tool_names, tuple) or not self.enabled_tool_names:
+                raise ValueError("conversation request enabled tools must be a non-empty tuple")
+            if len(set(self.enabled_tool_names)) != len(self.enabled_tool_names) or not all(
+                isinstance(name, str) and name and name.isascii()
+                for name in self.enabled_tool_names
+            ):
+                raise ValueError("conversation request enabled tool names are invalid")
         if self.project_instructions is not None and not isinstance(
             self.project_instructions, ProjectInstructionsSnapshot
         ):

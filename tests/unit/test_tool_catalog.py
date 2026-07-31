@@ -5,6 +5,8 @@ import pytest
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.tools.catalog import (
     TOOL_CATALOG,
+    model_tool_definitions,
+    select_tool_definitions,
     tool_input_from_use,
     tool_use_from_input,
 )
@@ -49,6 +51,29 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "old_text": " \n",
         "new_text": "",
     }
+
+
+def test_catalog_selects_exact_tools_in_global_canonical_order() -> None:
+    selected = select_tool_definitions(("git_show", "read_file", "grep"))
+
+    assert tuple(definition.name for definition in selected) == (
+        "read_file",
+        "grep",
+        "git_show",
+    )
+    assert tuple(item["name"] for item in model_tool_definitions(("git_show", "grep"))) == (
+        "grep",
+        "git_show",
+    )
+
+
+@pytest.mark.parametrize(
+    "names",
+    [(), ("read_file", "read_file"), ("unknown",), ["read_file"]],
+)
+def test_catalog_rejects_invalid_exact_tool_sets(names) -> None:
+    with pytest.raises(ValueError, match="enabled tool"):
+        select_tool_definitions(names)
 
 
 def test_catalog_factory_preserves_optional_assistant_text_without_changing_arguments() -> None:

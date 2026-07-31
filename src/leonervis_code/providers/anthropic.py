@@ -375,7 +375,7 @@ def build_input_projection(
         ],
     }
     if request_snapshot.allow_tools:
-        projection["tools"] = list(model_tool_definitions())
+        projection["tools"] = list(model_tool_definitions(request_snapshot.enabled_tool_names))
         projection["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
     return projection
 

@@ -31,6 +31,7 @@
 - [Foreground Task Stage Execution and Recovery](#foreground-task-stage-execution-and-recovery)
 - [Task Planning, Acceptance, Budgets, and Management](#task-planning-acceptance-budgets-and-management)
 - [Structured Task Acceptance and Independent Review](#structured-task-acceptance-and-independent-review)
+- [Task Proposal Control Boundary](#task-proposal-control-boundary)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -1064,6 +1065,14 @@ A `correction` Stage continues through the ordinary AgentLoop, PermissionGate, a
 
 The canonical system prompt advances to v26. Provider adapter v26, all 21 tool schemas and order, ToolArguments v1, ordinary Turn budgets, Session and Action Audit schemas, and `ctx-v5`/`ctx-v6` representation versions remain unchanged. The no-project-instructions empty full-context ID becomes `ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`. See [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md).
 
+## Task Proposal Control Boundary
+
+The `/task` family remains the human/operator command surface and the foreground Driver remains Host-owned. Future model Task interfaces enter a separate proposal adapter: they do not generate slash commands and cannot operate `TaskStore` directly. `ConversationRequest` and `PreparedAgentTurn` can now pin one exact tool-name subset; Anthropic count/create and OpenAI-compatible estimate/create project that same subset in global canonical order. A provider request for an unexposed tool fails before any dispatch.
+
+AgentLoop gains a Task-control dispatch seam separate from `ActionDispatcher`. A control call must be the only tool call in its assistant response and closes tools after handling so the next invocation is text-only. It still enters ordinary ToolUse/ToolResult causality, the shared Turn budget, Session transcript, and Host tool ledger, but a proposal receives no Action lease and creates no Action Audit merely for requesting coordination.
+
+The internal `TaskControlProposal` binds proposal kind, Task/Stage identity, pinned Effective Context ID, tool-use ID, and bounded ToolArguments. A successful dispatch must carry the matching proposal, and AgentLoop invokes the Host proposal sink only after the complete Session Turn commits successfully. Recovery trusts neither assistant prose nor ToolResult content: the committed Turn must contain exactly one matching control call and the Host ledger must record the same ID and tool name as `succeeded`. No concrete Task coordination tool is public yet, so ordinary model behavior, the 21-tool catalog, and system prompt v26 are unchanged. Exact subset projection advances the provider adapter contract to v27; `ctx-v5`/`ctx-v6`, Session/Task/Action Audit schemas, and 8/32/24 budgets remain unchanged. See [0094: Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md).
+
 ## TTY Host Wrapping and Process-local Command History
 
 The persistent TTY now converts dim Host blocks and in-Turn `  │ ` traces into bounded visual lines at the current display width before applying the same indentation or rail to every line. Long context, tool, usage, failure, and slash-result lines therefore no longer depend on terminal edge wrapping that returns continuations to column zero. Non-TTY and redirected output, assistant Markdown, and internal approval styling retain their existing paths.
@@ -1165,3 +1174,4 @@ Prompt history still starts from at most 1,000 committed user prompts in the cur
 91. [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
 92. [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)
 93. [0093: TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)
+94. [0094: Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md)

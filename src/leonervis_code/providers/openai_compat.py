@@ -344,9 +344,13 @@ def git_show_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[20])
 
 
-def model_tool_definitions_for_openai() -> tuple[dict[str, object], ...]:
+def model_tool_definitions_for_openai(
+    enabled_tool_names: tuple[str, ...] | None = None,
+) -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
-    return tuple(_compatible_tool_definition(item) for item in model_tool_definitions())
+    return tuple(
+        _compatible_tool_definition(item) for item in model_tool_definitions(enabled_tool_names)
+    )
 
 
 def build_input_projection(
@@ -377,7 +381,9 @@ def build_input_projection(
         ],
     }
     if request_snapshot.allow_tools:
-        projection["tools"] = list(model_tool_definitions_for_openai())
+        projection["tools"] = list(
+            model_tool_definitions_for_openai(request_snapshot.enabled_tool_names)
+        )
         projection["parallel_tool_calls"] = False
     return projection
 

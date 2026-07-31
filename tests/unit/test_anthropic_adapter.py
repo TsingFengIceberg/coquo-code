@@ -172,6 +172,28 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
     assert client.count_requests[0]["messages"] == client.requests[0]["messages"]
 
 
+def test_count_and_create_project_the_same_exact_tool_subset() -> None:
+    client = RecordingMessagesClient(
+        [message(TextBlock(text="done", type="text"))],
+        counts=[SimpleNamespace(input_tokens=5)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+    snapshot = ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=(UserMessage("inspect"),),
+        enabled_tool_names=("grep", "git_show"),
+    )
+
+    provider.count_input_tokens(snapshot)
+    assert provider.respond(snapshot) == AssistantText("done")
+
+    assert [tool["name"] for tool in client.count_requests[0]["tools"]] == [
+        "grep",
+        "git_show",
+    ]
+    assert client.count_requests[0]["tools"] == client.requests[0]["tools"]
+
+
 def test_project_instructions_use_the_same_dedicated_count_and_create_block(tmp_path) -> None:
     (tmp_path / "AGENTS.md").write_text("Use exact tests.\n", encoding="utf-8")
     instructions = ProjectInstructionsLoader(tmp_path).load()

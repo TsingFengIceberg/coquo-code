@@ -12,6 +12,7 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from leonervis_code.agent.loop import AgentLoop, PreparedAgentTurn
+from leonervis_code.agent.task_control import TaskProposalSink
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
     ToolDispatchResult,
@@ -2055,6 +2056,8 @@ class ProjectSession:
         cancellation: TurnCancellation | None = None,
         session_title_source_text: str | None = None,
         _allow_tools: bool = True,
+        _enabled_tool_names: tuple[str, ...] | None = None,
+        _task_proposal_sink: TaskProposalSink | None = None,
         _failure_usage_sink: Callable[[tuple[ProviderInvocationUsage, ...], ToolAttemptUsage], None]
         | None = None,
     ) -> str:
@@ -2063,6 +2066,10 @@ class ProjectSession:
             raise ValueError("tool detail event option is invalid")
         if type(_allow_tools) is not bool:
             raise ValueError("turn tool exposure flag is invalid")
+        if _enabled_tool_names is not None and not _allow_tools:
+            raise ValueError("disabled turn cannot select enabled tools")
+        if _task_proposal_sink is not None and not callable(_task_proposal_sink):
+            raise ValueError("Task proposal sink is invalid")
         if cancellation is not None and type(cancellation) is not TurnCancellation:
             raise ValueError("turn cancellation token is invalid")
         if session_title_source_text is not None and (
@@ -2072,7 +2079,11 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            prepared = self._loop.prepare_turn(text, allow_tools=_allow_tools)
+            prepared = self._loop.prepare_turn(
+                text,
+                allow_tools=_allow_tools,
+                enabled_tool_names=_enabled_tool_names,
+            )
             loop = self._loop
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
@@ -2132,6 +2143,7 @@ class ProjectSession:
                         tool_usage_sink=(
                             observe_tool_usage if _failure_usage_sink is not None else None
                         ),
+                        task_proposal_sink=_task_proposal_sink,
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:

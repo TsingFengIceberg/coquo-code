@@ -6,7 +6,13 @@ import pytest
 
 from leonervis_code.agent.loop import (
     AgentLoop,
+    TaskControlProtocolError,
     ToolLoopLimitError,
+)
+from leonervis_code.agent.task_control import (
+    TaskControlDispatchResult,
+    TaskControlProposal,
+    TaskProposalKind,
 )
 from leonervis_code.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
@@ -43,6 +49,9 @@ from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_REQUESTS_PER_TURN,
 )
+
+_TASK_ID = "11111111-1111-4111-8111-111111111111"
+_STAGE_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
@@ -1353,3 +1362,166 @@ def test_tool_request_during_final_text_only_invocation_cannot_extend_budget(tmp
 
     assert loop.history == ()
     assert provider.received_requests[-1].allow_tools is False
+
+
+def test_prepared_tool_subset_rejects_unexposed_provider_call_before_dispatch(tmp_path) -> None:
+    call = ToolUse(
+        "read-hidden",
+        "read_file",
+        ToolArguments.from_mapping({"path": "missing.txt"}),
+    )
+    provider = ScriptedFakeProvider([call])
+    dispatched = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        action_dispatcher=lambda request, _lease: dispatched.append(request),
+    )
+    prepared = loop.prepare_turn("inspect", enabled_tool_names=("glob",))
+
+    with pytest.raises(ValueError, match="outside the prepared tool set"):
+        loop.run_prepared(prepared)
+
+    assert dispatched == []
+    assert loop.history == ()
+    assert provider.received_requests[0].enabled_tool_names == ("glob",)
+
+
+def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(tmp_path) -> None:
+    call = ToolUse(
+        "task-control-1",
+        "git_show",
+        ToolArguments.from_mapping({"commit_id": "HEAD", "path": "."}),
+    )
+    provider = ScriptedFakeProvider([call, AssistantText("proposal submitted")])
+    order = []
+    proposals = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=lambda _turn: order.append("commit"),
+    )
+
+    def dispatch(request, context_id):
+        proposal = TaskControlProposal(
+            kind=TaskProposalKind.COMPLETION,
+            task_id=_TASK_ID,
+            stage_id=_STAGE_ID,
+            stage_number=1,
+            context_id=context_id,
+            tool_use_id=request.tool_use_id,
+            payload=ToolArguments.from_mapping({"proposed": True}),
+        )
+        return TaskControlDispatchResult(
+            ToolDispatchResult(
+                ToolResult(request.tool_use_id, '{"accepted":true}'),
+                ToolEventStatus.SUCCEEDED,
+                "proposal_received",
+            ),
+            proposal,
+        )
+
+    loop.install_task_control_dispatcher(("git_show",), dispatch)
+
+    assert (
+        loop.run(
+            "finish",
+            task_proposal_sink=lambda proposal: (
+                order.append("proposal"),
+                proposals.append(proposal),
+            ),
+        )
+        == "proposal submitted"
+    )
+
+    assert order == ["commit", "proposal"]
+    assert len(proposals) == 1
+    assert proposals[0].context_id.startswith("ctx-v5-")
+    assert provider.received_requests[0].allow_tools is True
+    assert provider.received_requests[1].allow_tools is False
+    assert provider.received_requests[1].enabled_tool_names is None
+
+
+def test_task_control_proposal_is_not_published_when_turn_commit_fails(tmp_path) -> None:
+    call = ToolUse(
+        "task-control-1",
+        "git_show",
+        ToolArguments.from_mapping({"commit_id": "HEAD", "path": "."}),
+    )
+    provider = ScriptedFakeProvider([call, AssistantText("proposal submitted")])
+    proposals = []
+
+    def fail_commit(_turn) -> None:
+        raise OSError("disk full")
+
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=fail_commit,
+    )
+
+    def dispatch(request, context_id):
+        return TaskControlDispatchResult(
+            ToolDispatchResult(
+                ToolResult(request.tool_use_id, '{"accepted":true}'),
+                ToolEventStatus.SUCCEEDED,
+            ),
+            TaskControlProposal(
+                TaskProposalKind.COMPLETION,
+                _TASK_ID,
+                _STAGE_ID,
+                1,
+                context_id,
+                request.tool_use_id,
+                ToolArguments.from_mapping({"proposed": True}),
+            ),
+        )
+
+    loop.install_task_control_dispatcher(("git_show",), dispatch)
+
+    with pytest.raises(OSError, match="disk full"):
+        loop.run("finish", task_proposal_sink=proposals.append)
+
+    assert proposals == []
+    assert loop.history == ()
+
+
+def test_task_control_call_must_be_the_only_call_in_its_response(tmp_path) -> None:
+    control = ToolUse(
+        "task-control-1",
+        "git_show",
+        ToolArguments.from_mapping({"commit_id": "HEAD", "path": "."}),
+    )
+    action = ToolUse(
+        "read-1",
+        "read_file",
+        ToolArguments.from_mapping({"path": "missing.txt"}),
+    )
+    provider = ScriptedFakeProvider([AssistantToolBatch((control, action))])
+    dispatched = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    loop.install_task_control_dispatcher(
+        ("git_show",),
+        lambda request, context_id: dispatched.append((request, context_id)),
+    )
+
+    with pytest.raises(TaskControlProtocolError, match="only call"):
+        loop.run("finish", task_proposal_sink=lambda _proposal: None)
+
+    assert dispatched == []
+    assert loop.history == ()

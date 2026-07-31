@@ -175,6 +175,23 @@ def test_text_only_count_and_create_projections_omit_tool_fields() -> None:
 
     assert "tools" not in counted and "parallel_tool_calls" not in counted
     assert "tools" not in created and "parallel_tool_calls" not in created
+
+
+def test_count_and_create_project_the_same_exact_tool_subset() -> None:
+    snapshot = ConversationRequest(
+        system_prompt=build_system_prompt(),
+        history=(UserMessage("inspect"),),
+        enabled_tool_names=("grep", "git_show"),
+    )
+
+    counted = build_input_projection(route(), snapshot)
+    created = build_request(route(), snapshot)
+
+    assert [tool["function"]["name"] for tool in counted["tools"]] == [
+        "grep",
+        "git_show",
+    ]
+    assert counted["tools"] == created["tools"]
     assert counted["messages"] == created["messages"]
 
 

@@ -134,6 +134,28 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     second.close()
 
 
+def test_project_session_projects_one_exact_private_tool_subset(tmp_path: Path) -> None:
+    provider = RecordingProvider("subset")
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    assert (
+        session.prompt(
+            "inspect",
+            _enabled_tool_names=("read_file", "grep"),
+        )
+        == "subset: inspect"
+    )
+
+    assert provider.requests[0].allow_tools is True
+    assert provider.requests[0].enabled_tool_names == ("read_file", "grep")
+    session.close()
+
+
 def test_first_tool_after_resume_uses_the_current_runtime_binding(tmp_path: Path) -> None:
     store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
     store.add_profile(

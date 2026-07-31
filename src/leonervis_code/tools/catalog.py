@@ -100,9 +100,31 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
 )
 
 
-def model_tool_definitions() -> tuple[dict[str, object], ...]:
-    """Return fresh definitions in the canonical model-visible order."""
-    return tuple(definition.as_mapping() for definition in TOOL_CATALOG)
+def model_tool_definitions(
+    enabled_tool_names: tuple[str, ...] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Return fresh definitions for one exact canonical model-visible tool set."""
+    selected = select_tool_definitions(enabled_tool_names)
+    return tuple(definition.as_mapping() for definition in selected)
+
+
+def select_tool_definitions(
+    enabled_tool_names: tuple[str, ...] | None,
+) -> tuple[CanonicalToolDefinition, ...]:
+    """Select a validated subset while preserving global canonical order."""
+    if enabled_tool_names is None:
+        return TOOL_CATALOG
+    if not isinstance(enabled_tool_names, tuple) or not enabled_tool_names:
+        raise ValueError("enabled tool names must be a non-empty tuple")
+    if len(set(enabled_tool_names)) != len(enabled_tool_names) or not all(
+        isinstance(name, str) and name and name.isascii() for name in enabled_tool_names
+    ):
+        raise ValueError("enabled tool names are invalid")
+    requested = frozenset(enabled_tool_names)
+    selected = tuple(definition for definition in TOOL_CATALOG if definition.name in requested)
+    if len(selected) != len(requested):
+        raise ValueError("enabled tool names contain an unsupported tool")
+    return selected
 
 
 def tool_use_from_input(

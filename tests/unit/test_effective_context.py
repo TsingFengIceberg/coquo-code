@@ -55,6 +55,19 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.to_conversation_request().history == ()
 
 
+def test_effective_context_projects_request_local_tool_subset_without_changing_identity() -> None:
+    context = snapshot()
+    request = context.to_conversation_request(enabled_tool_names=("read_file", "grep"))
+
+    assert request.enabled_tool_names == ("read_file", "grep")
+    assert context.context_id == snapshot().context_id
+    with pytest.raises(ValueError, match="disabled-tool"):
+        context.to_conversation_request(
+            allow_tools=False,
+            enabled_tool_names=("read_file",),
+        )
+
+
 def test_complete_tool_turn_is_atomic_and_identity_covers_flags() -> None:
     history = (
         UserMessage("read"),

@@ -219,6 +219,7 @@ class EffectiveContextSnapshot:
         *,
         pending_items: tuple[ConversationItem, ...] = (),
         allow_tools: bool = True,
+        enabled_tool_names: tuple[str, ...] | None = None,
     ) -> ConversationRequest:
         """Project effective history plus one optional uncommitted turn suffix."""
         if not isinstance(pending_items, tuple):
@@ -229,6 +230,7 @@ class EffectiveContextSnapshot:
             project_instructions=self.project_instructions,
             effective_summary=self.effective_summary,
             allow_tools=allow_tools,
+            enabled_tool_names=enabled_tool_names,
         )
 
 

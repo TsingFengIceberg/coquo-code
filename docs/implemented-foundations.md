@@ -31,6 +31,7 @@
 - [Foreground Task Stage Execution 与 Recovery](#foreground-task-stage-execution-与-recovery)
 - [Task Planning、Acceptance、Budgets 与 Management](#task-planningacceptancebudgets-与-management)
 - [Structured Task Acceptance 与 Independent Review](#structured-task-acceptance-与-independent-review)
+- [Task Proposal Control Boundary](#task-proposal-control-boundary)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -1064,6 +1065,14 @@ Task现在会把当前completion proposal对应的Host/reviewer检查以有界�
 
 Canonical system prompt升级为v26；provider adapter保持v26，21个tool schema与顺序、ToolArguments v1、普通Turn预算、Session/Action Audit schema及`ctx-v5`/`ctx-v6`representation均不变。无项目指令的empty full-context ID更新为`ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`。详见[0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)。
 
+## Task Proposal Control Boundary
+
+`/task`系列继续是人类/Operator命令，Foreground Driver继续由Host拥有；未来模型Task接口只进入独立proposal adapter，不需要生成slash command，也不能直接操作`TaskStore`。底层`ConversationRequest`与`PreparedAgentTurn`现在可固定一个精确工具名子集；Anthropic count/create和OpenAI-compatible estimate/create按照同一子集并保持全局canonical顺序。Provider若请求未暴露工具，会在任何dispatch之前失败。
+
+AgentLoop新增与`ActionDispatcher`分开的Task-control dispatch seam。Control call必须是该assistant response唯一的工具调用，并在处理后关闭工具，只允许下一次text-only finalization；它仍进入普通ToolUse/ToolResult因果链、共享Turn预算、Session transcript和Host tool ledger，但proposal本身不取得Action lease，也不因为协调请求创建Action Audit。
+
+内部`TaskControlProposal`固定绑定proposal kind、Task/Stage identity、pinned Effective Context ID、tool-use ID与有界ToolArguments。成功dispatch必须携带匹配proposal；AgentLoop只有在完整Session Turn已成功commit后才调用Host proposal sink。恢复时不相信assistant或ToolResult正文，而要求committed Turn内存在唯一匹配control call，且Host ledger对相同ID和tool name记录`succeeded`。当前尚未加入任何公开Task coordination tool，因此普通模型行为、21-tool catalog与system prompt v26不变；provider adapter contract因精确子集投影升级为v27，`ctx-v5`/`ctx-v6`、Session/Task/Action Audit schema与8/32/24预算不变。详见[0094：Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md)。
+
 ## TTY Host 包装与进程内命令历史
 
 常驻TTY现在把灰色Host block和Turn内`  │ `轨迹按当前显示宽度转换为有界视觉行，再为每一行应用相同缩进或轨迹前缀。超长context、tool、usage、failure与slash结果因此不会依赖终端在右边缘自行折行后回到第0列；非TTY、重定向输出、assistant Markdown及approval内部样式保持原路径。
@@ -1165,3 +1174,4 @@ Prompt history启动时仍从当前Session最多1000条已提交user prompt建�
 91. [0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
 92. [0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)
 93. [0093：TTY Host Wrapping and Process-local Command History](./decisions/0093-tty-host-wrapping-and-process-local-command-history.md)
+94. [0094：Task Proposal Control Boundary](./decisions/0094-task-proposal-control-boundary.md)

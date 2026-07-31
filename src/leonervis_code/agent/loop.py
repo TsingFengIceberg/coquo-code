@@ -24,6 +24,12 @@ from leonervis_code.agent.tool_events import (
     safe_tool_request_details,
     safe_tool_request_summary,
 )
+from leonervis_code.agent.task_control import (
+    TaskControlDispatcher,
+    TaskControlDispatchResult,
+    TaskControlProposal,
+    TaskProposalSink,
+)
 from leonervis_code.core.actions import ActionLease
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.cancellation import TurnCancellation
@@ -91,6 +97,10 @@ class ToolLoopLimitError(RuntimeError):
     """Raised when a provider does not finish after its tool-call budget is exhausted."""
 
 
+class TaskControlProtocolError(RuntimeError):
+    """Raised when a provider violates the terminal Task-control call contract."""
+
+
 @dataclass(frozen=True)
 class PreparedAgentTurn:
     """One pending user item pinned to one committed Effective Context."""
@@ -99,6 +109,7 @@ class PreparedAgentTurn:
     context: EffectiveContextSnapshot
     pending_items: tuple[ConversationItem, ...]
     allow_tools: bool = True
+    enabled_tool_names: tuple[str, ...] | None = None
     action_lease: ActionLease | None = None
 
     def __post_init__(self) -> None:
@@ -106,12 +117,24 @@ class PreparedAgentTurn:
             raise ValueError("prepared turn must contain exactly its pending user message")
         if type(self.allow_tools) is not bool:
             raise ValueError("prepared turn tool exposure flag is invalid")
+        if self.enabled_tool_names is not None:
+            if not self.allow_tools:
+                raise ValueError("disabled prepared turn cannot select enabled tools")
+            available = tuple(definition.name for definition in self.context.tool_definitions)
+            if (
+                not isinstance(self.enabled_tool_names, tuple)
+                or not self.enabled_tool_names
+                or len(set(self.enabled_tool_names)) != len(self.enabled_tool_names)
+                or any(name not in available for name in self.enabled_tool_names)
+            ):
+                raise ValueError("prepared turn enabled tools are invalid")
 
     @property
     def initial_request(self) -> ConversationRequest:
         return self.context.to_conversation_request(
             pending_items=self.pending_items,
             allow_tools=self.allow_tools,
+            enabled_tool_names=self.enabled_tool_names,
         )
 
     def rebase(self, context: EffectiveContextSnapshot) -> PreparedAgentTurn:
@@ -198,6 +221,8 @@ class AgentLoop:
         self._system_prompt_factory = system_prompt_factory
         self._project_instructions_factory = project_instructions_factory
         self._action_dispatcher = action_dispatcher
+        self._task_control_names: frozenset[str] = frozenset()
+        self._task_control_dispatcher: TaskControlDispatcher | None = None
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
@@ -265,7 +290,13 @@ class AgentLoop:
         """Retain the committed-count compatibility seam through effective context."""
         return self.effective_context_snapshot().to_conversation_request()
 
-    def prepare_turn(self, prompt: str, *, allow_tools: bool = True) -> PreparedAgentTurn:
+    def prepare_turn(
+        self,
+        prompt: str,
+        *,
+        allow_tools: bool = True,
+        enabled_tool_names: tuple[str, ...] | None = None,
+    ) -> PreparedAgentTurn:
         """Freeze one pending user message without mutating conversation state."""
         user = UserMessage(text=prompt)
         return PreparedAgentTurn(
@@ -273,6 +304,7 @@ class AgentLoop:
             context=self.effective_context_snapshot(),
             pending_items=(user,),
             allow_tools=allow_tools,
+            enabled_tool_names=enabled_tool_names,
         )
 
     def run(
@@ -284,6 +316,7 @@ class AgentLoop:
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
         tool_usage_sink: ToolUsageSink | None = None,
+        task_proposal_sink: TaskProposalSink | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
@@ -293,6 +326,7 @@ class AgentLoop:
             include_tool_details=include_tool_details,
             cancellation=cancellation,
             tool_usage_sink=tool_usage_sink,
+            task_proposal_sink=task_proposal_sink,
         )
 
     def run_prepared(
@@ -304,10 +338,13 @@ class AgentLoop:
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
         tool_usage_sink: ToolUsageSink | None = None,
+        task_proposal_sink: TaskProposalSink | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
+        if task_proposal_sink is not None and not callable(task_proposal_sink):
+            raise ValueError("Task proposal sink is invalid")
         turn_provider = provider or self._provider
         if turn_provider is None:
             raise RuntimeError("conversation provider is required for this turn")
@@ -321,6 +358,7 @@ class AgentLoop:
         ledger_summary_attached = False
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
         attempt_usage = ToolAttemptUsage()
+        pending_task_proposal: TaskControlProposal | None = None
         self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:
@@ -342,6 +380,7 @@ class AgentLoop:
                 context.to_conversation_request(
                     pending_items=pending,
                     allow_tools=allow_tools,
+                    enabled_tool_names=(prepared.enabled_tool_names if allow_tools else None),
                 ),
                 event_sink,
                 provider_invocations + 1,
@@ -354,6 +393,9 @@ class AgentLoop:
                     cancellation.check()
                 ledger = ToolTurnLedger(tuple(ledger_entries))
                 self._commit(pending + (response,), user, response, ledger)
+                if pending_task_proposal is not None:
+                    assert task_proposal_sink is not None
+                    task_proposal_sink(pending_task_proposal)
                 if outcome.text_was_streamed:
                     self._emit_prompt_event(
                         event_sink,
@@ -376,6 +418,20 @@ class AgentLoop:
             if any(request.tool_use_id in seen_tool_ids for request in requests):
                 raise ValueError("provider reused a tool use ID")
             seen_tool_ids.update(request.tool_use_id for request in requests)
+            enabled_names = prepared.enabled_tool_names
+            if enabled_names is not None and any(
+                request.name not in enabled_names for request in requests
+            ):
+                raise ValueError("provider requested a tool outside the prepared tool set")
+            control_requests = tuple(
+                request for request in requests if request.name in self._task_control_names
+            )
+            if control_requests and len(requests) != 1:
+                raise TaskControlProtocolError(
+                    "Task control tool must be the only call in its assistant response"
+                )
+            if control_requests and task_proposal_sink is None:
+                raise TaskControlProtocolError("Task control tool requires a proposal sink")
 
             if response.assistant_text is not None:
                 companion_event = (
@@ -478,7 +534,13 @@ class AgentLoop:
                     ),
                 )
                 try:
-                    dispatch = self._execute(request, prepared.action_lease)
+                    if request.name in self._task_control_names:
+                        control = self._execute_task_control(request, context.context_id)
+                        dispatch = control.dispatch
+                        pending_task_proposal = control.proposal
+                        force_final = True
+                    else:
+                        dispatch = self._execute(request, prepared.action_lease)
                 except BaseException:
                     attempt_usage = ToolAttemptUsage(
                         requested=attempt_usage.requested,
@@ -588,6 +650,27 @@ class AgentLoop:
             raise ValueError("action dispatcher is already installed")
         self._action_dispatcher = dispatcher
 
+    def install_task_control_dispatcher(
+        self,
+        tool_names: tuple[str, ...],
+        dispatcher: TaskControlDispatcher,
+    ) -> None:
+        """Install one proposal-only Task coordination boundary exactly once."""
+        if self._task_control_dispatcher is not None or self._task_control_names:
+            raise ValueError("Task control dispatcher is already installed")
+        available = {definition.name for definition in TOOL_CATALOG}
+        if (
+            not isinstance(tool_names, tuple)
+            or not tool_names
+            or len(set(tool_names)) != len(tool_names)
+            or any(name not in available for name in tool_names)
+        ):
+            raise ValueError("Task control tool names are invalid")
+        if not callable(dispatcher):
+            raise ValueError("Task control dispatcher is invalid")
+        self._task_control_names = frozenset(tool_names)
+        self._task_control_dispatcher = dispatcher
+
     def install_compaction(
         self,
         *,
@@ -666,6 +749,22 @@ class AgentLoop:
                 is_error=True,
             )
         return infer_tool_dispatch_result(result)
+
+    def _execute_task_control(
+        self,
+        request: ToolUse,
+        context_id: str,
+    ) -> TaskControlDispatchResult:
+        """Dispatch proposal-only coordination without entering the Action boundary."""
+        dispatcher = self._task_control_dispatcher
+        if dispatcher is None:
+            raise RuntimeError("Task control dispatcher is not installed")
+        result = dispatcher(request, context_id)
+        if type(result) is not TaskControlDispatchResult:
+            raise ValueError("Task control dispatcher returned an invalid result")
+        if result.proposal is not None and result.proposal.context_id != context_id:
+            raise ValueError("Task control proposal context does not match prepared turn")
+        return result
 
     @staticmethod
     def _emit_prompt_event(sink: AgentEventSink | None, event: AgentPromptEvent) -> None:
