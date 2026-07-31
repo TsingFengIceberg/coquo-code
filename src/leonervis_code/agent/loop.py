@@ -98,15 +98,21 @@ class PreparedAgentTurn:
     user: UserMessage
     context: EffectiveContextSnapshot
     pending_items: tuple[ConversationItem, ...]
+    allow_tools: bool = True
     action_lease: ActionLease | None = None
 
     def __post_init__(self) -> None:
         if self.pending_items != (self.user,):
             raise ValueError("prepared turn must contain exactly its pending user message")
+        if type(self.allow_tools) is not bool:
+            raise ValueError("prepared turn tool exposure flag is invalid")
 
     @property
     def initial_request(self) -> ConversationRequest:
-        return self.context.to_conversation_request(pending_items=self.pending_items)
+        return self.context.to_conversation_request(
+            pending_items=self.pending_items,
+            allow_tools=self.allow_tools,
+        )
 
     def rebase(self, context: EffectiveContextSnapshot) -> PreparedAgentTurn:
         if self.action_lease is not None:
@@ -259,13 +265,14 @@ class AgentLoop:
         """Retain the committed-count compatibility seam through effective context."""
         return self.effective_context_snapshot().to_conversation_request()
 
-    def prepare_turn(self, prompt: str) -> PreparedAgentTurn:
+    def prepare_turn(self, prompt: str, *, allow_tools: bool = True) -> PreparedAgentTurn:
         """Freeze one pending user message without mutating conversation state."""
         user = UserMessage(text=prompt)
         return PreparedAgentTurn(
             user=user,
             context=self.effective_context_snapshot(),
             pending_items=(user,),
+            allow_tools=allow_tools,
         )
 
     def run(
@@ -322,7 +329,9 @@ class AgentLoop:
             if provider_invocations >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
                 raise ToolLoopLimitError("provider invocation limit reached")
             allow_tools = (
-                not force_final and provider_invocations < MAX_PROVIDER_INVOCATIONS_PER_TURN - 1
+                prepared.allow_tools
+                and not force_final
+                and provider_invocations < MAX_PROVIDER_INVOCATIONS_PER_TURN - 1
             )
             if not allow_tools and ledger_entries and not ledger_summary_attached:
                 ledger = ToolTurnLedger(tuple(ledger_entries))

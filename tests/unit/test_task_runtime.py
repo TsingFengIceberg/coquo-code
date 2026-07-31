@@ -34,6 +34,7 @@ from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore
 from leonervis_code.task_records import (
     AcceptanceCheckOutcome,
+    ReflectionRecommendation,
     StageFailureReason,
     StageKind,
     TaskBudget,
@@ -43,6 +44,8 @@ from leonervis_code.task_records import (
 from leonervis_code.task_runtime import (
     TASK_COMPLETION_SIGNAL,
     TASK_PLAN_SIGNAL,
+    TASK_REFLECTION_SIGNAL,
+    TaskDriverStopReason,
     TaskProtocolEventFilter,
     TaskRunStopped,
     TaskRuntimeError,
@@ -560,6 +563,170 @@ def test_plan_accept_and_foreground_run_execute_one_fresh_turn_per_stage(
         StageKind.EXECUTION,
     ]
     assert len(session.turns) == 3
+    session.close()
+
+
+def test_adaptive_driver_projects_failed_feedback_then_reflects_and_corrects(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f'{TASK_PLAN_SIGNAL} ["Produce the artifact"]'),
+            AssistantText(f"Initial attempt finished.\n{TASK_COMPLETION_SIGNAL} yes"),
+            AssistantText(
+                "The required path is missing.\n"
+                f"{TASK_REFLECTION_SIGNAL} "
+                '{"recommendation":"correction","summary":"Create the missing artifact.",'
+                '"next_objective":"Create artifact.txt and verify it exists."}'
+            ),
+            AssistantText(f"Correction needs another pass.\n{TASK_COMPLETION_SIGNAL} no"),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Produce one artifact",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "artifact.txt exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+    )
+    session.plan_task(task.task_id)
+    session.accept_task_plan(task.task_id)
+
+    driven = session.drive_task(task.task_id, max_stages=3)
+
+    assert driven.stopped_reason is TaskDriverStopReason.STAGE_INCOMPLETE
+    assert [stage.kind for stage in driven.task.stages] == [
+        StageKind.PLANNING,
+        StageKind.EXECUTION,
+        StageKind.REFLECTION,
+        StageKind.CORRECTION,
+    ]
+    assert driven.task.latest_reflection is not None
+    assert driven.task.latest_reflection.recommendation is ReflectionRecommendation.CORRECTION
+    assert driven.task.latest_checkpoint is not None
+    assert len(driven.stages) == 3
+    reflection_request = provider.requests[2]
+    assert reflection_request.allow_tools is False
+    reflection_prompt = reflection_request.history[-1]
+    assert isinstance(reflection_prompt, UserMessage)
+    reflection_payload = json.loads(reflection_prompt.text.splitlines()[2])
+    assert reflection_payload["current_acceptance_checks"] == [
+        {
+            "criterion_index": 1,
+            "evidence": "path=artifact.txt expected=file observed=missing-or-unsafe",
+            "outcome": "failed",
+            "source": "host-check",
+        }
+    ]
+    assert session.preview_task_next(task.task_id).reason is TaskDriverStopReason.PLAN_EXHAUSTED
+    session.close()
+
+
+def test_reflection_backed_plan_revision_requires_explicit_acceptance(tmp_path: Path) -> None:
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f'{TASK_PLAN_SIGNAL} ["Old step"]'),
+            AssistantText(f"Attempt complete.\n{TASK_COMPLETION_SIGNAL} yes"),
+            AssistantText(
+                f"{TASK_REFLECTION_SIGNAL} "
+                '{"recommendation":"revise-plan","summary":"The old plan missed repair work.",'
+                '"next_objective":"Propose a replacement repair plan."}'
+            ),
+            AssistantText(f'{TASK_PLAN_SIGNAL} ["Repair artifact","Re-run checks"]'),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Repair the artifact",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "artifact.txt exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+    )
+    old = session.plan_task(task.task_id)
+    session.accept_task_plan(task.task_id)
+    session.continue_task(task.task_id, "Old step")
+    session.verify_task_host(task.task_id)
+    reflected = session.reflect_task(task.task_id)
+    assert reflected.reflection.recommendation is ReflectionRecommendation.REVISE_PLAN
+
+    revised = session.revise_task_plan(task.task_id)
+
+    assert revised.task.latest_plan is not None
+    assert revised.task.latest_plan.accepted is False
+    assert revised.task.latest_plan.predecessor_plan_id == old.task.latest_plan.plan_id
+    assert revised.task.latest_plan.reflection_id == revised.task.latest_reflection.reflection_id
+    assert (
+        session.preview_task_next(task.task_id).reason
+        is TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
+    )
+    accepted = session.accept_task_plan(task.task_id)
+    assert accepted.latest_plan is not None and accepted.latest_plan.accepted
+    session.close()
+
+
+def test_task_pause_resume_next_and_checkpoint_are_durable_host_controls(tmp_path: Path) -> None:
+    session = open_task_session(tmp_path, ScriptedTaskProvider([]))
+    task = session.create_task("Control foreground driving")
+    before = task.path.read_bytes()
+
+    preview = session.preview_task_next(task.task_id)
+    assert preview.reason is TaskDriverStopReason.PLAN_REQUIRED
+    assert task.path.read_bytes() == before
+
+    paused = session.set_task_driver_paused(task.task_id, True, "study break")
+    assert paused.driver_paused is True
+    assert session.preview_task_next(task.task_id).reason is TaskDriverStopReason.PAUSED
+    checkpointed = session.checkpoint_task(task.task_id)
+    assert checkpointed.latest_checkpoint is not None
+    assert checkpointed.latest_checkpoint.source_sequence == checkpointed.record_count - 2
+    with pytest.raises(TaskStoreError, match="has not advanced"):
+        session.checkpoint_task(task.task_id)
+    resumed = session.set_task_driver_paused(task.task_id, False)
+    assert resumed.driver_paused is False
+    assert TaskStore(tmp_path).inspect(task.task_id).driver_paused is False
+    session.close()
+
+
+def test_driver_auto_completion_does_not_append_after_terminal_record(tmp_path: Path) -> None:
+    (tmp_path / "artifact.txt").write_text("ready\n", encoding="utf-8")
+    provider = ScriptedTaskProvider(
+        [
+            AssistantText(f'{TASK_PLAN_SIGNAL} ["Confirm artifact"]'),
+            AssistantText(f"Artifact is complete.\n{TASK_COMPLETION_SIGNAL} yes"),
+        ]
+    )
+    session = open_task_session(tmp_path, provider)
+    task = session.create_task(
+        "Confirm one artifact",
+        structured_criteria=(
+            {
+                "kind": "path-exists",
+                "description": "artifact.txt exists",
+                "path": "artifact.txt",
+                "path_type": "file",
+            },
+        ),
+        completion_policy=TaskCompletionPolicy.AUTO_VERIFIED,
+    )
+    session.plan_task(task.task_id)
+    session.accept_task_plan(task.task_id)
+
+    result = session.drive_task(task.task_id, max_stages=2)
+
+    assert result.stopped_reason is TaskDriverStopReason.COMPLETED
+    assert result.task.status is TaskStatus.COMPLETED
+    records = result.task.path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(records[-1])["record_type"] == "task_terminated"
     session.close()
 
 

@@ -169,6 +169,26 @@ class TurnRunner:
                     **common,
                 )
                 response = "\n\n".join(stage.response for stage in result.stages if stage.response)
+            elif request.operation == "reflect":
+                result = getattr(self._session, "reflect_task")(request.task_id, **common)
+                response = result.response
+            elif request.operation == "correct":
+                result = getattr(self._session, "correct_task")(
+                    request.task_id,
+                    request.stage_objective,
+                    **common,
+                )
+                response = result.response
+            elif request.operation == "revise":
+                result = getattr(self._session, "revise_task_plan")(request.task_id, **common)
+                response = result.response
+            elif request.operation == "drive":
+                result = getattr(self._session, "drive_task")(
+                    request.task_id,
+                    max_stages=request.max_stages,
+                    **common,
+                )
+                response = "\n\n".join(stage.response for stage in result.stages if stage.response)
             else:
                 raise ValueError("unsupported Task turn operation")
             self._queue.put(TurnCompleting(turn_id))

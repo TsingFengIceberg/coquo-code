@@ -39,7 +39,7 @@ from leonervis_code.session import (
     SessionTitleFallbackApplied,
     TurnUsageCompleted,
 )
-from leonervis_code.task_runtime import TaskRunStopped
+from leonervis_code.task_runtime import TaskNextAction, TaskRunStopped
 from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
@@ -121,6 +121,9 @@ TASK_HELP = (
     "  /task show <task-id> | /task timeline <task-id>\n"
     "  /task continue <task-id> <stage-objective> | /task recover <task-id>\n"
     "  /task plan <task-id> | /task plan accept <task-id> | /task run <task-id> [1-16]\n"
+    "  /task reflect <task-id> | /task correct <task-id> [objective] | /task revise <task-id>\n"
+    "  /task drive <task-id> [1-16] | /task next <task-id> | /task checkpoint <task-id>\n"
+    "  /task pause <task-id> [reason] | /task resume <task-id>\n"
     "  /task verify <task-id> <criterion-number> <evidence>\n"
     "  /task verify host <task-id> | /task review <task-id> | /task complete <task-id>\n"
     "  /task cancel <task-id> <reason> | /task fail <task-id> <reason>\n"
@@ -1592,10 +1595,15 @@ def render_prompt_event(
     if isinstance(event, TurnUsageCompleted):
         return render_usage_summary(event.usage, compact=True), "info"
     if isinstance(event, TaskRunStopped):
-        return (
-            f"Task run stopped: reason={event.reason}, completed_stages={event.completed_stages}",
-            "info",
+        message = (
+            f"Task run stopped: reason={event.reason}, completed_stages={event.completed_stages}"
         )
+        if event.reason == "independent-review-required":
+            message += (
+                "\nIndependent review was not started automatically. /task review uses the "
+                "current provider with tools disabled and may consume tokens or API cost."
+            )
+        return message, "info"
     if isinstance(event, SessionTitleFallbackApplied):
         return (
             "Session naming used a Host fallback: "
@@ -1802,6 +1810,7 @@ def render_task_info(info: TaskInfoView) -> str:
         f"Task: {_safe_inline(info.objective)}",
         f"Status: {info.status.value}",
         f"Archived: {'yes' if getattr(info, 'archived', False) else 'no'}",
+        f"Driver paused: {'yes' if getattr(info, 'driver_paused', False) else 'no'}",
         f"Task ID: {info.task_id}",
         f"Owner Session: {info.owner_session_id}",
         f"Scope: {info.scope.value}",
@@ -1890,6 +1899,26 @@ def render_task_info(info: TaskInfoView) -> str:
             f"Latest plan: {plan.plan_id}, {'accepted' if plan.accepted else 'proposed'}, "
             f"progress {plan.completed_steps}/{len(plan.steps)}"
         )
+        if getattr(plan, "predecessor_plan_id", None) is not None:
+            lines.append(
+                f"Plan revision: replaces {plan.predecessor_plan_id}; reason "
+                f"{_safe_inline(plan.revision_reason)}"
+            )
+    reflection = getattr(info, "latest_reflection", None)
+    if reflection is not None:
+        lines.append(
+            f"Latest reflection: {reflection.recommendation.value} - "
+            f"{_safe_inline(reflection.summary)}"
+        )
+        if reflection.next_objective is not None:
+            lines.append(f"Reflection next objective: {_safe_inline(reflection.next_objective)}")
+    checkpoint = getattr(info, "latest_checkpoint", None)
+    if checkpoint is not None:
+        lines.append(
+            f"Task checkpoint: {checkpoint.checkpoint_id}, source record "
+            f"#{checkpoint.source_sequence}, unresolved criteria "
+            f"{len(checkpoint.unresolved_criterion_indices)}"
+        )
     verifications = getattr(info, "acceptance_verifications", ())
     verified = {item.criterion_index for item in verifications}
     if info.acceptance_criteria:
@@ -1924,6 +1953,21 @@ def render_task_verification_result(result) -> str:
         )
     lines.append(f"Auto-completed: {'yes' if result.auto_completed else 'no'}")
     lines.append(render_task_info(result.task))
+    return "\n".join(lines)
+
+
+def render_task_next_action(action: TaskNextAction) -> str:
+    """Render one read-only foreground-driver decision preview."""
+    lines = [
+        f"Next Task decision: {action.reason.value}",
+        f"Action: {_safe_inline(action.description)}",
+        f"Would mutate Task/workspace: {'yes' if action.mutates else 'no'}",
+        f"Would call provider: {'yes' if action.provider_call else 'no'}",
+    ]
+    if action.reviewer_paths:
+        lines.append(
+            f"Independent review paths: {action.reviewer_paths}; tools are disabled, but provider tokens/API cost may apply."
+        )
     return "\n".join(lines)
 
 
@@ -1962,6 +2006,18 @@ def render_task_timeline(info: TaskInfoView) -> str:
         )
         lines.extend(
             f"  {index}. {_safe_inline(step)}" for index, step in enumerate(plan.steps, start=1)
+        )
+    reflection = getattr(info, "latest_reflection", None)
+    if reflection is not None:
+        lines.append(
+            f"Reflection {reflection.reflection_id}: {reflection.recommendation.value} - "
+            f"{_safe_inline(reflection.summary)}"
+        )
+    checkpoint = getattr(info, "latest_checkpoint", None)
+    if checkpoint is not None:
+        lines.append(
+            f"Checkpoint {checkpoint.checkpoint_id}: source record #{checkpoint.source_sequence}, "
+            f"unresolved {len(checkpoint.unresolved_criterion_indices)}"
         )
     for verification in getattr(info, "acceptance_verifications", ()):
         lines.append(

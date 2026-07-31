@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、两层Eval、可跨重启继续的前台多Stage Task，以及21个受限工具。Task现支持结构化验收、只读Host检查、独立无工具review和可选自动完成；每个Stage仍复用普通Turn、PermissionGate、approval、Action Audit与Session提交。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时不会降级到Host直接执行。当前普通Turn预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、两层Eval、可跨重启继续的前台多Stage Task，以及21个受限工具。Task现支持结构化验收、反馈驱动的无工具Reflection、普通权限边界内的Correction、带来源的计划修订、有界前台Driver、Task context checkpoint及人工pause/resume/next控制；每个Stage仍复用普通Turn、PermissionGate、approval、Action Audit与Session提交。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时不会降级到Host直接执行。当前普通Turn预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
 
 ## 目录
 
@@ -194,7 +194,7 @@ uv run leonervis-code task show <task-uuid>
 uv run leonervis-code task timeline <task-uuid>
 ```
 
-Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。`--accept`声明人工条件；可重复的`--criterion`接受严格JSON，支持`path-exists`、`path-unchanged`、`command-succeeds`、`action-audit-certain`和`independent-reviewer`。`manual`策略要求显式完成，`auto-verified`也必须先有当前模型完成提议并且全部条件由规定来源验证通过。每个Stage仍是普通Turn，因此不会获得跨Stageblanket approval，也不会绕过工具、只读验证沙箱、审计或Session durability边界。
+Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。`--accept`声明人工条件；可重复的`--criterion`接受严格JSON，支持`path-exists`、`path-unchanged`、`command-succeeds`、`action-audit-certain`和`independent-reviewer`。`manual`策略要求显式完成，`auto-verified`也必须先有当前模型完成提议并且全部条件由规定来源验证通过。失败的Host检查可进入无工具Reflection，再建议Correction、继续、修订计划或停止；Driver始终在前台且有Stage上限，独立review不会被自动调用。每个Stage仍是普通Turn，因此不会获得跨Stage blanket approval，也不会绕过工具、只读验证沙箱、审计或Session durability边界。
 
 ### REPL 命令
 
@@ -247,6 +247,9 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 | `/task show <task-id>`、`/task timeline <task-id>` | 严格回放Task详情或完整Stage时间线，不显示对话与工具正文 |
 | `/task continue <task-id> <Stage目标>`、`/task recover <task-id>` | 执行一个普通Turn，或只用已提交Session证据恢复而不重跑provider/工具 |
 | `/task plan <task-id>`、`/task plan accept <task-id>`、`/task run <task-id> [1-16]` | 生成提议、人工接受，并在前台按顺序执行有界Stage；run会显示停止原因 |
+| `/task reflect <task-id>`、`/task correct <task-id> [目标]`、`/task revise <task-id>` | 对当前失败验收做无工具反思，执行一个受控修正Stage，或提出带前序来源的新计划 |
+| `/task drive <task-id> [1-16]`、`/task next <task-id>` | 有界推进自适应前台状态机，或只读预览下一决定；reviewer条件会停止并提示潜在token/API费用 |
+| `/task checkpoint <task-id>`、`/task pause <task-id> [原因]`、`/task resume <task-id>` | 追加有界派生checkpoint，或只暂停/恢复自动Driver而不禁止人工Stage命令 |
 | `/task verify <task-id> <条件编号> <证据>`、`/task verify host <task-id>` | 为人工条件提交证据，或运行path/digest/command/Action Audit确定性检查 |
 | `/task review <task-id>`、`/task complete <task-id>` | 用当前provider发起独立无工具review；全部条件满足后手动完成或按策略自动完成 |
 | `/task cancel <task-id> <原因>`、`/task fail <task-id> <原因>` | 写入明确的cancelled或failed终态 |
@@ -369,6 +372,7 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md)：普通AgentLoop复用、Task framing、精确崩溃恢复、失败映射与终端接入。
 - [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md)：计划执行、累计Stage间预算、完成提议、人工验收与生命周期管理。
 - [Structured Task Acceptance and Independent Review](./docs/decisions/0090-structured-task-acceptance-and-independent-review.md)：结构化条件、只读Host verifier、独立无工具review与自动完成策略。
+- [Adaptive Foreground Task Orchestration](./docs/decisions/0092-adaptive-foreground-task-orchestration.md)：验收反馈、Reflection/Correction、计划修订、有界Driver、Task checkpoint与人工控制。
 - [Resume Runtime Binding at the Durable Commit Point](./docs/decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)：恢复时把当前runtime binding写入同一个durable commit point，使恢复后的首个工具动作继续通过严格Action Audit绑定校验。
 - [AgentLoop 与 Terminal Assistant Tool Text Integration](./docs/decisions/0046-agent-loop-and-terminal-assistant-tool-text-integration.md)：mixed response的顺序执行、即时展示、failure atomicity与Session恢复。
 - [AgentLoop、Runtime 与 Terminal Streaming Integration](./docs/decisions/0050-agentloop-runtime-and-terminal-streaming-integration.md)：stream preflight、完整工具组装、即时REPL显示与durable final确认。
@@ -443,4 +447,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Foundation 5A只读取workspace根目录唯一规范名称`AGENTS.md`：missing表示无项目指令；现有文件必须是non-symlink、strict UTF-8普通文件，不含NUL且最多32 KiB。Host在每个user turn准备时读取并冻结一次，工具continuation始终复用该快照，下一turn才重载；不搜索parent或subdirectory，也不自动加载`CLAUDE.md`或`LEONERVIS.md`。项目指令作为独立provider block参与token计量和Effective Context identity，但不写Session transcript；它从属于canonical Host策略与当前直接user request，不能放宽permission、approval、workspace、symlink、budget、audit、sandbox或durability边界。`/instructions`只显示元数据且不调用provider或修改Session。
 
-Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval及前台durable Task现已完成。当前版本为canonical system prompt v25、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v8、`turn_failed` schema v2、新`session_resumed` schema v2、Action Audit schema v1、`context_compacted`新记录v4、Task Stage新记录v2、Task acceptance contract/check新记录v1，以及current `ctx-v5`/`ctx-v6`representation；旧`session_resumed` v1、header-only Task、Task Stage v1与历史context identity/checkpoint继续兼容，缺失项目指令时的current empty full-context identity为`ctx-v5-7fefaa42ca4226a17e7312fc723ecb3add2b6e8c96a0ac02671e69048156d401`。后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动通用retry、network tool、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。Task执行与恢复见[ADR 0088](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md)，计划与基础验收见[ADR 0089](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md)，结构化验收与独立review见[ADR 0090](./docs/decisions/0090-structured-task-acceptance-and-independent-review.md)，恢复后的首动作绑定见[ADR 0091](./docs/decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)。
+Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval及自适应前台durable Task现已完成。当前版本为canonical system prompt v26、provider adapter contract v26、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v8、`turn_failed` schema v2、新`session_resumed` schema v2、Action Audit schema v1、`context_compacted`新记录v4、Task Stage新记录v2、Task plan proposal新记录v2，以及Task acceptance、reflection、pause和Task checkpoint新记录v1；current Effective Context仍为`ctx-v5`/`ctx-v6`representation。旧`session_resumed` v1、header-only Task、Task Stage v1、Task plan proposal v1与历史context identity/checkpoint继续兼容，缺失项目指令时的current empty full-context identity为`ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`。后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动reviewer费用、自动通用retry、network tool、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。自适应Task编排见[ADR 0092](./docs/decisions/0092-adaptive-foreground-task-orchestration.md)，恢复后的首动作绑定见[ADR 0091](./docs/decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)。

@@ -59,6 +59,7 @@ from leonervis_code.task_records import (
     TaskStatus,
     TaskTerminalOutcome,
 )
+from leonervis_code.task_runtime import TaskDriverStopReason, TaskNextAction
 
 
 @dataclass
@@ -395,6 +396,9 @@ class Session:
             acceptance_checks=(),
             terminal_outcome=None,
             terminal_reason=None,
+            driver_paused=False,
+            latest_reflection=None,
+            latest_checkpoint=None,
         )
         self.tasks.append(info)
         return info
@@ -470,6 +474,30 @@ class Session:
             ),
             auto_completed=False,
         )
+
+    def preview_task_next(self, task_id):
+        self.inspect_task(task_id)
+        return TaskNextAction(
+            TaskDriverStopReason.PLAN_REQUIRED,
+            "A bounded plan proposal is required.",
+            True,
+            True,
+        )
+
+    def checkpoint_task(self, task_id):
+        info = self.inspect_task(task_id)
+        info.latest_checkpoint = SimpleNamespace(
+            checkpoint_id="72345678-1234-4234-9234-123456789abc",
+            source_sequence=info.record_count - 1,
+            unresolved_criterion_indices=(),
+        )
+        info.record_count += 1
+        return info
+
+    def set_task_driver_paused(self, task_id, paused, reason=None):
+        info = self.inspect_task(task_id)
+        info.driver_paused = paused
+        return info
 
     def complete_task(self, task_id):
         info = self.inspect_task(task_id)
@@ -1050,6 +1078,10 @@ def test_task_execution_commands_are_deferred_and_host_management_stays_local(tm
     continued = dispatch_slash(f"/task continue {task_id} Implement one Stage", session)
     planned = dispatch_slash(f"/task plan {task_id}", session)
     run = dispatch_slash(f"/task run {task_id} 4", session)
+    reflected = dispatch_slash(f"/task reflect {task_id}", session)
+    corrected = dispatch_slash(f"/task correct {task_id} Repair the artifact", session)
+    revised = dispatch_slash(f"/task revise {task_id}", session)
+    driven = dispatch_slash(f"/task drive {task_id} 3", session)
 
     assert continued.task_request.operation == "continue"
     assert continued.task_request.task_id == task_id
@@ -1057,6 +1089,12 @@ def test_task_execution_commands_are_deferred_and_host_management_stays_local(tm
     assert planned.task_request.operation == "plan"
     assert run.task_request.operation == "run"
     assert run.task_request.max_stages == 4
+    assert reflected.task_request.operation == "reflect"
+    assert corrected.task_request.operation == "correct"
+    assert corrected.task_request.stage_objective == "Repair the artifact"
+    assert revised.task_request.operation == "revise"
+    assert driven.task_request.operation == "drive"
+    assert driven.task_request.max_stages == 3
     assert session.prompts == []
 
     assert dispatch_slash(f"/task plan accept {task_id}", session).kind == "success"
@@ -1073,6 +1111,15 @@ def test_task_execution_commands_are_deferred_and_host_management_stays_local(tm
     assert "Release-ready" in dispatch_slash("/task list archived name=release", session).message
     assert dispatch_slash(f"/task unarchive {task_id}", session).kind == "success"
     assert dispatch_slash(f"/task timeline {task_id}", session).kind == "info"
+    assert (
+        "Next Task decision: plan-required"
+        in dispatch_slash(f"/task next {task_id}", session).message
+    )
+    assert dispatch_slash(f"/task pause {task_id} study-break", session).kind == "success"
+    assert session.inspect_task(task_id).driver_paused is True
+    assert dispatch_slash(f"/task checkpoint {task_id}", session).kind == "success"
+    assert dispatch_slash(f"/task resume {task_id}", session).kind == "success"
+    assert session.inspect_task(task_id).driver_paused is False
     derived = dispatch_slash(f"/task derive {task_id} Follow-up checks", session)
     assert derived.kind == "success"
     assert f"Derived from: {task_id}" in derived.message

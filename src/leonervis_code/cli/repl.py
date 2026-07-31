@@ -289,4 +289,17 @@ def _run_task_request(
     if request.operation == "run":
         result = session.run_task(request.task_id, max_stages=request.max_stages, **common)
         return "\n\n".join(stage.response for stage in result.stages if stage.response)
+    if request.operation == "reflect":
+        return session.reflect_task(request.task_id, **common).response
+    if request.operation == "correct":
+        return session.correct_task(
+            request.task_id,
+            request.stage_objective,
+            **common,
+        ).response
+    if request.operation == "revise":
+        return session.revise_task_plan(request.task_id, **common).response
+    if request.operation == "drive":
+        result = session.drive_task(request.task_id, max_stages=request.max_stages, **common)
+        return "\n\n".join(stage.response for stage in result.stages if stage.response)
     raise ValueError("unsupported Task turn operation")

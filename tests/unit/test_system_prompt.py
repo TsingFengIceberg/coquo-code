@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v25-db322892f1bd87cd50c2ab48da6371e273b8fef81ce4d4579fe6f0e564003710"
+EXPECTED_FINGERPRINT = "v26-f24561c77c00cf2b4ba96a05ae1343e0c386df3949b8d1a3cf729817a2c138e5"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 25
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 26
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -40,12 +40,15 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "[Leonervis durable Task Stage]" in prompt.text
     assert "TASK_COMPLETION_PROPOSAL: yes" in prompt.text
     assert "TASK_PLAN_JSON:" in prompt.text
+    assert "TASK_REFLECTION_JSON:" in prompt.text
+    assert "execution or correction Stage" in prompt.text
+    assert "driver remains bounded and foreground-only" in prompt.text
     assert "only a model proposal" in prompt.text
     assert "cannot verify any criterion" in prompt.text
     assert "deterministic read-only Host checks" in prompt.text
     assert "independent no-tools review" in prompt.text
     assert "Host completes a Task only after a current completion proposal" in prompt.text
-    assert "Do not emit either protocol line during ordinary non-Task prompts" in prompt.text
+    assert "Do not emit Task protocol lines during ordinary non-Task prompts" in prompt.text
     assert "does not provide an OS filesystem" not in prompt.text
     assert build_system_prompt() == prompt
 

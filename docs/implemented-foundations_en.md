@@ -1052,6 +1052,18 @@ New `session_resumed` records use record-local schema v2 and capture the context
 
 Legacy v1 remains readable without rewriting; v1 rejects a binding field and v2 requires one complete valid binding. `SessionResumed` fsync semantics, latest-pointer partial outcomes, resume CAS, model history, and Effective Context identity remain unchanged. Canonical system prompt stays at v25, provider adapter stays at v26, and all 21 tool schemas, ToolArguments, Action Audit, Task records, and context representations remain unchanged. See [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md).
 
+## Adaptive Foreground Task Orchestration
+
+Tasks now project bounded Host/reviewer checks for the current completion proposal into the next Stage. A new `reflection` Stage strictly disables tools and may only use `TASK_REFLECTION_JSON` to recommend `continue`, `correction`, `revise-plan`, `needs-human`, or `fail`; the Host appends `task_reflection_recorded` only after the Stage's ordinary Session Turn commits. Reflection cannot execute, accept, authorize, or complete a Task.
+
+A `correction` Stage continues through the ordinary AgentLoop, PermissionGate, approval, Action Audit, tool budgets, cancellation, and atomic Session commit. A correction's new completion proposal makes checks and verifications for the old proposal non-current while preserving history. New plan proposals use schema v2 to identify their direct predecessor, revision reason, and optional reflection provenance. Legacy v1 remains replayable, and every revised plan still requires explicit acceptance.
+
+`/task drive <id> [1-16]` implements a bounded, cancellable, foreground-only state machine. It can propose an initial plan, run accepted steps, execute deterministic Host checks, reflect after failure and run one advised correction/continuation, or propose a revised plan. It stops accurately at pause, recovery requirement, budget, Stage limit, pending/exhausted plan, human evidence, independent review, manual completion, or reflection escalation. The Driver never invokes a token/API-cost-bearing independent reviewer automatically; `/task next` previews the next decision and cost boundary without mutation.
+
+`task_pause_changed` blocks only automatic driving while explicit Stage and management commands remain available. `task_context_checkpoint` stores source sequence, checkpoint chain, accepted-plan progress, current completion Stage, unresolved criterion indices, and latest reflection ID. It stores no dialogue, tool arguments, or complete output, becomes current only after candidate replay and append+fsync, and never deletes or rewrites the complete Task transcript. Task framing may use a checkpoint plus a shorter recent-Stage suffix.
+
+The canonical system prompt advances to v26. Provider adapter v26, all 21 tool schemas and order, ToolArguments v1, ordinary Turn budgets, Session and Action Audit schemas, and `ctx-v5`/`ctx-v6` representation versions remain unchanged. The no-project-instructions empty full-context ID becomes `ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`. See [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1145,3 +1157,4 @@ Legacy v1 remains readable without rewriting; v1 rejects a binding field and v2 
 89. [0089: Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
 90. [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
 91. [0091: Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
+92. [0092: Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)

@@ -1052,6 +1052,18 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 
 旧v1记录继续读取且不重写；v1不允许binding字段，v2必须有一个完整有效binding。`SessionResumed` fsync、latest pointer partial outcome、resume CAS、model history和Effective Context identity均保持原语义。Canonical system prompt保持v25，provider adapter保持v26，21个tool schema、ToolArguments、Action Audit、Task records与context representation均不变。详见[0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)。
 
+## 自适应前台 Task 编排
+
+Task现在会把当前completion proposal对应的Host/reviewer检查以有界事实投影给下一Stage。新`reflection` Stage严格关闭工具，只能用`TASK_REFLECTION_JSON`提出`continue`、`correction`、`revise-plan`、`needs-human`或`fail`建议；Host只在Stage对应的普通Session Turn已经提交后追加`task_reflection_recorded`。Reflection不能执行、验收、授权或完成Task。
+
+`correction` Stage继续走普通AgentLoop、PermissionGate、approval、Action Audit、工具预算、取消与Session原子提交。Correction产生的新completion proposal会使旧proposal的check/verification失去当前效力而保留历史。后续计划提案使用schema v2，记录直接前序plan、修订原因及可选reflection来源；旧v1仍可回放，任何修订计划都必须重新显式accept。
+
+`/task drive <id> [1-16]`实现有界、可取消、纯前台的状态机：它可提出初始计划、执行已接受步骤、运行确定性Host检查、在失败后反思并执行一次建议的Correction/继续，或提出修订计划。它会在pause、恢复要求、预算、Stage上限、计划待接受/耗尽、人工证据、independent reviewer、manual completion或reflection升级时准确停止。Driver不会自动调用可能产生token/API费用的independent reviewer；`/task next`只读显示下一决定及费用边界。
+
+`task_pause_changed`只阻止自动Driver，人工Stage和管理命令仍可用。`task_context_checkpoint`保存来源sequence、checkpoint链、accepted plan进度、current completion Stage、未解决条件编号和latest reflection ID；它不保存对话、工具参数或完整输出，必须经candidate replay及append+fsync后生效，完整Task transcript永不删除或重写。Task prompt可使用checkpoint加较短的recent Stage suffix。
+
+Canonical system prompt升级为v26；provider adapter保持v26，21个tool schema与顺序、ToolArguments v1、普通Turn预算、Session/Action Audit schema及`ctx-v5`/`ctx-v6`representation均不变。无项目指令的empty full-context ID更新为`ctx-v5-4f33f80622dd368a51b4046c5292951f2dd42fdb05b3d9be798dfa6b5f2457a4`。详见[0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1145,3 +1157,4 @@ Cache 不保存 credential value、raw provider body 或 Session 内容。Profil
 89. [0089：Task Planning, Acceptance, Budgets, and Management](./decisions/0089-task-planning-acceptance-budgets-and-management.md)
 90. [0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)
 91. [0091：Resume Runtime Binding at the Durable Commit Point](./decisions/0091-resume-runtime-binding-at-the-durable-commit-point.md)
+92. [0092：Adaptive Foreground Task Orchestration](./decisions/0092-adaptive-foreground-task-orchestration.md)

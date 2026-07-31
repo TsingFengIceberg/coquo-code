@@ -27,6 +27,7 @@ from leonervis_code.task_records import (
     AcceptancePathType,
     AcceptanceVerificationSource,
     CompletionProposalSource,
+    ReflectionRecommendation,
     StageCommitted,
     StageFailed,
     StageFailureReason,
@@ -45,6 +46,9 @@ from leonervis_code.task_records import (
     TaskHeader,
     TaskPlanAccepted,
     TaskPlanProposed,
+    TaskReflectionRecorded,
+    TaskPauseChanged,
+    TaskContextCheckpoint,
     TaskRecord,
     TaskRecordError,
     TaskRenamed,
@@ -56,6 +60,8 @@ from leonervis_code.task_records import (
     canonical_acceptance_criteria,
     canonical_task_acceptance_contract,
     canonical_plan_id,
+    canonical_reflection_id,
+    canonical_checkpoint_id,
     canonical_plan_steps,
     canonical_stage_id,
     canonical_stage_objective,
@@ -143,6 +149,32 @@ class TaskPlanInfo:
     proposed_at: str
     accepted: bool
     completed_steps: int
+    predecessor_plan_id: str | None = None
+    revision_reason: str | None = None
+    reflection_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskReflectionInfo:
+    reflection_id: str
+    stage_id: str
+    stage_number: int
+    recommendation: ReflectionRecommendation
+    summary: str
+    next_objective: str | None
+    recorded_at: str
+
+
+@dataclass(frozen=True)
+class TaskCheckpointInfo:
+    checkpoint_id: str
+    source_sequence: int
+    accepted_plan_id: str | None
+    completed_plan_steps: int
+    completion_stage_id: str | None
+    unresolved_criterion_indices: tuple[int, ...]
+    latest_reflection_id: str | None
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -193,6 +225,9 @@ class TaskInfo:
     acceptance_checks: tuple[TaskAcceptanceCheckInfo, ...] = ()
     terminal_outcome: TaskTerminalOutcome | None = None
     terminal_reason: str | None = None
+    driver_paused: bool = False
+    latest_reflection: TaskReflectionInfo | None = None
+    latest_checkpoint: TaskCheckpointInfo | None = None
 
 
 def utc_now() -> str:
@@ -210,6 +245,8 @@ class TaskStore:
         uuid_factory: Callable[[], UUID | str] = uuid4,
         stage_uuid_factory: Callable[[], UUID | str] = uuid4,
         plan_uuid_factory: Callable[[], UUID | str] = uuid4,
+        reflection_uuid_factory: Callable[[], UUID | str] = uuid4,
+        checkpoint_uuid_factory: Callable[[], UUID | str] = uuid4,
         clock: Callable[[], str] = utc_now,
     ) -> None:
         requested = Path(workspace)
@@ -229,6 +266,8 @@ class TaskStore:
         self._uuid_factory = uuid_factory
         self._stage_uuid_factory = stage_uuid_factory
         self._plan_uuid_factory = plan_uuid_factory
+        self._reflection_uuid_factory = reflection_uuid_factory
+        self._checkpoint_uuid_factory = checkpoint_uuid_factory
         self._clock = clock
 
     def create(
@@ -586,7 +625,13 @@ class TaskWriter:
         self._append(record)
         return record
 
-    def propose_plan(self, steps: tuple[str, ...]) -> TaskPlanProposed:
+    def propose_plan(
+        self,
+        steps: tuple[str, ...],
+        *,
+        revision_reason: str | None = None,
+        reflection_id: str | None = None,
+    ) -> TaskPlanProposed:
         """Persist a parsed model plan only after its planning Stage committed."""
         self._ensure_writable()
         latest = self._state.stages[-1] if self._state.stages else None
@@ -614,6 +659,12 @@ class TaskWriter:
             stage_number=latest.started.stage_number,
             steps=canonical_steps,
             proposed_at=self._store._clock(),
+            predecessor_plan_id=(
+                self._state.latest_plan.plan_id if self._state.latest_plan is not None else None
+            ),
+            revision_reason=(revision_reason if self._state.latest_plan is not None else None)
+            or ("user-requested-replan" if self._state.latest_plan is not None else None),
+            reflection_id=reflection_id,
         )
         self._append(record)
         return record
@@ -639,7 +690,7 @@ class TaskWriter:
         if (
             latest is None
             or not isinstance(latest.terminal, StageCommitted)
-            or latest.started.kind is not StageKind.EXECUTION
+            or latest.started.kind not in {StageKind.EXECUTION, StageKind.CORRECTION}
         ):
             raise TaskStoreError("Task completion requires a committed execution Stage")
         record = TaskCompletionProposed(
@@ -648,6 +699,99 @@ class TaskWriter:
             stage_number=latest.started.stage_number,
             source=CompletionProposalSource.MODEL,
             proposed_at=self._store._clock(),
+        )
+        self._append(record)
+        return record
+
+    def record_reflection(
+        self,
+        recommendation: ReflectionRecommendation,
+        summary: str,
+        next_objective: str | None,
+    ) -> TaskReflectionRecorded:
+        """Persist one parsed recommendation after its no-tools reflection Stage commits."""
+        self._ensure_writable()
+        latest = self._state.stages[-1] if self._state.stages else None
+        if (
+            latest is None
+            or not isinstance(latest.terminal, StageCommitted)
+            or latest.started.kind is not StageKind.REFLECTION
+        ):
+            raise TaskStoreError("Task reflection requires a committed reflection Stage")
+        if (
+            self._state.reflections
+            and self._state.reflections[-1].stage_id == latest.started.stage_id
+        ):
+            raise TaskStoreError("latest reflection Stage is already recorded")
+        record = TaskReflectionRecorded(
+            sequence=self._state.next_sequence,
+            reflection_id=_factory_reflection_id(self._store._reflection_uuid_factory),
+            stage_id=latest.started.stage_id,
+            stage_number=latest.started.stage_number,
+            recommendation=recommendation,
+            summary=summary,
+            next_objective=next_objective,
+            recorded_at=self._store._clock(),
+        )
+        self._append(record)
+        return record
+
+    def set_paused(self, paused: bool, reason: str | None = None) -> TaskPauseChanged:
+        """Durably change only automatic foreground-driver admission."""
+        self._ensure_writable()
+        if self._state.active_stage is not None:
+            raise TaskStoreError("Task driver pause cannot change while a Stage is active")
+        if self._state.terminal is not None:
+            raise TaskStoreError("terminal Task driver pause cannot change")
+        if type(paused) is not bool or paused is self._state.driver_paused:
+            raise TaskStoreError("Task driver pause state is unchanged")
+        record = TaskPauseChanged(
+            sequence=self._state.next_sequence,
+            paused=paused,
+            reason=reason,
+            changed_at=self._store._clock(),
+        )
+        self._append(record)
+        return record
+
+    def create_context_checkpoint(self) -> TaskContextCheckpoint:
+        """Append one deterministic bounded snapshot of current derived Task state."""
+        self._ensure_writable()
+        if self._state.active_stage is not None:
+            raise TaskStoreError("Task checkpoint cannot be created while a Stage is active")
+        if (
+            self._state.latest_checkpoint is not None
+            and self._state.latest_checkpoint.sequence == self._state.next_sequence - 1
+        ):
+            raise TaskStoreError("Task context has not advanced since the latest checkpoint")
+        plan = _task_plan_info(self._state)
+        proposal = self._state.current_completion_proposal
+        unresolved = tuple(
+            index
+            for index in range(1, len(self._state.criteria) + 1)
+            if index not in self._state.verified_criteria
+        )
+        record = TaskContextCheckpoint(
+            sequence=self._state.next_sequence,
+            checkpoint_id=_factory_checkpoint_id(self._store._checkpoint_uuid_factory),
+            source_sequence=self._state.next_sequence - 1,
+            prior_checkpoint_id=(
+                self._state.latest_checkpoint.checkpoint_id
+                if self._state.latest_checkpoint is not None
+                else None
+            ),
+            accepted_plan_id=(plan.plan_id if plan is not None and plan.accepted else None),
+            completed_plan_steps=(
+                plan.completed_steps if plan is not None and plan.accepted else 0
+            ),
+            completion_stage_id=proposal.stage_id if proposal is not None else None,
+            unresolved_criterion_indices=unresolved,
+            latest_reflection_id=(
+                self._state.latest_reflection.reflection_id
+                if self._state.latest_reflection is not None
+                else None
+            ),
+            created_at=self._store._clock(),
         )
         self._append(record)
         return record
@@ -996,6 +1140,24 @@ def _factory_plan_id(factory: Callable[[], UUID | str]) -> str:
         raise TaskStoreError(f"plan ID factory returned an invalid value: {error}") from None
 
 
+def _factory_reflection_id(factory: Callable[[], UUID | str]) -> str:
+    value = factory()
+    candidate = str(value) if isinstance(value, UUID) else value
+    try:
+        return canonical_reflection_id(candidate)
+    except TaskRecordError as error:
+        raise TaskStoreError(f"reflection ID factory returned an invalid value: {error}") from None
+
+
+def _factory_checkpoint_id(factory: Callable[[], UUID | str]) -> str:
+    value = factory()
+    candidate = str(value) if isinstance(value, UUID) else value
+    try:
+        return canonical_checkpoint_id(candidate)
+    except TaskRecordError as error:
+        raise TaskStoreError(f"checkpoint ID factory returned an invalid value: {error}") from None
+
+
 def _store_task_id(value: object) -> str:
     try:
         return canonical_task_id(value)
@@ -1067,6 +1229,11 @@ def _task_info(
     usage = _task_usage(state)
     plan = _task_plan_info(state)
     terminal = state.terminal
+    current_checks: dict[int, TaskAcceptanceChecked] = {}
+    if state.current_completion_proposal is not None:
+        for record in state.acceptance_checks:
+            if record.completion_stage_id == state.current_completion_proposal.stage_id:
+                current_checks[record.criterion_index] = record
     return TaskInfo(
         task_id=header.task_id,
         path=path,
@@ -1108,12 +1275,38 @@ def _task_info(
                 record.evidence,
                 record.checked_at,
             )
-            for record in state.acceptance_checks
-            if state.current_completion_proposal is not None
-            and record.completion_stage_id == state.current_completion_proposal.stage_id
+            for record in (current_checks[index] for index in sorted(current_checks))
         ),
         terminal_outcome=terminal.outcome if terminal is not None else None,
         terminal_reason=terminal.reason if terminal is not None else None,
+        driver_paused=state.driver_paused,
+        latest_reflection=(
+            TaskReflectionInfo(
+                state.latest_reflection.reflection_id,
+                state.latest_reflection.stage_id,
+                state.latest_reflection.stage_number,
+                state.latest_reflection.recommendation,
+                state.latest_reflection.summary,
+                state.latest_reflection.next_objective,
+                state.latest_reflection.recorded_at,
+            )
+            if state.latest_reflection is not None
+            else None
+        ),
+        latest_checkpoint=(
+            TaskCheckpointInfo(
+                state.latest_checkpoint.checkpoint_id,
+                state.latest_checkpoint.source_sequence,
+                state.latest_checkpoint.accepted_plan_id,
+                state.latest_checkpoint.completed_plan_steps,
+                state.latest_checkpoint.completion_stage_id,
+                state.latest_checkpoint.unresolved_criterion_indices,
+                state.latest_checkpoint.latest_reflection_id,
+                state.latest_checkpoint.created_at,
+            )
+            if state.latest_checkpoint is not None
+            else None
+        ),
     )
 
 
@@ -1207,6 +1400,9 @@ def _task_plan_info(state: TaskReplayState) -> TaskPlanInfo | None:
         proposed_at=plan.proposed_at,
         accepted=accepted_record is not None,
         completed_steps=min(completed, len(plan.steps)),
+        predecessor_plan_id=plan.predecessor_plan_id,
+        revision_reason=plan.revision_reason,
+        reflection_id=plan.reflection_id,
     )
 
 

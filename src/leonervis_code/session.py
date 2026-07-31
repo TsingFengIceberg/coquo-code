@@ -141,6 +141,7 @@ from leonervis_code.task_records import (
     AcceptanceCheckOutcome,
     AcceptanceCriterionKind,
     AcceptanceVerificationSource,
+    ReflectionRecommendation,
     StageCommitted,
     StageFailureReason,
     StageKind,
@@ -152,6 +153,10 @@ from leonervis_code.task_records import (
 )
 from leonervis_code.task_runtime import (
     TaskPlanExecutionResult,
+    TaskReflectionExecutionResult,
+    TaskDriveResult,
+    TaskDriverStopReason,
+    TaskNextAction,
     TaskProtocolEventFilter,
     TaskRunResult,
     TaskRuntimeError,
@@ -163,6 +168,7 @@ from leonervis_code.task_runtime import (
 from leonervis_code.task_store import (
     TaskAppendCommitError,
     TaskInfo,
+    TaskStageInfo,
     TaskStore,
     TaskStoreError,
     TaskWriter,
@@ -1084,6 +1090,105 @@ class ProjectSession:
             raise TaskRuntimeError("planning Stage committed without a durable plan proposal")
         return TaskPlanExecutionResult(task, result.response, plan.steps)
 
+    def reflect_task(
+        self,
+        task_id: str,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskReflectionExecutionResult:
+        """Run one no-tools reflection Stage that can advise but cannot execute or accept."""
+        task = self._task_store.inspect(task_id)
+        if task.status is not TaskStatus.COMPLETION_PROPOSED:
+            raise TaskStoreError("Task reflection requires a current completion proposal")
+        if not any(
+            check.outcome in {AcceptanceCheckOutcome.FAILED, AcceptanceCheckOutcome.ERROR}
+            for check in task.acceptance_checks
+        ):
+            raise TaskStoreError("Task reflection requires current failed acceptance feedback")
+        result = self._execute_task_stage(
+            task_id,
+            "Reflect on current acceptance feedback and recommend one bounded next action.",
+            kind=StageKind.REFLECTION,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
+            cancellation=cancellation,
+        )
+        if result.reflection is None:
+            raise TaskRuntimeError("reflection Stage committed without a durable recommendation")
+        current = self._task_store.inspect(task_id)
+        return TaskReflectionExecutionResult(current, result.response, result.reflection)
+
+    def correct_task(
+        self,
+        task_id: str,
+        stage_objective: str | None = None,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskStageExecutionResult:
+        """Execute one ordinary tool-capable correction Stage from current reflection advice."""
+        task = self._task_store.inspect(task_id)
+        reflection = task.latest_reflection
+        if (
+            reflection is None
+            or reflection.recommendation is not ReflectionRecommendation.CORRECTION
+            or not task.stages
+            or task.stages[-1].stage_id != reflection.stage_id
+        ):
+            raise TaskStoreError("Task correction requires a current correction recommendation")
+        objective = stage_objective or reflection.next_objective
+        if objective is None:
+            raise TaskStoreError("Task correction recommendation has no objective")
+        return self._execute_task_stage(
+            task_id,
+            objective,
+            kind=StageKind.CORRECTION,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
+            cancellation=cancellation,
+        )
+
+    def revise_task_plan(
+        self,
+        task_id: str,
+        *,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskPlanExecutionResult:
+        """Generate a replacement plan with explicit predecessor and reflection provenance."""
+        task = self._task_store.inspect(task_id)
+        reflection = task.latest_reflection
+        if (
+            task.latest_plan is None
+            or reflection is None
+            or reflection.recommendation is not ReflectionRecommendation.REVISE_PLAN
+            or reflection.next_objective is None
+            or not task.stages
+            or task.stages[-1].stage_id != reflection.stage_id
+        ):
+            raise TaskStoreError(
+                "Task plan revision requires current revise-plan reflection advice"
+            )
+        result = self._execute_task_stage(
+            task_id,
+            reflection.next_objective,
+            kind=StageKind.PLANNING,
+            event_sink=event_sink,
+            include_tool_details=include_tool_details,
+            cancellation=cancellation,
+            plan_revision_reason=reflection.summary,
+            plan_revision_reflection_id=reflection.reflection_id,
+        )
+        current = self._task_store.inspect(task_id)
+        plan = current.latest_plan
+        if plan is None:
+            raise TaskRuntimeError("plan revision Stage committed without a durable plan proposal")
+        return TaskPlanExecutionResult(current, result.response, plan.steps)
+
     def accept_task_plan(self, task_id: str) -> TaskInfo:
         with self._lock, self._task_store.open(task_id) as writer:
             self._ensure_open()
@@ -1149,6 +1254,283 @@ class ProjectSession:
         self._emit_prompt_event(event_sink, TaskRunStopped(len(completed), reason))
         return TaskRunResult(final, tuple(completed), reason)
 
+    def set_task_driver_paused(
+        self,
+        task_id: str,
+        paused: bool,
+        reason: str | None = None,
+    ) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.set_paused(paused, reason)
+            return writer.info
+
+    def checkpoint_task(self, task_id: str) -> TaskInfo:
+        with self._lock, self._task_store.open(task_id) as writer:
+            self._ensure_open()
+            writer.create_context_checkpoint()
+            return writer.info
+
+    def preview_task_next(self, task_id: str) -> TaskNextAction:
+        """Derive the next foreground-driver decision without provider work or mutation."""
+        task = self._task_store.inspect(task_id)
+        if task.status is TaskStatus.COMPLETED:
+            return TaskNextAction(TaskDriverStopReason.COMPLETED, "Task is complete.", False, False)
+        if task.status is TaskStatus.CANCELLED:
+            return TaskNextAction(
+                TaskDriverStopReason.CANCELLED, "Task is cancelled.", False, False
+            )
+        if task.status is TaskStatus.FAILED:
+            return TaskNextAction(TaskDriverStopReason.FAILED, "Task has failed.", False, False)
+        if task.driver_paused:
+            return TaskNextAction(
+                TaskDriverStopReason.PAUSED,
+                "Foreground driver is durably paused; manual Stage commands remain available.",
+                False,
+                False,
+            )
+        if task.status is TaskStatus.INTERRUPTED:
+            return TaskNextAction(
+                TaskDriverStopReason.RECOVERY_REQUIRED,
+                "Interrupted Stage must be reconciled before further work.",
+                False,
+                False,
+            )
+        if task.budget_exhausted:
+            return TaskNextAction(
+                TaskDriverStopReason.BUDGET_EXHAUSTED,
+                "Cumulative Task budget blocks another Stage.",
+                False,
+                False,
+            )
+        if task.status is TaskStatus.COMPLETION_PROPOSED:
+            verified = {item.criterion_index for item in task.acceptance_verifications}
+            unresolved = [
+                (index, criterion)
+                for index, criterion in enumerate(task.criteria, start=1)
+                if index not in verified
+            ]
+            host = [
+                (index, criterion)
+                for index, criterion in unresolved
+                if criterion.kind
+                not in {
+                    AcceptanceCriterionKind.HUMAN,
+                    AcceptanceCriterionKind.INDEPENDENT_REVIEWER,
+                }
+            ]
+            if host:
+                failed = any(
+                    check.criterion_index in {index for index, _ in host}
+                    and check.outcome
+                    in {AcceptanceCheckOutcome.FAILED, AcceptanceCheckOutcome.ERROR}
+                    for check in task.acceptance_checks
+                )
+                return TaskNextAction(
+                    (
+                        TaskDriverStopReason.HOST_VERIFICATION_FAILED
+                        if failed
+                        else TaskDriverStopReason.HOST_VERIFICATION_REQUIRED
+                    ),
+                    (
+                        "Current Host checks failed; the driver will run a no-tools reflection."
+                        if failed
+                        else "Deterministic Host acceptance checks are ready to run."
+                    ),
+                    True,
+                    failed,
+                )
+            reviewer = [
+                criterion
+                for _, criterion in unresolved
+                if criterion.kind is AcceptanceCriterionKind.INDEPENDENT_REVIEWER
+            ]
+            if reviewer:
+                return TaskNextAction(
+                    TaskDriverStopReason.INDEPENDENT_REVIEW_REQUIRED,
+                    "Independent review requires an explicit provider call with tools disabled and may consume API tokens or cost.",
+                    False,
+                    True,
+                    sum(len(criterion.review_paths) for criterion in reviewer),
+                )
+            if unresolved:
+                return TaskNextAction(
+                    TaskDriverStopReason.HUMAN_VERIFICATION_REQUIRED,
+                    "Human acceptance evidence is required.",
+                    False,
+                    False,
+                )
+            return TaskNextAction(
+                TaskDriverStopReason.MANUAL_COMPLETION_REQUIRED,
+                "All criteria are verified; manual completion policy requires /task complete.",
+                False,
+                False,
+            )
+        plan = task.latest_plan
+        if plan is None:
+            return TaskNextAction(
+                TaskDriverStopReason.PLAN_REQUIRED,
+                "A bounded plan proposal is required.",
+                True,
+                True,
+            )
+        if not plan.accepted:
+            return TaskNextAction(
+                TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED,
+                "The latest plan proposal requires explicit user acceptance.",
+                False,
+                False,
+            )
+        if plan.completed_steps >= len(plan.steps):
+            return TaskNextAction(
+                TaskDriverStopReason.PLAN_EXHAUSTED,
+                "Accepted plan is exhausted without a current completion proposal.",
+                False,
+                False,
+            )
+        return TaskNextAction(
+            TaskDriverStopReason.STAGE_INCOMPLETE,
+            f"Run accepted plan step {plan.completed_steps + 1}: {plan.steps[plan.completed_steps]}",
+            True,
+            True,
+        )
+
+    def drive_task(
+        self,
+        task_id: str,
+        *,
+        max_stages: int = 16,
+        event_sink: PromptEventSink | None = None,
+        include_tool_details: bool = False,
+        cancellation: TurnCancellation | None = None,
+    ) -> TaskDriveResult:
+        """Advance one Task through a bounded adaptive foreground state machine."""
+        if type(max_stages) is not int or not 1 <= max_stages <= 16:
+            raise ValueError("Task drive Stage limit must be between 1 and 16")
+        completed: list[TaskStageExecutionResult] = []
+        reason = TaskDriverStopReason.STAGE_LIMIT
+        while len(completed) < max_stages:
+            if cancellation is not None:
+                cancellation.check()
+            action = self.preview_task_next(task_id)
+            if action.reason is TaskDriverStopReason.PLAN_REQUIRED:
+                planned = self.plan_task(
+                    task_id,
+                    event_sink=event_sink,
+                    include_tool_details=include_tool_details,
+                    cancellation=cancellation,
+                )
+                latest = planned.task.stages[-1]
+                completed.append(_task_result_from_info(planned.task, planned.response, latest))
+                self._checkpoint_after_driver_stage(task_id)
+                reason = TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
+                break
+            if action.reason is TaskDriverStopReason.STAGE_INCOMPLETE:
+                task = self._task_store.inspect(task_id)
+                plan = task.latest_plan
+                assert plan is not None and plan.accepted
+                stage = self.continue_task(
+                    task_id,
+                    plan.steps[plan.completed_steps],
+                    event_sink=event_sink,
+                    include_tool_details=include_tool_details,
+                    cancellation=cancellation,
+                )
+                completed.append(stage)
+                self._checkpoint_after_driver_stage(task_id)
+                if not stage.completion_proposed:
+                    continue
+                continue
+            if action.reason in {
+                TaskDriverStopReason.HOST_VERIFICATION_REQUIRED,
+                TaskDriverStopReason.HOST_VERIFICATION_FAILED,
+            }:
+                if action.reason is TaskDriverStopReason.HOST_VERIFICATION_REQUIRED:
+                    self.verify_task_host(task_id)
+                    self._checkpoint_after_driver_stage(task_id)
+                    continue
+                reflection = self.reflect_task(
+                    task_id,
+                    event_sink=event_sink,
+                    include_tool_details=include_tool_details,
+                    cancellation=cancellation,
+                )
+                latest = reflection.task.stages[-1]
+                completed.append(
+                    _task_result_from_info(reflection.task, reflection.response, latest)
+                )
+                self._checkpoint_after_driver_stage(task_id)
+                recommendation = reflection.reflection.recommendation
+                if recommendation is ReflectionRecommendation.CORRECTION:
+                    if len(completed) >= max_stages:
+                        reason = TaskDriverStopReason.STAGE_LIMIT
+                        break
+                    correction = self.correct_task(
+                        task_id,
+                        event_sink=event_sink,
+                        include_tool_details=include_tool_details,
+                        cancellation=cancellation,
+                    )
+                    completed.append(correction)
+                    self._checkpoint_after_driver_stage(task_id)
+                    if not correction.completion_proposed:
+                        reason = TaskDriverStopReason.STAGE_INCOMPLETE
+                        break
+                    continue
+                if recommendation is ReflectionRecommendation.REVISE_PLAN:
+                    if len(completed) >= max_stages:
+                        reason = TaskDriverStopReason.STAGE_LIMIT
+                        break
+                    revised = self.revise_task_plan(
+                        task_id,
+                        event_sink=event_sink,
+                        include_tool_details=include_tool_details,
+                        cancellation=cancellation,
+                    )
+                    latest = revised.task.stages[-1]
+                    completed.append(_task_result_from_info(revised.task, revised.response, latest))
+                    self._checkpoint_after_driver_stage(task_id)
+                    reason = TaskDriverStopReason.PLAN_ACCEPTANCE_REQUIRED
+                    break
+                if recommendation is ReflectionRecommendation.CONTINUE:
+                    if len(completed) >= max_stages:
+                        reason = TaskDriverStopReason.STAGE_LIMIT
+                        break
+                    assert reflection.reflection.next_objective is not None
+                    stage = self._execute_task_stage(
+                        task_id,
+                        reflection.reflection.next_objective,
+                        kind=StageKind.EXECUTION,
+                        event_sink=event_sink,
+                        include_tool_details=include_tool_details,
+                        cancellation=cancellation,
+                    )
+                    completed.append(stage)
+                    self._checkpoint_after_driver_stage(task_id)
+                    if not stage.completion_proposed:
+                        reason = TaskDriverStopReason.STAGE_INCOMPLETE
+                        break
+                    continue
+                reason = (
+                    TaskDriverStopReason.REFLECTION_NEEDS_HUMAN
+                    if recommendation is ReflectionRecommendation.NEEDS_HUMAN
+                    else TaskDriverStopReason.REFLECTION_FAILED
+                )
+                break
+            reason = action.reason
+            break
+        final = self._task_store.inspect(task_id)
+        if final.status is TaskStatus.COMPLETED:
+            reason = TaskDriverStopReason.COMPLETED
+        self._emit_prompt_event(event_sink, TaskRunStopped(len(completed), reason.value))
+        return TaskDriveResult(final, tuple(completed), reason)
+
+    def _checkpoint_after_driver_stage(self, task_id: str) -> None:
+        if self._task_store.inspect(task_id).terminal_outcome is not None:
+            return
+        with self._task_store.open(task_id) as writer:
+            writer.create_context_checkpoint()
+
     def recover_task(self, task_id: str) -> TaskInfo:
         with self._lock, self._task_store.open(task_id) as writer:
             self._ensure_open()
@@ -1171,6 +1553,13 @@ class ProjectSession:
             latest_plan = state.latest_plan
             if latest_plan is not None and latest_plan.stage_id == stage.started.stage_id:
                 return
+        elif stage.started.kind is StageKind.REFLECTION:
+            latest_reflection = state.latest_reflection
+            if (
+                latest_reflection is not None
+                and latest_reflection.stage_id == stage.started.stage_id
+            ):
+                return
         elif (
             state.current_completion_proposal is not None
             and state.current_completion_proposal.stage_id == stage.started.stage_id
@@ -1187,7 +1576,31 @@ class ProjectSession:
             return
         if stage.started.kind is StageKind.PLANNING:
             assert parsed.plan_steps is not None
-            writer.propose_plan(parsed.plan_steps)
+            reflection = state.latest_reflection
+            writer.propose_plan(
+                parsed.plan_steps,
+                revision_reason=(
+                    reflection.summary
+                    if state.latest_plan is not None
+                    and reflection is not None
+                    and reflection.recommendation is ReflectionRecommendation.REVISE_PLAN
+                    else None
+                ),
+                reflection_id=(
+                    reflection.reflection_id
+                    if state.latest_plan is not None
+                    and reflection is not None
+                    and reflection.recommendation is ReflectionRecommendation.REVISE_PLAN
+                    else None
+                ),
+            )
+        elif stage.started.kind is StageKind.REFLECTION:
+            assert parsed.reflection is not None
+            writer.record_reflection(
+                parsed.reflection.recommendation,
+                parsed.reflection.summary,
+                parsed.reflection.next_objective,
+            )
         elif parsed.completion_proposed:
             writer.propose_completion()
             self._auto_complete_verified_task(writer)
@@ -1337,6 +1750,8 @@ class ProjectSession:
         event_sink: PromptEventSink | None,
         include_tool_details: bool,
         cancellation: TurnCancellation | None,
+        plan_revision_reason: str | None = None,
+        plan_revision_reflection_id: str | None = None,
     ) -> TaskStageExecutionResult:
         with self._lock:
             self._ensure_open()
@@ -1394,6 +1809,7 @@ class ProjectSession:
                         include_tool_details=include_tool_details,
                         cancellation=cancellation,
                         session_title_source_text=initial.objective,
+                        _allow_tools=kind is not StageKind.REFLECTION,
                         _failure_usage_sink=capture_failure_usage,
                     )
                 except BaseException as error:
@@ -1419,7 +1835,18 @@ class ProjectSession:
                 parsed = parse_task_response(response, kind=kind)
                 if kind is StageKind.PLANNING:
                     assert parsed.plan_steps is not None
-                    writer.propose_plan(parsed.plan_steps)
+                    writer.propose_plan(
+                        parsed.plan_steps,
+                        revision_reason=plan_revision_reason,
+                        reflection_id=plan_revision_reflection_id,
+                    )
+                elif kind is StageKind.REFLECTION:
+                    assert parsed.reflection is not None
+                    writer.record_reflection(
+                        parsed.reflection.recommendation,
+                        parsed.reflection.summary,
+                        parsed.reflection.next_objective,
+                    )
                 elif parsed.completion_proposed:
                     writer.propose_completion()
                     self._auto_complete_verified_task(writer)
@@ -1430,6 +1857,7 @@ class ProjectSession:
                     completion_proposed=parsed.completion_proposed,
                     session_turn_number=stage_record.turn_number,
                     session_turn_record_sequence=stage_record.turn_record_sequence,
+                    reflection=parsed.reflection,
                 )
 
     def latest_session_info(self) -> SessionInfo:
@@ -1626,12 +2054,15 @@ class ProjectSession:
         include_tool_details: bool = False,
         cancellation: TurnCancellation | None = None,
         session_title_source_text: str | None = None,
+        _allow_tools: bool = True,
         _failure_usage_sink: Callable[[tuple[ProviderInvocationUsage, ...], ToolAttemptUsage], None]
         | None = None,
     ) -> str:
         """Run one serialized preflighted turn with one exact prepared-action lease."""
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
+        if type(_allow_tools) is not bool:
+            raise ValueError("turn tool exposure flag is invalid")
         if cancellation is not None and type(cancellation) is not TurnCancellation:
             raise ValueError("turn cancellation token is invalid")
         if session_title_source_text is not None and (
@@ -1641,7 +2072,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            prepared = self._loop.prepare_turn(text)
+            prepared = self._loop.prepare_turn(text, allow_tools=_allow_tools)
             loop = self._loop
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
@@ -3079,6 +3510,23 @@ def _latest_turn_after(
     if len(matches) > 1:
         raise TaskRuntimeError("Task Stage produced more than one committed Session Turn")
     return matches[0] if matches else None
+
+
+def _task_result_from_info(
+    task: TaskInfo,
+    response: str,
+    stage: TaskStageInfo,
+) -> TaskStageExecutionResult:
+    if stage.turn_number is None or stage.turn_record_sequence is None:
+        raise TaskRuntimeError("committed Task Stage is missing Session Turn evidence")
+    return TaskStageExecutionResult(
+        task=task,
+        stage_number=stage.stage_number,
+        response=response,
+        completion_proposed=task.status is TaskStatus.COMPLETION_PROPOSED,
+        session_turn_number=stage.turn_number,
+        session_turn_record_sequence=stage.turn_record_sequence,
+    )
 
 
 def _task_stage_failure_reason(error: BaseException) -> StageFailureReason:

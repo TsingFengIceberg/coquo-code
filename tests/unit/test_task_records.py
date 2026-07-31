@@ -394,3 +394,21 @@ def test_replay_rejects_overcommitted_duplicate_or_reaccepted_plan(tmp_path: Pat
                 replace(accepted, sequence=5),
             ],
         )
+
+
+def test_legacy_plan_proposal_v1_remains_readable_without_revision_fields() -> None:
+    record = TaskPlanProposed(
+        sequence=3,
+        plan_id=PLAN_ID,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        steps=("One legacy step",),
+        proposed_at="2026-07-31T01:05:00.000000Z",
+        schema_version=1,
+    )
+
+    payload = json.loads(encode_task_record(record))
+
+    assert payload["schema_version"] == 1
+    assert "predecessor_plan_id" not in payload
+    assert decode_task_record(json.dumps(payload).encode()) == record

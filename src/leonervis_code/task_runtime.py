@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 import json
 
 from leonervis_code.agent.tool_events import (
@@ -13,13 +14,16 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.task_records import (
     MAX_PLAN_STEPS,
+    ReflectionRecommendation,
     StageKind,
     canonical_plan_steps,
+    canonical_stage_objective,
 )
 from leonervis_code.task_store import TaskInfo
 
 TASK_COMPLETION_SIGNAL = "TASK_COMPLETION_PROPOSAL:"
 TASK_PLAN_SIGNAL = "TASK_PLAN_JSON:"
+TASK_REFLECTION_SIGNAL = "TASK_REFLECTION_JSON:"
 MAX_TASK_CONTEXT_STAGES = 16
 MAX_TASK_PROMPT_BYTES = 64 * 1024
 
@@ -33,6 +37,14 @@ class ParsedTaskResponse:
     display_text: str
     completion_proposed: bool
     plan_steps: tuple[str, ...] | None
+    reflection: TaskReflectionProposal | None = None
+
+
+@dataclass(frozen=True)
+class TaskReflectionProposal:
+    recommendation: ReflectionRecommendation
+    summary: str
+    next_objective: str | None
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,7 @@ class TaskStageExecutionResult:
     completion_proposed: bool
     session_turn_number: int
     session_turn_record_sequence: int
+    reflection: TaskReflectionProposal | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,50 @@ class TaskPlanExecutionResult:
     task: TaskInfo
     response: str
     plan_steps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TaskReflectionExecutionResult:
+    task: TaskInfo
+    response: str
+    reflection: TaskReflectionProposal
+
+
+class TaskDriverStopReason(StrEnum):
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    PAUSED = "paused"
+    RECOVERY_REQUIRED = "recovery-required"
+    PLAN_REQUIRED = "plan-required"
+    PLAN_ACCEPTANCE_REQUIRED = "plan-acceptance-required"
+    PLAN_EXHAUSTED = "plan-exhausted"
+    BUDGET_EXHAUSTED = "budget-exhausted"
+    STAGE_LIMIT = "stage-limit"
+    HOST_VERIFICATION_REQUIRED = "host-verification-required"
+    HOST_VERIFICATION_FAILED = "host-verification-failed"
+    INDEPENDENT_REVIEW_REQUIRED = "independent-review-required"
+    HUMAN_VERIFICATION_REQUIRED = "human-verification-required"
+    MANUAL_COMPLETION_REQUIRED = "manual-completion-required"
+    REFLECTION_NEEDS_HUMAN = "reflection-needs-human"
+    REFLECTION_FAILED = "reflection-failed"
+    STAGE_INCOMPLETE = "stage-incomplete"
+
+
+@dataclass(frozen=True)
+class TaskNextAction:
+    reason: TaskDriverStopReason
+    description: str
+    mutates: bool
+    provider_call: bool
+    reviewer_paths: int = 0
+
+
+@dataclass(frozen=True)
+class TaskDriveResult:
+    task: TaskInfo
+    stages: tuple[TaskStageExecutionResult, ...]
+    stopped_reason: TaskDriverStopReason
 
 
 @dataclass(frozen=True)
@@ -122,6 +179,7 @@ def build_task_stage_prompt(
 ) -> str:
     """Build one bounded canonical user message for an ordinary Task-owned Turn."""
     _validate_stage_kind(kind)
+    history_limit = 8 if task.latest_checkpoint is not None else MAX_TASK_CONTEXT_STAGES
     history = [
         {
             "kind": stage.kind.value,
@@ -133,7 +191,7 @@ def build_task_stage_prompt(
                 stage.failure_reason.value if stage.failure_reason is not None else None
             ),
         }
-        for stage in task.stages[-MAX_TASK_CONTEXT_STAGES:]
+        for stage in task.stages[-history_limit:]
     ]
     plan = task.latest_plan
     budget = task.budget
@@ -185,6 +243,39 @@ def build_task_stage_prompt(
             "objective": stage_objective,
         },
         "completion_policy": task.completion_policy.value,
+        "current_acceptance_checks": [
+            {
+                "criterion_index": check.criterion_index,
+                "evidence": check.evidence,
+                "outcome": check.outcome.value,
+                "source": check.source.value,
+            }
+            for check in task.acceptance_checks
+        ],
+        "task_context_checkpoint": (
+            {
+                "accepted_plan_id": task.latest_checkpoint.accepted_plan_id,
+                "checkpoint_id": task.latest_checkpoint.checkpoint_id,
+                "completed_plan_steps": task.latest_checkpoint.completed_plan_steps,
+                "completion_stage_id": task.latest_checkpoint.completion_stage_id,
+                "latest_reflection_id": task.latest_checkpoint.latest_reflection_id,
+                "source_sequence": task.latest_checkpoint.source_sequence,
+                "unresolved_criterion_indices": list(
+                    task.latest_checkpoint.unresolved_criterion_indices
+                ),
+            }
+            if task.latest_checkpoint is not None
+            else None
+        ),
+        "latest_reflection": (
+            {
+                "recommendation": task.latest_reflection.recommendation.value,
+                "summary": task.latest_reflection.summary,
+                "next_objective": task.latest_reflection.next_objective,
+            }
+            if task.latest_reflection is not None
+            else None
+        ),
         "overall_objective": task.objective,
         "parent_task_id": task.parent_task_id,
         "prior_stages": history,
@@ -223,9 +314,20 @@ def build_task_stage_prompt(
             f"`{TASK_PLAN_SIGNAL} <JSON array of stage objective strings>`. The JSON line is a "
             "proposal only and does not execute or approve any stage."
         )
-    else:
+    elif kind is StageKind.REFLECTION:
         instruction = (
-            "Advance only the current bounded Stage using the ordinary tools and budgets. End "
+            "Do not request tools or claim new execution. Reflect on the current acceptance "
+            "feedback and prior durable facts. End with exactly one line "
+            f"`{TASK_REFLECTION_SIGNAL} <JSON object>`, where the object has exactly "
+            "recommendation (continue|correction|revise-plan|needs-human|fail), summary, and "
+            "next_objective. next_objective must be a bounded string for continue, correction, "
+            "or revise-plan and null otherwise. Reflection is advice only."
+        )
+    else:
+        stage_label = "correction" if kind is StageKind.CORRECTION else "execution"
+        instruction = (
+            f"Advance only the current bounded {stage_label} Stage using the ordinary tools and "
+            "budgets. End "
             f"with exactly one line `{TASK_COMPLETION_SIGNAL} yes` only if the overall Task now "
             f"appears complete, otherwise `{TASK_COMPLETION_SIGNAL} no`. This signal is only a "
             "model proposal; it is not Host acceptance or execution proof."
@@ -253,12 +355,20 @@ def parse_task_response(text: str, *, kind: StageKind) -> ParsedTaskResponse:
     plan_lines = [
         (index, line) for index, line in enumerate(lines) if line.startswith(TASK_PLAN_SIGNAL)
     ]
+    reflection_lines = [
+        (index, line) for index, line in enumerate(lines) if line.startswith(TASK_REFLECTION_SIGNAL)
+    ]
     final_nonblank = next(
         (index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()),
         None,
     )
     if kind is StageKind.PLANNING:
-        if completion_lines or len(plan_lines) != 1 or plan_lines[0][0] != final_nonblank:
+        if (
+            completion_lines
+            or reflection_lines
+            or len(plan_lines) != 1
+            or plan_lines[0][0] != final_nonblank
+        ):
             raise TaskRuntimeError("planning Stage must return exactly one Task plan signal")
         signal_index, signal_line = plan_lines[0]
         raw = signal_line.removeprefix(TASK_PLAN_SIGNAL).strip()
@@ -269,7 +379,65 @@ def parse_task_response(text: str, *, kind: StageKind) -> ParsedTaskResponse:
             raise TaskRuntimeError(f"Task plan signal is invalid: {error}") from None
         clean = _without_protocol_line(lines, signal_index)
         return ParsedTaskResponse(clean, False, steps)
-    if plan_lines or len(completion_lines) != 1 or completion_lines[0][0] != final_nonblank:
+    if kind is StageKind.REFLECTION:
+        if (
+            completion_lines
+            or plan_lines
+            or len(reflection_lines) != 1
+            or reflection_lines[0][0] != final_nonblank
+        ):
+            raise TaskRuntimeError("reflection Stage must return exactly one reflection signal")
+        signal_index, signal_line = reflection_lines[0]
+        raw = signal_line.removeprefix(TASK_REFLECTION_SIGNAL).strip()
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise TaskRuntimeError(f"Task reflection signal is invalid: {error}") from None
+        if not isinstance(value, dict) or set(value) != {
+            "recommendation",
+            "summary",
+            "next_objective",
+        }:
+            raise TaskRuntimeError("Task reflection JSON must use the exact closed object schema")
+        try:
+            recommendation = ReflectionRecommendation(value["recommendation"])
+        except (TypeError, ValueError):
+            raise TaskRuntimeError("Task reflection recommendation is invalid") from None
+        summary = value["summary"]
+        next_objective = value["next_objective"]
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary.encode("utf-8")) > 4096
+        ):
+            raise TaskRuntimeError("Task reflection summary is invalid")
+        if next_objective is not None:
+            try:
+                next_objective = canonical_stage_objective(next_objective)
+            except ValueError as error:
+                raise TaskRuntimeError(
+                    f"Task reflection next objective is invalid: {error}"
+                ) from None
+        actionable = recommendation in {
+            ReflectionRecommendation.CONTINUE,
+            ReflectionRecommendation.CORRECTION,
+            ReflectionRecommendation.REVISE_PLAN,
+        }
+        if actionable != (next_objective is not None):
+            raise TaskRuntimeError("Task reflection next objective does not match recommendation")
+        clean = _without_protocol_line(lines, signal_index)
+        return ParsedTaskResponse(
+            clean,
+            False,
+            None,
+            TaskReflectionProposal(recommendation, summary, next_objective),
+        )
+    if (
+        plan_lines
+        or reflection_lines
+        or len(completion_lines) != 1
+        or completion_lines[0][0] != final_nonblank
+    ):
         raise TaskRuntimeError("execution Stage must return exactly one completion proposal signal")
     signal_index, signal_line = completion_lines[0]
     value = signal_line.removeprefix(TASK_COMPLETION_SIGNAL).strip()

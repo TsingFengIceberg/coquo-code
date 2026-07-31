@@ -57,6 +57,7 @@ from leonervis_code.cli.presentation import (
     render_session_summary,
     render_session_turn_range,
     render_task_info,
+    render_task_next_action,
     render_task_summary,
     render_task_timeline,
     render_task_verification_result,
@@ -211,6 +212,14 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task plan", "Generate a bounded Task plan proposal"),
     SlashCompletionSpec("/task plan accept", "Accept the latest Task plan"),
     SlashCompletionSpec("/task run", "Run accepted plan stages in the foreground"),
+    SlashCompletionSpec("/task reflect", "Reflect on failed acceptance feedback"),
+    SlashCompletionSpec("/task correct", "Run one recommended correction Stage"),
+    SlashCompletionSpec("/task revise", "Propose a reflection-backed plan revision"),
+    SlashCompletionSpec("/task drive", "Drive bounded adaptive Task stages"),
+    SlashCompletionSpec("/task next", "Preview the next driver decision"),
+    SlashCompletionSpec("/task checkpoint", "Append a bounded Task context checkpoint"),
+    SlashCompletionSpec("/task pause", "Pause automatic Task driving"),
+    SlashCompletionSpec("/task resume", "Resume automatic Task driving"),
     SlashCompletionSpec("/task recover", "Reconcile an interrupted Stage"),
     SlashCompletionSpec("/task verify", "Verify one acceptance criterion"),
     SlashCompletionSpec("/task verify host", "Run deterministic Host acceptance checks"),
@@ -329,6 +338,12 @@ class ReplSession(Protocol):
     def verify_task_host(self, task_id: str): ...
 
     def review_task_acceptance(self, task_id: str): ...
+
+    def preview_task_next(self, task_id: str): ...
+
+    def checkpoint_task(self, task_id: str): ...
+
+    def set_task_driver_paused(self, task_id: str, paused: bool, reason: str | None = None): ...
 
     def complete_task(self, task_id: str): ...
 
@@ -540,6 +555,22 @@ def dispatch_slash(
         return _task_plan(command)
     if command == "/task run" or command.startswith("/task run "):
         return _task_run(command)
+    if command == "/task reflect" or command.startswith("/task reflect "):
+        return _task_turn_single(command, "reflect")
+    if command == "/task correct" or command.startswith("/task correct "):
+        return _task_correct(command)
+    if command == "/task revise" or command.startswith("/task revise "):
+        return _task_turn_single(command, "revise")
+    if command == "/task drive" or command.startswith("/task drive "):
+        return _task_drive(command)
+    if command == "/task next" or command.startswith("/task next "):
+        return _task_next(command, session)
+    if command == "/task checkpoint" or command.startswith("/task checkpoint "):
+        return _task_checkpoint(command, session)
+    if command == "/task pause" or command.startswith("/task pause "):
+        return _task_pause(command, session)
+    if command == "/task resume" or command.startswith("/task resume "):
+        return _task_resume(command, session)
     if command == "/task recover" or command.startswith("/task recover "):
         return _task_recover(command, session)
     if command == "/task verify host" or command.startswith("/task verify host "):
@@ -575,6 +606,14 @@ def dispatch_slash(
                 "continue",
                 "plan",
                 "run",
+                "reflect",
+                "correct",
+                "revise",
+                "drive",
+                "next",
+                "checkpoint",
+                "pause",
+                "resume",
                 "recover",
                 "verify",
                 "review",
@@ -1281,6 +1320,95 @@ def _task_run(command: str) -> SlashResult:
             return _usage("Usage: /task run <task-id> [1-16]")
         limit = int(parts[3])
     return SlashResult(handled=True, task_request=TaskTurnRequest("run", task_id, max_stages=limit))
+
+
+def _task_turn_single(command: str, operation: str) -> SlashResult:
+    task_id = _single_task_id(command, operation)
+    if task_id is None:
+        return _usage(f"Usage: /task {operation} <task-id>")
+    return SlashResult(handled=True, task_request=TaskTurnRequest(operation, task_id))
+
+
+def _task_correct(command: str) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) not in {3, 4} or (task_id := _task_id_or_none(parts[2])) is None:
+        return _usage("Usage: /task correct <task-id> [stage-objective]")
+    objective = parts[3].strip() if len(parts) == 4 else None
+    if objective == "":
+        return _usage("Usage: /task correct <task-id> [stage-objective]")
+    return SlashResult(
+        handled=True,
+        task_request=TaskTurnRequest("correct", task_id, objective),
+    )
+
+
+def _task_drive(command: str) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {3, 4} or (task_id := _task_id_or_none(parts[2])) is None:
+        return _usage("Usage: /task drive <task-id> [1-16]")
+    limit = 16
+    if len(parts) == 4:
+        if not parts[3].isascii() or not parts[3].isdigit() or not 1 <= int(parts[3]) <= 16:
+            return _usage("Usage: /task drive <task-id> [1-16]")
+        limit = int(parts[3])
+    return SlashResult(
+        handled=True,
+        task_request=TaskTurnRequest("drive", task_id, max_stages=limit),
+    )
+
+
+def _task_next(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "next")
+    if task_id is None:
+        return _usage("Usage: /task next <task-id>")
+    return _call(
+        lambda: render_task_next_action(session.preview_task_next(task_id)),
+        kind="info",
+        failure_prefix="Task next-decision preview failed",
+    )
+
+
+def _task_checkpoint(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "checkpoint")
+    if task_id is None:
+        return _usage("Usage: /task checkpoint <task-id>")
+    return _call(
+        lambda: (
+            "Created Task context checkpoint:\n"
+            + render_task_info(session.checkpoint_task(task_id))
+        ),
+        kind="success",
+        failure_prefix="Task checkpoint failed",
+    )
+
+
+def _task_pause(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) not in {3, 4} or (task_id := _task_id_or_none(parts[2])) is None:
+        return _usage("Usage: /task pause <task-id> [reason]")
+    reason = parts[3].strip() if len(parts) == 4 else None
+    return _call(
+        lambda: (
+            "Paused Task foreground driver:\n"
+            + render_task_info(session.set_task_driver_paused(task_id, True, reason))
+        ),
+        kind="success",
+        failure_prefix="Task pause failed",
+    )
+
+
+def _task_resume(command: str, session: ReplSession) -> SlashResult:
+    task_id = _single_task_id(command, "resume")
+    if task_id is None:
+        return _usage("Usage: /task resume <task-id>")
+    return _call(
+        lambda: (
+            "Resumed Task foreground driver:\n"
+            + render_task_info(session.set_task_driver_paused(task_id, False))
+        ),
+        kind="success",
+        failure_prefix="Task resume failed",
+    )
 
 
 def _task_recover(command: str, session: ReplSession) -> SlashResult:
