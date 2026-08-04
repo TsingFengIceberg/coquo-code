@@ -38,6 +38,15 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "git_log",
         "git_show",
         "web_search",
+        "web_fetch",
+        "compare_files",
+        "git_blame",
+        "git_refs",
+        "json_query",
+        "checksum_file",
+        "archive_list",
+        "move_directory",
+        "download_file",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -246,6 +255,51 @@ def test_catalog_validates_closed_web_search_input() -> None:
         "query": "Python 3.14 documentation",
         "max_results": 5,
     }
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("web_fetch", {"url": "https://example.com/docs", "format": "markdown"}),
+        ("compare_files", {"left": "a.txt", "right": "b.txt"}),
+        ("git_blame", {"path": "src/app.py", "start_line": 1, "line_count": 20}),
+        ("git_refs", {}),
+        ("json_query", {"path": "data.json", "pointer": ""}),
+        ("checksum_file", {"path": "artifact.bin"}),
+        ("archive_list", {"path": "bundle.zip"}),
+        ("move_directory", {"source": "old", "destination": "new"}),
+        (
+            "download_file",
+            {"url": "https://example.com/file.bin", "path": "file.bin"},
+        ),
+    ],
+)
+def test_catalog_validates_additional_bounded_tool_inputs(
+    name: str, arguments: dict[str, object]
+) -> None:
+    call = tool_use_from_input(f"{name}-1", name, arguments)
+    assert tool_input_from_use(call) == arguments
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("web_fetch", {"url": "https://example.com", "format": "html"}),
+        ("compare_files", {"left": "a.txt"}),
+        ("git_blame", {"path": "a.py", "start_line": 0, "line_count": 1}),
+        ("git_refs", {"all": True}),
+        ("json_query", {"path": "data.json"}),
+        ("checksum_file", {"path": 1}),
+        ("archive_list", {"path": ""}),
+        ("move_directory", {"source": "old", "destination": ""}),
+        ("download_file", {"url": "https://example.com/file.bin"}),
+    ],
+)
+def test_catalog_rejects_malformed_additional_tool_inputs(
+    name: str, arguments: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError):
+        tool_use_from_input(f"{name}-1", name, arguments)
 
 
 @pytest.mark.parametrize(

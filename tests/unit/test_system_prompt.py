@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v32-190003c17bc135995cd060d7c80bf68a3cb90d58023f5e015bfd039277afe78a"
+EXPECTED_FINGERPRINT = "v33-ecefd82d8e51e9542404288e5911fcd8355e1179d1f9c13c2b3ec09492fac4f5"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 32
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 33
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -37,6 +37,10 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "requires `danger-full-access`" in prompt.text
     assert "Tavily basic search consumes one API credit" in prompt.text
     assert "do not retry it automatically" in prompt.text
+    assert "`web_fetch`, `compare_files`, `git_blame`, `git_refs`, `json_query`" in prompt.text
+    assert "Use `web_search` to discover candidate URLs and `web_fetch`" in prompt.text
+    assert "one `network-write` action" in prompt.text
+    assert "never extracts entries" in prompt.text
     assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text
     assert "mounts only the workspace read-write" in prompt.text

@@ -87,6 +87,23 @@ def test_metadata_preview_rejects_file_change_without_a_diff() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "kind",
+    (
+        ApprovalPreviewKind.WEB_FETCH,
+        ApprovalPreviewKind.DIRECTORY_MOVE,
+        ApprovalPreviewKind.FILE_DOWNLOAD,
+    ),
+)
+def test_additional_action_previews_are_content_free(kind: ApprovalPreviewKind) -> None:
+    preview = build_metadata_preview(action_digest=ACTION_DIGEST, kind=kind)
+
+    assert preview.kind is kind
+    assert preview.body is None
+    assert preview.byte_count is None
+    assert preview.version == APPROVAL_PREVIEW_VERSION == 3
+
+
 def test_web_search_preview_requires_a_supported_backend() -> None:
     tavily = build_metadata_preview(
         action_digest=ACTION_DIGEST,
@@ -94,7 +111,7 @@ def test_web_search_preview_requires_a_supported_backend() -> None:
         backend="tavily",
     )
     assert tavily.backend == "tavily"
-    assert tavily.version == APPROVAL_PREVIEW_VERSION == 2
+    assert tavily.version == APPROVAL_PREVIEW_VERSION == 3
     assert (
         build_metadata_preview(
             action_digest=ACTION_DIGEST,

@@ -404,7 +404,7 @@ def safe_tool_request_summary(request: ToolUse) -> str:
             f"cwd={_safe_path(arguments.get('cwd'))} "
             f"timeout={_safe_number(arguments.get('timeout_seconds'))}s"
         )
-    elif name in {"move_file", "copy_file"}:
+    elif name in {"move_file", "copy_file", "move_directory"}:
         summary = (
             f"source={_safe_path(arguments.get('source'))} "
             f"destination={_safe_path(arguments.get('destination'))}"
@@ -450,6 +450,29 @@ def safe_tool_request_summary(request: ToolUse) -> str:
             f"query_bytes={_utf8_size(arguments.get('query'))} "
             f"max_results={_safe_number(arguments.get('max_results'))}"
         )
+    elif name == "web_fetch":
+        summary = f"url=<redacted> format={_safe_argument(arguments.get('format'))}"
+    elif name == "compare_files":
+        summary = (
+            f"left={_safe_path(arguments.get('left'))} right={_safe_path(arguments.get('right'))}"
+        )
+    elif name == "git_blame":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"start_line={_safe_number(arguments.get('start_line'))} "
+            f"line_count={_safe_number(arguments.get('line_count'))}"
+        )
+    elif name == "git_refs":
+        summary = "repository=."
+    elif name == "json_query":
+        summary = (
+            f"path={_safe_path(arguments.get('path'))} "
+            f"pointer_bytes={_utf8_size(arguments.get('pointer'))}"
+        )
+    elif name in {"checksum_file", "archive_list"}:
+        summary = f"path={_safe_path(arguments.get('path'))}"
+    elif name == "download_file":
+        summary = f"url=<redacted> path={_safe_path(arguments.get('path'))}"
     elif name == "task_propose_plan":
         steps = arguments.get("steps")
         summary = f"steps={len(steps) if isinstance(steps, list) else '<invalid>'}"

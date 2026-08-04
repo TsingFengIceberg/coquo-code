@@ -44,6 +44,10 @@ from leonervis_code.tools.web_search import (
     WebSearchPreparationError,
     WebSearchTool,
 )
+from leonervis_code.tools.download_file import DownloadFileTool
+from leonervis_code.tools.move_directory import MoveDirectoryTool
+from leonervis_code.tools.web_fetch import WebFetchTool
+from leonervis_code.tools.web_transport import WebHttpResponse
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -97,6 +101,7 @@ def open_session(
     approval_handler=None,
     environment=None,
     web_search_factory=WebSearchTool,
+    **tool_factories,
 ) -> ProjectSession:
     return ProjectSession.open(
         workspace,
@@ -113,6 +118,7 @@ def open_session(
         approval_handler=approval_handler,
         action_uuid_factory=uuid_factory(),
         web_search_factory=web_search_factory,
+        **tool_factories,
     )
 
 
@@ -135,6 +141,118 @@ def search_call() -> ToolUse:
         "web_search",
         ToolArguments.from_mapping({"query": "Python official documentation", "max_results": 3}),
     )
+
+
+class FetchTransport:
+    def __init__(self, body: bytes = b"<h1>Docs</h1>") -> None:
+        self.body = body
+        self.calls: list[str] = []
+
+    def fetch(self, url: str, *, timeout_seconds: int, max_response_bytes: int):
+        self.calls.append(url)
+        return WebHttpResponse(200, "text/html; charset=utf-8", "", self.body, url, 0)
+
+
+def fetch_call() -> ToolUse:
+    return ToolUse(
+        "fetch-1",
+        "web_fetch",
+        ToolArguments.from_mapping({"url": "https://example.com/docs", "format": "markdown"}),
+    )
+
+
+def download_call() -> ToolUse:
+    return ToolUse(
+        "download-1",
+        "download_file",
+        ToolArguments.from_mapping({"url": "https://example.com/file.bin", "path": "artifact.bin"}),
+    )
+
+
+def test_web_fetch_requires_network_permission_and_does_not_contact_on_denial(
+    tmp_path: Path,
+) -> None:
+    transport = FetchTransport()
+    provider = ToolProvider([fetch_call(), AssistantText("fetch denied")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        web_fetch_factory=lambda: WebFetchTool(transport),
+    )
+    try:
+        assert session.prompt("fetch docs") == "fetch denied"
+        assert transport.calls == []
+        assert provider.requests[1].history[-1].content == (
+            "permission denied: denied_network_access_mode"
+        )
+        audit = session.action_audits()[0]
+        assert audit.identity.action.value == "network-read"
+        assert audit.status is ActionAuditStatus.DENIED
+    finally:
+        session.close()
+
+
+def test_approved_web_fetch_is_audited_and_returned_to_model(tmp_path: Path) -> None:
+    transport = FetchTransport()
+    approvals: list[HumanApprovalRequest] = []
+    provider = ToolProvider([fetch_call(), AssistantText("fetched")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=lambda request: approvals.append(request) or ApprovalResolution.ACCEPT,
+        web_fetch_factory=lambda: WebFetchTool(transport),
+    )
+    try:
+        assert session.prompt("fetch docs") == "fetched"
+        assert transport.calls == ["https://example.com/docs"]
+        assert approvals[0].preview is not None
+        assert approvals[0].preview.kind.value == "web-fetch"
+        assert "# Docs" in provider.requests[1].history[-1].content
+        audit = session.action_audits()[0]
+        assert audit.status is ActionAuditStatus.SUCCEEDED
+        assert audit.result_code == "web_fetched"
+    finally:
+        session.close()
+
+
+def test_directory_move_and_network_download_use_distinct_permission_classes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "item.txt").write_text("x", encoding="utf-8")
+    move = ToolUse(
+        "move-dir-1",
+        "move_directory",
+        ToolArguments.from_mapping({"source": "source", "destination": "target"}),
+    )
+    transport = FetchTransport(b"binary\x00data")
+    provider = ToolProvider(
+        [move, AssistantText("moved"), download_call(), AssistantText("downloaded")]
+    )
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        move_directory_factory=MoveDirectoryTool,
+        download_file_factory=lambda workspace: DownloadFileTool(workspace, transport),
+    )
+    try:
+        assert session.prompt("move") == "moved"
+        assert session.prompt("download") == "downloaded"
+        assert (tmp_path / "target" / "item.txt").read_text(encoding="utf-8") == "x"
+        assert (tmp_path / "artifact.bin").read_bytes() == b"binary\x00data"
+        audits = session.action_audits()
+        assert [audit.identity.action.value for audit in audits] == [
+            "workspace-move",
+            "network-write",
+        ]
+        assert [audit.result_code for audit in audits] == ["directory_moved", "file_created"]
+    finally:
+        session.close()
 
 
 def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_path: Path) -> None:

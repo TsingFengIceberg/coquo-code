@@ -768,11 +768,13 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Permission decisions describe policy only" in permissions
     assert "workspace-create: ask (approval_required_workspace_create)" in permissions
     assert "network-read: ask (approval_required_network_read)" in permissions
+    assert "network-write: ask (approval_required_network_write)" in permissions
     assert "dangerous: ask (approval_required_dangerous)" in permissions
     preview = dispatch_slash("/permissions workspace-write auto", session).message
     assert "Policy preview (not applied): permission=workspace-write, approval=auto" in preview
     assert "workspace-create: allow (allowed_workspace_create_auto)" in preview
     assert "network-read: deny (denied_network_access_mode)" in preview
+    assert "network-write: deny (denied_network_access_mode)" in preview
     assert "dangerous: deny (denied_workspace_write_mode)" in preview
     assert session.project_status().permission_mode == PermissionMode.DANGER_FULL_ACCESS
     permissions_usage = (

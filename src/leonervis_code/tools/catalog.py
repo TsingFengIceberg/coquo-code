@@ -5,6 +5,9 @@ from __future__ import annotations
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
+from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, archive_list_tool_snapshot
+from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, checksum_file_tool_snapshot
+from leonervis_code.tools.compare_files import COMPARE_FILES_TOOL_NAME, compare_files_tool_snapshot
 from leonervis_code.tools.copy_file import COPY_FILE_TOOL_NAME, copy_file_tool_snapshot
 from leonervis_code.tools.delete_directory import (
     DELETE_DIRECTORY_TOOL_NAME,
@@ -12,6 +15,7 @@ from leonervis_code.tools.delete_directory import (
 )
 from leonervis_code.tools.delete_file import DELETE_FILE_TOOL_NAME, delete_file_tool_snapshot
 from leonervis_code.tools.edit_file import EDIT_FILE_TOOL_NAME, edit_file_tool_snapshot
+from leonervis_code.tools.download_file import DOWNLOAD_FILE_TOOL_NAME, download_file_tool_snapshot
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, glob_tool_snapshot
 from leonervis_code.tools.grep import GREP_TOOL_NAME, grep_tool_snapshot
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, grep_regex_tool_snapshot
@@ -20,6 +24,13 @@ from leonervis_code.tools.git_diff import (
     GitDiffScope,
     git_diff_tool_snapshot,
 )
+from leonervis_code.tools.git_blame import (
+    GIT_BLAME_TOOL_NAME,
+    MAX_GIT_BLAME_LINE_COUNT,
+    MAX_GIT_BLAME_START_LINE,
+    git_blame_tool_snapshot,
+)
+from leonervis_code.tools.git_refs import GIT_REFS_TOOL_NAME, git_refs_tool_snapshot
 from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, git_status_tool_snapshot
 from leonervis_code.tools.git_log import (
     GIT_LOG_TOOL_NAME,
@@ -38,6 +49,10 @@ from leonervis_code.tools.list_tree import (
     list_tree_tool_snapshot,
 )
 from leonervis_code.tools.mkdir import MKDIR_TOOL_NAME, mkdir_tool_snapshot
+from leonervis_code.tools.move_directory import (
+    MOVE_DIRECTORY_TOOL_NAME,
+    move_directory_tool_snapshot,
+)
 from leonervis_code.tools.move_file import MOVE_FILE_TOOL_NAME, move_file_tool_snapshot
 from leonervis_code.tools.patch_file import (
     MAX_PATCH_FILE_EDITS,
@@ -67,6 +82,12 @@ from leonervis_code.tools.run_command import (
 )
 from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, stat_path_tool_snapshot
+from leonervis_code.tools.json_query import JSON_QUERY_TOOL_NAME, json_query_tool_snapshot
+from leonervis_code.tools.web_fetch import (
+    WEB_FETCH_TOOL_NAME,
+    WebFetchFormat,
+    web_fetch_tool_snapshot,
+)
 from leonervis_code.tools.web_search import (
     MAX_WEB_SEARCH_QUERY_BYTES,
     MAX_WEB_SEARCH_QUERY_CHARACTERS,
@@ -117,6 +138,15 @@ ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     git_log_tool_snapshot(),
     git_show_tool_snapshot(),
     web_search_tool_snapshot(),
+    web_fetch_tool_snapshot(),
+    compare_files_tool_snapshot(),
+    git_blame_tool_snapshot(),
+    git_refs_tool_snapshot(),
+    json_query_tool_snapshot(),
+    checksum_file_tool_snapshot(),
+    archive_list_tool_snapshot(),
+    move_directory_tool_snapshot(),
+    download_file_tool_snapshot(),
 )
 ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
 ORDINARY_PROMPT_TOOL_NAMES = (
@@ -260,6 +290,22 @@ def _expected_keys(name: str) -> set[str]:
         return {"commit_id", "path"}
     if name == WEB_SEARCH_TOOL_NAME:
         return {"query", "max_results"}
+    if name == WEB_FETCH_TOOL_NAME:
+        return {"url", "format"}
+    if name == COMPARE_FILES_TOOL_NAME:
+        return {"left", "right"}
+    if name == GIT_BLAME_TOOL_NAME:
+        return {"path", "start_line", "line_count"}
+    if name == GIT_REFS_TOOL_NAME:
+        return set()
+    if name == JSON_QUERY_TOOL_NAME:
+        return {"path", "pointer"}
+    if name in {CHECKSUM_FILE_TOOL_NAME, ARCHIVE_LIST_TOOL_NAME}:
+        return {"path"}
+    if name == MOVE_DIRECTORY_TOOL_NAME:
+        return {"source", "destination"}
+    if name == DOWNLOAD_FILE_TOOL_NAME:
+        return {"url", "path"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -402,6 +448,35 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
             MIN_WEB_SEARCH_RESULTS <= max_results <= MAX_WEB_SEARCH_RESULTS
         ):
             raise ValueError("web_search max_results is invalid")
+        return
+
+    if name == WEB_FETCH_TOOL_NAME:
+        _validate_input_string(tool_input["url"], label="web_fetch url")
+        if tool_input["format"] not in {item.value for item in WebFetchFormat}:
+            raise ValueError("web_fetch format is invalid")
+        return
+
+    if name == GIT_BLAME_TOOL_NAME:
+        _validate_input_string(tool_input["path"], label="git_blame path")
+        start_line = tool_input["start_line"]
+        line_count = tool_input["line_count"]
+        if type(start_line) is not int or not 1 <= start_line <= MAX_GIT_BLAME_START_LINE:
+            raise ValueError("git_blame start_line is invalid")
+        if type(line_count) is not int or not 1 <= line_count <= MAX_GIT_BLAME_LINE_COUNT:
+            raise ValueError("git_blame line_count is invalid")
+        return
+
+    if name == GIT_REFS_TOOL_NAME:
+        return
+
+    if name == JSON_QUERY_TOOL_NAME:
+        _validate_input_string(tool_input["path"], label="json_query path")
+        _validate_input_string(
+            tool_input["pointer"],
+            label="json_query pointer",
+            allow_whitespace=True,
+            allow_empty=True,
+        )
         return
 
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:

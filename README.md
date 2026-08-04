@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、Provider原生搜索、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、两层Eval、可跨重启继续的前台多Stage Task、22个普通受限工具（含Host选择Brave或Tavily后端的独立网页搜索）、4个Stage专属协调工具、1个Task admission工具及3个自然语言Task生命周期工具。Session只在当前Provider声明原生搜索能力时默认启用该能力，Brave/Tavily始终默认关闭。每个Stage仍复用普通Turn，实际文件与Host搜索动作继续经过PermissionGate、approval和Action Audit；Provider原生搜索属于模型请求本身，不伪装成Host ToolUse。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且命令网络socket被拒绝。当前普通Turn预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及31个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取和受控文件传输。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ## 目录
 
@@ -88,12 +88,6 @@ uv run leonervis-code task --help
 | 使用Profile声明的Provider原生搜索 | `uv run leonervis-code --profile search-provider prompt "搜索Python 3.14官方发布说明并列出来源"` |
 | 查看版本 | `uv run leonervis-code --version` |
 
-`prompt`用于脚本和一次性任务；裸命令用于有状态多轮REPL。成功turn会自动保存，工具执行时会显示脱敏的`[tool 1/32] ...`状态行。
-
-搜索有两条不同边界。Provider原生搜索由Profile的版本化adapter投影到模型请求中；当前Provider声明可用时Session默认启用，它不属于Leonervis ToolUse，不经过PermissionGate或Action Audit，搜索调用与计费由Provider拥有。OpenAI与DeepSeek V4 Flash使用Responses协议，Provider返回的`web_search_call`会作为Provider-owned history随Session持久化并在后续请求中原样回传；其他原生搜索dialect保留各自adapter。已完成的Responses允许其中某个搜索action失败；安全的citation会规范为最终回答中的`Sources:`，不安全或不兼容的citation则被丢弃并显示脱敏warning，不再让已完成的Turn失败。`/search mode auto|required`控制Provider是自行决定还是强制搜索，`/search domains`与`/search context`设置adapter支持的进程内限制，不支持的组合会明确拒绝。
-
-独立`web_search(query, max_results)`由Host调用固定Brave或Tavily API，始终默认关闭，即使环境中已有key也不会自动激活。`/search use brave|tavily`使其成为primary；`/search use provider tavily`则保持Provider为primary，并仅在模型已观察到Provider搜索失败或结构化citation不可用后，向模型曝光Tavily支持的Host fallback。Host不猜query、不自动请求fallback，也不做fan-out或结果融合。`/search status|sources`检查状态，`/search reset`恢复“Provider可用则启用，否则全部关闭”。Host搜索属于`network-read`，只有`danger-full-access`按`ask/auto`继续，并保留既有query、响应、输出、timeout、ActionIdentity及partial边界。终端会显示不含query、URL或正文的Provider搜索阶段与降级摘要，Session预览只派生调用数、失败数、action type、source数和citation数。凭据只从环境读取，绝不写入Session或审计。
-
 常用权限模式：
 
 ```bash
@@ -102,8 +96,6 @@ uv run leonervis-code --permission-mode workspace-write --approval ask
 uv run leonervis-code --permission-mode danger-full-access --approval ask
 uv run leonervis-code --permission-mode workspace-write --approval auto prompt "修改并验证项目"
 ```
-
-REPL的`ask`审批会在`write_file`、`edit_file`和`patch_file`前显示有界candidate diff，并为copy、move、delete、mkdir和command显示必要风险事实；批准后workspace状态变化仍会stale reject，也不会关闭command沙箱。沙箱把Host root设为只读、workspace重新挂载为读写、提供私有`/tmp`、遮蔽已知HOME敏感路径并禁止socket；它不提供回滚、资源配额或敌对并发事务。One-shot的工具状态写入stderr，最终回答写入stdout；REPL内可用`/actions`查看持久化Action Audit。普通工具与Task协调工具的schema、可用Stage、权限及durability边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及[架构决策记录](./docs/decisions/)。
 
 ### 配置 Provider
 
@@ -249,9 +241,7 @@ uv run leonervis-code task show <task-uuid>
 uv run leonervis-code task timeline <task-uuid>
 ```
 
-Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一个已有Session。`--accept`声明人工条件；可重复的`--criterion`接受严格JSON，支持`path-exists`、`path-unchanged`、`command-succeeds`、`action-audit-certain`和`independent-reviewer`。`manual`策略要求显式完成，`auto-verified`也必须先有当前模型完成提议并且全部条件由规定来源验证通过。失败的Host检查可进入无工具Reflection，再建议Correction、继续、修订计划或停止；Driver始终在前台且有Stage上限，独立review不会被自动调用。每个Stage仍是普通Turn，因此不会获得跨Stage blanket approval，也不会绕过工具、只读验证沙箱、审计或Session durability边界。
-
-普通成功路径不再要求用户输入`/task`命令。模型先用`task_propose_start`提交多Stage提案；用户自然语言明确同意后，模型用`task_accept_admission`请求接受，Host在该普通Turn提交后复核默认知情候选并自动启动前台Driver。规划Stage用`task_propose_plan`提交计划，用户自然语言接受后由`task_accept_plan`提交并自动继续；当前完成提案满足全部非人工验收来源后，用户可自然语言确认，`task_confirm_completion`只把该直接user Turn绑定到未解决的human criteria并完成Task。三个生命周期工具都必须独占回复，不能授予文件权限、批准Action或伪造Host/reviewer证据。`/task`仍保留为精确预览、自定义admission配置、审计、恢复、暂停、拒绝、独立review和高级控制入口，模型不生成slash命令。
+Task用于管理可恢复的前台多阶段工作，既可由自然语言交互发起，也可通过`task`与`/task`命令检查和控制。完整状态机、验收与恢复边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及Task相关ADR。
 
 ### REPL 命令
 
@@ -260,7 +250,7 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 | `/help [session\|task\|tools\|git\|context\|provider\|search\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`search`显示搜索源控制 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
-| `/tools catalog [tool-name]` | 显示30个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
+| `/tools catalog [tool-name]` | 显示39个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -372,25 +362,7 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 /history 5
 ```
 
-真实TTY现在由一个常驻的inline `prompt_toolkit.Application`持有输入区和状态栏。提交后空白prompt立即留在底部，模型回复与工具事件显示在已提交prompt和新draft之间；busy期间可继续编辑一份draft，但Enter不会排队或插入第二条消息。Up/Down和Ctrl-R会从有界进程内历史恢复当前进程已接受的普通prompt与slash command；启动时仍从当前Session最近1000条已提交prompt装载，切换Session时改为目标Session历史并保留本次切换命令，slash本身不写Session transcript。Slash补全可继续到工具名、permission mode、Action Audit status/tool筛选值和常用子命令，明确的近似拼写只给出建议而不自动执行。Ctrl-C请求协作取消当前turn，Ctrl-D会先取消并等待provider、tool与Action Audit清理后退出；审批暂时接管输入并在结束后恢复draft。`/clear`只重置画面，不修改Session、history或transcript。
-
-底栏阶段由typed Host事件驱动，可区分准备turn/provider请求、规划动作、运行具体工具、处理工具结果、等待审批、compaction、记录provider usage、真实Session持久提交、Task生命周期、最终收尾与取消。Busy期间，输入框上方还会显示一行当前阶段文字，回到`Ready`后自动隐藏。该活动行不包含符号或动画，只是瞬时UI，不写Session、Task transcript、Action Audit或模型历史，也不作为执行成功证据。已知context、provider、runtime、authorization、Session及`run_command`结果码会给出保守的`Next:`建议，但不会自动retry、声称rollback或掩盖已完成工具副作用；`/status`、`/sandbox check`、`/tools catalog`、`/actions last`及其他slash检查都不进入模型历史。Command审批会明确说明Host只读、workspace可写和socket禁止的实际沙箱边界。
-
-已提交用户消息固定以`› `开头，assistant正文固定以`• `开头；普通回复、Task Stage回复和流式异常回退都复用同一悬挂缩进，显式换行和终端自动换行从标记后的正文列继续。灰色Host block和`  │ `Turn轨迹也会按当前TTY显示宽度预先包装，因此超长状态、工具与slash结果的视觉续行继续保留缩进或轨迹线，不会贴回终端左边。用户消息与本轮首个可见输出之间固定留一行；若模型直接请求工具而没有阶段性正文，界面会从`  │ `Host轨迹开始，不伪造空`•`。同一user turn内的context、tool、approval、usage和failure等Host执行事实使用`  │ `轨迹线归入该Assistant Turn，但不会冒充模型原话；slash结果仍是turn外Host block，并以“回显的`›`输入 + Host结果 + 一次低强度短线”组成完整交互块。模型正文与Host轨迹切换时不再插入分隔线，完整turn结束后才在下一个`›`前显示一次低强度短线。Warning、approval和error继续保持醒目；`NO_COLOR=1`会关闭颜色与dim但保留角色、轨迹、分隔线、缩进和布局。
-
-真实TTY使用`›`输入标记和`model · Session名称 · context · workspace`状态栏。新Session先持久显示`New session N`；首个成功turn在落盘前会用同一provider发起最多3次独立的无工具标题请求，自动标题重名时重试，仍不满足时由Host添加稳定编号兜底。标题调用与正文共享每turn最多24次provider invocation，并和首轮正文、usage一起原子写入当前`turn_committed` v9；若因provider输出上限、provider失败、标题无效、标题重名或调用预算而使用Host兜底，安全原因也会持久显示。失败或未提交turn不会留下名称。`/session rename <名称>`可手动命名，`/session rename --auto`可恢复首轮自动标题；`/session archive`只添加可逆归档标记，归档Session仍可按UUID或`latest`恢复和继续使用。名称和归档状态会即时刷新，UUID仍是精确resume标识。每次真实provider调用前会显示方块context条，调用后显示厂商实际返回的input/output Token；工具continuation分别计量，turn结束后汇总当前turn与profile。Live工具行默认保持脱敏compact；`/tool-details full`会在当前进程内展开有界结构化command argv、cwd、timeout及direct/shell解释提示，并警告argv可能包含敏感值，文件/edit/patch/search内容仍不显示。Command完成行会显示可信的exit/status、duration和stdout/stderr byte统计；full模式再展开signal、各路truncation与cleanup completeness，但任何模式都不显示stdout/stderr原文。`/changes`系列直接运行固定的只读Git观察，不调用provider、不消耗模型tool budget、不写Session或Action Audit；untracked只显示路径，不显示内容。`/context`和`/compact preview`会标明normal、接近80%、auto-compact、接近满载或unknown；`/usage`还显示当前runtime最近一次compaction generation。`/usage session`与`/usage turns`从严格replay的Session终局记录读取跨重启用量；旧记录显示legacy unavailable，缺失usage metadata明确计为unknown而不按0处理。Provider用尽输出上限时，终端会显示requested limit与可用的actual usage；不完整回复不会成为final answer或committed turn，已完成的工具副作用不会回滚。`/output`显示effective、configured default和known model maximum；`/output 8192`只调整当前进程，`/output reset`恢复profile或direct route默认值。调整会在当前Effective Context上先筛查known overflow，并重建provider route；profile文件、Session历史和已有usage累计不变。Model切换保留临时预算并重新筛查，新profile切换清除它。非缩减`/compact`失败会显示source与candidate input计量，并保持checkpoint及Effective Context不变，同时持久保存失败调用的usage audit。进程内统计仍在成功`/provider use`或`/model`切换后清零；Session统计持久保留，但不计算费用。Enter提交，Alt+Enter换行；若terminal拦截Alt组合，可先按Esc再按Enter。提交后assistant内容以`•`开头，工具turn另显示Host生成的`Tool summary:`。TTY会渲染assistant Markdown；pipe/redirect保留原始Markdown。`NO_COLOR=1`关闭颜色但保留Markdown布局。完整边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
-
-历史`turn_committed` v5记录会继承v3的tool companion text和v4的assistant tool batch语义，并继续按v5 ledger严格校验；读取、列举或名称查重不会改写旧transcript。v1/v2仍拒绝这些较新字段。
-
-`/session pin`通过append-only元数据保存收藏状态；`/session list pinned`可和其他筛选组合。`/session switch`只保存当前进程的一份“编号到完整UUID”快照，显示名称、turn数、开闭/归档/收藏状态、model和创建时间；`/session switch <编号>`消费一次后立即清空。任何普通prompt、Session元数据修改、直接resume或失败刷新也会废弃旧快照。真正切换仍执行现有prepare、context screening、stale/CAS验证与durable resume commit，失败时当前Session保持不变。
-
-`/session show <id>`和`/session preview <id> [1-10]`允许在不切换的情况下检查另一个Session。Preview通过strict replay选择最近完整turn，只显示最终user/assistant文本，不混入tool companion text、tool result或Action Audit；输出转义终端控制字符并限制为32 KiB。两个命令都不调用provider、不获取writer lease、不修复tail、不追加record，也不改变current Session、`latest`、runtime、history、Effective Context或picker快照。Standalone脚本可使用`leonervis-code -C <workspace> session preview [latest|id] --limit 3`获得同一投影。
-
-`/session search`只在最终对话文本中执行有界、大小写敏感的字面搜索，并返回完整UUID与turn编号；`/session turns`可继续查看对应位置。`/session export`只向stdout输出Markdown或JSON对话视图，不把内部Action Audit、tool result、usage或compaction summary冒充可分享对话。
-
-`/session fork`从严格source snapshot的完整turn边界创建新UUID，复制完整ToolUse/ToolResult因果但不复制父Session的Action Audit、provider usage、failure、compaction或归档/收藏状态；`session_forked` v1持久记录父UUID、turn边界和源transcript SHA-256。`/session doctor`永远只读；`/session repair`只接受“有效完整前缀+未完成最终JSON fragment”，获取writer lease、先写入digest命名的私有备份，再截断fragment并append+fsync现有`recovery` v1。中部损坏、完整JSON缺换行或正在写入的Session都不会被修复。
-
-`/commits`与`/commit`复用同一固定只读Git runner：只遍历当前`HEAD`可达历史，`git_show`只接受完整40/64位小写十六进制commit ID；subject、message和patch均有界并显式标记截断，终端控制字符会被转义。
+REPL的输入、呈现、Session管理、Task控制、上下文观测与Git检查均可通过上表直接使用；实现与持久化细节见[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)。
 
 用于观察受限工具循环的确定性演示命令：
 
@@ -489,6 +461,7 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Provider-native Web Search](./docs/decisions/0103-provider-native-web-search.md)：Profile声明的搜索dialect、默认激活、来源选择及Provider/Host责任边界。
 - [OpenAI Responses Protocol and Provider-owned History](./docs/decisions/0104-openai-responses-protocol-and-provider-owned-history.md)：Responses路由、语义stream、Provider-owned item持久化与回传。
 - [Provider Search Resilience, Controls, and Observability](./docs/decisions/0105-provider-search-resilience-controls-and-observability.md)：失败search action兼容、citation降级、进程内控制、脱敏观测与显式fallback。
+- [Bounded Fetch, Structured Read, and Controlled Transfer Tools](./docs/decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)：公开页面抓取、结构化只读观察、目录移动、受控下载与`network-write`边界。
 - [Host Policy and Tool Discoverability](./docs/decisions/0082-host-policy-and-tool-discoverability.md)：单工具schema/硬边界查看、PermissionGate只读预览、上下文补全与非执行式拼写建议。
 - [Provider Mixed-response History Projection](./docs/decisions/0045-provider-mixed-response-history-projection.md)：Anthropic与OpenAI-compatible continuation history的准确native投影。
 - [`turn_committed` v3 Assistant Tool Text Persistence](./docs/decisions/0044-turn-committed-v3-assistant-tool-text-persistence.md)：nullable companion text、v1/v2 replay兼容与旧prefix不重写。
@@ -525,8 +498,6 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-普通prompt的model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show, web_search, task_propose_start, task_accept_admission, task_accept_plan, task_confirm_completion`。完整catalog在22个普通工具后依次包含4个Stage proposal工具、`task_propose_start`及3个普通Prompt生命周期工具，共30个定义；Task Stage只曝光匹配的最小子集。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个普通动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。普通文件、命令和搜索工具继续经过permission、approval、executor和Action Audit；Task协调调用独占一个response并共享预算，不取得Action lease。
+Leonervis Code目前提供31个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、目录移动和受控下载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-Foundation 5A只读取workspace根目录唯一规范名称`AGENTS.md`：missing表示无项目指令；现有文件必须是non-symlink、strict UTF-8普通文件，不含NUL且最多32 KiB。Host在每个user turn准备时读取并冻结一次，工具continuation始终复用该快照，下一turn才重载；不搜索parent或subdirectory，也不自动加载`CLAUDE.md`或`LEONERVIS.md`。项目指令作为独立provider block参与token计量和Effective Context identity，但不写Session transcript；它从属于canonical Host策略与当前直接user request，不能放宽permission、approval、workspace、symlink、budget、audit、sandbox或durability边界。`/instructions`只显示元数据且不调用provider或修改Session。
-
-Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval、结构化模型Task协调、自然语言Task生命周期、Brave/Tavily独立搜索、Provider原生搜索及OpenAI Responses现已完成。当前版本为canonical system prompt v32、provider adapter contract v35、Profile schema v5/fingerprint v4、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v9、`turn_failed` schema v2、新`session_resumed` schema v2、Action Audit schema v1、`context_compacted`新记录v4及既有Task schema；current Effective Context为`ctx-v7`/`ctx-v8`representation。旧Session/Task transcript不重写，缺失项目指令时的current empty full-context identity为`ctx-v7-3ac4ba4e6ffa39c1184cfff6cc4200eb30607553fdf886451c0d967765ff0432`。Responses原生搜索支持搜索阶段stream、失败action保留、citation降级与脱敏Session摘要，其他原生搜索dialect仍使用可靠buffered调用；多源fan-out/融合、通用`web_fetch`、MCP、后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动通用retry、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。Responses边界见[ADR 0104](./docs/decisions/0104-openai-responses-protocol-and-provider-owned-history.md)，Provider搜索弹性与控制见[ADR 0105](./docs/decisions/0105-provider-search-resilience-controls-and-observability.md)。
+项目仍定位为本地单用户CLI原型；MCP、Skills、浏览器自动化、后台或并行智能体及远程服务尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

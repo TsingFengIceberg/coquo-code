@@ -248,6 +248,9 @@ _TOOL_PREVIEW_KINDS = {
     "delete_directory": ApprovalPreviewKind.DIRECTORY_DELETE,
     "run_command": ApprovalPreviewKind.COMMAND,
     "web_search": ApprovalPreviewKind.WEB_SEARCH,
+    "web_fetch": ApprovalPreviewKind.WEB_FETCH,
+    "move_directory": ApprovalPreviewKind.DIRECTORY_MOVE,
+    "download_file": ApprovalPreviewKind.FILE_DOWNLOAD,
 }
 
 

@@ -8,7 +8,7 @@ from difflib import unified_diff
 from enum import StrEnum
 import re
 
-APPROVAL_PREVIEW_VERSION = 2
+APPROVAL_PREVIEW_VERSION = 3
 MAX_APPROVAL_DIFF_LINES = 160
 MAX_APPROVAL_DIFF_BYTES = 24 * 1024
 MAX_APPROVAL_DIFF_LINE_BYTES = 4096
@@ -27,6 +27,9 @@ class ApprovalPreviewKind(StrEnum):
     DIRECTORY_DELETE = "directory-delete"
     COMMAND = "command"
     WEB_SEARCH = "web-search"
+    WEB_FETCH = "web-fetch"
+    DIRECTORY_MOVE = "directory-move"
+    FILE_DOWNLOAD = "file-download"
 
 
 @dataclass(frozen=True)

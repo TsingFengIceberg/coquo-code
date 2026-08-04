@@ -224,6 +224,9 @@ from leonervis_code.tools.delete_directory import (
     DeleteDirectoryTool,
     PreparedDeleteDirectory,
 )
+from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
+from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
+from leonervis_code.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
 from leonervis_code.tools.catalog import ORDINARY_PROMPT_TOOL_NAMES, ORDINARY_TOOL_NAMES
 from leonervis_code.tools.task_coordination import (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
@@ -256,6 +259,13 @@ from leonervis_code.tools.edit_file import (
     EditFileTool,
     PreparedEditFile,
 )
+from leonervis_code.tools.download_file import (
+    DOWNLOAD_FILE_TOOL_NAME,
+    DownloadFileOutcome,
+    DownloadFilePreparationError,
+    DownloadFileTool,
+    PreparedDownloadFile,
+)
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
@@ -265,6 +275,8 @@ from leonervis_code.tools.git_diff import (
     GitDiffSnapshot,
     GitDiffTool,
 )
+from leonervis_code.tools.git_blame import GIT_BLAME_TOOL_NAME, GitBlameTool
+from leonervis_code.tools.git_refs import GIT_REFS_TOOL_NAME, GitRefsTool
 from leonervis_code.tools.git_log import (
     DEFAULT_GIT_LOG_LIMIT,
     GIT_LOG_TOOL_NAME,
@@ -286,6 +298,7 @@ from leonervis_code.tools.list_directory import (
     ListDirectoryTool,
 )
 from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
+from leonervis_code.tools.json_query import JSON_QUERY_TOOL_NAME, JsonQueryTool
 from leonervis_code.tools.mkdir import (
     MKDIR_TOOL_NAME,
     MkdirOutcome,
@@ -299,6 +312,13 @@ from leonervis_code.tools.move_file import (
     MoveFilePreparationError,
     MoveFileTool,
     PreparedMoveFile,
+)
+from leonervis_code.tools.move_directory import (
+    MOVE_DIRECTORY_TOOL_NAME,
+    MoveDirectoryOutcome,
+    MoveDirectoryPreparationError,
+    MoveDirectoryTool,
+    PreparedMoveDirectory,
 )
 from leonervis_code.tools.patch_file import (
     PATCH_FILE_TOOL_NAME,
@@ -337,6 +357,13 @@ from leonervis_code.tools.web_search import (
     WebSearchSourceConfiguration,
     WebSearchTool,
 )
+from leonervis_code.tools.web_fetch import (
+    WEB_FETCH_TOOL_NAME,
+    PreparedWebFetch,
+    WebFetchOutcome,
+    WebFetchPreparationError,
+    WebFetchTool,
+)
 from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_CALLS_PER_RESPONSE,
@@ -358,6 +385,13 @@ _TASK_PLANNING_READ_TOOL_NAMES = (
     GIT_LOG_TOOL_NAME,
     GIT_SHOW_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
+    WEB_FETCH_TOOL_NAME,
+    COMPARE_FILES_TOOL_NAME,
+    GIT_BLAME_TOOL_NAME,
+    GIT_REFS_TOOL_NAME,
+    JSON_QUERY_TOOL_NAME,
+    CHECKSUM_FILE_TOOL_NAME,
+    ARCHIVE_LIST_TOOL_NAME,
 )
 
 
@@ -712,6 +746,15 @@ class ProjectSession:
         git_log: GitLogTool | None = None,
         git_show: GitShowTool | None = None,
         web_search: WebSearchTool | None = None,
+        web_fetch: WebFetchTool | None = None,
+        compare_files: CompareFilesTool | None = None,
+        git_blame: GitBlameTool | None = None,
+        git_refs: GitRefsTool | None = None,
+        json_query: JsonQueryTool | None = None,
+        checksum_file: ChecksumFileTool | None = None,
+        archive_list: ArchiveListTool | None = None,
+        move_directory: MoveDirectoryTool | None = None,
+        download_file: DownloadFileTool | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -748,6 +791,15 @@ class ProjectSession:
         self._git_log = git_log or GitLogTool(workspace)
         self._git_show = git_show or GitShowTool(workspace)
         self._web_search = web_search or WebSearchTool()
+        self._web_fetch = web_fetch or WebFetchTool()
+        self._compare_files = compare_files or CompareFilesTool(workspace)
+        self._git_blame = git_blame or GitBlameTool(workspace)
+        self._git_refs = git_refs or GitRefsTool(workspace)
+        self._json_query = json_query or JsonQueryTool(workspace)
+        self._checksum_file = checksum_file or ChecksumFileTool(workspace)
+        self._archive_list = archive_list or ArchiveListTool(workspace)
+        self._move_directory = move_directory or MoveDirectoryTool(workspace)
+        self._download_file = download_file or DownloadFileTool(workspace)
         self._web_search.disable_sources()
         self._search_source_order = (
             ("provider",) if self._manager.status().native_search_available else ()
@@ -824,6 +876,15 @@ class ProjectSession:
         git_log_factory: Callable[[Path], GitLogTool] = GitLogTool,
         git_show_factory: Callable[[Path], GitShowTool] = GitShowTool,
         web_search_factory: Callable[[Mapping[str, str]], WebSearchTool] = WebSearchTool,
+        web_fetch_factory: Callable[[], WebFetchTool] = WebFetchTool,
+        compare_files_factory: Callable[[Path], CompareFilesTool] = CompareFilesTool,
+        git_blame_factory: Callable[[Path], GitBlameTool] = GitBlameTool,
+        git_refs_factory: Callable[[Path], GitRefsTool] = GitRefsTool,
+        json_query_factory: Callable[[Path], JsonQueryTool] = JsonQueryTool,
+        checksum_file_factory: Callable[[Path], ChecksumFileTool] = ChecksumFileTool,
+        archive_list_factory: Callable[[Path], ArchiveListTool] = ArchiveListTool,
+        move_directory_factory: Callable[[Path], MoveDirectoryTool] = MoveDirectoryTool,
+        download_file_factory: Callable[[Path], DownloadFileTool] = DownloadFileTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -882,6 +943,15 @@ class ProjectSession:
             git_log = git_log_factory(resolved_workspace)
             git_show = git_show_factory(resolved_workspace)
             web_search = web_search_factory(resolved_environment)
+            web_fetch = web_fetch_factory()
+            compare_files = compare_files_factory(resolved_workspace)
+            git_blame = git_blame_factory(resolved_workspace)
+            git_refs = git_refs_factory(resolved_workspace)
+            json_query = json_query_factory(resolved_workspace)
+            checksum_file = checksum_file_factory(resolved_workspace)
+            archive_list = archive_list_factory(resolved_workspace)
+            move_directory = move_directory_factory(resolved_workspace)
+            download_file = download_file_factory(resolved_workspace)
             project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
@@ -915,6 +985,15 @@ class ProjectSession:
                     git_log=git_log,
                     git_show=git_show,
                     web_search=web_search,
+                    web_fetch=web_fetch,
+                    compare_files=compare_files,
+                    git_blame=git_blame,
+                    git_refs=git_refs,
+                    json_query=json_query,
+                    checksum_file=checksum_file,
+                    archive_list=archive_list,
+                    move_directory=move_directory,
+                    download_file=download_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -939,6 +1018,12 @@ class ProjectSession:
                     git_diff,
                     git_log,
                     git_show,
+                    compare_files,
+                    git_blame,
+                    git_refs,
+                    json_query,
+                    checksum_file,
+                    archive_list,
                     commit_turn=lambda turn: session_holder["session"]._commit_turn(
                         writer_holder["writer"], turn
                     ),
@@ -989,6 +1074,15 @@ class ProjectSession:
                     git_log=git_log,
                     git_show=git_show,
                     web_search=web_search,
+                    web_fetch=web_fetch,
+                    compare_files=compare_files,
+                    git_blame=git_blame,
+                    git_refs=git_refs,
+                    json_query=json_query,
+                    checksum_file=checksum_file,
+                    archive_list=archive_list,
+                    move_directory=move_directory,
+                    download_file=download_file,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -2342,6 +2436,12 @@ class ProjectSession:
                     self._git_diff,
                     self._git_log,
                     self._git_show,
+                    self._compare_files,
+                    self._git_blame,
+                    self._git_refs,
+                    self._json_query,
+                    self._checksum_file,
+                    self._archive_list,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                     project_instructions_factory=self._project_instructions_loader.load,
                 )
@@ -3205,6 +3305,12 @@ class ProjectSession:
         git_diff,
         git_log,
         git_show,
+        compare_files,
+        git_blame,
+        git_refs,
+        json_query,
+        checksum_file,
+        archive_list,
         *,
         commit_turn,
         project_instructions_factory,
@@ -3223,6 +3329,12 @@ class ProjectSession:
             git_diff=git_diff,
             git_log=git_log,
             git_show=git_show,
+            compare_files=compare_files,
+            git_blame=git_blame,
+            git_refs=git_refs,
+            json_query=json_query,
+            checksum_file=checksum_file,
+            archive_list=archive_list,
             initial_history=state.history,
             initial_effective_history=state.effective_history,
             initial_effective_summary=state.effective_summary,
@@ -3246,6 +3358,12 @@ class ProjectSession:
             self._git_diff,
             self._git_log,
             self._git_show,
+            self._compare_files,
+            self._git_blame,
+            self._git_refs,
+            self._json_query,
+            self._checksum_file,
+            self._archive_list,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
             project_instructions_factory=self._project_instructions_loader.load,
         )
@@ -3512,6 +3630,9 @@ class ProjectSession:
         prepared_copy: PreparedCopyFile | None = None
         prepared_patch: PreparedPatchFile | None = None
         prepared_web_search: PreparedWebSearch | None = None
+        prepared_web_fetch: PreparedWebFetch | None = None
+        prepared_move_directory: PreparedMoveDirectory | None = None
+        prepared_download: PreparedDownloadFile | None = None
         if request.name in {
             READ_FILE_TOOL_NAME,
             GLOB_TOOL_NAME,
@@ -3525,6 +3646,12 @@ class ProjectSession:
             GIT_DIFF_TOOL_NAME,
             GIT_LOG_TOOL_NAME,
             GIT_SHOW_TOOL_NAME,
+            COMPARE_FILES_TOOL_NAME,
+            GIT_BLAME_TOOL_NAME,
+            GIT_REFS_TOOL_NAME,
+            JSON_QUERY_TOOL_NAME,
+            CHECKSUM_FILE_TOOL_NAME,
+            ARCHIVE_LIST_TOOL_NAME,
         }:
             action = PermissionAction.WORKSPACE_READ
             precondition = ActionPrecondition.none()
@@ -3605,6 +3732,27 @@ class ProjectSession:
                 return _invalid_tool_request(request, error)
             action = prepared_web_search.action
             precondition = prepared_web_search.precondition
+        elif request.name == WEB_FETCH_TOOL_NAME:
+            try:
+                prepared_web_fetch = self._web_fetch.prepare(request)
+            except WebFetchPreparationError as error:
+                return _invalid_tool_request(request, error)
+            action = prepared_web_fetch.action
+            precondition = prepared_web_fetch.precondition
+        elif request.name == MOVE_DIRECTORY_TOOL_NAME:
+            try:
+                prepared_move_directory = self._move_directory.prepare(request)
+            except MoveDirectoryPreparationError as error:
+                return _invalid_tool_request(request, error)
+            action = prepared_move_directory.action
+            precondition = prepared_move_directory.precondition
+        elif request.name == DOWNLOAD_FILE_TOOL_NAME:
+            try:
+                prepared_download = self._download_file.prepare(request)
+            except DownloadFilePreparationError as error:
+                return _invalid_tool_request(request, error)
+            action = prepared_download.action
+            precondition = prepared_download.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -3680,6 +3828,21 @@ class ProjectSession:
                 kind=ApprovalPreviewKind.WEB_SEARCH,
                 backend=prepared_web_search.backend.value,
             )
+        elif prepared_web_fetch is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.WEB_FETCH,
+            )
+        elif prepared_move_directory is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.DIRECTORY_MOVE,
+            )
+        elif prepared_download is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.FILE_DOWNLOAD,
+            )
         coordinator = ActionCoordinator(
             writer=self._writer,
             approval_handler=self._approval_handler,
@@ -3721,6 +3884,15 @@ class ProjectSession:
             if prepared_web_search is not None:
                 refreshed = self._web_search.revalidate(prepared_web_search)
                 return replace(current, precondition=refreshed)
+            if prepared_web_fetch is not None:
+                refreshed = self._web_fetch.revalidate(prepared_web_fetch)
+                return replace(current, precondition=refreshed)
+            if prepared_move_directory is not None:
+                refreshed = self._move_directory.refresh_precondition(prepared_move_directory)
+                return replace(current, precondition=refreshed)
+            if prepared_download is not None:
+                refreshed = self._download_file.refresh_precondition(prepared_download)
+                return replace(current, precondition=refreshed)
             return current
 
         def execute(current: ActionIdentity) -> ActionExecutionResult:
@@ -3752,6 +3924,18 @@ class ProjectSession:
                 result = self._git_log.execute(request)
             elif request.name == GIT_SHOW_TOOL_NAME:
                 result = self._git_show.execute(request)
+            elif request.name == COMPARE_FILES_TOOL_NAME:
+                result = self._compare_files.execute(request)
+            elif request.name == GIT_BLAME_TOOL_NAME:
+                result = self._git_blame.execute(request)
+            elif request.name == GIT_REFS_TOOL_NAME:
+                result = self._git_refs.execute(request)
+            elif request.name == JSON_QUERY_TOOL_NAME:
+                result = self._json_query.execute(request)
+            elif request.name == CHECKSUM_FILE_TOOL_NAME:
+                result = self._checksum_file.execute(request)
+            elif request.name == ARCHIVE_LIST_TOOL_NAME:
+                result = self._archive_list.execute(request)
             elif request.name == WRITE_FILE_TOOL_NAME and prepared_write is not None:
                 write_result = self._write_file.execute_detailed(prepared_write)
                 outcome = {
@@ -3887,6 +4071,47 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=search_result.result_code,
                     audit_message=search_result.audit_message,
+                )
+            elif request.name == WEB_FETCH_TOOL_NAME and prepared_web_fetch is not None:
+                fetch_result = self._web_fetch.execute_detailed(prepared_web_fetch)
+                outcome = {
+                    WebFetchOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    WebFetchOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    WebFetchOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[fetch_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=fetch_result.tool_result,
+                    outcome=outcome,
+                    result_code=fetch_result.result_code,
+                    audit_message=fetch_result.audit_message,
+                )
+            elif request.name == MOVE_DIRECTORY_TOOL_NAME and prepared_move_directory is not None:
+                move_directory_result = self._move_directory.execute_detailed(
+                    prepared_move_directory
+                )
+                outcome = {
+                    MoveDirectoryOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    MoveDirectoryOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    MoveDirectoryOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[move_directory_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=move_directory_result.tool_result,
+                    outcome=outcome,
+                    result_code=move_directory_result.result_code,
+                    audit_message=move_directory_result.audit_message,
+                )
+            elif request.name == DOWNLOAD_FILE_TOOL_NAME and prepared_download is not None:
+                download_result = self._download_file.execute_detailed(prepared_download)
+                outcome = {
+                    DownloadFileOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    DownloadFileOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    DownloadFileOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[download_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=download_result.tool_result,
+                    outcome=outcome,
+                    result_code=download_result.result_code,
+                    audit_message=download_result.audit_message,
                 )
             else:
                 result = ToolResult(

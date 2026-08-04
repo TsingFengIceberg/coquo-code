@@ -1341,6 +1341,15 @@ _TOOL_POLICY_LABELS = {
     "git_log": "workspace-read",
     "git_show": "workspace-read",
     "web_search": "network-read",
+    "web_fetch": "network-read",
+    "compare_files": "workspace-read",
+    "git_blame": "workspace-read",
+    "git_refs": "workspace-read",
+    "json_query": "workspace-read",
+    "checksum_file": "workspace-read",
+    "archive_list": "workspace-read",
+    "move_directory": "workspace-move",
+    "download_file": "network-write",
     "task_propose_plan": "task-control",
     "task_report_reflection": "task-control",
     "task_report_blocker": "task-control",
@@ -1374,6 +1383,15 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "git_log": "Current-HEAD-reachable history only; literal path, at most 50 commits, and 32 KiB output.",
     "git_show": "One full current-HEAD-reachable commit ID; bounded metadata/message and 64 KiB tracked patch.",
     "web_search": "Host-selected fixed Brave or Tavily HTTPS endpoint; 1-10 results, 15-second timeout, 256 KiB response, and 32 KiB JSONL output.",
+    "web_fetch": "Public HTTP(S) GET only; standard ports, public DNS/IP pinning, 5 redirects, 20-second timeout, 512 KiB response, and 64 KiB output.",
+    "compare_files": "Two existing UTF-8 regular files up to 1 MiB each; no symlinks; bounded 64 KiB unified diff.",
+    "git_blame": "Current HEAD only; one literal workspace path, 1-200 lines, no external diff or arbitrary revision, and 32 KiB output.",
+    "git_refs": "Current HEAD, local branches, and tags only; at most 200 refs and 32 KiB output.",
+    "json_query": "Strict UTF-8 JSON up to 1 MiB; RFC 6901 pointer, duplicate/non-finite rejection, 128 segments, and 32 KiB output.",
+    "checksum_file": "Streams SHA-256 for one regular workspace file up to 256 MiB without following symlinks.",
+    "archive_list": "ZIP or uncompressed TAR metadata only; no extraction; 64 MiB archive, 1,000 entries, and 32 KiB output.",
+    "move_directory": "Atomic no-replace same-filesystem directory-tree rename; rejects symlinks, descendants, stale state, and unsupported platforms.",
+    "download_file": "Public HTTP(S) GET to one regular workspace file; 5 redirects, 30-second timeout, 16 MiB body, exact-state recheck, and atomic install.",
     "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
     "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
     "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",
@@ -1402,7 +1420,7 @@ def render_tool_catalog(status: ProjectStatusView, tool_name: str | None = None)
             (
                 f"Tool {index}/{len(TOOL_CATALOG)}: {definition.name}",
                 f"Permission class: {policy}",
-                f"Current policy: {_tool_policy_availability(policy, status)}",
+                f"Current policy: {_tool_policy_availability(policy, status, definition.name)}",
                 "Arguments:",
                 *_render_tool_arguments(definition.as_mapping()),
                 f"Hard boundaries: {_TOOL_HARD_BOUND_SUMMARIES[definition.name]}",
@@ -1416,7 +1434,7 @@ def render_tool_catalog(status: ProjectStatusView, tool_name: str | None = None)
     ]
     for index, definition in enumerate(TOOL_CATALOG, start=1):
         policy = _TOOL_POLICY_LABELS[definition.name]
-        availability = _tool_policy_availability(policy, status)
+        availability = _tool_policy_availability(policy, status, definition.name)
         lines.append(f"{index:>2}. {definition.name}: {policy}; {availability}")
     lines.append(
         "Use /tools for durable per-turn tool ledgers and /tools details for request outcomes."
@@ -1456,6 +1474,7 @@ def render_permission_matrix(
         PermissionAction.WORKSPACE_MOVE,
         PermissionAction.WORKSPACE_DELETE,
         PermissionAction.NETWORK_READ,
+        PermissionAction.NETWORK_WRITE,
         PermissionAction.DANGEROUS,
     ):
         result = gate.evaluate(PermissionRequest(selected_permission, selected_approval, action))
@@ -1464,14 +1483,16 @@ def render_permission_matrix(
         (
             "read-only: workspace reads only; external network access is denied.",
             "workspace-write: reads and bounded workspace mutations; network and dangerous commands remain denied.",
-            "danger-full-access: includes approved network reads and dangerous actions, while run_command still requires its Linux sandbox.",
+            "danger-full-access: includes approved network reads, network writes, and dangerous actions, while run_command still requires its Linux sandbox.",
             "Change startup policy with --permission-mode and --approval; this command never mutates it.",
         )
     )
     return "\n".join(lines)
 
 
-def _tool_policy_availability(policy: str, status: ProjectStatusView) -> str:
+def _tool_policy_availability(
+    policy: str, status: ProjectStatusView, tool_name: str | None = None
+) -> str:
     mode = getattr(status.permission_mode, "value", str(status.permission_mode))
     approval = getattr(status.approval_mode, "value", str(status.approval_mode))
     if policy == "workspace-read":
@@ -1491,7 +1512,13 @@ def _tool_policy_availability(policy: str, status: ProjectStatusView) -> str:
     if policy == "network-read":
         if mode != "danger-full-access":
             return "denied by current permission mode"
-        return f"available ({approval}; BRAVE_SEARCH_API_KEY or TAVILY_API_KEY required)"
+        if tool_name == "web_search":
+            return f"available ({approval}; BRAVE_SEARCH_API_KEY or TAVILY_API_KEY required)"
+        return f"available ({approval})"
+    if policy == "network-write":
+        if mode != "danger-full-access":
+            return "denied by current permission mode"
+        return f"available ({approval})"
     if mode == "read-only":
         return "denied by current permission mode"
     return f"available ({approval})"

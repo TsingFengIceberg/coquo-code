@@ -407,36 +407,76 @@ def web_search_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[21])
 
 
+def _named_compatible_tool_definition(name: str) -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions((name,))[0])
+
+
+def web_fetch_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("web_fetch")
+
+
+def compare_files_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("compare_files")
+
+
+def git_blame_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("git_blame")
+
+
+def git_refs_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("git_refs")
+
+
+def json_query_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("json_query")
+
+
+def checksum_file_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("checksum_file")
+
+
+def archive_list_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("archive_list")
+
+
+def move_directory_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("move_directory")
+
+
+def download_file_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("download_file")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[22])
+    return _named_compatible_tool_definition("task_propose_plan")
 
 
 def task_report_reflection_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[23])
+    return _named_compatible_tool_definition("task_report_reflection")
 
 
 def task_report_blocker_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[24])
+    return _named_compatible_tool_definition("task_report_blocker")
 
 
 def task_propose_completion_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[25])
+    return _named_compatible_tool_definition("task_propose_completion")
 
 
 def task_propose_start_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[26])
+    return _named_compatible_tool_definition("task_propose_start")
 
 
 def task_accept_admission_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[27])
+    return _named_compatible_tool_definition("task_accept_admission")
 
 
 def task_accept_plan_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[28])
+    return _named_compatible_tool_definition("task_accept_plan")
 
 
 def task_confirm_completion_tool_definition() -> dict[str, object]:
-    return _compatible_tool_definition(model_tool_definitions()[29])
+    return _named_compatible_tool_definition("task_confirm_completion")
 
 
 def model_tool_definitions_for_openai(

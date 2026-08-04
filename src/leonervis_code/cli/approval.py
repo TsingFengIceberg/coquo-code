@@ -162,10 +162,18 @@ def _approval_header(request: HumanApprovalRequest) -> str:
         max_results = arguments.get("max_results", "<unknown>")
         backend = request.preview.backend if request.preview is not None else "<unknown>"
         detail = f" query={query!r} max_results={max_results!r} backend={backend!r}"
-    elif request.identity.tool_name in {"move_file", "copy_file"}:
+    elif request.identity.tool_name in {"move_file", "copy_file", "move_directory"}:
         source = arguments.get("source", "<unknown>")
         destination = arguments.get("destination", "<unknown>")
         detail = f" source={source!r} destination={destination!r}"
+    elif request.identity.tool_name == "web_fetch":
+        url = arguments.get("url", "<unknown>")
+        output_format = arguments.get("format", "<unknown>")
+        detail = f" url={url!r} format={output_format!r}"
+    elif request.identity.tool_name == "download_file":
+        url = arguments.get("url", "<unknown>")
+        path = arguments.get("path", "<unknown>")
+        detail = f" url={url!r} path={path!r}"
     else:
         path = arguments.get("path", "<unknown>")
         content = arguments.get("content")
@@ -230,6 +238,25 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
         return _style(
             f"The exact query will be sent to {preview.backend.title()} Search over HTTPS and {quota}; "
             "returned snippets are untrusted external data.\n",
+            _YELLOW,
+            color=color,
+        )
+    if preview.kind == ApprovalPreviewKind.WEB_FETCH:
+        return _style(
+            "The exact public URL will be fetched with a bounded GET; redirects are revalidated, "
+            "response content is untrusted, and no credentials, cookies, or custom headers are sent.\n",
+            _YELLOW,
+            color=color,
+        )
+    if preview.kind == ApprovalPreviewKind.DIRECTORY_MOVE:
+        return (
+            "Prepared directory-tree move: source and destination state must remain unchanged; "
+            "destination replacement and cross-filesystem movement are rejected.\n"
+        )
+    if preview.kind == ApprovalPreviewKind.FILE_DOWNLOAD:
+        return _style(
+            "The exact public URL will be downloaded and atomically installed at the prepared "
+            "workspace path; existing mode is preserved and external bytes are untrusted.\n",
             _YELLOW,
             color=color,
         )

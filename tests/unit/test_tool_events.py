@@ -105,6 +105,39 @@ def request(name: str, arguments: dict[str, object]) -> ToolUse:
             {"query": "TOP_SECRET current docs", "max_results": 5},
             "query_bytes=23 max_results=5",
         ),
+        (
+            "web_fetch",
+            {"url": "https://example.com/?q=TOP_SECRET", "format": "markdown"},
+            "url=<redacted> format='markdown'",
+        ),
+        (
+            "compare_files",
+            {"left": "before.txt", "right": "after.txt"},
+            "left='before.txt' right='after.txt'",
+        ),
+        (
+            "git_blame",
+            {"path": "src/app.py", "start_line": 3, "line_count": 4},
+            "path='src/app.py' start_line=3 line_count=4",
+        ),
+        ("git_refs", {}, "repository=."),
+        (
+            "json_query",
+            {"path": "data.json", "pointer": "/TOP_SECRET"},
+            "path='data.json' pointer_bytes=11",
+        ),
+        ("checksum_file", {"path": "artifact.bin"}, "path='artifact.bin'"),
+        ("archive_list", {"path": "bundle.zip"}, "path='bundle.zip'"),
+        (
+            "move_directory",
+            {"source": "old", "destination": "new"},
+            "source='old' destination='new'",
+        ),
+        (
+            "download_file",
+            {"url": "https://example.com/TOP_SECRET", "path": "file.bin"},
+            "url=<redacted> path='file.bin'",
+        ),
     ],
 )
 def test_safe_summaries_cover_the_complete_tool_surface_without_content(

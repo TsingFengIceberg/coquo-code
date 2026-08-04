@@ -13,7 +13,7 @@ from leonervis_code.providers.native_search import (
 )
 
 
-ADAPTER_CONTRACT_VERSION = 35
+ADAPTER_CONTRACT_VERSION = 36
 
 
 class WireProtocol(StrEnum):

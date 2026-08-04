@@ -184,6 +184,8 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         "/tools catalog git_diff",
         "/tools catalog git_log",
         "/tools catalog git_show",
+        "/tools catalog git_blame",
+        "/tools catalog git_refs",
     ]
     action_statuses = [
         completion.text
@@ -199,6 +201,8 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
         "/actions tool=git_diff",
         "/actions tool=git_log",
         "/actions tool=git_show",
+        "/actions tool=git_blame",
+        "/actions tool=git_refs",
     ]
     assert list(completer.get_completions(Document("/h\ntext"), event)) == []
     assert list(completer.get_completions(Document("ordinary"), event)) == []

@@ -1171,6 +1171,14 @@ Responses stream以语义event的terminal response object为最终真相，增�
 
 有序来源现在表示primary加显式的model-mediated fallback：`/search use provider tavily`保持Provider搜索为primary，同时把Tavily支持的Host `web_search`暴露为fallback。模型只有在同一history观察到Provider搜索失败或结构化citation不可用后才能请求它；Host不猜query、不自动请求、不并行fan-out，也不绕过`network-read`、PermissionGate、approval、Action Audit、额度提示或普通预算。Canonical system prompt升级v32，provider adapter contract升级v35；Effective Context representation仍为`ctx-v7`/`ctx-v8`，但current empty full-context ID更新为`ctx-v7-3ac4ba4e6ffa39c1184cfff6cc4200eb30607553fdf886451c0d967765ff0432`。其他持久schema不变。详见[0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)。
 
+## Bounded Fetch、Structured Read 与 Controlled Transfer Tools
+
+普通工具新增`web_fetch`、`compare_files`、`git_blame`、`git_refs`、`json_query`、`checksum_file`、`archive_list`、`move_directory`和`download_file`。Provider adapter不再用易漂移的catalog数字下标映射Task工具，而是按canonical名称选择schema；Anthropic Messages、OpenAI Chat Completions与OpenAI Responses继续投影同一套provider-neutral定义。六个本地观察工具统一属于`workspace-read`：它们分别限制UTF-8 diff、current-HEAD blame、local refs、strict JSON Pointer、256 MiB流式SHA-256及ZIP/未压缩TAR只读metadata，均不执行任意命令或archive extraction。
+
+`web_fetch`与`download_file`共享一个标准库public-web GET transport：仅HTTP(S)标准端口，拒绝credential URL及任何非public或混合DNS结果，连接固定到已验证IP且保留Host/TLS hostname，每次redirect重新验证，禁止proxy、cookie、auth、body、自定义header、压缩响应与JavaScript。`web_fetch`是`network-read`，最多20秒、512 KiB body与64 KiB输出；`download_file`把远端读取和workspace原子安装合并成一个`network-write`，最多30秒与16 MiB，并在网络前后复查目标状态。`network-write`在read-only/workspace-write均deny，只有danger-full-access按ask/auto继续。
+
+`move_directory`使用Linux `renameat2(RENAME_NOREPLACE)`，只允许同文件系统移动到missing destination，拒绝symlink parent、descendant destination、replacement、stale state和不支持原子no-replace的平台。三类新action都有独立ApprovalPreview v3；Routine terminal摘要继续隐藏URL、query、pointer和正文，ask审批则显示授权所需的exact URL/path。Transport或durability不确定性保持partial且不得自动retry。Canonical system prompt升级v33，provider adapter contract升级v36，empty full-context ID变为`ctx-v7-d9d80c3188613943154a2c3f8df40062d52ff14fdb19b3b8628d557e81e13c95`；Effective Context仍为`ctx-v7`/`ctx-v8`，所有持久schema及旧transcript replay不变。详见[0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1278,3 +1286,4 @@ Responses stream以语义event的terminal response object为最终真相，增�
 103. [0103：Provider-native Web Search](./decisions/0103-provider-native-web-search.md)
 104. [0104：OpenAI Responses Protocol and Provider-owned History](./decisions/0104-openai-responses-protocol-and-provider-owned-history.md)
 105. [0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)
+106. [0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)

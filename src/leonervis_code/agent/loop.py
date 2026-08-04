@@ -77,6 +77,9 @@ from leonervis_code.tools.catalog import (
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_CATALOG,
 )
+from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
+from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
+from leonervis_code.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
 from leonervis_code.tools.glob import GLOB_TOOL_NAME, GlobTool
 from leonervis_code.tools.grep import GREP_TOOL_NAME, GrepTool
 from leonervis_code.tools.grep_regex import GREP_REGEX_TOOL_NAME, GrepRegexTool
@@ -84,6 +87,9 @@ from leonervis_code.tools.git_diff import GIT_DIFF_TOOL_NAME, GitDiffTool
 from leonervis_code.tools.git_log import GIT_LOG_TOOL_NAME, GitLogTool
 from leonervis_code.tools.git_show import GIT_SHOW_TOOL_NAME, GitShowTool
 from leonervis_code.tools.git_status import GIT_STATUS_TOOL_NAME, GitStatusTool
+from leonervis_code.tools.git_blame import GIT_BLAME_TOOL_NAME, GitBlameTool
+from leonervis_code.tools.git_refs import GIT_REFS_TOOL_NAME, GitRefsTool
+from leonervis_code.tools.json_query import JSON_QUERY_TOOL_NAME, JsonQueryTool
 from leonervis_code.tools.list_directory import LIST_DIRECTORY_TOOL_NAME, ListDirectoryTool
 from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
@@ -178,6 +184,12 @@ class AgentLoop:
         git_diff: GitDiffTool | None = None,
         git_log: GitLogTool | None = None,
         git_show: GitShowTool | None = None,
+        compare_files: CompareFilesTool | None = None,
+        git_blame: GitBlameTool | None = None,
+        git_refs: GitRefsTool | None = None,
+        json_query: JsonQueryTool | None = None,
+        checksum_file: ChecksumFileTool | None = None,
+        archive_list: ArchiveListTool | None = None,
         initial_history: tuple[ConversationItem, ...] = (),
         initial_effective_history: tuple[ConversationItem, ...] | None = None,
         initial_effective_summary: EffectiveContextSummary | None = None,
@@ -201,6 +213,12 @@ class AgentLoop:
         self._git_diff = git_diff
         self._git_log = git_log
         self._git_show = git_show
+        self._compare_files = compare_files
+        self._git_blame = git_blame
+        self._git_refs = git_refs
+        self._json_query = json_query
+        self._checksum_file = checksum_file
+        self._archive_list = archive_list
         restored = validate_complete_history(initial_history)
         effective_items = (
             restored.history if initial_effective_history is None else initial_effective_history
@@ -775,6 +793,18 @@ class AgentLoop:
             result = self._git_log.execute(request)
         elif request.name == GIT_SHOW_TOOL_NAME and self._git_show is not None:
             result = self._git_show.execute(request)
+        elif request.name == COMPARE_FILES_TOOL_NAME and self._compare_files is not None:
+            result = self._compare_files.execute(request)
+        elif request.name == GIT_BLAME_TOOL_NAME and self._git_blame is not None:
+            result = self._git_blame.execute(request)
+        elif request.name == GIT_REFS_TOOL_NAME and self._git_refs is not None:
+            result = self._git_refs.execute(request)
+        elif request.name == JSON_QUERY_TOOL_NAME and self._json_query is not None:
+            result = self._json_query.execute(request)
+        elif request.name == CHECKSUM_FILE_TOOL_NAME and self._checksum_file is not None:
+            result = self._checksum_file.execute(request)
+        elif request.name == ARCHIVE_LIST_TOOL_NAME and self._archive_list is not None:
+            result = self._archive_list.execute(request)
         else:
             result = ToolResult(
                 tool_use_id=request.tool_use_id,
