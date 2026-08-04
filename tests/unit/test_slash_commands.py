@@ -56,6 +56,11 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
 from leonervis_code.tools.run_command import CommandSandboxInspection
 from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.web_search import (
+    BRAVE_SEARCH_API_KEY_ENV,
+    TAVILY_SEARCH_API_KEY_ENV,
+    WebSearchTool,
+)
 from leonervis_code.task_records import (
     AcceptanceCheckOutcome,
     AcceptanceVerificationSource,
@@ -100,6 +105,12 @@ class Session:
         self.archived = False
         self.pinned = False
         self.tasks = []
+        self.web_search = WebSearchTool(
+            {
+                BRAVE_SEARCH_API_KEY_ENV: "brave-secret",
+                TAVILY_SEARCH_API_KEY_ENV: "tavily-secret",
+            }
+        )
         proposal = TaskAdmissionProposal.from_request(
             ToolUse(
                 "admission-1",
@@ -180,6 +191,15 @@ class Session:
 
     def inspect_project_instructions(self):
         return None
+
+    def inspect_web_search_sources(self):
+        return self.web_search.source_configuration()
+
+    def set_web_search_sources(self, sources):
+        return self.web_search.configure_sources(sources)
+
+    def reset_web_search_sources(self):
+        return self.web_search.reset_source_configuration()
 
     def compact_context(self):
         return CompactContextResult(
@@ -679,13 +699,15 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "/task proposal accept <admission-id> confirm <sha256>" in task_help
     assert "/task proposal drive <admission-id> [1-16]" in task_help
     assert "Provider commands:" in dispatch_slash("/provider", session).message
+    assert "Search source commands:" in dispatch_slash("/search", session).message
     assert "Host command groups:" in dispatch_slash("/help", session).message
     assert "Tool and audit commands:" in dispatch_slash("/help tools", session).message
     assert "Read-only Git commands:" in dispatch_slash("/help git", session).message
     assert "Input controls:" in dispatch_slash("/help input", session).message
     assert "Policy commands:" in dispatch_slash("/help policy", session).message
+    assert "Search source commands:" in dispatch_slash("/help search", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|task|tools|git|context|provider|policy|input]"
+        "Usage: /help [session|task|tools|git|context|provider|search|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -733,10 +755,12 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Command sandbox: ready; activation verified" in permissions
     assert "Permission decisions describe policy only" in permissions
     assert "workspace-create: ask (approval_required_workspace_create)" in permissions
+    assert "network-read: ask (approval_required_network_read)" in permissions
     assert "dangerous: ask (approval_required_dangerous)" in permissions
     preview = dispatch_slash("/permissions workspace-write auto", session).message
     assert "Policy preview (not applied): permission=workspace-write, approval=auto" in preview
     assert "workspace-create: allow (allowed_workspace_create_auto)" in preview
+    assert "network-read: deny (denied_network_access_mode)" in preview
     assert "dangerous: deny (denied_workspace_write_mode)" in preview
     assert session.project_status().permission_mode == PermissionMode.DANGER_FULL_ACCESS
     permissions_usage = (
@@ -825,6 +849,10 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
+    assert (
+        "22. web_search: network-read; available "
+        "(ask; BRAVE_SEARCH_API_KEY or TAVILY_API_KEY required)" in catalog
+    )
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
@@ -1314,6 +1342,82 @@ def test_valid_provider_commands_and_history(tmp_path) -> None:
     assert history.message == "User: hello\nAssistant: reply"
     assert dispatch_slash("/history 0", session).kind == "warning"
     assert session.prompts == []
+
+
+def test_search_commands_switch_primary_and_reserve_ordered_multi_source_activation(
+    tmp_path,
+) -> None:
+    session = Session(tmp_path)
+
+    initial = dispatch_slash("/search status", session)
+    assert initial.kind == "info"
+    assert "brave: available" in initial.message
+    assert "tavily: available" in initial.message
+    assert "Active order: none" in initial.message
+
+    multiple = dispatch_slash("/search use tavily brave", session)
+    assert multiple.kind == "success"
+    assert "tavily: available, active, primary" in multiple.message
+    assert "brave: available, active" in multiple.message
+    assert "Active order: tavily, brave" in multiple.message
+    assert "Current execution: primary-only (tavily)" in multiple.message
+    assert "does not query or merge them" in multiple.message
+
+    switched = dispatch_slash("/search use brave", session)
+    assert switched.kind == "success"
+    assert "Active order: brave" in switched.message
+    assert "Current execution: primary-only (brave)" in switched.message
+    assert dispatch_slash("/search sources", session).message == switched.message
+
+    reset = dispatch_slash("/search reset", session)
+    assert reset.kind == "success"
+    assert "Active order: none" in reset.message
+    assert "Configuration issue:" in reset.message
+
+    for invalid in (
+        "/search use",
+        "/search use unknown",
+        "/search use tavily tavily",
+        "/search status extra",
+        "/search reset extra",
+    ):
+        assert dispatch_slash(invalid, session).kind == "warning"
+    typo = dispatch_slash("/search us tavily", session)
+    assert "Unknown search command: us" in typo.message
+    assert "Did you mean use?" in typo.message
+    assert session.prompts == []
+
+
+def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_write_session(
+    tmp_path,
+) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={TAVILY_SEARCH_API_KEY_ENV: "tavily-secret"},
+    )
+    transcript = session.transcript_path
+    before = (
+        transcript.read_bytes(),
+        session.history,
+        session.action_audits(),
+        session.usage(),
+    )
+    try:
+        inspected = dispatch_slash("/search status", session)
+        assert inspected.kind == "info"
+        assert "tavily: available, active, primary" in inspected.message
+
+        selected = dispatch_slash("/search use tavily", session)
+        assert selected.kind == "success"
+        assert "Selection source: runtime" in selected.message
+        assert (
+            transcript.read_bytes(),
+            session.history,
+            session.action_audits(),
+            session.usage(),
+        ) == before
+    finally:
+        session.close()
 
 
 def test_prefixes_remain_unknown_top_level_or_group_commands(tmp_path) -> None:

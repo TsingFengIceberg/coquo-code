@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from leonervis_code.core.approval_preview import (
+    APPROVAL_PREVIEW_VERSION,
     MAX_APPROVAL_DIFF_BYTES,
     MAX_APPROVAL_DIFF_LINES,
     ApprovalPreview,
@@ -83,6 +84,45 @@ def test_metadata_preview_rejects_file_change_without_a_diff() -> None:
         build_metadata_preview(
             action_digest=ACTION_DIGEST,
             kind=ApprovalPreviewKind.FILE_CHANGE,
+        )
+
+
+def test_web_search_preview_requires_a_supported_backend() -> None:
+    tavily = build_metadata_preview(
+        action_digest=ACTION_DIGEST,
+        kind=ApprovalPreviewKind.WEB_SEARCH,
+        backend="tavily",
+    )
+    assert tavily.backend == "tavily"
+    assert tavily.version == APPROVAL_PREVIEW_VERSION == 2
+    assert (
+        build_metadata_preview(
+            action_digest=ACTION_DIGEST,
+            kind=ApprovalPreviewKind.WEB_SEARCH,
+            backend="brave",
+        ).backend
+        == "brave"
+    )
+
+    for backend in (None, "other"):
+        with pytest.raises(ValueError, match="backend"):
+            build_metadata_preview(
+                action_digest=ACTION_DIGEST,
+                kind=ApprovalPreviewKind.WEB_SEARCH,
+                backend=backend,
+            )
+    with pytest.raises(ValueError, match="does not match"):
+        build_metadata_preview(
+            action_digest=ACTION_DIGEST,
+            kind=ApprovalPreviewKind.COMMAND,
+            backend="tavily",
+        )
+    with pytest.raises(ValueError, match="version"):
+        ApprovalPreview(
+            action_digest=ACTION_DIGEST,
+            kind=ApprovalPreviewKind.WEB_SEARCH,
+            backend="tavily",
+            version=1,
         )
 
 

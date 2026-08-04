@@ -37,6 +37,7 @@ def test_permission_contract_values_are_stable() -> None:
         "workspace-overwrite",
         "workspace-move",
         "workspace-delete",
+        "network-read",
         "dangerous",
         "unknown",
     ]
@@ -47,14 +48,17 @@ def test_permission_contract_values_are_stable() -> None:
         "allowed_workspace_overwrite_auto",
         "allowed_workspace_move_auto",
         "allowed_workspace_delete_auto",
+        "allowed_network_read_auto",
         "allowed_dangerous_auto",
         "approval_required_workspace_create",
         "approval_required_workspace_overwrite",
         "approval_required_workspace_move",
         "approval_required_workspace_delete",
+        "approval_required_network_read",
         "approval_required_dangerous",
         "denied_read_only_mode",
         "denied_workspace_write_mode",
+        "denied_network_access_mode",
         "denied_unknown_action",
     ]
 
@@ -143,6 +147,31 @@ def test_dangerous_actions_require_danger_full_access() -> None:
     ) == PermissionResult(
         PermissionDecision.ALLOW,
         PermissionReason.ALLOWED_DANGEROUS_AUTO,
+    )
+
+
+def test_network_reads_require_danger_full_access_and_follow_approval_mode() -> None:
+    gate = PermissionGate()
+
+    for permission_mode in (PermissionMode.READ_ONLY, PermissionMode.WORKSPACE_WRITE):
+        for approval_mode in ApprovalMode:
+            assert gate.evaluate(
+                request(PermissionAction.NETWORK_READ, permission_mode, approval_mode)
+            ) == PermissionResult(
+                PermissionDecision.DENY,
+                PermissionReason.DENIED_NETWORK_ACCESS_MODE,
+            )
+    assert gate.evaluate(
+        request(PermissionAction.NETWORK_READ, PermissionMode.DANGER_FULL_ACCESS, ApprovalMode.ASK)
+    ) == PermissionResult(
+        PermissionDecision.ASK,
+        PermissionReason.APPROVAL_REQUIRED_NETWORK_READ,
+    )
+    assert gate.evaluate(
+        request(PermissionAction.NETWORK_READ, PermissionMode.DANGER_FULL_ACCESS, ApprovalMode.AUTO)
+    ) == PermissionResult(
+        PermissionDecision.ALLOW,
+        PermissionReason.ALLOWED_NETWORK_READ_AUTO,
     )
 
 

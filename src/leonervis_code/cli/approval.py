@@ -157,6 +157,11 @@ def _approval_header(request: HumanApprovalRequest) -> str:
         timeout = arguments.get("timeout_seconds")
         rendered_argv = repr(tuple(argv)) if isinstance(argv, list) else "<unknown>"
         detail = f" argv={rendered_argv} cwd={cwd!r} timeout={timeout!r}s"
+    elif request.identity.tool_name == "web_search":
+        query = arguments.get("query", "<unknown>")
+        max_results = arguments.get("max_results", "<unknown>")
+        backend = request.preview.backend if request.preview is not None else "<unknown>"
+        detail = f" query={query!r} max_results={max_results!r} backend={backend!r}"
     elif request.identity.tool_name in {"move_file", "copy_file"}:
         source = arguments.get("source", "<unknown>")
         destination = arguments.get("destination", "<unknown>")
@@ -213,6 +218,18 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
         return _style(
             "Direct argv execution without shell parsing or rollback; Linux sandbox keeps the "
             "Host filesystem read-only, the workspace writable, and socket creation denied.\n",
+            _YELLOW,
+            color=color,
+        )
+    if preview.kind == ApprovalPreviewKind.WEB_SEARCH:
+        quota = (
+            "consumes one basic-search API credit"
+            if preview.backend == "tavily"
+            else "may consume API quota"
+        )
+        return _style(
+            f"The exact query will be sent to {preview.backend.title()} Search over HTTPS and {quota}; "
+            "returned snippets are untrusted external data.\n",
             _YELLOW,
             color=color,
         )

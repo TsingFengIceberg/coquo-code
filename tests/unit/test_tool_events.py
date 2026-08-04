@@ -100,6 +100,11 @@ def request(name: str, arguments: dict[str, object]) -> ToolUse:
             {"commit_id": "a" * 40, "path": "src/app.py"},
             f"commit='{'a' * 40}' path='src/app.py'",
         ),
+        (
+            "web_search",
+            {"query": "TOP_SECRET current docs", "max_results": 5},
+            "query_bytes=23 max_results=5",
+        ),
     ],
 )
 def test_safe_summaries_cover_the_complete_tool_surface_without_content(

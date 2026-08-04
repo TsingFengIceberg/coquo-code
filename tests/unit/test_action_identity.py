@@ -36,6 +36,7 @@ GRANT_ID = "42345678-1234-4234-9234-123456789abc"
 CONTEXT_ID = f"ctx-v1-{'1' * 64}"
 WORKSPACE_FINGERPRINT = f"v1-{'2' * 64}"
 STATE_FINGERPRINT = "3" * 64
+CONFIGURATION_FINGERPRINT = "4" * 64
 
 
 def identity(**changes) -> ActionIdentity:
@@ -106,6 +107,7 @@ def test_action_identity_is_canonical_round_trippable_and_has_stable_digest() ->
             )
         ),
         identity(precondition=ActionPrecondition.expected_state(STATE_FINGERPRINT)),
+        identity(precondition=ActionPrecondition.expected_configuration(CONFIGURATION_FINGERPRINT)),
     ],
 )
 def test_every_exact_action_component_changes_the_digest(changed: ActionIdentity) -> None:
@@ -122,8 +124,13 @@ def test_action_contracts_are_frozen_and_reject_untyped_or_malformed_values() ->
         ActionPrecondition("none")
     with pytest.raises(ValueError, match="requires"):
         ActionPrecondition(ActionPreconditionKind.EXPECTED_STATE_SHA256)
+    with pytest.raises(ValueError, match="requires"):
+        ActionPrecondition(ActionPreconditionKind.EXPECTED_CONFIGURATION_SHA256)
     with pytest.raises(ValueError, match="must be null"):
         ActionPrecondition(ActionPreconditionKind.NONE, STATE_FINGERPRINT)
+    assert ActionPrecondition.from_mapping(
+        ActionPrecondition.expected_configuration(CONFIGURATION_FINGERPRINT).as_mapping()
+    ) == ActionPrecondition.expected_configuration(CONFIGURATION_FINGERPRINT)
     with pytest.raises(ValueError, match="runtime generation"):
         ActionLease(SESSION_ID, LEASE_ID, True, CONTEXT_ID)
     with pytest.raises(ValueError, match="context ID"):

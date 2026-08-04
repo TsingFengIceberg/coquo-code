@@ -120,6 +120,7 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.edit_file import EditFileTool
 from leonervis_code.tools.write_file import WriteFileTool
+from leonervis_code.tools.web_search import WebSearchTool
 
 
 def nonblank_prompt(value: str) -> str:
@@ -1309,6 +1310,7 @@ def main(
             copy_file_factory=CopyFileTool,
             delete_file_factory=DeleteFileTool,
             delete_directory_factory=DeleteDirectoryTool,
+            web_search_factory=WebSearchTool,
             permission_mode=PermissionMode(arguments.permission_mode),
             approval_mode=ApprovalMode(arguments.approval),
             approval_handler=approval_handler,

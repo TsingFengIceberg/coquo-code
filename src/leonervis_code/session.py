@@ -323,6 +323,14 @@ from leonervis_code.tools.write_file import (
     WriteFileTool,
 )
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
+from leonervis_code.tools.web_search import (
+    WEB_SEARCH_TOOL_NAME,
+    PreparedWebSearch,
+    WebSearchOutcome,
+    WebSearchPreparationError,
+    WebSearchSourceConfiguration,
+    WebSearchTool,
+)
 from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_CALLS_PER_RESPONSE,
@@ -343,6 +351,7 @@ _TASK_PLANNING_READ_TOOL_NAMES = (
     GIT_DIFF_TOOL_NAME,
     GIT_LOG_TOOL_NAME,
     GIT_SHOW_TOOL_NAME,
+    WEB_SEARCH_TOOL_NAME,
 )
 
 
@@ -696,6 +705,7 @@ class ProjectSession:
         git_diff: GitDiffTool | None = None,
         git_log: GitLogTool | None = None,
         git_show: GitShowTool | None = None,
+        web_search: WebSearchTool | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -731,6 +741,7 @@ class ProjectSession:
         self._git_diff = git_diff or GitDiffTool(workspace)
         self._git_log = git_log or GitLogTool(workspace)
         self._git_show = git_show or GitShowTool(workspace)
+        self._web_search = web_search or WebSearchTool()
         self._project_instructions_loader = (
             project_instructions_loader or ProjectInstructionsLoader(workspace)
         )
@@ -801,6 +812,7 @@ class ProjectSession:
         git_diff_factory: Callable[[Path], GitDiffTool] = GitDiffTool,
         git_log_factory: Callable[[Path], GitLogTool] = GitLogTool,
         git_show_factory: Callable[[Path], GitShowTool] = GitShowTool,
+        web_search_factory: Callable[[Mapping[str, str]], WebSearchTool] = WebSearchTool,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -858,6 +870,7 @@ class ProjectSession:
             git_diff = git_diff_factory(resolved_workspace)
             git_log = git_log_factory(resolved_workspace)
             git_show = git_show_factory(resolved_workspace)
+            web_search = web_search_factory(resolved_environment)
             project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
@@ -890,6 +903,7 @@ class ProjectSession:
                     git_diff=git_diff,
                     git_log=git_log,
                     git_show=git_show,
+                    web_search=web_search,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -963,6 +977,7 @@ class ProjectSession:
                     git_diff=git_diff,
                     git_log=git_log,
                     git_show=git_show,
+                    web_search=web_search,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -2545,6 +2560,26 @@ class ProjectSession:
                 committed_context=self._loop.effective_context_snapshot(),
             )
 
+    def inspect_web_search_sources(self) -> WebSearchSourceConfiguration:
+        """Inspect process-local search source activation without provider or Session work."""
+        with self._lock:
+            self._ensure_open()
+            return self._web_search.source_configuration()
+
+    def set_web_search_sources(self, sources: tuple[str, ...]) -> WebSearchSourceConfiguration:
+        """Activate ordered sources; current execution uses the first source only."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._web_search.configure_sources(sources)
+
+    def reset_web_search_sources(self) -> WebSearchSourceConfiguration:
+        """Restore source selection derived from the startup environment."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._web_search.reset_source_configuration()
+
     def compact_context(self) -> CompactContextResult:
         """Run the shared controlled-compaction transaction manually."""
         prepared = self._prepare_compaction(CompactionTrigger.MANUAL)
@@ -3346,6 +3381,7 @@ class ProjectSession:
         prepared_delete_directory: PreparedDeleteDirectory | None = None
         prepared_copy: PreparedCopyFile | None = None
         prepared_patch: PreparedPatchFile | None = None
+        prepared_web_search: PreparedWebSearch | None = None
         if request.name in {
             READ_FILE_TOOL_NAME,
             GLOB_TOOL_NAME,
@@ -3425,6 +3461,13 @@ class ProjectSession:
                 return _invalid_tool_request(request, error)
             action = prepared_patch.action
             precondition = prepared_patch.precondition
+        elif request.name == WEB_SEARCH_TOOL_NAME:
+            try:
+                prepared_web_search = self._web_search.prepare(request)
+            except WebSearchPreparationError as error:
+                return _invalid_tool_request(request, error)
+            action = prepared_web_search.action
+            precondition = prepared_web_search.precondition
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -3494,6 +3537,12 @@ class ProjectSession:
                 kind=ApprovalPreviewKind.FILE_COPY,
                 byte_count=len(prepared_copy.content),
             )
+        elif prepared_web_search is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.WEB_SEARCH,
+                backend=prepared_web_search.backend.value,
+            )
         coordinator = ActionCoordinator(
             writer=self._writer,
             approval_handler=self._approval_handler,
@@ -3531,6 +3580,9 @@ class ProjectSession:
                 return replace(current, precondition=refreshed)
             if prepared_patch is not None:
                 refreshed = self._patch_file.refresh_precondition(prepared_patch)
+                return replace(current, precondition=refreshed)
+            if prepared_web_search is not None:
+                refreshed = self._web_search.revalidate(prepared_web_search)
                 return replace(current, precondition=refreshed)
             return current
 
@@ -3685,6 +3737,19 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=patch_result.result_code,
                     audit_message=patch_result.audit_message,
+                )
+            elif request.name == WEB_SEARCH_TOOL_NAME and prepared_web_search is not None:
+                search_result = self._web_search.execute_detailed(prepared_web_search)
+                outcome = {
+                    WebSearchOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    WebSearchOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    WebSearchOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[search_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=search_result.tool_result,
+                    outcome=outcome,
+                    result_code=search_result.result_code,
+                    audit_message=search_result.audit_message,
                 )
             else:
                 result = ToolResult(

@@ -247,6 +247,7 @@ _TOOL_PREVIEW_KINDS = {
     "mkdir": ApprovalPreviewKind.DIRECTORY_CREATE,
     "delete_directory": ApprovalPreviewKind.DIRECTORY_DELETE,
     "run_command": ApprovalPreviewKind.COMMAND,
+    "web_search": ApprovalPreviewKind.WEB_SEARCH,
 }
 
 

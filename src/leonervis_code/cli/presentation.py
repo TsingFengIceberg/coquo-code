@@ -47,6 +47,7 @@ from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
 from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.web_search import WebSearchBackend, WebSearchSourceConfiguration
 
 RESET = "\x1b[0m"
 RED = "\x1b[31m"
@@ -83,7 +84,17 @@ class ToolDetailMode(StrEnum):
     FULL = "full"
 
 
-HELP_TOPICS = ("session", "task", "tools", "git", "context", "provider", "policy", "input")
+HELP_TOPICS = (
+    "session",
+    "task",
+    "tools",
+    "git",
+    "context",
+    "provider",
+    "search",
+    "policy",
+    "input",
+)
 HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
@@ -92,6 +103,7 @@ HELP_TEXT = (
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
     "  /help provider  Provider and model selection\n"
+    "  /help search    Independent web search source selection\n"
     "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
@@ -179,6 +191,16 @@ PROVIDER_HELP = (
     "  /output [tokens|reset]\n"
     "  /model <model>"
 )
+SEARCH_HELP = (
+    "Search source commands:\n"
+    "  /search status\n"
+    "  /search sources\n"
+    "  /search use <source> [source...]\n"
+    "  /search reset\n"
+    "Supported sources: brave, tavily. Source order matters: the first active source is primary. "
+    "Current web_search execution is primary-only; additional active sources reserve the future "
+    "multi-source fan-out boundary. Selection is process-local and does not modify Session history."
+)
 POLICY_HELP = (
     "Policy commands:\n"
     "  /status\n"
@@ -206,9 +228,48 @@ HELP_BY_TOPIC = {
     "git": GIT_HELP,
     "context": CONTEXT_HELP,
     "provider": PROVIDER_HELP,
+    "search": SEARCH_HELP,
     "policy": POLICY_HELP,
     "input": INPUT_HELP,
 }
+
+
+def render_web_search_sources(configuration: WebSearchSourceConfiguration) -> str:
+    """Render credential presence and process-local activation without secret material."""
+    lines = ["Web search sources:"]
+    for source in WebSearchBackend:
+        states = [
+            "available" if source in configuration.available_sources else "credential unavailable"
+        ]
+        if source in configuration.active_sources:
+            states.append("active")
+        if source is configuration.primary_source:
+            states.append("primary")
+        lines.append(f"  {source.value}: {', '.join(states)}")
+    active = ", ".join(source.value for source in configuration.active_sources) or "none"
+    primary = (
+        configuration.primary_source.value if configuration.primary_source is not None else "none"
+    )
+    execution = (
+        ", ".join(source.value for source in configuration.execution_sources) or "unavailable"
+    )
+    lines.extend(
+        (
+            f"Active order: {active}",
+            f"Primary: {primary}",
+            f"Current execution: {configuration.execution_mode} ({execution})",
+            f"Selection source: {configuration.selection_source.value}",
+            "Scope: current process only; Session history and credentials are unchanged.",
+        )
+    )
+    if len(configuration.active_sources) > 1:
+        lines.append(
+            "Note: additional sources are activated for the future command contract; current "
+            "web_search does not query or merge them."
+        )
+    if configuration.error is not None:
+        lines.append(f"Configuration issue: {configuration.error}")
+    return "\n".join(lines)
 
 
 def render_provider_adapter_error(
@@ -386,6 +447,7 @@ class ActionAuditView(Protocol):
     approval_outcome: object | None
     status: object
     result_code: str | None
+    message: str | None
     requested_sequence: int
 
 
@@ -872,6 +934,19 @@ def render_action_audits(audits: tuple[ActionAuditView, ...], count: int) -> str
                 f"\n  cwd: {_safe_inline(str(cwd))!r}"
                 f"\n  timeout: {timeout}s"
             )
+        if identity.tool_name == "web_search":
+            query = arguments.get("query")
+            max_results = arguments.get("max_results", "<unknown>")
+            query_bytes = len(query.encode("utf-8")) if isinstance(query, str) else "<unknown>"
+            backend_line = ""
+            if isinstance(audit.message, str):
+                if audit.message.startswith("Brave Search "):
+                    backend_line = "\n  backend: brave"
+                elif audit.message.startswith("Tavily Search "):
+                    backend_line = "\n  backend: tavily"
+            command_line = (
+                f"{backend_line}\n  query bytes: {query_bytes}\n  max results: {max_results}"
+            )
 
         permission = audit.permission_result
         if permission is None:
@@ -1213,6 +1288,7 @@ _TOOL_POLICY_LABELS = {
     "git_diff": "workspace-read",
     "git_log": "workspace-read",
     "git_show": "workspace-read",
+    "web_search": "network-read",
     "task_propose_plan": "task-control",
     "task_report_reflection": "task-control",
     "task_report_blocker": "task-control",
@@ -1245,6 +1321,7 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "git_diff": "Current staged or unstaged tracked patch only; literal path, no external diff, and 64 KiB output.",
     "git_log": "Current-HEAD-reachable history only; literal path, at most 50 commits, and 32 KiB output.",
     "git_show": "One full current-HEAD-reachable commit ID; bounded metadata/message and 64 KiB tracked patch.",
+    "web_search": "Host-selected fixed Brave or Tavily HTTPS endpoint; 1-10 results, 15-second timeout, 256 KiB response, and 32 KiB JSONL output.",
     "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
     "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
     "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",
@@ -1326,15 +1403,16 @@ def render_permission_matrix(
         PermissionAction.WORKSPACE_OVERWRITE,
         PermissionAction.WORKSPACE_MOVE,
         PermissionAction.WORKSPACE_DELETE,
+        PermissionAction.NETWORK_READ,
         PermissionAction.DANGEROUS,
     ):
         result = gate.evaluate(PermissionRequest(selected_permission, selected_approval, action))
         lines.append(f"{action.value}: {result.decision.value} ({result.reason.value})")
     lines.extend(
         (
-            "read-only: workspace reads only.",
-            "workspace-write: reads and bounded workspace mutations; dangerous commands remain denied.",
-            "danger-full-access: includes dangerous actions, while run_command still requires its Linux sandbox.",
+            "read-only: workspace reads only; external network access is denied.",
+            "workspace-write: reads and bounded workspace mutations; network and dangerous commands remain denied.",
+            "danger-full-access: includes approved network reads and dangerous actions, while run_command still requires its Linux sandbox.",
             "Change startup policy with --permission-mode and --approval; this command never mutates it.",
         )
     )
@@ -1358,6 +1436,10 @@ def _tool_policy_availability(policy: str, status: ProjectStatusView) -> str:
         if not status.sandbox.dependencies.ready:
             return "sandbox dependencies unavailable"
         return f"available ({approval}; sandbox required)"
+    if policy == "network-read":
+        if mode != "danger-full-access":
+            return "denied by current permission mode"
+        return f"available ({approval}; BRAVE_SEARCH_API_KEY or TAVILY_API_KEY required)"
     if mode == "read-only":
         return "denied by current permission mode"
     return f"available ({approval})"

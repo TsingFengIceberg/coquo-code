@@ -344,36 +344,40 @@ def git_show_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[20])
 
 
-def task_propose_plan_tool_definition() -> dict[str, object]:
+def web_search_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[21])
 
 
-def task_report_reflection_tool_definition() -> dict[str, object]:
+def task_propose_plan_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[22])
 
 
-def task_report_blocker_tool_definition() -> dict[str, object]:
+def task_report_reflection_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[23])
 
 
-def task_propose_completion_tool_definition() -> dict[str, object]:
+def task_report_blocker_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[24])
 
 
-def task_propose_start_tool_definition() -> dict[str, object]:
+def task_propose_completion_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[25])
 
 
-def task_accept_admission_tool_definition() -> dict[str, object]:
+def task_propose_start_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[26])
 
 
-def task_accept_plan_tool_definition() -> dict[str, object]:
+def task_accept_admission_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[27])
 
 
-def task_confirm_completion_tool_definition() -> dict[str, object]:
+def task_accept_plan_tool_definition() -> dict[str, object]:
     return _compatible_tool_definition(model_tool_definitions()[28])
+
+
+def task_confirm_completion_tool_definition() -> dict[str, object]:
+    return _compatible_tool_definition(model_tool_definitions()[29])
 
 
 def model_tool_definitions_for_openai(

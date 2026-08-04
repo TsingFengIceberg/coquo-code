@@ -117,6 +117,7 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "git_diff",
         "git_log",
         "git_show",
+        "web_search",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",

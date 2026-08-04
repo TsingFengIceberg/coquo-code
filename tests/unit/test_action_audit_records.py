@@ -211,6 +211,24 @@ def test_action_audit_record_codec_round_trips_canonical_closed_records(
         assert encode_record(decode_record(encoded)) == encoded
 
 
+def test_configuration_precondition_replays_in_existing_action_audit_schema(
+    tmp_path: Path,
+) -> None:
+    precondition = ActionPrecondition.expected_configuration("a" * 64)
+    exact = identity(tmp_path, precondition=precondition)
+    encoded = encode_record(request_record(tmp_path, exact=exact))
+    payload = json.loads(encoded)
+
+    assert payload["schema_version"] == 1
+    decoded = decode_record(encoded)
+    assert isinstance(decoded, ActionRequested)
+    assert decoded.identity.precondition == precondition
+    assert encode_record(decoded) == encoded
+
+    state = replay_records([header(tmp_path), decoded])
+    assert state.action_audits[0].identity.precondition == precondition
+
+
 @pytest.mark.parametrize(
     "mutate,match",
     [

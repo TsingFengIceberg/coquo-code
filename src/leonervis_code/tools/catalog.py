@@ -67,6 +67,14 @@ from leonervis_code.tools.run_command import (
 )
 from leonervis_code.tools.write_file import WRITE_FILE_TOOL_NAME, write_file_tool_snapshot
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, stat_path_tool_snapshot
+from leonervis_code.tools.web_search import (
+    MAX_WEB_SEARCH_QUERY_BYTES,
+    MAX_WEB_SEARCH_QUERY_CHARACTERS,
+    MAX_WEB_SEARCH_RESULTS,
+    MIN_WEB_SEARCH_RESULTS,
+    WEB_SEARCH_TOOL_NAME,
+    web_search_tool_snapshot,
+)
 from leonervis_code.tools.task_coordination import (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
@@ -108,6 +116,7 @@ ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     git_diff_tool_snapshot(),
     git_log_tool_snapshot(),
     git_show_tool_snapshot(),
+    web_search_tool_snapshot(),
 )
 ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
 ORDINARY_PROMPT_TOOL_NAMES = (
@@ -249,6 +258,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"limit", "path"}
     if name == GIT_SHOW_TOOL_NAME:
         return {"commit_id", "path"}
+    if name == WEB_SEARCH_TOOL_NAME:
+        return {"query", "max_results"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -376,6 +387,21 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
         if not isinstance(commit_id, str) or not GIT_OBJECT_ID_PATTERN.fullmatch(commit_id):
             raise ValueError("git_show commit_id is invalid")
         _validate_input_string(tool_input["path"], label="git_show path")
+        return
+
+    if name == WEB_SEARCH_TOOL_NAME:
+        _validate_input_string(
+            tool_input["query"],
+            label="web_search query",
+            allow_whitespace=True,
+            max_characters=MAX_WEB_SEARCH_QUERY_CHARACTERS,
+            max_bytes=MAX_WEB_SEARCH_QUERY_BYTES,
+        )
+        max_results = tool_input["max_results"]
+        if type(max_results) is not int or not (
+            MIN_WEB_SEARCH_RESULTS <= max_results <= MAX_WEB_SEARCH_RESULTS
+        ):
+            raise ValueError("web_search max_results is invalid")
         return
 
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:

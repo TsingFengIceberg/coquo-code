@@ -29,6 +29,7 @@ class PermissionAction(StrEnum):
     WORKSPACE_OVERWRITE = "workspace-overwrite"
     WORKSPACE_MOVE = "workspace-move"
     WORKSPACE_DELETE = "workspace-delete"
+    NETWORK_READ = "network-read"
     DANGEROUS = "dangerous"
     UNKNOWN = "unknown"
 
@@ -49,14 +50,17 @@ class PermissionReason(StrEnum):
     ALLOWED_WORKSPACE_OVERWRITE_AUTO = "allowed_workspace_overwrite_auto"
     ALLOWED_WORKSPACE_MOVE_AUTO = "allowed_workspace_move_auto"
     ALLOWED_WORKSPACE_DELETE_AUTO = "allowed_workspace_delete_auto"
+    ALLOWED_NETWORK_READ_AUTO = "allowed_network_read_auto"
     ALLOWED_DANGEROUS_AUTO = "allowed_dangerous_auto"
     APPROVAL_REQUIRED_WORKSPACE_CREATE = "approval_required_workspace_create"
     APPROVAL_REQUIRED_WORKSPACE_OVERWRITE = "approval_required_workspace_overwrite"
     APPROVAL_REQUIRED_WORKSPACE_MOVE = "approval_required_workspace_move"
     APPROVAL_REQUIRED_WORKSPACE_DELETE = "approval_required_workspace_delete"
+    APPROVAL_REQUIRED_NETWORK_READ = "approval_required_network_read"
     APPROVAL_REQUIRED_DANGEROUS = "approval_required_dangerous"
     DENIED_READ_ONLY_MODE = "denied_read_only_mode"
     DENIED_WORKSPACE_WRITE_MODE = "denied_workspace_write_mode"
+    DENIED_NETWORK_ACCESS_MODE = "denied_network_access_mode"
     DENIED_UNKNOWN_ACTION = "denied_unknown_action"
 
 
@@ -66,14 +70,17 @@ _REASON_DECISIONS = {
     PermissionReason.ALLOWED_WORKSPACE_OVERWRITE_AUTO: PermissionDecision.ALLOW,
     PermissionReason.ALLOWED_WORKSPACE_MOVE_AUTO: PermissionDecision.ALLOW,
     PermissionReason.ALLOWED_WORKSPACE_DELETE_AUTO: PermissionDecision.ALLOW,
+    PermissionReason.ALLOWED_NETWORK_READ_AUTO: PermissionDecision.ALLOW,
     PermissionReason.ALLOWED_DANGEROUS_AUTO: PermissionDecision.ALLOW,
     PermissionReason.APPROVAL_REQUIRED_WORKSPACE_CREATE: PermissionDecision.ASK,
     PermissionReason.APPROVAL_REQUIRED_WORKSPACE_OVERWRITE: PermissionDecision.ASK,
     PermissionReason.APPROVAL_REQUIRED_WORKSPACE_MOVE: PermissionDecision.ASK,
     PermissionReason.APPROVAL_REQUIRED_WORKSPACE_DELETE: PermissionDecision.ASK,
+    PermissionReason.APPROVAL_REQUIRED_NETWORK_READ: PermissionDecision.ASK,
     PermissionReason.APPROVAL_REQUIRED_DANGEROUS: PermissionDecision.ASK,
     PermissionReason.DENIED_READ_ONLY_MODE: PermissionDecision.DENY,
     PermissionReason.DENIED_WORKSPACE_WRITE_MODE: PermissionDecision.DENY,
+    PermissionReason.DENIED_NETWORK_ACCESS_MODE: PermissionDecision.DENY,
     PermissionReason.DENIED_UNKNOWN_ACTION: PermissionDecision.DENY,
 }
 
@@ -128,6 +135,21 @@ class PermissionGate:
             return PermissionResult(
                 PermissionDecision.DENY,
                 PermissionReason.DENIED_UNKNOWN_ACTION,
+            )
+        if request.action == PermissionAction.NETWORK_READ:
+            if request.permission_mode != PermissionMode.DANGER_FULL_ACCESS:
+                return PermissionResult(
+                    PermissionDecision.DENY,
+                    PermissionReason.DENIED_NETWORK_ACCESS_MODE,
+                )
+            if request.approval_mode == ApprovalMode.ASK:
+                return PermissionResult(
+                    PermissionDecision.ASK,
+                    PermissionReason.APPROVAL_REQUIRED_NETWORK_READ,
+                )
+            return PermissionResult(
+                PermissionDecision.ALLOW,
+                PermissionReason.ALLOWED_NETWORK_READ_AUTO,
             )
         if request.permission_mode == PermissionMode.READ_ONLY:
             return PermissionResult(

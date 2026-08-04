@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v29-f2403bf3878b966f9905d31ef63196ba81ed8fb68e50143fb21a8d8f71b3cc4e"
+EXPECTED_FINGERPRINT = "v30-771142a226151088098884be99603e0d0bddd0bb36ee9b9b1123ed0a0460cd33"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 29
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 30
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -28,6 +28,11 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "`git_status` returns bounded deterministic JSON Lines" in prompt.text
     assert "`git_log` returns bounded deterministic JSON Lines" in prompt.text
     assert "only after the Host verifies that commit is reachable" in prompt.text
+    assert "additionally contains `web_search`" in prompt.text
+    assert "Host-selected fixed Brave or Tavily Search API" in prompt.text
+    assert "requires `danger-full-access` and one unambiguous valid Host backend" in prompt.text
+    assert "Tavily basic search consumes one API credit" in prompt.text
+    assert "do not retry it automatically" in prompt.text
     assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text
     assert "mounts only the workspace read-write" in prompt.text

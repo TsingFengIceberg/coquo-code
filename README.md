@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、两层Eval、可跨重启继续的前台多Stage Task、21个普通受限工具、4个Stage专属协调工具、1个Task admission工具及3个自然语言Task生命周期工具。用户可直接用“同意”“计划没问题，继续”“确认验收通过”等自然语言推进Task，模型提交结构化请求，Host在普通Session Turn耐久提交并复核精确pending状态后才修改Task并自动接续前台Driver。每个Stage仍复用普通Turn，实际文件动作继续经过PermissionGate、approval和Action Audit。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且网络socket被拒绝；沙箱不可用时不会降级到Host直接执行。当前普通Turn预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
+> **当前状态：** 已支持命名 provider profile、真实/离线 runtime、可恢复 Session、工作区根`AGENTS.md`项目指令、两层Eval、可跨重启继续的前台多Stage Task、22个普通受限工具（含Host选择Brave或Tavily后端的独立网页搜索）、4个Stage专属协调工具、1个Task admission工具及3个自然语言Task生命周期工具。用户可直接用“同意”“计划没问题，继续”“确认验收通过”等自然语言推进Task，模型提交结构化请求，Host在普通Session Turn耐久提交并复核精确pending状态后才修改Task并自动接续前台Driver。每个Stage仍复用普通Turn，实际文件与搜索动作继续经过PermissionGate、approval和Action Audit。`run_command`在Linux上强制使用bubblewrap与seccomp隔离，workspace是唯一Host持久可写区且命令网络socket被拒绝；独立搜索使用单独的Host网络边界。当前普通Turn预算为每个回复最多8个调用、每个user turn最多32个工具请求、最多24次provider invocation且最后一次只允许文字。
 
 ## 目录
 
@@ -34,7 +34,7 @@ Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding 
 
 ## 快速开始
 
-要求 Python 3.12 或 3.13、最新稳定版 [uv](https://docs.astral.sh/uv/) 和 Git。项目使用 `uv.lock` 管理可复现环境。模型使用`run_command`还要求Linux、`/usr/bin/bwrap`与`libseccomp.so.2`；缺少任一项时其他功能仍可使用，但命令会fail closed。
+要求 Python 3.12 或 3.13、最新稳定版 [uv](https://docs.astral.sh/uv/) 和 Git。项目使用 `uv.lock` 管理可复现环境。模型使用`run_command`还要求Linux、`/usr/bin/bwrap`与`libseccomp.so.2`；独立网页搜索要求进程环境中存在`BRAVE_SEARCH_API_KEY`或`TAVILY_API_KEY`。缺少这些可选条件时其他功能仍可使用，对应工具会fail closed。
 
 ```bash
 cd leonervis-code
@@ -84,9 +84,13 @@ uv run leonervis-code task --help
 | 一次性允许 workspace 自动写入 | `uv run leonervis-code --permission-mode workspace-write --approval auto prompt "创建 note.txt"` |
 | 在 REPL 逐次审批本地命令 | `uv run leonervis-code --permission-mode danger-full-access --approval ask` |
 | 一次性自动运行获准命令 | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
+| 在 REPL 逐次审批网页搜索 | `TAVILY_API_KEY=... uv run leonervis-code --permission-mode danger-full-access --approval ask` |
+| 一次性自动执行网页搜索 | `TAVILY_API_KEY=... uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "搜索Python 3.14官方发布说明并列出来源"` |
 | 查看版本 | `uv run leonervis-code --version` |
 
 `prompt`用于脚本和一次性任务；裸命令用于有状态多轮REPL。成功turn会自动保存，工具执行时会显示脱敏的`[tool 1/32] ...`状态行。
+
+`web_search(query, max_results)`由Host选择固定Brave或Tavily Search API，不接受模型指定URL，也不读取结果页面。只有一个有效key时自动选择对应后端；两个key同时存在时可设置`LEONERVIS_WEB_SEARCH_BACKEND=brave|tavily`，或进入REPL后使用`/search use <source> [source...]`。`/search status`和`/search sources`查看可用及激活状态，`/search reset`恢复启动环境选择。来源按顺序激活，第一个是primary；当前执行仍是明确的`primary-only`，额外激活来源只预留未来多源fan-out和结果融合契约，不会被暗中请求。该选择仅在当前进程生效，不修改Session。Brave使用固定GET查询；Tavily使用固定basic search并关闭自动参数、生成答案、raw content和images，官方计为一次basic-search credit。查询最多512字符/2 KiB，返回1至10条有界JSONL结果；响应、输出和15秒超时均由Host限制。它属于`network-read`，只有`danger-full-access`按`ask/auto`继续。Ask会在发送前展示完整查询、数量、实际primary后端及额度提示；后端也绑定进精确ActionIdentity，普通live摘要与Action Audit列表仍隐藏查询正文。超时或transport失败可能已经发送请求并产生计费，因此结果为partial且不得自动重试。凭据必须是可打印ASCII，只从上述环境变量读取，绝不写入Session或审计。
 
 常用权限模式：
 
@@ -202,10 +206,10 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help [session\|task\|tools\|git\|context\|provider\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口 |
+| `/help [session\|task\|tools\|git\|context\|provider\|search\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`search`显示搜索源控制 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
-| `/tools catalog [tool-name]` | 显示29个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
+| `/tools catalog [tool-name]` | 显示30个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -230,6 +234,9 @@ Task是高于普通Turn的持久目标，单独保存在workspace内并绑定一
 | `/provider current` | 显示当前 profile/provider/model |
 | `/provider use <name>` | 为当前 workspace 原子切换 active profile |
 | `/model <model>` | 仅覆盖当前进程 model，不修改 profile |
+| `/search status`、`/search sources` | 查看Brave/Tavily凭据可用性、有序激活来源及当前primary，不显示key |
+| `/search use <source> [source...]` | 为当前进程设置有序激活来源；当前只执行第一个primary来源 |
+| `/search reset` | 清除REPL覆盖并恢复启动环境决定的搜索来源 |
 | `/session show [latest\|id]` | 显示当前或指定Session的严格回放元数据，不执行切换 |
 | `/session preview <latest\|id> [1-10]` | 只读显示指定Session最近的完整user/final-assistant回合，默认3轮、最多10轮 |
 | `/session turns <latest\|id> <start> [1-10]` | 从指定的1-based完整turn开始只读显示，默认3轮 |
@@ -460,8 +467,8 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-普通prompt的model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show, task_propose_start, task_accept_admission, task_accept_plan, task_confirm_completion`。完整catalog在21个普通工具后依次包含4个Stage proposal工具、`task_propose_start`及3个普通Prompt生命周期工具；Task Stage只曝光匹配的最小子集。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个普通动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。普通文件/命令工具继续经过permission、approval、executor和Action Audit；Task协调调用独占一个response并共享预算，不取得Action lease。
+普通prompt的model-visible surface固定为`read_file, glob, grep, write_file, edit_file, run_command, mkdir, move_file, delete_file, delete_directory, list_directory, copy_file, read_file_lines, stat_path, list_tree, grep_regex, patch_file, git_status, git_diff, git_log, git_show, web_search, task_propose_start, task_accept_admission, task_accept_plan, task_confirm_completion`。完整catalog在22个普通工具后依次包含4个Stage proposal工具、`task_propose_start`及3个普通Prompt生命周期工具，共30个定义；Task Stage只曝光匹配的最小子集。Provider单次回复可包含最多8个有序工具调用；每个user turn最多接纳32个工具请求和24次provider invocation，最后一次只允许文字。Host在整批解析和预算验证后逐个执行；一个普通动作非成功会让同批后续动作明确skipped，无法装入剩余预算的整批零执行。普通文件、命令和搜索工具继续经过permission、approval、executor和Action Audit；Task协调调用独占一个response并共享预算，不取得Action lease。
 
 Foundation 5A只读取workspace根目录唯一规范名称`AGENTS.md`：missing表示无项目指令；现有文件必须是non-symlink、strict UTF-8普通文件，不含NUL且最多32 KiB。Host在每个user turn准备时读取并冻结一次，工具continuation始终复用该快照，下一turn才重载；不搜索parent或subdirectory，也不自动加载`CLAUDE.md`或`LEONERVIS.md`。项目指令作为独立provider block参与token计量和Effective Context identity，但不写Session transcript；它从属于canonical Host策略与当前直接user request，不能放宽permission、approval、workspace、symlink、budget、audit、sandbox或durability边界。`/instructions`只显示元数据且不调用provider或修改Session。
 
-Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval、结构化模型Task协调、知情admission及自然语言Task生命周期现已完成。兼容provider返回可规范保存但违反普通工具schema的参数时，Host现在会返回匹配的错误ToolResult并允许模型在同一Turn纠正；坏JSON、未知工具、全局超限参数和无效Task控制调用仍fail closed。确定性Host Eval当前为`host-baseline-v2`。当前版本为canonical system prompt v29、provider adapter contract v31、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v8、`turn_failed` schema v2、新`session_resumed` schema v2、Action Audit schema v1、`context_compacted`新记录v4、`task_admission_resolved`新记录v1、`task_admission_origin`新记录v1、Task Stage新记录v2、Task plan proposal新记录v3、Task completion proposal新记录v2、Task reflection新记录v2、Task blocker新记录v1，以及Task acceptance、pause和Task checkpoint新记录v1；current Effective Context仍为`ctx-v5`/`ctx-v6`representation。旧Session/Task transcript不重写且继续兼容，缺失项目指令时的current empty full-context identity为`ctx-v5-e681ce5f35a3bd5b4d0591912d49119c767e97ad87b9ecad6806777c3a6caecd`。后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动reviewer费用、自动通用retry、network tool、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。参数恢复边界见[ADR 0099](./docs/decisions/0099-recoverable-provider-tool-argument-validation.md)，自然语言生命周期见[ADR 0098](./docs/decisions/0098-natural-language-task-lifecycle-handoffs.md)，知情admission见[ADR 0097](./docs/decisions/0097-informed-task-admission-and-foreground-handoff.md)。
+Provider batch、结构化tool ledger、streaming/Markdown终端、Session管理与usage audit、Git只读观察、fail-closed命令沙箱、Foundation 5A、两类Eval、结构化模型Task协调、知情admission、自然语言Task生命周期及Brave/Tavily独立网页搜索现已完成。兼容provider返回可规范保存但违反普通工具schema的参数时，Host现在会返回匹配的错误ToolResult并允许模型在同一Turn纠正；坏JSON、未知工具、全局超限参数和无效Task控制调用仍fail closed。确定性Host Eval当前为`host-baseline-v2`。当前版本为canonical system prompt v30、provider adapter contract v32、ToolArguments v1、ActionIdentity v1、`turn_committed` schema v8、`turn_failed` schema v2、新`session_resumed` schema v2、Action Audit schema v1、`context_compacted`新记录v4、`task_admission_resolved`新记录v1、`task_admission_origin`新记录v1、Task Stage新记录v2、Task plan proposal新记录v3、Task completion proposal新记录v2、Task reflection新记录v2、Task blocker新记录v1，以及Task acceptance、pause和Task checkpoint新记录v1；current Effective Context仍为`ctx-v5`/`ctx-v6`representation。旧Session/Task transcript不重写且继续兼容，缺失项目指令时的current empty full-context identity为`ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`。Provider原生搜索、通用`web_fetch`、MCP、后台Task、调度、SubAgent、team、worktree编排、并行Stage/Action、自动reviewer费用、自动通用retry、resource quota、Host sandbox bypass、真实模型Eval排行榜与远程服务仍不可用。独立搜索边界见[ADR 0102](./docs/decisions/0102-bounded-independent-web-search.md)，参数恢复边界见[ADR 0099](./docs/decisions/0099-recoverable-provider-tool-argument-validation.md)，自然语言生命周期见[ADR 0098](./docs/decisions/0098-natural-language-task-lifecycle-handoffs.md)。

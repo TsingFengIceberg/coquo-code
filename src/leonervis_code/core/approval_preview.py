@@ -8,7 +8,7 @@ from difflib import unified_diff
 from enum import StrEnum
 import re
 
-APPROVAL_PREVIEW_VERSION = 1
+APPROVAL_PREVIEW_VERSION = 2
 MAX_APPROVAL_DIFF_LINES = 160
 MAX_APPROVAL_DIFF_BYTES = 24 * 1024
 MAX_APPROVAL_DIFF_LINE_BYTES = 4096
@@ -26,6 +26,7 @@ class ApprovalPreviewKind(StrEnum):
     DIRECTORY_CREATE = "directory-create"
     DIRECTORY_DELETE = "directory-delete"
     COMMAND = "command"
+    WEB_SEARCH = "web-search"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class ApprovalPreview:
     kind: ApprovalPreviewKind
     byte_count: int | None = None
     body: str | None = None
+    backend: str | None = None
     truncated: bool = False
     version: int = APPROVAL_PREVIEW_VERSION
 
@@ -72,6 +74,11 @@ class ApprovalPreview:
             }
             if (self.kind in sized_kinds) != (self.byte_count is not None):
                 raise ValueError("approval preview byte count does not match its kind")
+        if self.kind == ApprovalPreviewKind.WEB_SEARCH:
+            if self.backend not in {"brave", "tavily"}:
+                raise ValueError("web-search approval preview backend is invalid")
+        elif self.backend is not None:
+            raise ValueError("approval preview backend does not match its kind")
 
 
 def build_file_change_preview(
@@ -126,6 +133,7 @@ def build_metadata_preview(
     action_digest: str,
     kind: ApprovalPreviewKind,
     byte_count: int | None = None,
+    backend: str | None = None,
 ) -> ApprovalPreview:
     """Build a content-free preview for an already-prepared non-edit action."""
     if kind == ApprovalPreviewKind.FILE_CHANGE:
@@ -134,6 +142,7 @@ def build_metadata_preview(
         action_digest=action_digest,
         kind=kind,
         byte_count=byte_count,
+        backend=backend,
     )
 
 

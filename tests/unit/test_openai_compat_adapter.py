@@ -49,6 +49,7 @@ from leonervis_code.providers.openai_compat import (
     git_diff_tool_definition,
     git_log_tool_definition,
     git_show_tool_definition,
+    web_search_tool_definition,
     git_status_tool_definition,
     list_directory_tool_definition,
     list_tree_tool_definition,
@@ -1319,6 +1320,11 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
             git_show_tool_definition,
             "git_show",
             {"commit_id": "a" * 40, "path": "src/app.py"},
+        ),
+        (
+            web_search_tool_definition,
+            "web_search",
+            {"query": "Python documentation", "max_results": 5},
         ),
         (task_propose_plan_tool_definition, "task_propose_plan", {"steps": ["Inspect"]}),
         (

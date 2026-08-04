@@ -28,6 +28,7 @@ class ActionPreconditionKind(StrEnum):
     NONE = "none"
     PATH_ABSENT = "path-absent"
     EXPECTED_STATE_SHA256 = "expected-state-sha256"
+    EXPECTED_CONFIGURATION_SHA256 = "expected-configuration-sha256"
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,12 @@ class ActionPrecondition:
     def __post_init__(self) -> None:
         if type(self.kind) is not ActionPreconditionKind:
             raise ValueError("action precondition kind is invalid")
-        if self.kind == ActionPreconditionKind.EXPECTED_STATE_SHA256:
+        if self.kind in {
+            ActionPreconditionKind.EXPECTED_STATE_SHA256,
+            ActionPreconditionKind.EXPECTED_CONFIGURATION_SHA256,
+        }:
             if type(self.fingerprint) is not str or _SHA256.fullmatch(self.fingerprint) is None:
-                raise ValueError("expected-state precondition requires a lowercase SHA-256 digest")
+                raise ValueError("SHA-256 precondition requires a lowercase SHA-256 digest")
         elif self.fingerprint is not None:
             raise ValueError("action precondition fingerprint must be null for this kind")
 
@@ -57,6 +61,10 @@ class ActionPrecondition:
     @classmethod
     def expected_state(cls, fingerprint: str) -> ActionPrecondition:
         return cls(ActionPreconditionKind.EXPECTED_STATE_SHA256, fingerprint)
+
+    @classmethod
+    def expected_configuration(cls, fingerprint: str) -> ActionPrecondition:
+        return cls(ActionPreconditionKind.EXPECTED_CONFIGURATION_SHA256, fingerprint)
 
     def as_mapping(self) -> dict[str, object]:
         return {"fingerprint": self.fingerprint, "kind": self.kind.value}

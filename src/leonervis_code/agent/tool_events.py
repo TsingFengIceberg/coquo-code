@@ -417,6 +417,11 @@ def safe_tool_request_summary(request: ToolUse) -> str:
             f"commit={_safe_argument(arguments.get('commit_id'))} "
             f"path={_safe_path(arguments.get('path'))}"
         )
+    elif name == "web_search":
+        summary = (
+            f"query_bytes={_utf8_size(arguments.get('query'))} "
+            f"max_results={_safe_number(arguments.get('max_results'))}"
+        )
     elif name == "task_propose_plan":
         steps = arguments.get("steps")
         summary = f"steps={len(steps) if isinstance(steps, list) else '<invalid>'}"

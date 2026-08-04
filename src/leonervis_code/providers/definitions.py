@@ -8,7 +8,7 @@ import hashlib
 import json
 
 
-ADAPTER_CONTRACT_VERSION = 31
+ADAPTER_CONTRACT_VERSION = 32
 
 
 class WireProtocol(StrEnum):

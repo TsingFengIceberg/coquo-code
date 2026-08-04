@@ -37,6 +37,7 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "git_diff",
         "git_log",
         "git_show",
+        "web_search",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -232,6 +233,34 @@ def test_catalog_validates_closed_run_command_array_and_integer_input() -> None:
         "cwd": ".",
         "timeout_seconds": 60,
     }
+
+
+def test_catalog_validates_closed_web_search_input() -> None:
+    call = tool_use_from_input(
+        "search-1",
+        "web_search",
+        {"query": "Python 3.14 documentation", "max_results": 5},
+    )
+
+    assert tool_input_from_use(call) == {
+        "query": "Python 3.14 documentation",
+        "max_results": 5,
+    }
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"query": "", "max_results": 5},
+        {"query": "Python", "max_results": 0},
+        {"query": "Python", "max_results": 11},
+        {"query": "Python"},
+        {"query": "Python", "max_results": 5, "url": "https://example.com"},
+    ],
+)
+def test_catalog_rejects_malformed_web_search_inputs(tool_input: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="web_search"):
+        tool_use_from_input("search-1", "web_search", tool_input)
 
 
 @pytest.mark.parametrize(

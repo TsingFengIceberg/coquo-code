@@ -34,6 +34,7 @@
 - [Task Proposal Control Boundary](#task-proposal-control-boundary)
 - [Natural-language Task Lifecycle Handoffs](#natural-language-task-lifecycle-handoffs)
 - [Recoverable Provider Tool Argument Validation](#recoverable-provider-tool-argument-validation)
+- [Bounded Independent Brave/Tavily Web Search](#bounded-independent-bravetavily-web-search)
 - [Foundation 4D Slices 0–4: Controlled Single-directory Creation](#foundation-4d-slices-04-controlled-single-directory-creation)
 - [Foundation 4E Slices 0–9: Controlled No-overwrite File Move](#foundation-4e-slices-09-controlled-no-overwrite-file-move)
 - [Foundation 4F Slices 0–6: Controlled Regular-file Deletion](#foundation-4f-slices-06-controlled-regular-file-deletion)
@@ -1131,6 +1132,16 @@ Complete assistant responses now always reuse the `• ` role marker and two-spa
 
 The item codec now expresses inheritance at each capability's introduction boundary: every supported schema at v3 or later reads and writes ordinary assistant companion text, and every supported schema at v4 or later reads and writes assistant tool batches. The supported set remains closed to v1 through v8 and does not admit unknown future versions. Strict v1/v2 rejection, v5 ledger validation, complete causality, and historical transcript bytes remain unchanged. Canonical system prompt remains v29, provider adapter contract remains v31, and Effective Context, Session version numbers, and every other durable contract remain unchanged. See [0101: turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md).
 
+## Bounded Independent Brave/Tavily Web Search
+
+`web_search(query, max_results)` adds Leonervis's first Host-owned public-web search path. The model supplies only a unified query and result count; the Host selects a fixed Brave or Tavily Search API. It accepts no model-selected endpoint and does not read result pages, so its causality and provenance remain distinct from future provider-native search, MCP search, and general `web_fetch`. The tool is available to ordinary Prompts and Task planning, execution, and correction Stages, but not reflection Stages.
+
+Brave uses a fixed GET request and subscription-token header. Tavily uses a fixed Bearer-authenticated POST with basic search, one chunk per source, and automatic parameters, generated answers, raw content, and images disabled; Tavily documents this as one basic-search credit. The Host limits queries to 512 characters/2 KiB and results to 1 through 10, with a 15-second timeout, 256 KiB response, 32 KiB JSONL output, and at most 100 parsed raw results. Both responses normalize into provider-ordered title, URL, snippet, domain, and explicit backend fields after unsafe or duplicate URLs are filtered. Third-party results remain untrusted data.
+
+Search uses the new `network-read` action: `read-only` and `workspace-write` deny it, while only `danger-full-access` proceeds under `ask | auto`. Exactly one valid key selects that backend automatically. With both keys, `LEONERVIS_WEB_SEARCH_BACKEND` can select one, or `/search use <source> [source...]` can establish ordered active sources in the REPL. `/search status|sources` inspects state and `/search reset` restores startup-environment selection. The first active source is the only currently executed primary; additional sources establish the future fan-out interface but are not requested or billed. Command configuration is process-local, does not write Session state, and invokes no provider. Ask displays the complete query, count, actual backend, and backend-specific quota disclosure. The query and a credential-free backend-configuration fingerprint participate in exact ActionIdentity, approval binding, and durable Action Audit, while routine live and `/actions` views redact query text. Credentials never enter model arguments, ActionIdentity, ToolResult, Session, or audit. Timeout or transport uncertainty returns `partial` and prohibits automatic retry.
+
+The catalog now contains 22 ordinary tools and 30 definitions total. Canonical system prompt advances to v30, provider adapter contract advances to v32, and the empty full-context identity becomes `ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`; ToolArguments v1, ActionIdentity v1, `ctx-v5`/`ctx-v6` representations, and all Session, Task, and Action Audit schemas remain unchanged, and old transcripts are not rewritten. Non-persistent ApprovalPreview advances to v2 to carry the selected backend; ActionPrecondition adds a credential-free configuration SHA-256 kind without changing ActionIdentity's version. Deterministic injected-transport tests cover both wire protocols, selection, policy, approval, audit, truncation, malformed responses, and uncertain failures without real network access or API quota. See [0102: Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1234,3 +1245,4 @@ The item codec now expresses inheritance at each capability's introduction bound
 99. [0099: Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)
 100. [0100: Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)
 101. [0101: turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)
+102. [0102: Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)

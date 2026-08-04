@@ -348,6 +348,60 @@ def test_terminal_command_approval_shows_exact_argv_cwd_and_timeout() -> None:
     assert "PWD" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("backend", "quota_warning"),
+    [
+        ("tavily", "consumes one basic-search API credit"),
+        ("brave", "may consume API quota"),
+    ],
+)
+def test_terminal_web_search_approval_shows_exact_query_backend_and_quota_warning(
+    backend: str,
+    quota_warning: str,
+) -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="search-1",
+        tool_name="web_search",
+        arguments=ToolArguments.from_mapping(
+            {"query": "Python 3.14 release notes", "max_results": 5}
+        ),
+        action=PermissionAction.NETWORK_READ,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.none(),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_NETWORK_READ,
+        ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.WEB_SEARCH,
+            backend=backend,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert "network-read web_search" in rendered
+    assert "query='Python 3.14 release notes'" in rendered
+    assert "max_results=5" in rendered
+    assert f"backend='{backend}'" in rendered
+    assert quota_warning in rendered
+    assert "untrusted external data" in rendered
+
+
 def test_terminal_mkdir_approval_shows_only_relative_path() -> None:
     identity = ActionIdentity(
         request_id="12345678-1234-4234-9234-123456789abc",

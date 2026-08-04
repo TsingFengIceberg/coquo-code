@@ -24,6 +24,7 @@ from leonervis_code.cli.presentation import (
     MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     PROVIDER_HELP,
+    SEARCH_HELP,
     SESSION_HELP,
     TASK_HELP,
     MessageKind,
@@ -48,6 +49,7 @@ from leonervis_code.cli.presentation import (
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
+    render_web_search_sources,
     render_resume_rejection,
     render_session_info,
     render_session_diagnosis,
@@ -98,6 +100,7 @@ from leonervis_code.task_store import TaskAdmissionConfiguration
 from leonervis_code.tools.git_repository import GitObservationError
 from leonervis_code.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.web_search import WebSearchPreparationError
 
 TOP_LEVEL_COMMANDS = (
     "/help",
@@ -120,6 +123,7 @@ TOP_LEVEL_COMMANDS = (
     "/compact",
     "/compactions",
     "/provider",
+    "/search",
     "/model",
     "/session",
     "/task",
@@ -145,6 +149,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help git", "Read-only Git observation"),
     SlashCompletionSpec("/help context", "Context, usage, and compaction"),
     SlashCompletionSpec("/help provider", "Provider and model selection"),
+    SlashCompletionSpec("/help search", "Independent web search sources"),
     SlashCompletionSpec("/help policy", "Permission, approval, and command sandbox"),
     SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
@@ -185,6 +190,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
     SlashCompletionSpec("/compactions", "Show durable compaction history", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
+    SlashCompletionSpec("/search", "Web search source commands", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
@@ -195,6 +201,17 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider list", "List provider profiles"),
     SlashCompletionSpec("/provider current", "Show the current provider"),
     SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
+    SlashCompletionSpec("/search status", "Show web search source activation"),
+    SlashCompletionSpec("/search sources", "List supported and available search sources"),
+    SlashCompletionSpec("/search use brave", "Use Brave as the primary search source"),
+    SlashCompletionSpec("/search use tavily", "Use Tavily as the primary search source"),
+    SlashCompletionSpec(
+        "/search use brave tavily", "Activate Brave then Tavily; execute Brave only for now"
+    ),
+    SlashCompletionSpec(
+        "/search use tavily brave", "Activate Tavily then Brave; execute Tavily only for now"
+    ),
+    SlashCompletionSpec("/search reset", "Restore startup-environment search selection"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -403,6 +420,12 @@ class ReplSession(Protocol):
 
     def set_model(self, model: str): ...
 
+    def inspect_web_search_sources(self): ...
+
+    def set_web_search_sources(self, sources: tuple[str, ...]): ...
+
+    def reset_web_search_sources(self): ...
+
 
 @dataclass(frozen=True)
 class SlashResult:
@@ -478,6 +501,8 @@ def dispatch_slash(
         return _info(SESSION_HELP)
     if command == "/provider":
         return _info(PROVIDER_HELP)
+    if command == "/search":
+        return _info(SEARCH_HELP)
     if command == "/status":
         return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):
@@ -770,6 +795,27 @@ def dispatch_slash(
             f"Unknown provider command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Usage: /provider <list|current|use>"
         )
+    if command == "/search status" or command.startswith("/search status "):
+        if command != "/search status":
+            return _usage("Usage: /search status")
+        return _search_status(session)
+    if command == "/search sources" or command.startswith("/search sources "):
+        if command != "/search sources":
+            return _usage("Usage: /search sources")
+        return _search_status(session)
+    if command == "/search reset" or command.startswith("/search reset "):
+        if command != "/search reset":
+            return _usage("Usage: /search reset")
+        return _search_reset(session)
+    if command == "/search use" or command.startswith("/search use "):
+        return _search_use(command, session)
+    if command.startswith("/search "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("status", "sources", "use", "reset"))
+        return _usage(
+            f"Unknown search command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Usage: /search <status|sources|use|reset>"
+        )
     if command == "/model" or command.startswith("/model "):
         return _model(command, session)
     token = command.split(maxsplit=1)[0]
@@ -779,6 +825,43 @@ def dispatch_slash(
             f"Unknown command: {command}.\nDid you mean {suggestion}?\nType /help for controls."
         )
     return _usage(f"Unknown command: {command}. Type /help for controls.")
+
+
+def _search_status(session: ReplSession) -> SlashResult:
+    return _call(
+        lambda: render_web_search_sources(session.inspect_web_search_sources()),
+        kind="info",
+        failure_prefix="Search source inspection failed",
+    )
+
+
+def _search_use(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) < 3:
+        return _usage("Usage: /search use <source> [source...]")
+    try:
+        configuration = session.set_web_search_sources(tuple(parts[2:]))
+    except WebSearchPreparationError as error:
+        return SlashResult(
+            handled=True,
+            message=f"Search source update rejected: {error}",
+            kind="warning",
+        )
+    except Exception as error:
+        return _command_error(error, failure_prefix="Search source update failed")
+    return SlashResult(
+        handled=True,
+        message=render_web_search_sources(configuration),
+        kind="success",
+    )
+
+
+def _search_reset(session: ReplSession) -> SlashResult:
+    return _call(
+        lambda: render_web_search_sources(session.reset_web_search_sources()),
+        kind="success",
+        failure_prefix="Search source reset failed",
+    )
 
 
 def _permissions(command: str, session: ReplSession) -> SlashResult:

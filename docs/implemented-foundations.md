@@ -34,6 +34,7 @@
 - [Task Proposal Control Boundary](#task-proposal-control-boundary)
 - [自然语言 Task 生命周期交接](#自然语言-task-生命周期交接)
 - [可恢复的 Provider Tool 参数校验](#可恢复的-provider-tool-参数校验)
+- [有界独立 Brave/Tavily 网页搜索](#有界独立-bravetavily-网页搜索)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -1131,6 +1132,16 @@ Assistant完整回复现在始终复用`• `和两空格悬挂缩进，包括Ta
 
 Item codec现在按能力引入版本表达继承：所有已支持的v3及以后schema读写普通assistant companion text，v4及以后读写assistant tool batch；支持版本仍是闭合的v1-v8集合，不接受未知未来版本。v1/v2拒绝新字段、v5 ledger严格校验、完整causality和旧transcript bytes均保持不变。Canonical system prompt保持v29、provider adapter contract保持v31，Effective Context、Session schema编号及其他持久契约不变。详见[0101：turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)。
 
+## 有界独立 Brave/Tavily 网页搜索
+
+`web_search(query, max_results)`为Leonervis增加第一条Host拥有的公共网页搜索路径。模型只提供统一query和结果数；Host选择固定Brave或Tavily Search API，不接受模型指定endpoint，也不读取结果页面。因此它和后续Provider原生搜索、MCP搜索及通用`web_fetch`保持不同的调用因果与来源标识。普通Prompt以及Task planning、execution、correction Stage可使用该工具，reflection Stage不开放。
+
+Brave走固定GET与subscription-token header；Tavily走固定Bearer POST，并固定basic search、单来源一个chunk、关闭自动参数、生成答案、raw content和images，Tavily官方将其计为一次basic-search credit。Host把query限制为512字符/2 KiB、结果数限制为1至10，固定15秒timeout、256 KiB response和32 KiB JSONL输出，并最多解析100条原始结果。Transport禁止redirect且只接受JSON；两种返回都归一为保留provider顺序的title、URL、snippet、domain和显式backend，过滤非HTTP(S)、带credential、含控制字符、畸形、超长及重复URL。第三方结果始终是不可信数据。
+
+搜索属于新的`network-read` action：`read-only`和`workspace-write`拒绝，只有`danger-full-access`按正交的`ask | auto`策略继续。只有一个有效key时自动选择对应后端；两个key同时有效时可由`LEONERVIS_WEB_SEARCH_BACKEND`选择，或在REPL通过`/search use <source> [source...]`设置有序激活来源。`/search status|sources`只读检查，`/search reset`恢复启动环境选择。第一个激活来源是当前唯一执行的primary；额外来源只建立未来fan-out接口，不会被请求或计费。命令配置仅在当前进程生效，不写Session，也不调用provider。Ask在网络请求前显示完整query、数量、实际backend及对应额度提示；query和不含credential的backend配置fingerprint参与exact ActionIdentity、approval binding和durable Action Audit，普通live摘要及`/actions`列表隐藏query正文。凭据绝不进入模型参数、ActionIdentity、ToolResult、Session或审计。Timeout或transport不确定返回`partial`并禁止自动retry，因为请求或计费可能已发生。
+
+Catalog现在包含22个ordinary tools和30个总定义。Canonical system prompt升级v30、provider adapter contract升级v32，empty full-context identity变为`ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`；ToolArguments v1、ActionIdentity v1、`ctx-v5`/`ctx-v6`representation及Session、Task、Action Audit schema均不变，旧transcript不重写。非持久化ApprovalPreview升级v2以携带所选backend；ActionPrecondition增加不含secret的configuration SHA-256种类而不改变ActionIdentity版本。确定性测试通过注入transport覆盖双后端协议、选择、权限、审批、审计、截断、坏响应和不确定失败，不访问真实网络或消耗API额度。详见[0102：Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1234,3 +1245,4 @@ Item codec现在按能力引入版本表达继承：所有已支持的v3及以�
 99. [0099：Recoverable Provider Tool Argument Validation](./decisions/0099-recoverable-provider-tool-argument-validation.md)
 100. [0100：Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)
 101. [0101：turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)
+102. [0102：Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)

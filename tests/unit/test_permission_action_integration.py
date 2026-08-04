@@ -37,6 +37,13 @@ from leonervis_code.session_store import (
 )
 from leonervis_code.tools import grep_regex as grep_regex_module
 from leonervis_code.tools.catalog import MAX_TOOL_REQUESTS_PER_TURN
+from leonervis_code.tools.web_search import (
+    BRAVE_SEARCH_API_KEY_ENV,
+    SearchHttpResponse,
+    TAVILY_SEARCH_API_KEY_ENV,
+    WEB_SEARCH_BACKEND_ENV,
+    WebSearchTool,
+)
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -88,13 +95,15 @@ def open_session(
     permission_mode: PermissionMode = PermissionMode.READ_ONLY,
     approval_mode: ApprovalMode = ApprovalMode.ASK,
     approval_handler=None,
+    environment=None,
+    web_search_factory=WebSearchTool,
 ) -> ProjectSession:
     return ProjectSession.open(
         workspace,
         model="custom/model",
         custom_protocol="openai-compatible",
         custom_base_url="http://127.0.0.1:11434/v1",
-        environment={},
+        environment={} if environment is None else environment,
         provider_factory=lambda route, *, environment: provider,
         user_profile_path=workspace / "user.json",
         project_profile_path=workspace / "project.json",
@@ -103,6 +112,28 @@ def open_session(
         approval_mode=approval_mode,
         approval_handler=approval_handler,
         action_uuid_factory=uuid_factory(),
+        web_search_factory=web_search_factory,
+    )
+
+
+class SearchTransport:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def search(self, **arguments):
+        self.calls.append(arguments)
+        return SearchHttpResponse(
+            200,
+            "application/json",
+            b'{"results":[{"title":"Python","url":"https://python.org/","content":"Official site"}]}',
+        )
+
+
+def search_call() -> ToolUse:
+    return ToolUse(
+        "search-1",
+        "web_search",
+        ToolArguments.from_mapping({"query": "Python official documentation", "max_results": 3}),
     )
 
 
@@ -141,6 +172,127 @@ def test_default_read_only_denial_is_model_visible_audited_and_committed(tmp_pat
             in events
         )
         assert any(isinstance(event, ToolTurnSummaryCommitted) for event in events)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "reason"),
+    [
+        (PermissionMode.READ_ONLY, "denied_network_access_mode"),
+        (PermissionMode.WORKSPACE_WRITE, "denied_network_access_mode"),
+    ],
+)
+def test_web_search_requires_danger_full_access_without_contacting_backend(
+    tmp_path: Path,
+    permission_mode: PermissionMode,
+    reason: str,
+) -> None:
+    transport = SearchTransport()
+    call = search_call()
+    provider = ToolProvider([call, AssistantText("search denied")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=permission_mode,
+        environment={TAVILY_SEARCH_API_KEY_ENV: "secret"},
+        web_search_factory=lambda environment: WebSearchTool(environment, transport=transport),
+    )
+    try:
+        assert session.prompt("search the web") == "search denied"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "search-1", f"permission denied: {reason}", is_error=True
+        )
+        assert transport.calls == []
+        audit = session.action_audits()[0]
+        assert audit.identity.action.value == "network-read"
+        assert audit.status is ActionAuditStatus.DENIED
+    finally:
+        session.close()
+
+
+def test_approved_web_search_is_exact_audited_and_returned_to_model(tmp_path: Path) -> None:
+    transport = SearchTransport()
+    call = search_call()
+    provider = ToolProvider([call, AssistantText("Python is documented at python.org")])
+    approvals: list[HumanApprovalRequest] = []
+
+    def approve(request: HumanApprovalRequest) -> ApprovalResolution:
+        approvals.append(request)
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve,
+        environment={TAVILY_SEARCH_API_KEY_ENV: "secret"},
+        web_search_factory=lambda environment: WebSearchTool(environment, transport=transport),
+    )
+    try:
+        assert session.prompt("find Python docs") == "Python is documented at python.org"
+        assert len(approvals) == 1
+        assert approvals[0].identity.arguments.as_mapping() == {
+            "query": "Python official documentation",
+            "max_results": 3,
+        }
+        assert approvals[0].preview is not None
+        assert approvals[0].preview.backend == "tavily"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert '"backend":"tavily"' in result.content
+        assert '"url":"https://python.org/"' in result.content
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["api_key"] == "secret"
+        audit = session.action_audits()[0]
+        assert audit.identity.action.value == "network-read"
+        assert audit.status is ActionAuditStatus.SUCCEEDED
+        assert audit.result_code == "ok"
+    finally:
+        session.close()
+
+
+def test_missing_search_credential_hard_rejects_without_action_audit(tmp_path: Path) -> None:
+    call = search_call()
+    provider = ToolProvider([call, AssistantText("search unavailable")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("search the web") == "search unavailable"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert TAVILY_SEARCH_API_KEY_ENV in result.content
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_ambiguous_search_credentials_reject_before_permission_and_audit(tmp_path: Path) -> None:
+    call = search_call()
+    provider = ToolProvider([call, AssistantText("select a backend")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        environment={
+            BRAVE_SEARCH_API_KEY_ENV: "brave-secret",
+            TAVILY_SEARCH_API_KEY_ENV: "tavily-secret",
+        },
+    )
+    try:
+        assert session.prompt("search the web") == "select a backend"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert WEB_SEARCH_BACKEND_ENV in result.content
+        assert session.action_audits() == ()
     finally:
         session.close()
 
