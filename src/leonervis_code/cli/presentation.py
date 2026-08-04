@@ -11,6 +11,8 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
+    ProviderSearchActivityReceived,
+    ProviderSearchSummaryReceived,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
     ToolEventStatus,
@@ -196,10 +198,14 @@ SEARCH_HELP = (
     "  /search status\n"
     "  /search sources\n"
     "  /search use <source> [source...]\n"
+    "  /search mode <auto|required>\n"
+    "  /search domains <domain> [domain...] | reset\n"
+    "  /search context <low|medium|high|reset>\n"
     "  /search reset\n"
-    "Supported sources: brave, tavily. Source order matters: the first active source is primary. "
-    "Current web_search execution is primary-only; additional active sources reserve the future "
-    "multi-source fan-out boundary. Selection is process-local and does not modify Session history."
+    "Supported sources: provider, brave, tavily. A declared provider-native source is enabled "
+    "by default; independent sources remain disabled until explicitly selected. Source order "
+    "matters: later independent sources are explicit model-mediated fallbacks and are never "
+    "queried automatically. Provider controls are process-local and adapter-validated."
 )
 POLICY_HELP = (
     "Policy commands:\n"
@@ -237,6 +243,14 @@ HELP_BY_TOPIC = {
 def render_web_search_sources(configuration: WebSearchSourceConfiguration) -> str:
     """Render credential presence and process-local activation without secret material."""
     lines = ["Web search sources:"]
+    provider_states = ["available" if configuration.provider_available else "unavailable"]
+    if configuration.provider_active:
+        provider_states.append("active")
+    if configuration.primary_source_name == "provider":
+        provider_states.append("primary")
+    if configuration.provider_adapter is not None:
+        provider_states.append(configuration.provider_adapter)
+    lines.append(f"  provider: {', '.join(provider_states)}")
     for source in WebSearchBackend:
         states = [
             "available" if source in configuration.available_sources else "credential unavailable"
@@ -246,26 +260,31 @@ def render_web_search_sources(configuration: WebSearchSourceConfiguration) -> st
         if source is configuration.primary_source:
             states.append("primary")
         lines.append(f"  {source.value}: {', '.join(states)}")
-    active = ", ".join(source.value for source in configuration.active_sources) or "none"
-    primary = (
-        configuration.primary_source.value if configuration.primary_source is not None else "none"
-    )
-    execution = (
-        ", ".join(source.value for source in configuration.execution_sources) or "unavailable"
-    )
+    active = ", ".join(configuration.ordered_source_names) or "none"
+    primary = configuration.primary_source_name or "none"
+    execution = configuration.execution_source_name or "unavailable"
     lines.extend(
         (
             f"Active order: {active}",
             f"Primary: {primary}",
             f"Current execution: {configuration.execution_mode} ({execution})",
-            f"Selection source: {configuration.selection_source.value}",
+            "Selection source: "
+            + (
+                "provider-default"
+                if configuration.ordered_source_names == ("provider",)
+                else configuration.selection_source.value
+            ),
             "Scope: current process only; Session history and credentials are unchanged.",
+            f"Provider mode: {configuration.provider_mode}",
+            "Provider allowed domains: "
+            + (", ".join(configuration.provider_allowed_domains) or "all"),
+            f"Provider search context: {configuration.provider_context_size or 'default'}",
         )
     )
-    if len(configuration.active_sources) > 1:
+    if configuration.execution_mode == "primary-with-explicit-fallback":
         lines.append(
-            "Note: additional sources are activated for the future command contract; current "
-            "web_search does not query or merge them."
+            "Fallback: later independent sources are exposed to the model only as explicit "
+            "fallbacks; the Host never guesses a query or calls them automatically."
         )
     if configuration.error is not None:
         lines.append(f"Configuration issue: {configuration.error}")
@@ -317,6 +336,10 @@ class RuntimeStatusView(Protocol):
     max_output_tokens: int | None
     default_max_output_tokens: int | None
     max_output_tokens_source: str
+    native_search_available: bool
+    native_search_enabled: bool
+    native_search_adapter: str | None
+    native_search_source: str
 
 
 class CommandSandboxDependenciesView(Protocol):
@@ -426,6 +449,7 @@ class TaskStageInfoView(Protocol):
 class ConversationTurnView(Protocol):
     user: object
     assistant: object
+    provider_search: object | None
 
 
 class SessionPreviewView(Protocol):
@@ -689,6 +713,15 @@ def render_session_preview(preview: SessionPreviewView) -> str:
                 indent_terminal_block(_escape_terminal_text(turn.assistant.text), "  "),
             )
         )
+        summary = getattr(turn, "provider_search", None)
+        if summary is not None:
+            actions = ", ".join(summary.action_types) or "unknown"
+            lines.append(
+                "Provider search: "
+                f"calls={summary.call_count} failed={summary.failed_count} "
+                f"actions={actions} sources={summary.source_count} "
+                f"citations={summary.citation_count}"
+            )
     rendered = "\n".join(lines)
     if len(rendered.encode("utf-8")) <= MAX_SESSION_PREVIEW_RENDER_BYTES:
         return rendered
@@ -719,6 +752,15 @@ def render_session_turn_range(result: SessionTurnRangeView) -> str:
                 indent_terminal_block(_escape_terminal_text(turn.assistant.text), "  "),
             )
         )
+        summary = getattr(turn, "provider_search", None)
+        if summary is not None:
+            actions = ", ".join(summary.action_types) or "unknown"
+            lines.append(
+                "Provider search: "
+                f"calls={summary.call_count} failed={summary.failed_count} "
+                f"actions={actions} sources={summary.source_count} "
+                f"citations={summary.citation_count}"
+            )
     return _cap_rendered_text(
         "\n".join(lines),
         MAX_SESSION_PREVIEW_RENDER_BYTES,
@@ -1192,6 +1234,15 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         if status.model_max_output_diagnostic
         else ""
     )
+    native_search = (
+        f"enabled ({status.native_search_adapter}, {status.native_search_source})"
+        if status.native_search_enabled
+        else (
+            f"available but disabled ({status.native_search_adapter}, {status.native_search_source})"
+            if status.native_search_available
+            else "unavailable"
+        )
+    )
     return (
         f"Mode: real\n"
         f"Profile: {status.profile or '<direct>'} ({status.selection_source})\n"
@@ -1199,6 +1250,7 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         f"Model: {status.selected_model}\n"
         f"Base URL: {status.base_url} ({status.base_url_source})\n"
         f"Credential: {credential}\n"
+        f"Provider native search: {native_search}\n"
         f"Context window: {context}{diagnostic}\n"
         f"Model max output: {model_output}{output_diagnostic}\n"
         f"Requested output reserve: {output_reserve} ({status.max_output_tokens_source})"
@@ -1822,6 +1874,27 @@ def render_prompt_event(
             f"Token usage [{event.invocation_index}/{event.invocation_limit}]: {detail}",
             kind,
         )
+    if isinstance(event, ProviderSearchActivityReceived):
+        return f"Provider search: {event.phase.value}", "info"
+    if isinstance(event, ProviderSearchSummaryReceived):
+        observation = event.observation
+        actions = ", ".join(observation.action_types) or "unknown"
+        detail = (
+            f"calls={observation.call_count} failed={observation.failed_count} "
+            f"actions={actions} sources={observation.source_count} "
+            f"citations={observation.citation_count} "
+            f"discarded_citations={observation.discarded_citation_count}"
+        )
+        if observation.discarded_citation_count:
+            return f"Provider search discarded malformed citations: {detail}", "warning"
+        if observation.failed_count:
+            return f"Provider search completed with failed actions: {detail}", "warning"
+        if observation.citation_count == 0:
+            return (
+                "Provider search completed; structured citations unavailable. " + detail,
+                "warning",
+            )
+        return f"Provider search completed: {detail}", "info"
     if isinstance(event, TaskAdmissionProposed):
         return (
             "Task admission proposal committed:\n"

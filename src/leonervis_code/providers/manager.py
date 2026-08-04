@@ -34,6 +34,7 @@ from leonervis_code.providers.model_context_cache import (
     ModelContextCapabilityCache,
     default_model_context_cache_path,
 )
+from leonervis_code.providers.native_search import NativeSearchRuntimeOptions
 from leonervis_code.providers.profile import MAX_MODEL_OUTPUT_TOKENS, NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
 from leonervis_code.providers.request_context import (
@@ -133,6 +134,10 @@ class RuntimeStatus:
     model_max_output_diagnostic: str | None = None
     generation: int = 0
     adapter_contract_version: int = ADAPTER_CONTRACT_VERSION
+    native_search_available: bool = False
+    native_search_enabled: bool = False
+    native_search_adapter: str | None = None
+    native_search_source: str = "unavailable"
 
     @property
     def profile_name(self) -> str | None:
@@ -450,6 +455,7 @@ class TurnRuntimeSnapshot:
             outcome.text_was_streamed,
             outcome.usage,
             report,
+            outcome.search_observation,
         )
 
 
@@ -618,6 +624,8 @@ class RuntimeProviderManager:
         self._output_override: int | None = None
         self._output_override_source: str | None = None
         self._selection_source = "default"
+        self._native_search_enabled = False
+        self._native_search_options = NativeSearchRuntimeOptions()
         self._route: RuntimeProviderRoute | None = None
         self._capability = ModelContextCapability.unknown(None)
         self._usage_tracker = RuntimeUsageTracker(self._generation)
@@ -831,6 +839,7 @@ class RuntimeProviderManager:
                     generation=self._generation,
                     default_max_output_tokens=self._default_max_output_tokens,
                     max_output_tokens_source=self._max_output_tokens_source(),
+                    native_search_enabled=self._native_search_enabled,
                 )
             )
             snapshot = ContextTransitionRuntimeSnapshot(
@@ -869,6 +878,7 @@ class RuntimeProviderManager:
                 generation=self._generation,
                 default_max_output_tokens=self._default_max_output_tokens,
                 max_output_tokens_source=self._max_output_tokens_source(),
+                native_search_enabled=False,
             )
             snapshot = CompactionRuntimeSnapshot(
                 self._provider,
@@ -906,6 +916,7 @@ class RuntimeProviderManager:
                     generation=self._generation,
                     default_max_output_tokens=self._default_max_output_tokens,
                     max_output_tokens_source=self._max_output_tokens_source(),
+                    native_search_enabled=self._native_search_enabled,
                 )
             )
             snapshot = TurnRuntimeSnapshot(
@@ -1034,9 +1045,21 @@ class RuntimeProviderManager:
                 if candidate is None:
                     self._route = None
                     self._capability = ModelContextCapability.unknown(None)
+                    self._native_search_enabled = False
+                    self._native_search_options = NativeSearchRuntimeOptions()
                 else:
                     self._route = candidate.route
                     self._capability = candidate.capability
+                    self._native_search_enabled = candidate.route.native_search.default_enabled
+                    self._native_search_options = NativeSearchRuntimeOptions()
+                    operation = getattr(candidate_provider, "set_native_search_enabled", None)
+                    if callable(operation):
+                        operation(self._native_search_enabled)
+                    option_operation = getattr(
+                        candidate_provider, "set_native_search_options", None
+                    )
+                    if callable(option_operation):
+                        option_operation(self._native_search_options)
                 if loaded is None:
                     self._profile_id = None
                     self._loaded_profile = None
@@ -1196,6 +1219,7 @@ class RuntimeProviderManager:
                 generation=self._generation,
                 default_max_output_tokens=self._default_max_output_tokens,
                 max_output_tokens_source=self._max_output_tokens_source(),
+                native_search_enabled=self._native_search_enabled,
             )
             report = assess_context_fit(
                 provider=self._provider,
@@ -1223,7 +1247,57 @@ class RuntimeProviderManager:
                 generation=self._generation,
                 default_max_output_tokens=self._default_max_output_tokens,
                 max_output_tokens_source=self._max_output_tokens_source(),
+                native_search_enabled=self._native_search_enabled,
             )
+
+    def set_native_search_enabled(self, enabled: bool) -> RuntimeStatus:
+        """Toggle provider-owned search without changing profile persistence."""
+        if type(enabled) is not bool:
+            raise RuntimeProviderStateError("native-search state must be boolean")
+        with self._lock:
+            self._ensure_switchable()
+            if self._route is None:
+                if enabled:
+                    raise RuntimeProviderStateError("current runtime has no provider native search")
+                self._native_search_enabled = False
+                return self.status()
+            if enabled and not self._route.native_search.available:
+                raise RuntimeProviderStateError("current provider has no native-search adapter")
+            operation = getattr(self._provider, "set_native_search_enabled", None)
+            if not callable(operation):
+                if enabled:
+                    raise RuntimeProviderStateError(
+                        "current provider adapter cannot enable native search"
+                    )
+            else:
+                operation(enabled)
+            self._native_search_enabled = enabled
+            return self.status()
+
+    def set_native_search_options(self, options: NativeSearchRuntimeOptions) -> RuntimeStatus:
+        """Set bounded process-local Provider search controls without profile persistence."""
+        if type(options) is not NativeSearchRuntimeOptions:
+            raise RuntimeProviderStateError("native-search options are invalid")
+        with self._lock:
+            self._ensure_switchable()
+            if self._route is None:
+                if options != NativeSearchRuntimeOptions():
+                    raise RuntimeProviderStateError("current runtime has no provider native search")
+                self._native_search_options = options
+                return self.status()
+            operation = getattr(self._provider, "set_native_search_options", None)
+            if not callable(operation):
+                if options != NativeSearchRuntimeOptions():
+                    raise RuntimeProviderStateError(
+                        "current provider adapter cannot configure native search"
+                    )
+            else:
+                try:
+                    operation(options)
+                except ValueError as error:
+                    raise RuntimeProviderStateError(str(error)) from None
+            self._native_search_options = options
+            return self.status()
 
     def begin_turn_usage(self) -> int:
         self._ensure_open()
@@ -1299,6 +1373,14 @@ class RuntimeProviderManager:
         self._provider = candidate.provider
         self._route = candidate.route
         self._capability = candidate.capability
+        self._native_search_enabled = candidate.route.native_search.default_enabled
+        self._native_search_options = NativeSearchRuntimeOptions()
+        operation = getattr(candidate.provider, "set_native_search_enabled", None)
+        if callable(operation):
+            operation(self._native_search_enabled)
+        option_operation = getattr(candidate.provider, "set_native_search_options", None)
+        if callable(option_operation):
+            option_operation(self._native_search_options)
 
     def _load_profile(self, profile: NamedProviderProfile) -> None:
         self._profile_id = profile.profile_id
@@ -1406,6 +1488,7 @@ def _status_for_route(
     generation: int = 0,
     default_max_output_tokens: int | None = None,
     max_output_tokens_source: str | None = None,
+    native_search_enabled: bool | None = None,
 ) -> RuntimeStatus:
     definition = route.definition
     present = bool(
@@ -1448,6 +1531,18 @@ def _status_for_route(
         model_max_output_source=capability.model_max_output_source.value,
         model_max_output_diagnostic=capability.model_max_output_diagnostic,
         generation=generation,
+        native_search_available=route.native_search.available,
+        native_search_enabled=(
+            route.native_search.default_enabled
+            if native_search_enabled is None
+            else native_search_enabled
+        ),
+        native_search_adapter=(
+            route.native_search.adapter_id.value
+            if route.native_search.adapter_id is not None
+            else None
+        ),
+        native_search_source=route.native_search.source.value,
     )
 
 

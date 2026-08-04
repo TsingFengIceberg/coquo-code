@@ -79,6 +79,12 @@ from leonervis_code.providers.factory import create_provider
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
 from leonervis_code.providers.model_context import ModelContextCapabilityResolver
+from leonervis_code.providers.native_search import (
+    MAX_NATIVE_SEARCH_MANIFEST_BYTES,
+    NativeSearchConfigurationError,
+    NativeSearchManifest,
+    adapter_option_values,
+)
 from leonervis_code.providers.profile import (
     MAX_MODEL_OUTPUT_TOKENS,
     NamedProviderProfile,
@@ -260,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-protocol",
         dest="invocation_provider_protocol",
-        choices=["openai-compatible"],
+        choices=["openai-compatible", "openai-responses"],
         help="explicit custom provider wire protocol",
     )
     parser.add_argument(
@@ -335,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument(
         "--protocol",
         dest="profile_protocol",
-        choices=["openai-compatible", "anthropic-messages"],
+        choices=["openai-compatible", "openai-responses", "anthropic-messages"],
     )
     add_parser.add_argument("--base-url", dest="profile_base_url")
     add_parser.add_argument("--api-key-env", dest="profile_api_key_env")
@@ -343,6 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--context-window-tokens", type=int)
     add_parser.add_argument("--model-max-output-tokens", type=int)
     add_parser.add_argument("--temperature", type=float)
+    add_parser.add_argument(
+        "--native-search-adapter",
+        choices=adapter_option_values(),
+        help="provider-native search adapter (built-ins default to auto; custom defaults to none)",
+    )
+    add_parser.add_argument("--native-search-manifest", type=Path)
     add_parser.add_argument("--replace", action="store_true")
     add_parser.add_argument("--if-revision", type=int)
     list_parser = provider_commands.add_parser("list", help="list global provider profiles")
@@ -376,7 +388,9 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--provider", required=True, choices=[*BUILTIN_PROVIDERS, "custom"])
     replace_parser.add_argument("--model", dest="profile_model", required=True, type=nonblank_model)
     replace_parser.add_argument(
-        "--protocol", dest="profile_protocol", choices=["openai-compatible", "anthropic-messages"]
+        "--protocol",
+        dest="profile_protocol",
+        choices=["openai-compatible", "openai-responses", "anthropic-messages"],
     )
     replace_parser.add_argument("--base-url", dest="profile_base_url")
     replace_parser.add_argument("--api-key-env", dest="profile_api_key_env")
@@ -384,8 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--context-window-tokens", type=int)
     replace_parser.add_argument("--model-max-output-tokens", type=int)
     replace_parser.add_argument("--temperature", type=float)
+    replace_parser.add_argument(
+        "--native-search-adapter",
+        choices=adapter_option_values(),
+        help="provider-native search adapter (built-ins default to auto; custom defaults to none)",
+    )
+    replace_parser.add_argument("--native-search-manifest", type=Path)
     replace_parser.add_argument("--if-revision", type=int)
-    provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v4")
+    provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v5")
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -634,6 +654,14 @@ def render_runtime_route(
     model_output = capability.model_max_output_tokens or "unknown"
     stdout.write(f"model max output: {model_output} ({capability.model_max_output_source.value})\n")
     stdout.write(f"requested output reserve: {route.max_output_tokens}\n")
+    stdout.write(
+        f"native search: {'available' if route.native_search.available else 'unavailable'}\n"
+    )
+    stdout.write(
+        "native search adapter: "
+        f"{route.native_search.adapter_id.value if route.native_search.adapter_id else '<none>'}\n"
+    )
+    stdout.write(f"native search source: {route.native_search.source.value}\n")
     if capability.diagnostic:
         stdout.write(f"context diagnostic: {capability.diagnostic}\n")
     return 0
@@ -676,25 +704,50 @@ def render_profile(
     stdout.write(
         f"temperature: {profile.temperature if profile.temperature is not None else '<default>'}\n"
     )
+    route = resolve_profile_route(profile, environment=environment)
+    stdout.write(
+        "native search: "
+        f"{'available; enabled by default' if route.native_search.available else 'unavailable'}\n"
+    )
+    stdout.write(
+        "native search adapter: "
+        f"{route.native_search.adapter_id.value if route.native_search.adapter_id else '<none>'}\n"
+    )
+    stdout.write(f"native search source: {route.native_search.source.value}\n")
+    if route.native_search.manifest is not None:
+        stdout.write(f"native search manifest: {route.native_search.manifest.manifest_id}\n")
+        stdout.write(
+            f"native search manifest digest: sha256:{route.native_search.manifest.fingerprint()}\n"
+        )
 
 
-def _profile_protocol(provider_id: str, option: str | None) -> WireProtocol:
+def _profile_protocol(provider_id: str, option: str | None, model: str) -> WireProtocol:
     if provider_id in BUILTIN_PROVIDERS:
         expected = BUILTIN_PROVIDERS[provider_id].protocol
+        if provider_id == "deepseek" and model == "deepseek-v4-flash":
+            expected = WireProtocol.OPENAI_RESPONSES
         if option is not None and option != _protocol_option(expected):
             raise ProviderProfileError(
                 f"profile protocol does not match built-in provider {provider_id}"
             )
         return expected
-    if option != "openai-compatible":
-        raise ProviderProfileError("custom profiles require --protocol openai-compatible")
-    return WireProtocol.OPENAI_CHAT_COMPLETIONS
+    if option == "openai-compatible":
+        return WireProtocol.OPENAI_CHAT_COMPLETIONS
+    if option == "openai-responses":
+        return WireProtocol.OPENAI_RESPONSES
+    if option == "anthropic-messages":
+        return WireProtocol.ANTHROPIC_MESSAGES
+    raise ProviderProfileError(
+        "custom profiles require --protocol openai-compatible, openai-responses, or anthropic-messages"
+    )
 
 
 def _protocol_option(protocol: WireProtocol) -> str:
-    return (
-        "anthropic-messages" if protocol == WireProtocol.ANTHROPIC_MESSAGES else "openai-compatible"
-    )
+    if protocol == WireProtocol.ANTHROPIC_MESSAGES:
+        return "anthropic-messages"
+    if protocol == WireProtocol.OPENAI_RESPONSES:
+        return "openai-responses"
+    return "openai-compatible"
 
 
 def _store(
@@ -712,10 +765,18 @@ def _store(
 
 
 def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
+    manifest = _load_native_search_manifest(arguments.native_search_manifest)
+    selected_adapter = arguments.native_search_adapter
+    if arguments.provider == "custom" and selected_adapter is None and manifest is None:
+        selected_adapter = "none"
     return ProviderProfileSpec(
         name=arguments.name,
         provider_id=arguments.provider,
-        protocol=_profile_protocol(arguments.provider, arguments.profile_protocol),
+        protocol=_profile_protocol(
+            arguments.provider,
+            arguments.profile_protocol,
+            arguments.profile_model,
+        ),
         model=arguments.profile_model,
         base_url=arguments.profile_base_url,
         api_key_env=arguments.profile_api_key_env,
@@ -723,7 +784,32 @@ def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
         context_window_tokens=arguments.context_window_tokens,
         model_max_output_tokens=arguments.model_max_output_tokens,
         temperature=arguments.temperature,
+        native_search_adapter=selected_adapter,
+        native_search_manifest=manifest,
     )
+
+
+def _load_native_search_manifest(path: Path | None) -> NativeSearchManifest | None:
+    if path is None:
+        return None
+    if path.is_symlink():
+        raise ProviderProfileError("native-search manifest path must not be a symlink")
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise ProviderProfileError(f"could not read native-search manifest: {error}") from None
+    if not payload or len(payload) > MAX_NATIVE_SEARCH_MANIFEST_BYTES:
+        raise ProviderProfileError("native-search manifest is empty or exceeds its byte limit")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise ProviderProfileError("native-search manifest is not valid UTF-8 JSON") from None
+    if not isinstance(value, dict):
+        raise ProviderProfileError("native-search manifest must be a JSON object")
+    try:
+        return NativeSearchManifest.from_mapping(value)
+    except NativeSearchConfigurationError as error:
+        raise ProviderProfileError(str(error)) from None
 
 
 def _selected_profile(
@@ -792,7 +878,7 @@ def handle_provider_command(
         stdout.write(f"Renamed provider profile {configured.name} to {renamed.name}.\n")
     elif command == "migrate":
         store.migrate()
-        stdout.write("Migrated provider configuration to schema v4.\n")
+        stdout.write("Migrated provider configuration to schema v5.\n")
     elif command == "clear":
         RuntimeProviderManager.prepare_clear(
             store,

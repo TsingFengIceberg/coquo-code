@@ -13,6 +13,7 @@ import pytest
 from leonervis_code.core.contracts import (
     ToolArguments,
     AssistantText,
+    ProviderOwnedItem,
     ToolOutcomeEntry,
     ToolRequestOutcome,
     ToolResult,
@@ -161,6 +162,42 @@ def test_preview_replays_bounded_recent_turns_without_mutation(tmp_path: Path) -
         session_store.preview(SESSION_ONE, MAX_SESSION_PREVIEW_TURNS + 1)
     with pytest.raises(SessionStoreError, match="preview limit"):
         session_store.preview(SESSION_ONE, True)
+    writer.release()
+
+
+def test_preview_derives_content_free_provider_search_summary(tmp_path: Path) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    writer.append_turn(
+        (
+            UserMessage("find official docs"),
+            ProviderOwnedItem.from_mapping(
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "status": "failed",
+                    "action": {
+                        "type": "open_page",
+                        "url": "https://example.com/private-query",
+                        "sources": [{"url": "https://example.com"}],
+                    },
+                }
+            ),
+            AssistantText("Partial result.\n\nSources:\n- [Example](https://example.com)"),
+        ),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+
+    summary = session_store.preview(SESSION_ONE, 1).turns[0].provider_search
+
+    assert summary is not None
+    assert summary.call_count == 1
+    assert summary.failed_count == 1
+    assert summary.action_types == ("open_page",)
+    assert summary.source_count == 1
+    assert summary.citation_count == 1
     writer.release()
 
 

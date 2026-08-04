@@ -32,6 +32,8 @@ from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.core.session_title import build_session_title_request
 from leonervis_code.providers.definitions import OPENAI
+from leonervis_code.providers.definitions import WireProtocol
+from leonervis_code.providers.native_search import NativeSearchConfiguration
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.openai_compat import (
     OpenAICompatibleConversationProvider,
@@ -164,8 +166,26 @@ def test_counter_accepts_empty_and_complete_committed_history_without_weakening_
     assert client.requests == []
 
 
-def route(selector: str = "openai/gpt-4.1"):
-    return resolve_runtime_route(selector, environment={})
+def route(
+    selector: str = "openai/gpt-4.1",
+    *,
+    max_output_tokens: int = 1024,
+    temperature: float | None = None,
+):
+    resolved = resolve_runtime_route(
+        selector,
+        environment={},
+        max_output_tokens=max_output_tokens,
+        temperature=temperature,
+    )
+    return replace(
+        resolved,
+        definition=replace(
+            resolved.definition,
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        ),
+        native_search=NativeSearchConfiguration.unavailable(),
+    )
 
 
 def request(*history, allow_tools: bool = True) -> ConversationRequest:
@@ -984,9 +1004,7 @@ def test_parser_classifies_refusal() -> None:
 
 
 def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> None:
-    normal = resolve_runtime_route(
-        "openai/gpt-4.1", environment={}, max_output_tokens=32, temperature=0.2
-    )
+    normal = route("openai/gpt-4.1", max_output_tokens=32, temperature=0.2)
     normal_request = build_request(normal, request(UserMessage(text="Hello")))
     assert normal_request["messages"][0] == {
         "role": "system",
@@ -997,9 +1015,7 @@ def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> N
     assert normal_request["temperature"] == 0.2
     assert "max_completion_tokens" not in normal_request
 
-    reasoning = resolve_runtime_route(
-        "openai/gpt-5", environment={}, max_output_tokens=64, temperature=0.2
-    )
+    reasoning = route("openai/gpt-5", max_output_tokens=64, temperature=0.2)
     reasoning_request = build_request(reasoning, request(UserMessage(text="Hello")))
     assert reasoning_request["max_completion_tokens"] == 64
     assert "max_tokens" not in reasoning_request

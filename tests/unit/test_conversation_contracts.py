@@ -5,9 +5,12 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from leonervis_code.core.contracts import (
+    AssistantText,
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
     MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
     MAX_TOOL_OUTCOME_ENTRIES,
+    ProviderOwnedItem,
+    ProviderResponseEnvelope,
     ConversationRequest,
     ToolArguments,
     ToolOutcomeEntry,
@@ -131,3 +134,24 @@ def test_tool_turn_ledger_rejects_gaps_duplicates_and_unbound_synthetic_codes() 
     )
     with pytest.raises(ValueError, match="entry limit"):
         ToolTurnLedger(oversized)
+
+
+def test_provider_owned_item_is_canonical_bounded_and_enveloped() -> None:
+    item = ProviderOwnedItem.from_mapping(
+        {
+            "status": "completed",
+            "type": "web_search_call",
+            "id": "ws_1",
+            "action": {"query": "Python", "type": "search"},
+        }
+    )
+
+    assert item.canonical_json.startswith('{"action"')
+    assert item.as_mapping()["id"] == "ws_1"
+    envelope = ProviderResponseEnvelope((item,), AssistantText("done"))
+    assert envelope.response == AssistantText("done")
+
+    with pytest.raises(ValueError, match="unsupported"):
+        ProviderOwnedItem.from_mapping({"type": "code_interpreter_call", "id": "ci_1"})
+    with pytest.raises(ValueError, match="duplicate"):
+        ProviderResponseEnvelope((item, item), AssistantText("done"))

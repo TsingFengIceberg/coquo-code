@@ -41,7 +41,7 @@ from leonervis_code.tools.web_search import (
     BRAVE_SEARCH_API_KEY_ENV,
     SearchHttpResponse,
     TAVILY_SEARCH_API_KEY_ENV,
-    WEB_SEARCH_BACKEND_ENV,
+    WebSearchPreparationError,
     WebSearchTool,
 )
 
@@ -199,6 +199,7 @@ def test_web_search_requires_danger_full_access_without_contacting_backend(
         web_search_factory=lambda environment: WebSearchTool(environment, transport=transport),
     )
     try:
+        session.set_web_search_sources(("tavily",))
         assert session.prompt("search the web") == "search denied"
         assert provider.requests[1].history[-1] == ToolResult(
             "search-1", f"permission denied: {reason}", is_error=True
@@ -231,6 +232,7 @@ def test_approved_web_search_is_exact_audited_and_returned_to_model(tmp_path: Pa
         web_search_factory=lambda environment: WebSearchTool(environment, transport=transport),
     )
     try:
+        session.set_web_search_sources(("tavily",))
         assert session.prompt("find Python docs") == "Python is documented at python.org"
         assert len(approvals) == 1
         assert approvals[0].identity.arguments.as_mapping() == {
@@ -253,9 +255,8 @@ def test_approved_web_search_is_exact_audited_and_returned_to_model(tmp_path: Pa
         session.close()
 
 
-def test_missing_search_credential_hard_rejects_without_action_audit(tmp_path: Path) -> None:
-    call = search_call()
-    provider = ToolProvider([call, AssistantText("search unavailable")])
+def test_missing_search_credential_rejects_activation_without_action_audit(tmp_path: Path) -> None:
+    provider = ToolProvider([])
     session = open_session(
         tmp_path,
         provider,
@@ -263,19 +264,16 @@ def test_missing_search_credential_hard_rejects_without_action_audit(tmp_path: P
         approval_mode=ApprovalMode.AUTO,
     )
     try:
-        assert session.prompt("search the web") == "search unavailable"
-        result = provider.requests[1].history[-1]
-        assert isinstance(result, ToolResult)
-        assert result.is_error is True
-        assert TAVILY_SEARCH_API_KEY_ENV in result.content
+        with pytest.raises(WebSearchPreparationError, match="credential environment value"):
+            session.set_web_search_sources(("tavily",))
+        assert session.history == ()
         assert session.action_audits() == ()
     finally:
         session.close()
 
 
-def test_ambiguous_search_credentials_reject_before_permission_and_audit(tmp_path: Path) -> None:
-    call = search_call()
-    provider = ToolProvider([call, AssistantText("select a backend")])
+def test_multiple_search_credentials_remain_inactive_until_one_is_selected(tmp_path: Path) -> None:
+    provider = ToolProvider([])
     session = open_session(
         tmp_path,
         provider,
@@ -287,11 +285,11 @@ def test_ambiguous_search_credentials_reject_before_permission_and_audit(tmp_pat
         },
     )
     try:
-        assert session.prompt("search the web") == "select a backend"
-        result = provider.requests[1].history[-1]
-        assert isinstance(result, ToolResult)
-        assert result.is_error is True
-        assert WEB_SEARCH_BACKEND_ENV in result.content
+        initial = session.inspect_web_search_sources()
+        assert initial.ordered_source_names == ()
+        assert {source.value for source in initial.available_sources} == {"brave", "tavily"}
+        selected = session.set_web_search_sources(("brave",))
+        assert selected.ordered_source_names == ("brave",)
         assert session.action_audits() == ()
     finally:
         session.close()

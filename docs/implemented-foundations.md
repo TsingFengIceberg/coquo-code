@@ -35,6 +35,9 @@
 - [自然语言 Task 生命周期交接](#自然语言-task-生命周期交接)
 - [可恢复的 Provider Tool 参数校验](#可恢复的-provider-tool-参数校验)
 - [有界独立 Brave/Tavily 网页搜索](#有界独立-bravetavily-网页搜索)
+- [Provider 原生网页搜索](#provider-原生网页搜索)
+- [OpenAI Responses protocol 与 Provider-owned history](#openai-responses-protocol-与-provider-owned-history)
+- [Provider Search Resilience、Controls 与 Observability](#provider-search-resiliencecontrols-与-observability)
 - [Foundation 4D Slice 0–4：Controlled Single-directory Creation](#foundation-4d-slice-04controlled-single-directory-creation)
 - [Foundation 4E Slice 0–9：Controlled No-overwrite File Move](#foundation-4e-slice-09controlled-no-overwrite-file-move)
 - [Foundation 4F Slice 0–6：Controlled Regular-file Deletion](#foundation-4f-slice-06controlled-regular-file-deletion)
@@ -1138,9 +1141,35 @@ Item codec现在按能力引入版本表达继承：所有已支持的v3及以�
 
 Brave走固定GET与subscription-token header；Tavily走固定Bearer POST，并固定basic search、单来源一个chunk、关闭自动参数、生成答案、raw content和images，Tavily官方将其计为一次basic-search credit。Host把query限制为512字符/2 KiB、结果数限制为1至10，固定15秒timeout、256 KiB response和32 KiB JSONL输出，并最多解析100条原始结果。Transport禁止redirect且只接受JSON；两种返回都归一为保留provider顺序的title、URL、snippet、domain和显式backend，过滤非HTTP(S)、带credential、含控制字符、畸形、超长及重复URL。第三方结果始终是不可信数据。
 
-搜索属于新的`network-read` action：`read-only`和`workspace-write`拒绝，只有`danger-full-access`按正交的`ask | auto`策略继续。只有一个有效key时自动选择对应后端；两个key同时有效时可由`LEONERVIS_WEB_SEARCH_BACKEND`选择，或在REPL通过`/search use <source> [source...]`设置有序激活来源。`/search status|sources`只读检查，`/search reset`恢复启动环境选择。第一个激活来源是当前唯一执行的primary；额外来源只建立未来fan-out接口，不会被请求或计费。命令配置仅在当前进程生效，不写Session，也不调用provider。Ask在网络请求前显示完整query、数量、实际backend及对应额度提示；query和不含credential的backend配置fingerprint参与exact ActionIdentity、approval binding和durable Action Audit，普通live摘要及`/actions`列表隐藏query正文。凭据绝不进入模型参数、ActionIdentity、ToolResult、Session或审计。Timeout或transport不确定返回`partial`并禁止自动retry，因为请求或计费可能已发生。
+搜索属于新的`network-read` action：`read-only`和`workspace-write`拒绝，只有`danger-full-access`按正交的`ask | auto`策略继续。底层`WebSearchTool`可从一个有效key解析backend，两个key时可用`LEONERVIS_WEB_SEARCH_BACKEND`消歧；ADR 0103随后规定普通ProjectSession启动时总是关闭独立来源，只有REPL的显式`/search use brave|tavily`才激活。`/search status|sources`只读检查，`/search reset`恢复Provider原生默认或关闭全部来源。第一个激活来源是当前唯一执行的primary；额外来源只建立未来fan-out接口，不会被请求或计费。命令配置仅在当前进程生效，不写Session，也不调用provider。Ask在网络请求前显示完整query、数量、实际backend及对应额度提示；query和不含credential的backend配置fingerprint参与exact ActionIdentity、approval binding和durable Action Audit，普通live摘要及`/actions`列表隐藏query正文。凭据绝不进入模型参数、ActionIdentity、ToolResult、Session或审计。Timeout或transport不确定返回`partial`并禁止自动retry，因为请求或计费可能已发生。
 
 Catalog现在包含22个ordinary tools和30个总定义。Canonical system prompt升级v30、provider adapter contract升级v32，empty full-context identity变为`ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`；ToolArguments v1、ActionIdentity v1、`ctx-v5`/`ctx-v6`representation及Session、Task、Action Audit schema均不变，旧transcript不重写。非持久化ApprovalPreview升级v2以携带所选backend；ActionPrecondition增加不含secret的configuration SHA-256种类而不改变ActionIdentity版本。确定性测试通过注入transport覆盖双后端协议、选择、权限、审批、审计、截断、坏响应和不确定失败，不访问真实网络或消耗API额度。详见[0102：Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)。
+
+## Provider 原生网页搜索
+
+Provider preset、消息protocol与原生搜索adapter现在分别建模。Profile schema升级v5，并可选择`auto`、`none`、一个已实现adapter，或导入`custom-manifest-v1`。Catalog目前预置Anthropic、OpenAI、xAI、DashScope、OpenRouter、DeepSeek、Zhipu、Moonshot、Ark、Hunyuan、Qianfan、Ollama与local；Anthropic、DashScope、OpenRouter声明原生搜索，OpenAI只对名称含`search-preview`的model声明，其他preset和custom默认不可用。Custom可选择OpenAI-compatible或Anthropic-messages protocol。旧Profile无需保留，可按v5重建；store仍提供低成本旧schema读取。
+
+Session启动时，当前route声明原生搜索就默认激活`provider`，否则不激活任何来源；Brave和Tavily即使存在key也始终默认关闭。`/search use provider|brave|tavily [...]`显式切换进程内有序来源，`/search reset`恢复Provider默认，Provider/model切换也重置为新route默认。当前只执行第一个primary。Provider原生搜索属于provider generation，不是Leonervis ToolUse，不消费普通tool request，不进入PermissionGate、Action lease或Action Audit；选择独立来源时会关闭Provider搜索并重新曝光Host `web_search`。
+
+固定adapter投影Anthropic server tool、OpenAI `web_search_options`、DashScope `extra_body.enable_search`及OpenRouter server tool；已支持citation会追加为最终assistant正文的有界Markdown `Sources:`，从而随Session普通历史持久化。为避免把厂商server-tool stream事件误解析为Host调用，原生搜索当前采用buffered provider invocation，再向终端发送一个完整text delta。Custom manifest只允许有界`extra_body`、一个非function server tool及预置citation格式，拒绝protected request字段、credential形字段、endpoint/header、代码、自定义parser与超限结构；CLI只在Profile创建/替换时读取并规范保存内容，不保存源path。
+
+Canonical system prompt升级v31、provider adapter contract升级v33，Profile fingerprint升级v4，empty full-context identity变为`ctx-v5-9ec8e77ded21f83ef65f66cb8c54d0e1c79e64d19bbfaa988e9a7d919b1d1e80`。ToolArguments、ActionIdentity、Session、Task、Action Audit、compaction及provider usage schema不变。完整边界见[0103：Provider-native Web Search](./decisions/0103-provider-native-web-search.md)。
+
+## OpenAI Responses protocol 与 Provider-owned history
+
+Leonervis现在把`openai_responses`作为与Anthropic Messages、OpenAI Chat Completions并列的一等wire protocol。OpenAI内置route使用Responses；DeepSeek按model选择，`deepseek-v4-flash`使用Responses并声明官方Provider原生`web_search`，其他DeepSeek model继续使用Chat Completions且不猜测搜索能力。Custom Profile也可显式选择`openai-responses`。旧V4 Flash Chat Profile仍可读取并保持Chat语义，但不会静默获得原生搜索。
+
+Responses adapter发送stateless完整history，以`instructions`和`input`分离system policy与消息，固定`store=false`，并同时投影Host function tools及可选Provider `web_search`。Host `ToolUse/ToolResult`分别映射为使用同一`call_id`的`function_call/function_call_output`；Provider返回的`reasoning`和`web_search_call`则进入新的有界`ProviderOwnedItem`，由`ProviderResponseEnvelope`交给AgentLoop随turn保存和后续原样回传，但绝不进入Host dispatch、PermissionGate、工具预算或Action Audit。未知hosted tool、重复ID、未完成item及坏结构均fail closed。
+
+Responses stream以语义event的terminal response object为最终真相，增量发送`response.output_text.delta`，并在结束时补入规范化citation；`response.incomplete`输出上限保留usage与partial observation但不提交turn。无工具的Session标题与compact调用允许解析后丢弃其独立reasoning，但拒绝Provider工具调用。新`turn_committed`使用schema v9保存Provider-owned item，v1-v8继续只读replay且不重写；Effective Context升级为`ctx-v7`/`ctx-v8`，当前empty full-context ID为`ctx-v7-a9178c934e67352a98ba3641b927acc250d800c1af8d9d1de1bfaa2f2028a6e7`。Provider adapter contract升级v34，system prompt仍为v31。完整边界见[0104：OpenAI Responses Protocol and Provider-owned History](./decisions/0104-openai-responses-protocol-and-provider-owned-history.md)。
+
+## Provider Search Resilience、Controls 与 Observability
+
+真实DeepSeek Responses可能在整体`response.completed`时保留一个`status=failed`的`web_search_call`，例如Provider内部`open_page`被`SSRF_BLOCKED`；兼容中转也可能把可选`annotations`返回为null、单个对象或嵌套`url_citation`。Leonervis现在把failed搜索调用作为合法Provider-owned终局事实原样保存，仍拒绝completed Response里的非终局状态；citation兼容上述有界形状，危险或畸形单条只丢弃并显示内容无关warning，不再推翻有效正文。未知hosted tool、重复ID、坏required content和不完整Response继续fail closed。
+
+进程内Provider搜索新增`auto|required`模式、最多20个canonical allowed domains及`low|medium|high` context size。OpenAI Responses支持三者；Anthropic只支持domain，OpenAI Chat search只支持context，不支持的adapter/option组合明确拒绝。`/search mode|domains|context`只修改当前runtime，并在reset或Provider/model切换时恢复默认。终端以独立低强度`Provider search:`轨迹显示阶段与调用数、失败数、动作类型、来源数、接受/丢弃citation数；`/session preview`与`/session turns`从既有v9 Provider-owned item派生相同的无正文摘要，不显示query、URL、页面内容或reasoning。
+
+有序来源现在表示primary加显式的model-mediated fallback：`/search use provider tavily`保持Provider搜索为primary，同时把Tavily支持的Host `web_search`暴露为fallback。模型只有在同一history观察到Provider搜索失败或结构化citation不可用后才能请求它；Host不猜query、不自动请求、不并行fan-out，也不绕过`network-read`、PermissionGate、approval、Action Audit、额度提示或普通预算。Canonical system prompt升级v32，provider adapter contract升级v35；Effective Context representation仍为`ctx-v7`/`ctx-v8`，但current empty full-context ID更新为`ctx-v7-3ac4ba4e6ffa39c1184cfff6cc4200eb30607553fdf886451c0d967765ff0432`。其他持久schema不变。详见[0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)。
 
 ## ADR 索引
 
@@ -1246,3 +1275,6 @@ Catalog现在包含22个ordinary tools和30个总定义。Canonical system promp
 100. [0100：Persistent Activity Indicator and Task Output Alignment](./decisions/0100-persistent-activity-indicator-and-task-output-alignment.md)
 101. [0101：turn_committed v5 Inherited Assistant Content Replay](./decisions/0101-turn-committed-v5-inherited-assistant-content-replay.md)
 102. [0102：Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)
+103. [0103：Provider-native Web Search](./decisions/0103-provider-native-web-search.md)
+104. [0104：OpenAI Responses Protocol and Provider-owned History](./decisions/0104-openai-responses-protocol-and-provider-owned-history.md)
+105. [0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)

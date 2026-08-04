@@ -12,6 +12,8 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
+    ProviderSearchActivityReceived,
+    ProviderSearchSummaryReceived,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -76,6 +78,10 @@ from leonervis_code.providers.request_context import (
     ContextFitReport,
     RequestTokenCount,
     RequestTokenCountMethod,
+)
+from leonervis_code.providers.streaming import (
+    ProviderSearchObservation,
+    ProviderSearchPhase,
 )
 from leonervis_code.core.compaction import CompactionTrigger
 from leonervis_code.core.contracts import (
@@ -766,6 +772,26 @@ def test_session_preview_escapes_controls_and_enforces_output_bound(tmp_path: Pa
     assert len(rendered.encode("utf-8")) <= MAX_SESSION_PREVIEW_RENDER_BYTES
 
 
+def test_provider_search_events_render_content_free_progress_and_degradation() -> None:
+    progress, progress_kind = render_prompt_event(
+        ProviderSearchActivityReceived(ProviderSearchPhase.SEARCHING)
+    )
+    malformed, malformed_kind = render_prompt_event(
+        ProviderSearchSummaryReceived(ProviderSearchObservation(1, 0, ("search",), 2, 1, 2))
+    )
+    missing, missing_kind = render_prompt_event(
+        ProviderSearchSummaryReceived(ProviderSearchObservation(1, 0, ("open_page",), 0, 0))
+    )
+
+    assert progress == "Provider search: searching"
+    assert progress_kind == "info"
+    assert malformed.startswith("Provider search discarded malformed citations:")
+    assert "discarded_citations=2" in malformed
+    assert malformed_kind == "warning"
+    assert missing.startswith("Provider search completed; structured citations unavailable.")
+    assert missing_kind == "warning"
+
+
 def test_session_management_projection_renderers_are_safe_and_structured(tmp_path: Path) -> None:
     info = SessionInfo(
         session_id="12345678-1234-4234-9234-123456789abc",
@@ -888,7 +914,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
 
     assert kind == "warning"
     assert "Source: full committed history" in rendered
-    assert "Context ID: ctx-v5-" in rendered
+    assert "Context ID: ctx-v7-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
     assert "Effective history: 1 turn, 2 items" in rendered
     assert "Input: 80 tokens (estimated)" in rendered

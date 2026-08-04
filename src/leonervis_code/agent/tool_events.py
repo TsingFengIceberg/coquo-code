@@ -16,7 +16,11 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.task_admission import TaskAdmissionProposal
-from leonervis_code.providers.streaming import ProviderTextDelta
+from leonervis_code.providers.streaming import (
+    ProviderSearchObservation,
+    ProviderSearchPhase,
+    ProviderTextDelta,
+)
 from leonervis_code.providers.request_context import ContextFitReport
 from leonervis_code.providers.usage import ProviderTokenUsage
 
@@ -72,6 +76,28 @@ class AssistantResponseTextDeltaReceived:
 
     def __post_init__(self) -> None:
         ProviderTextDelta(self.text)
+
+
+@dataclass(frozen=True)
+class ProviderSearchActivityReceived:
+    """Content-free Provider-owned search progress, never a Host ToolUse."""
+
+    phase: ProviderSearchPhase
+
+    def __post_init__(self) -> None:
+        if type(self.phase) is not ProviderSearchPhase:
+            raise ValueError("provider search activity phase is invalid")
+
+
+@dataclass(frozen=True)
+class ProviderSearchSummaryReceived:
+    """One terminal content-free Provider search observation."""
+
+    observation: ProviderSearchObservation
+
+    def __post_init__(self) -> None:
+        if type(self.observation) is not ProviderSearchObservation:
+            raise ValueError("provider search summary is invalid")
 
 
 @dataclass(frozen=True)
@@ -288,6 +314,8 @@ AgentPromptEvent = (
     | ToolPromptEvent
     | ProviderInvocationPreflighted
     | ProviderInvocationUsageReceived
+    | ProviderSearchActivityReceived
+    | ProviderSearchSummaryReceived
     | TaskAdmissionProposed
     | TaskLifecycleCommitted
 )

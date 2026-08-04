@@ -13,6 +13,8 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
+    ProviderSearchActivityReceived,
+    ProviderSearchSummaryReceived,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -41,6 +43,7 @@ from leonervis_code.core.contracts import (
     ConversationProvider,
     ConversationRequest,
     ConversationTurn,
+    ProviderResponseEnvelope,
     SystemPromptSnapshot,
     ToolOutcomeEntry,
     ToolAttemptUsage,
@@ -60,7 +63,12 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
-from leonervis_code.providers.streaming import ProviderResponseOutcome, respond_with_streaming
+from leonervis_code.providers.streaming import (
+    ProviderResponseOutcome,
+    ProviderSearchActivity,
+    ProviderTextDelta,
+    respond_with_streaming,
+)
 from leonervis_code.providers.request_context import ContextFitReport
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import (
@@ -388,6 +396,9 @@ class AgentLoop:
             )
             provider_invocations += 1
             response = outcome.response
+            if isinstance(response, ProviderResponseEnvelope):
+                pending += response.provider_items
+                response = response.response
             if isinstance(response, AssistantText):
                 if cancellation is not None:
                     cancellation.check()
@@ -401,6 +412,7 @@ class AgentLoop:
                         event_sink,
                         AssistantFinalTextStreamCommitted(response.text),
                     )
+                self._emit_search_observation(event_sink, outcome)
                 self._emit_invocation_usage(event_sink, provider_invocations, outcome)
                 if ledger.entries:
                     self._emit_prompt_event(event_sink, ToolTurnSummaryCommitted(ledger))
@@ -440,6 +452,7 @@ class AgentLoop:
                     else AssistantToolTextReceived(response.assistant_text)
                 )
                 self._emit_prompt_event(event_sink, companion_event)
+            self._emit_search_observation(event_sink, outcome)
             self._emit_invocation_usage(event_sink, provider_invocations, outcome)
             pending += (response,)
             if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
@@ -614,18 +627,38 @@ class AgentLoop:
                 ),
             )
 
+        def receive_provider_event(event: ProviderTextDelta | ProviderSearchActivity) -> None:
+            if isinstance(event, ProviderTextDelta):
+                self._emit_prompt_event(
+                    event_sink,
+                    AssistantResponseTextDeltaReceived(event.text),
+                )
+            else:
+                self._emit_prompt_event(
+                    event_sink,
+                    ProviderSearchActivityReceived(event.phase),
+                )
+
         outcome = respond_with_streaming(
             provider,
             request,
-            event_sink=lambda delta: self._emit_prompt_event(
-                event_sink,
-                AssistantResponseTextDeltaReceived(delta.text),
-            ),
+            event_sink=receive_provider_event,
             prefer_stream=event_sink is not None,
             preflight_sink=receive_preflight,
             cancellation=cancellation,
         )
         return outcome
+
+    def _emit_search_observation(
+        self,
+        event_sink: AgentEventSink | None,
+        outcome: ProviderResponseOutcome,
+    ) -> None:
+        if outcome.search_observation is not None:
+            self._emit_prompt_event(
+                event_sink,
+                ProviderSearchSummaryReceived(outcome.search_observation),
+            )
 
     def _emit_invocation_usage(
         self,

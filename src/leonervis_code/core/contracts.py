@@ -19,6 +19,8 @@ MAX_TOOL_ARGUMENTS_BYTES = 16 * 1024
 MAX_ASSISTANT_TOOL_TEXT_CHARACTERS = 32 * 1024
 MAX_ASSISTANT_TOOL_TEXT_BYTES = 32 * 1024
 MAX_TOOL_OUTCOME_ENTRIES = 40
+MAX_PROVIDER_OWNED_ITEMS_PER_RESPONSE = 32
+MAX_PROVIDER_OWNED_ITEM_BYTES = 256 * 1024
 
 
 def system_prompt_fingerprint(version: int, text: str) -> str:
@@ -155,6 +157,97 @@ class AssistantToolBatch:
             seen_ids.add(request.tool_use_id)
         if self.assistant_text is not None:
             _validate_assistant_tool_text(self.assistant_text)
+
+
+@dataclass(frozen=True)
+class ProviderOwnedItem:
+    """One opaque provider-executed response item retained for exact replay."""
+
+    protocol: str
+    item_type: str
+    item_id: str
+    canonical_json: str
+
+    def __post_init__(self) -> None:
+        if self.protocol != "openai_responses":
+            raise ValueError("provider-owned item protocol is unsupported")
+        if self.item_type not in {"reasoning", "web_search_call"}:
+            raise ValueError("provider-owned item type is unsupported")
+        _validate_ledger_text(self.item_id, "provider-owned item ID")
+        if not isinstance(self.canonical_json, str):
+            raise ValueError("provider-owned item JSON must be text")
+        try:
+            value = json.loads(self.canonical_json)
+        except json.JSONDecodeError:
+            raise ValueError("provider-owned item JSON is invalid") from None
+        if not isinstance(value, dict):
+            raise ValueError("provider-owned item must be a JSON object")
+        if value.get("type") != self.item_type or value.get("id") != self.item_id:
+            raise ValueError("provider-owned item identity does not match its JSON")
+        canonical = self._canonicalize(value)
+        if canonical != self.canonical_json:
+            raise ValueError("provider-owned item JSON is not canonical")
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: dict[str, object],
+        *,
+        protocol: str = "openai_responses",
+    ) -> ProviderOwnedItem:
+        if not isinstance(value, dict):
+            raise ValueError("provider-owned item must be a JSON object")
+        item_type = value.get("type")
+        item_id = value.get("id")
+        if not isinstance(item_type, str) or not isinstance(item_id, str):
+            raise ValueError("provider-owned item identity is malformed")
+        return cls(protocol, item_type, item_id, cls._canonicalize(value))
+
+    def as_mapping(self) -> dict[str, object]:
+        value = json.loads(self.canonical_json)
+        if not isinstance(value, dict):
+            raise ValueError("provider-owned item must decode to an object")
+        return value
+
+    @staticmethod
+    def _canonicalize(value: dict[str, object]) -> str:
+        try:
+            canonical = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            encoded = canonical.encode("utf-8")
+        except (TypeError, ValueError, OverflowError, UnicodeEncodeError):
+            raise ValueError("provider-owned item is not canonical JSON") from None
+        if len(encoded) > MAX_PROVIDER_OWNED_ITEM_BYTES:
+            raise ValueError("provider-owned item exceeds its byte limit")
+        return canonical
+
+
+@dataclass(frozen=True)
+class ProviderResponseEnvelope:
+    """One dispatchable response plus preceding provider-executed output items."""
+
+    provider_items: tuple[ProviderOwnedItem, ...]
+    response: AssistantText | ToolUse | AssistantToolBatch
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider_items, tuple) or not self.provider_items:
+            raise ValueError("provider response envelope requires provider-owned items")
+        if len(self.provider_items) > MAX_PROVIDER_OWNED_ITEMS_PER_RESPONSE:
+            raise ValueError("provider response envelope contains too many items")
+        seen_ids: set[str] = set()
+        for item in self.provider_items:
+            if not isinstance(item, ProviderOwnedItem):
+                raise ValueError("provider response envelope contains an invalid item")
+            if item.item_id in seen_ids:
+                raise ValueError("provider response envelope contains a duplicate item ID")
+            seen_ids.add(item.item_id)
+        if not isinstance(self.response, (AssistantText, ToolUse, AssistantToolBatch)):
+            raise ValueError("provider response envelope contains an invalid response")
 
 
 @dataclass(frozen=True)
@@ -299,10 +392,12 @@ class CommittedTurn:
 
 
 ConversationItem: TypeAlias = (
-    UserMessage | AssistantText | ToolUse | AssistantToolBatch | ToolResult
+    UserMessage | AssistantText | ToolUse | AssistantToolBatch | ToolResult | ProviderOwnedItem
 )
 TurnCommitter: TypeAlias = Callable[[CommittedTurn], None]
-ProviderResponse: TypeAlias = AssistantText | ToolUse | AssistantToolBatch
+ProviderResponse: TypeAlias = (
+    AssistantText | ToolUse | AssistantToolBatch | ProviderResponseEnvelope
+)
 
 
 def _validate_assistant_tool_text(text: str) -> None:

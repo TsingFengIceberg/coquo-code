@@ -201,6 +201,18 @@ class Session:
     def reset_web_search_sources(self):
         return self.web_search.reset_source_configuration()
 
+    def set_native_search_mode(self, mode):
+        return replace(self.inspect_web_search_sources(), provider_mode=mode)
+
+    def set_native_search_domains(self, domains):
+        return replace(
+            self.inspect_web_search_sources(),
+            provider_allowed_domains=() if domains is None else domains,
+        )
+
+    def set_native_search_context(self, size):
+        return replace(self.inspect_web_search_sources(), provider_context_size=size)
+
     def compact_context(self):
         return CompactContextResult(
             session_id=self.current,
@@ -777,7 +789,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v5-" in context.message
+    assert "Context ID: ctx-v7-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -1361,7 +1373,19 @@ def test_search_commands_switch_primary_and_reserve_ordered_multi_source_activat
     assert "brave: available, active" in multiple.message
     assert "Active order: tavily, brave" in multiple.message
     assert "Current execution: primary-only (tavily)" in multiple.message
-    assert "does not query or merge them" in multiple.message
+    assert "Host never guesses a query or calls them automatically" not in multiple.message
+
+    mode = dispatch_slash("/search mode required", session)
+    assert mode.kind == "success"
+    assert "Provider mode: required" in mode.message
+
+    domains = dispatch_slash("/search domains openai.com platform.openai.com", session)
+    assert domains.kind == "success"
+    assert "Provider allowed domains: openai.com, platform.openai.com" in domains.message
+
+    context = dispatch_slash("/search context high", session)
+    assert context.kind == "success"
+    assert "Provider search context: high" in context.message
 
     switched = dispatch_slash("/search use brave", session)
     assert switched.kind == "success"
@@ -1405,7 +1429,8 @@ def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_wr
     try:
         inspected = dispatch_slash("/search status", session)
         assert inspected.kind == "info"
-        assert "tavily: available, active, primary" in inspected.message
+        assert "tavily: available" in inspected.message
+        assert "Active order: none" in inspected.message
 
         selected = dispatch_slash("/search use tavily", session)
         assert selected.kind == "success"

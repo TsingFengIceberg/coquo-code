@@ -42,6 +42,8 @@ def test_profiles_validate_and_normalize_non_secret_configuration() -> None:
         "context_window_tokens": None,
         "model_max_output_tokens": None,
         "temperature": None,
+        "native_search_adapter": None,
+        "native_search_manifest": None,
     }
     assert "api_key" not in configured.to_dict()
     assert str(UUID(configured.profile_id)) == configured.profile_id
@@ -225,7 +227,7 @@ def test_v1_reads_are_deterministic_and_do_not_write(tmp_path) -> None:
     assert project_path.read_bytes() == before_project
 
 
-def test_explicit_migration_rewrites_both_v1_files_as_v4(tmp_path) -> None:
+def test_explicit_migration_rewrites_both_v1_files_as_v5(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
     write_v1_user(user_path, "Legacy", active="Legacy")
@@ -237,10 +239,10 @@ def test_explicit_migration_rewrites_both_v1_files_as_v4(tmp_path) -> None:
     user = json.loads(user_path.read_text(encoding="utf-8"))
     project = json.loads(project_path.read_text(encoding="utf-8"))
     profile_id = legacy_profile_id("Legacy")
-    assert user["schema_version"] == 4
+    assert user["schema_version"] == 5
     assert user["active_profile_id"] == profile_id
     assert user["profiles"][profile_id]["revision"] == 1
-    assert project == {"schema_version": 4, "active_profile_id": profile_id}
+    assert project == {"schema_version": 5, "active_profile_id": profile_id}
 
 
 @pytest.mark.parametrize(("user_version", "project_version"), [(1, 1), (1, 2), (2, 1), (2, 2)])
@@ -297,14 +299,14 @@ def test_writes_upgrade_only_the_written_file(tmp_path) -> None:
 
     assert json.loads(user_path.read_text(encoding="utf-8"))["schema_version"] == 1
     project = json.loads(project_path.read_text(encoding="utf-8"))
-    assert project["schema_version"] == 4
+    assert project["schema_version"] == 5
     assert project["active_profile_id"] == legacy_profile_id("Legacy")
 
 
 def test_future_schema_versions_fail_closed_for_each_layer(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     project_path = tmp_path / "project.json"
-    user_path.write_text(json.dumps({"schema_version": 5}), encoding="utf-8")
+    user_path.write_text(json.dumps({"schema_version": 6}), encoding="utf-8")
     store = ProviderProfileStore(user_path, project_path)
     with pytest.raises(ProviderProfileError, match="unsupported user"):
         store.list_profiles()
@@ -433,7 +435,12 @@ def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
             {
                 "schema_version": 2,
                 "active_profile_id": None,
-                "profiles": {profile_id: configured.to_dict(include_model_max_output=False)},
+                "profiles": {
+                    profile_id: configured.to_dict(
+                        include_model_max_output=False,
+                        include_native_search=False,
+                    )
+                },
             }
         ),
         encoding="utf-8",
@@ -455,6 +462,7 @@ def write_v1_user(path, name: str, *, active: str | None) -> None:
         .to_dict(
             include_context_window=False,
             include_model_max_output=False,
+            include_native_search=False,
         )
     )
     path.write_text(
@@ -489,6 +497,7 @@ def write_v2_user(path, configured: NamedProviderProfile, *, profile_id: str) ->
                     profile_id: owned.to_dict(
                         include_context_window=False,
                         include_model_max_output=False,
+                        include_native_search=False,
                     )
                 },
             }

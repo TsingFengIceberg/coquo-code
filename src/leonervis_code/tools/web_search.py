@@ -188,6 +188,13 @@ class WebSearchSourceConfiguration:
     primary_source: WebSearchBackend | None
     selection_source: WebSearchSelectionSource
     error: str | None = None
+    ordered_sources: tuple[str, ...] = ()
+    provider_available: bool = False
+    provider_active: bool = False
+    provider_adapter: str | None = None
+    provider_mode: str = "auto"
+    provider_allowed_domains: tuple[str, ...] = ()
+    provider_context_size: str | None = None
 
     def __post_init__(self) -> None:
         supported = tuple(WebSearchBackend)
@@ -210,16 +217,61 @@ class WebSearchSourceConfiguration:
             raise ValueError("web search selection source is invalid")
         if self.error is not None and (not isinstance(self.error, str) or not self.error):
             raise ValueError("web search configuration error is invalid")
-        if (self.error is None) != bool(self.active_sources):
+        if self.ordered_sources:
+            supported_names = {"provider", *(source.value for source in WebSearchBackend)}
+            if len(set(self.ordered_sources)) != len(self.ordered_sources) or any(
+                source not in supported_names for source in self.ordered_sources
+            ):
+                raise ValueError("ordered web search sources are invalid")
+            if self.provider_active != ("provider" in self.ordered_sources):
+                raise ValueError("provider web search activation is inconsistent")
+            external_names = tuple(
+                source for source in self.ordered_sources if source != "provider"
+            )
+            if external_names != tuple(source.value for source in self.active_sources):
+                raise ValueError("ordered external web search sources are inconsistent")
+        elif self.provider_active:
+            raise ValueError("provider web search activation requires an ordered source")
+        if self.provider_active and not self.provider_available:
+            raise ValueError("unavailable provider web search cannot be active")
+        if self.provider_mode not in {"auto", "required"}:
+            raise ValueError("provider web search mode is invalid")
+        if not isinstance(self.provider_allowed_domains, tuple) or any(
+            not isinstance(domain, str) or not domain for domain in self.provider_allowed_domains
+        ):
+            raise ValueError("provider web search domains are invalid")
+        if self.provider_context_size not in {None, "low", "medium", "high"}:
+            raise ValueError("provider web search context size is invalid")
+        if (self.error is None) != bool(self.ordered_source_names):
             raise ValueError("web search configuration error does not match activation")
 
     @property
+    def ordered_source_names(self) -> tuple[str, ...]:
+        return self.ordered_sources or tuple(source.value for source in self.active_sources)
+
+    @property
+    def primary_source_name(self) -> str | None:
+        sources = self.ordered_source_names
+        return sources[0] if sources else None
+
+    @property
     def execution_sources(self) -> tuple[WebSearchBackend, ...]:
+        if self.primary_source_name == "provider":
+            return ()
         return (self.primary_source,) if self.primary_source is not None else ()
 
     @property
+    def execution_source_name(self) -> str | None:
+        return self.primary_source_name
+
+    @property
     def execution_mode(self) -> str:
-        return "primary-only"
+        return (
+            "primary-with-explicit-fallback"
+            if self.primary_source_name == "provider"
+            and any(source != "provider" for source in self.ordered_source_names[1:])
+            else "primary-only"
+        )
 
 
 class WebSearchOutcome(StrEnum):
@@ -294,6 +346,14 @@ class WebSearchTool:
     def source_configuration(self) -> WebSearchSourceConfiguration:
         available = self._available_backends()
         if self._runtime_backends is not None:
+            if not self._runtime_backends:
+                return WebSearchSourceConfiguration(
+                    available_sources=available,
+                    active_sources=(),
+                    primary_source=None,
+                    selection_source=WebSearchSelectionSource.RUNTIME,
+                    error="independent web search sources are disabled",
+                )
             return WebSearchSourceConfiguration(
                 available_sources=available,
                 active_sources=self._runtime_backends,
@@ -342,7 +402,13 @@ class WebSearchTool:
         return self.source_configuration()
 
     def reset_source_configuration(self) -> WebSearchSourceConfiguration:
+        """Restore the standalone source selection derived from the environment."""
         self._runtime_backends = None
+        return self.source_configuration()
+
+    def disable_sources(self) -> WebSearchSourceConfiguration:
+        """Explicitly disable independent sources while retaining credential availability."""
+        self._runtime_backends = ()
         return self.source_configuration()
 
     def prepare(self, request: ToolUse) -> PreparedWebSearch:
@@ -459,6 +525,10 @@ class WebSearchTool:
 
     def _resolve_backend(self) -> tuple[WebSearchBackend, str]:
         if self._runtime_backends is not None:
+            if not self._runtime_backends:
+                raise WebSearchPreparationError(
+                    "independent web search is disabled; use /search use brave or tavily"
+                )
             backend = self._runtime_backends[0]
             api_key = self._api_keys[backend]
             if not _valid_api_key(api_key):

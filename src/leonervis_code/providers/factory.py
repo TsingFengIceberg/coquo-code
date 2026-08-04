@@ -13,6 +13,7 @@ from leonervis_code.providers.anthropic import (
 from leonervis_code.providers.definitions import RuntimeProviderRoute, WireProtocol
 from leonervis_code.providers.errors import ProviderAdapterError, adapter_error
 from leonervis_code.providers.openai_compat import create_openai_compatible_provider
+from leonervis_code.providers.openai_responses import create_openai_responses_provider
 
 
 def create_provider(
@@ -35,11 +36,14 @@ def create_provider(
                 max_output_tokens=route.max_output_tokens,
                 base_url=route.base_url,
                 temperature=route.temperature,
+                native_search=route.native_search,
             ),
             api_key=api_key or "",
         )
     if definition.protocol == WireProtocol.OPENAI_CHAT_COMPLETIONS:
         return create_openai_compatible_provider(route, api_key=api_key)
+    if definition.protocol == WireProtocol.OPENAI_RESPONSES:
+        return create_openai_responses_provider(route, api_key=api_key or "")
     raise adapter_error(
         provider_id=definition.provider_id,
         model_id=route.selected_model,

@@ -790,7 +790,7 @@ def test_structured_completion_proposal_never_bypasses_acceptance(
     with pytest.raises(TaskStoreError, match="requires all acceptance criteria verified"):
         session.complete_task(task.task_id)
     assert set(provider.requests[0].enabled_tool_names or ()) == {
-        *ORDINARY_TOOL_NAMES,
+        *(name for name in ORDINARY_TOOL_NAMES if name != "web_search"),
         TASK_REPORT_BLOCKER_TOOL_NAME,
         TASK_PROPOSE_COMPLETION_TOOL_NAME,
     }

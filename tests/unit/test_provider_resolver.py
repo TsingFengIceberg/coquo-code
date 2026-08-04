@@ -24,7 +24,7 @@ from leonervis_code.providers.resolver import (
         (
             "openai/gpt-5",
             "openai",
-            WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            WireProtocol.OPENAI_RESPONSES,
             "gpt-5",
             "OPENAI_API_KEY",
         ),
@@ -189,7 +189,7 @@ def test_route_fingerprint_is_canonical_and_credential_state_independent() -> No
         environment={"OPENAI_API_KEY": "first", "OPENAI_BASE_URL": "https://proxy.test/v1"},
     )
 
-    assert ADAPTER_CONTRACT_VERSION == 32
+    assert ADAPTER_CONTRACT_VERSION == 35
     assert first.fingerprint() == second.fingerprint()
     assert len(first.fingerprint()) == 64
     assert first.fingerprint() != overridden.fingerprint()

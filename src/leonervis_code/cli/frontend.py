@@ -214,6 +214,10 @@ def _activity_status(event: object) -> str:
         return "Preparing provider request"
     if name == "ProviderInvocationUsageReceived":
         return "Processing provider response"
+    if name == "ProviderSearchActivityReceived":
+        return f"Provider search {getattr(event, 'phase').value}"
+    if name == "ProviderSearchSummaryReceived":
+        return "Recording provider search"
     if name == "ToolRequestStarted":
         tool_name = getattr(event, "tool_name", "tool")
         return f"Running {tool_name}"

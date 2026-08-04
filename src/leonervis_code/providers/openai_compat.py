@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 import json
 from collections.abc import Callable
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import openai
 
@@ -24,6 +25,13 @@ from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.project_instructions import render_project_instructions
 from leonervis_code.core.session_title import SessionTitleRequest
 from leonervis_code.providers.definitions import RuntimeProviderRoute
+from leonervis_code.providers.native_search import (
+    NativeSearchAdapterId,
+    NativeSearchCitationFormat,
+    NativeSearchConfiguration,
+    NativeSearchRuntimeOptions,
+    validate_native_search_runtime_options,
+)
 from leonervis_code.providers.errors import (
     ProviderAdapterError,
     adapter_error,
@@ -44,6 +52,9 @@ from leonervis_code.providers.streaming import (
     ProviderTextDelta,
     ProviderTextDeltaSink,
     ProviderResponseOutcome,
+    ProviderSearchActivity,
+    ProviderSearchObservation,
+    ProviderSearchPhase,
 )
 from leonervis_code.providers.usage import ProviderTokenUsage, parse_provider_usage
 from leonervis_code.tools.catalog import (
@@ -74,6 +85,22 @@ class OpenAICompatibleConversationProvider:
         self._route = route
         self._client = client
         self._owner = owner
+        self._native_search_enabled = route.native_search.default_enabled
+        self._native_search_options = NativeSearchRuntimeOptions()
+
+    def set_native_search_enabled(self, enabled: bool) -> None:
+        """Toggle one process-local provider capability between serialized turns."""
+        if type(enabled) is not bool:
+            raise ValueError("provider native-search state must be boolean")
+        if enabled and not self._route.native_search.available:
+            raise ValueError("provider native search is unavailable")
+        self._native_search_enabled = enabled
+
+    def set_native_search_options(self, options: NativeSearchRuntimeOptions) -> None:
+        if type(options) is not NativeSearchRuntimeOptions:
+            raise ValueError("provider native-search options are invalid")
+        validate_native_search_runtime_options(self._route.native_search, options)
+        self._native_search_options = options
 
     def close(self) -> None:
         """Close the production SDK owner when this adapter constructed it."""
@@ -88,6 +115,8 @@ class OpenAICompatibleConversationProvider:
                 self._route,
                 request_snapshot,
                 committed_context=True,
+                native_search_enabled=self._native_search_enabled,
+                native_search_options=self._native_search_options,
             )
         )
 
@@ -142,7 +171,11 @@ class OpenAICompatibleConversationProvider:
     ) -> ProviderResponseOutcome:
         """Generate one no-tools Session title and retain provider usage."""
         route = replace(self._route, max_output_tokens=request_snapshot.max_output_tokens)
-        request = build_request(route, request_snapshot.conversation_request)
+        request = build_request(
+            route,
+            request_snapshot.conversation_request,
+            native_search_enabled=False,
+        )
         try:
             response = self._client.create(**request)
         except openai.APIError as error:
@@ -160,16 +193,25 @@ class OpenAICompatibleConversationProvider:
 
     def respond_outcome(self, request_snapshot: ConversationRequest) -> ProviderResponseOutcome:
         """Return one response with Host-only actual token usage."""
-        request = build_request(self._route, request_snapshot)
+        request = build_request(
+            self._route,
+            request_snapshot,
+            native_search_enabled=self._native_search_enabled,
+            native_search_options=self._native_search_options,
+        )
         try:
             response = self._client.create(**request)
         except openai.APIError as error:
             raise normalize_sdk_error(error, route=self._route) from None
         usage = _parse_compatible_usage(getattr(response, "usage", None))
+        parsed = parse_response(response, route=self._route, usage=usage)
         return ProviderResponseOutcome(
-            parse_response(response, route=self._route, usage=usage),
+            parsed,
             False,
             usage,
+            search_observation=(
+                _buffered_search_observation(parsed) if self._native_search_enabled else None
+            ),
         )
 
     def respond_stream(
@@ -188,7 +230,24 @@ class OpenAICompatibleConversationProvider:
         event_sink: ProviderTextDeltaSink,
     ) -> ProviderResponseOutcome:
         """Consume one stream and retain final compatible usage metadata."""
-        request = build_request(self._route, request_snapshot)
+        if self._native_search_enabled:
+            event_sink(ProviderSearchActivity(ProviderSearchPhase.SEARCHING))
+            try:
+                outcome = self.respond_outcome(request_snapshot)
+            except BaseException:
+                event_sink(ProviderSearchActivity(ProviderSearchPhase.FAILED))
+                raise
+            event_sink(ProviderSearchActivity(ProviderSearchPhase.COMPLETED))
+            if isinstance(outcome.response, AssistantText):
+                event_sink(ProviderTextDelta(outcome.response.text))
+                return ProviderResponseOutcome(
+                    outcome.response,
+                    True,
+                    outcome.usage,
+                    search_observation=outcome.search_observation,
+                )
+            return outcome
+        request = build_request(self._route, request_snapshot, native_search_enabled=False)
         request["stream"] = True
         request["stream_options"] = {"include_usage": True}
         _validate_request_size(self._route, request)
@@ -389,11 +448,124 @@ def model_tool_definitions_for_openai(
     )
 
 
+def _apply_native_search_projection(
+    projection: dict[str, object],
+    configuration: NativeSearchConfiguration,
+    options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
+) -> None:
+    validate_native_search_runtime_options(configuration, options)
+    adapter = configuration.adapter_id
+    if adapter is None:
+        return
+    if adapter is NativeSearchAdapterId.OPENAI_CHAT_WEB_SEARCH_OPTIONS_V1:
+        web_search_options: dict[str, object] = {}
+        if options.context_size is not None:
+            web_search_options["search_context_size"] = options.context_size.value
+        projection["web_search_options"] = web_search_options
+        return
+    if adapter is NativeSearchAdapterId.DASHSCOPE_ENABLE_SEARCH_V1:
+        projection["extra_body"] = {"enable_search": True}
+        return
+    if adapter is NativeSearchAdapterId.OPENROUTER_WEB_SEARCH_V1:
+        tools = projection.setdefault("tools", [])
+        assert isinstance(tools, list)
+        tools.append({"type": "openrouter:web_search"})
+        return
+    if adapter is NativeSearchAdapterId.CUSTOM_MANIFEST_V1:
+        manifest = configuration.manifest
+        assert manifest is not None
+        if manifest.extra_body:
+            projection["extra_body"] = dict(manifest.extra_body)
+        if manifest.server_tool is not None:
+            tools = projection.setdefault("tools", [])
+            assert isinstance(tools, list)
+            tools.append(dict(manifest.server_tool))
+        return
+    raise ValueError(f"native-search adapter is incompatible with OpenAI Chat: {adapter.value}")
+
+
+def _append_native_search_citations(
+    text: str,
+    message: object,
+    configuration: NativeSearchConfiguration,
+) -> str:
+    citation_format = _citation_format(configuration)
+    if citation_format is NativeSearchCitationFormat.NONE:
+        return text
+    citations: list[tuple[str, str]] = []
+    if citation_format is NativeSearchCitationFormat.OPENAI_URL_ANNOTATIONS:
+        for annotation in _object_list(_field(message, "annotations")):
+            if _field(annotation, "type") != "url_citation":
+                continue
+            citation = _field(annotation, "url_citation")
+            url = _field(citation, "url")
+            title = _field(citation, "title")
+            _add_citation(citations, url, title)
+    elif citation_format is NativeSearchCitationFormat.DASHSCOPE_SEARCH_INFO:
+        search_info = _field(message, "search_info")
+        for result in _object_list(_field(search_info, "search_results")):
+            _add_citation(citations, _field(result, "url"), _field(result, "title"))
+    if not citations:
+        return text
+    rendered = ["", "", "Sources:"]
+    rendered.extend(f"- [{_escape_link_title(title)}]({url})" for url, title in citations)
+    return text + "\n".join(rendered)
+
+
+def _citation_format(configuration: NativeSearchConfiguration) -> NativeSearchCitationFormat:
+    adapter = configuration.adapter_id
+    if adapter in {
+        NativeSearchAdapterId.OPENAI_CHAT_WEB_SEARCH_OPTIONS_V1,
+        NativeSearchAdapterId.OPENROUTER_WEB_SEARCH_V1,
+    }:
+        return NativeSearchCitationFormat.OPENAI_URL_ANNOTATIONS
+    if adapter is NativeSearchAdapterId.DASHSCOPE_ENABLE_SEARCH_V1:
+        return NativeSearchCitationFormat.DASHSCOPE_SEARCH_INFO
+    if adapter is NativeSearchAdapterId.CUSTOM_MANIFEST_V1:
+        assert configuration.manifest is not None
+        return configuration.manifest.citation_format
+    return NativeSearchCitationFormat.NONE
+
+
+def _field(value: object, name: str) -> object:
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+
+def _object_list(value: object) -> list[object]:
+    return value if isinstance(value, list) and len(value) <= 100 else []
+
+
+def _add_citation(citations: list[tuple[str, str]], url: object, title: object) -> None:
+    if len(citations) >= 20 or not isinstance(url, str) or len(url) > 4096:
+        return
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
+        return
+    safe_title = title if isinstance(title, str) and title.strip() else parsed.netloc
+    safe_title = " ".join(safe_title.split())[:512]
+    if not safe_title or any(character in safe_title for character in ("\x00", "\r", "\n")):
+        return
+    if all(existing_url != url for existing_url, _existing_title in citations):
+        citations.append((url, safe_title))
+
+
+def _escape_link_title(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _buffered_search_observation(response: ProviderResponse) -> ProviderSearchObservation:
+    text = response.text if isinstance(response, AssistantText) else response.assistant_text or ""
+    citation_count = min(20, text.count("\n- [") if "\n\nSources:\n" in text else 0)
+    return ProviderSearchObservation(1, 0, ("search",), citation_count, citation_count)
+
+
 def build_input_projection(
     route: RuntimeProviderRoute,
     request_snapshot: ConversationRequest,
     *,
     committed_context: bool = False,
+    native_search_enabled: bool = True,
+    native_search_options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
 ) -> dict[str, object]:
     """Build the native fields that contribute provider input tokens."""
     system_messages = [{"role": "system", "content": request_snapshot.system_prompt.text}]
@@ -421,16 +593,26 @@ def build_input_projection(
             model_tool_definitions_for_openai(request_snapshot.enabled_tool_names)
         )
         projection["parallel_tool_calls"] = False
+        if native_search_enabled:
+            _apply_native_search_projection(projection, route.native_search, native_search_options)
     return projection
 
 
 def build_request(
     route: RuntimeProviderRoute,
     request_snapshot: ConversationRequest,
+    *,
+    native_search_enabled: bool = True,
+    native_search_options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
 ) -> dict[str, object]:
     """Build a complete provider-native request with deterministic compatibility rules."""
     request: dict[str, object] = {
-        **build_input_projection(route, request_snapshot),
+        **build_input_projection(
+            route,
+            request_snapshot,
+            native_search_enabled=native_search_enabled,
+            native_search_options=native_search_options,
+        ),
         "stream": False,
     }
     token_field = token_limit_field(route.wire_model)
@@ -772,7 +954,9 @@ def parse_response(
             raise _invalid_response(route, "provider text response was empty or malformed")
         if tool_calls:
             raise _invalid_response(route, "text response unexpectedly contained tool calls")
-        return AssistantText(text=content)
+        return AssistantText(
+            text=_append_native_search_citations(content, message, route.native_search)
+        )
     if not isinstance(tool_calls, list) or not tool_calls:
         raise _invalid_response(route, "tool response contained no tool calls")
     if len(tool_calls) > MAX_TOOL_CALLS_PER_RESPONSE:

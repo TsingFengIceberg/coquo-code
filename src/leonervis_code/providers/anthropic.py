@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import json
 from collections.abc import Callable
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import anthropic
 
@@ -34,6 +35,12 @@ from leonervis_code.providers.model_context import (
     OFFICIAL_ANTHROPIC_BASE_URL,
     ModelContextDiscovery,
 )
+from leonervis_code.providers.native_search import (
+    NativeSearchAdapterId,
+    NativeSearchConfiguration,
+    NativeSearchRuntimeOptions,
+    validate_native_search_runtime_options,
+)
 from leonervis_code.providers.request_context import (
     MAX_REQUEST_INPUT_TOKENS,
     RequestTokenCount,
@@ -49,6 +56,9 @@ from leonervis_code.providers.streaming import (
     ProviderTextDelta,
     ProviderTextDeltaSink,
     ProviderResponseOutcome,
+    ProviderSearchActivity,
+    ProviderSearchObservation,
+    ProviderSearchPhase,
 )
 from leonervis_code.providers.usage import (
     MAX_PROVIDER_USAGE_TOKENS,
@@ -74,6 +84,7 @@ class AnthropicProviderConfig:
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     base_url: str = "https://api.anthropic.com"
     temperature: float | None = None
+    native_search: NativeSearchConfiguration = NativeSearchConfiguration.unavailable()
 
     def __post_init__(self) -> None:
         if not self.model_id.strip():
@@ -143,6 +154,22 @@ class AnthropicConversationProvider:
         self._client = client
         self._models_client = models_client
         self._owner = owner
+        self._native_search_enabled = config.native_search.default_enabled
+        self._native_search_options = NativeSearchRuntimeOptions()
+
+    def set_native_search_enabled(self, enabled: bool) -> None:
+        """Toggle one process-local provider capability between serialized turns."""
+        if type(enabled) is not bool:
+            raise ValueError("provider native-search state must be boolean")
+        if enabled and not self._config.native_search.available:
+            raise ValueError("provider native search is unavailable")
+        self._native_search_enabled = enabled
+
+    def set_native_search_options(self, options: NativeSearchRuntimeOptions) -> None:
+        if type(options) is not NativeSearchRuntimeOptions:
+            raise ValueError("provider native-search options are invalid")
+        validate_native_search_runtime_options(self._config.native_search, options)
+        self._native_search_options = options
 
     def close(self) -> None:
         """Close the production SDK owner when this adapter constructed it."""
@@ -156,6 +183,8 @@ class AnthropicConversationProvider:
             self._config,
             request_snapshot,
             committed_context=True,
+            native_search_enabled=self._native_search_enabled,
+            native_search_options=self._native_search_options,
         )
         if self._config.base_url.rstrip("/") != OFFICIAL_ANTHROPIC_BASE_URL:
             return estimate_serialized_input_tokens(projection)
@@ -250,7 +279,11 @@ class AnthropicConversationProvider:
     ) -> ProviderResponseOutcome:
         """Generate one no-tools Session title and retain provider usage."""
         config = replace(self._config, max_output_tokens=request_snapshot.max_output_tokens)
-        request = build_request(config, request_snapshot.conversation_request)
+        request = build_request(
+            config,
+            request_snapshot.conversation_request,
+            native_search_enabled=False,
+        )
         try:
             response = self._client.create(**request)
         except anthropic.APIError as error:
@@ -268,16 +301,25 @@ class AnthropicConversationProvider:
 
     def respond_outcome(self, request_snapshot: ConversationRequest) -> ProviderResponseOutcome:
         """Return one response with Host-only actual token usage."""
-        request = build_request(self._config, request_snapshot)
+        request = build_request(
+            self._config,
+            request_snapshot,
+            native_search_enabled=self._native_search_enabled,
+            native_search_options=self._native_search_options,
+        )
         try:
             response = self._client.create(**request)
         except anthropic.APIError as error:
             raise normalize_sdk_error(error, config=self._config) from None
         usage = _parse_anthropic_usage(getattr(response, "usage", None))
+        parsed = parse_response(response, config=self._config, usage=usage)
         return ProviderResponseOutcome(
-            parse_response(response, config=self._config, usage=usage),
+            parsed,
             False,
             usage,
+            search_observation=(
+                _buffered_search_observation(parsed) if self._native_search_enabled else None
+            ),
         )
 
     def respond_stream(
@@ -296,7 +338,24 @@ class AnthropicConversationProvider:
         event_sink: ProviderTextDeltaSink,
     ) -> ProviderResponseOutcome:
         """Consume one stream and retain its final Host-only usage metadata."""
-        request = build_request(self._config, request_snapshot)
+        if self._native_search_enabled:
+            event_sink(ProviderSearchActivity(ProviderSearchPhase.SEARCHING))
+            try:
+                outcome = self.respond_outcome(request_snapshot)
+            except BaseException:
+                event_sink(ProviderSearchActivity(ProviderSearchPhase.FAILED))
+                raise
+            event_sink(ProviderSearchActivity(ProviderSearchPhase.COMPLETED))
+            if isinstance(outcome.response, AssistantText):
+                event_sink(ProviderTextDelta(outcome.response.text))
+                return ProviderResponseOutcome(
+                    outcome.response,
+                    True,
+                    outcome.usage,
+                    search_observation=outcome.search_observation,
+                )
+            return outcome
+        request = build_request(self._config, request_snapshot, native_search_enabled=False)
         request["stream"] = True
         stream = None
         captured_usage: list[ProviderTokenUsage] = []
@@ -346,11 +405,47 @@ class AnthropicConversationProvider:
         return ModelContextDiscovery(context_value, diagnostic, output_value)
 
 
+def _apply_native_search_projection(
+    projection: dict[str, object],
+    configuration: NativeSearchConfiguration,
+    options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
+) -> None:
+    validate_native_search_runtime_options(configuration, options)
+    adapter = configuration.adapter_id
+    if adapter is None:
+        return
+    if adapter is NativeSearchAdapterId.ANTHROPIC_WEB_SEARCH_20250305:
+        tools = projection.setdefault("tools", [])
+        assert isinstance(tools, list)
+        tool: dict[str, object] = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+        }
+        if options.allowed_domains:
+            tool["allowed_domains"] = list(options.allowed_domains)
+        tools.append(tool)
+        return
+    if adapter is NativeSearchAdapterId.CUSTOM_MANIFEST_V1:
+        manifest = configuration.manifest
+        assert manifest is not None
+        if manifest.extra_body:
+            projection["extra_body"] = dict(manifest.extra_body)
+        if manifest.server_tool is not None:
+            tools = projection.setdefault("tools", [])
+            assert isinstance(tools, list)
+            tools.append(dict(manifest.server_tool))
+        return
+    raise ValueError(f"native-search adapter is incompatible with Anthropic: {adapter.value}")
+
+
 def build_input_projection(
     config: AnthropicProviderConfig,
     request_snapshot: ConversationRequest,
     *,
     committed_context: bool = False,
+    native_search_enabled: bool = True,
+    native_search_options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
 ) -> dict[str, object]:
     """Build the Anthropic fields that contribute provider input tokens."""
     system: object = request_snapshot.system_prompt.text
@@ -377,16 +472,26 @@ def build_input_projection(
     if request_snapshot.allow_tools:
         projection["tools"] = list(model_tool_definitions(request_snapshot.enabled_tool_names))
         projection["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+        if native_search_enabled:
+            _apply_native_search_projection(projection, config.native_search, native_search_options)
     return projection
 
 
 def build_request(
     config: AnthropicProviderConfig,
     request_snapshot: ConversationRequest,
+    *,
+    native_search_enabled: bool = True,
+    native_search_options: NativeSearchRuntimeOptions = NativeSearchRuntimeOptions(),
 ) -> dict[str, object]:
     """Build one complete Anthropic Messages request deterministically."""
     request: dict[str, object] = {
-        **build_input_projection(config, request_snapshot),
+        **build_input_projection(
+            config,
+            request_snapshot,
+            native_search_enabled=native_search_enabled,
+            native_search_options=native_search_options,
+        ),
         "max_tokens": config.max_output_tokens,
         "stream": False,
     }
@@ -796,6 +901,44 @@ def parse_session_title_response(
     return AssistantText(text)
 
 
+def _object_list(value: object) -> list[object]:
+    return value if isinstance(value, list) and len(value) <= 100 else []
+
+
+def _add_anthropic_citation(
+    citations: list[tuple[str, str]],
+    url: object,
+    title: object,
+) -> None:
+    if len(citations) >= 20 or not isinstance(url, str) or len(url) > 4096:
+        return
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
+        return
+    safe_title = title if isinstance(title, str) and title.strip() else parsed.netloc
+    safe_title = " ".join(safe_title.split())[:512]
+    if not safe_title or any(character in safe_title for character in ("\x00", "\r", "\n")):
+        return
+    if all(existing_url != url for existing_url, _existing_title in citations):
+        citations.append((url, safe_title))
+
+
+def _append_anthropic_citations(text: str, citations: list[tuple[str, str]]) -> str:
+    if not citations:
+        return text
+    lines = ["", "", "Sources:"]
+    lines.extend(
+        f"- [{title.replace('[', r'\[').replace(']', r'\]')}]({url})" for url, title in citations
+    )
+    return text + "\n".join(lines)
+
+
+def _buffered_search_observation(response: ProviderResponse) -> ProviderSearchObservation:
+    text = response.text if isinstance(response, AssistantText) else response.assistant_text or ""
+    citation_count = min(20, text.count("\n- [") if "\n\nSources:\n" in text else 0)
+    return ProviderSearchObservation(1, 0, ("search",), citation_count, citation_count)
+
+
 def parse_response(
     response: object,
     *,
@@ -828,6 +971,7 @@ def parse_response(
 
     text_parts: list[str] = []
     tool_blocks: list[object] = []
+    citations: list[tuple[str, str]] = []
     for block in content:
         block_type = getattr(block, "type", None)
         if block_type == "text":
@@ -835,15 +979,26 @@ def parse_response(
             if not isinstance(text, str):
                 raise _invalid_response(config, "Anthropic text block was malformed")
             text_parts.append(text)
+            for citation in _object_list(getattr(block, "citations", None)):
+                _add_anthropic_citation(
+                    citations,
+                    getattr(citation, "url", None),
+                    getattr(citation, "title", None),
+                )
         elif block_type == "tool_use":
             tool_blocks.append(block)
+        elif block_type in {"server_tool_use", "web_search_tool_result"}:
+            if not config.native_search.available:
+                raise _invalid_response(
+                    config, "Anthropic response contained an undeclared server-search block"
+                )
         else:
             raise _invalid_response(config, "Anthropic response contained an unsupported block")
 
     if not tool_blocks:
         if stop_reason != "end_turn":
             raise _invalid_response(config, "text response did not end with end_turn")
-        return AssistantText(text="".join(text_parts))
+        return AssistantText(text=_append_anthropic_citations("".join(text_parts), citations))
     if stop_reason != "tool_use":
         raise _invalid_response(config, "tool response did not end with tool_use")
     if len(tool_blocks) > MAX_TOOL_CALLS_PER_RESPONSE:

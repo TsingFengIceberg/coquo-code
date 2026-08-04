@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from leonervis_code.core.contracts import (
@@ -12,6 +13,7 @@ from leonervis_code.core.contracts import (
     ConversationProvider,
     ConversationRequest,
     ProviderResponse,
+    ProviderResponseEnvelope,
     ToolUse,
 )
 from leonervis_code.providers.usage import ProviderTokenUsage
@@ -47,7 +49,60 @@ class ProviderTextDelta:
             raise ValueError("provider text delta exceeds the supported size")
 
 
-ProviderTextDeltaSink = Callable[[ProviderTextDelta], None]
+class ProviderSearchPhase(StrEnum):
+    SEARCHING = "searching"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ProviderSearchActivity:
+    """One content-free ephemeral Provider-owned search lifecycle event."""
+
+    phase: ProviderSearchPhase
+
+    def __post_init__(self) -> None:
+        if type(self.phase) is not ProviderSearchPhase:
+            raise ValueError("provider search activity phase is invalid")
+
+
+@dataclass(frozen=True)
+class ProviderSearchObservation:
+    """Bounded content-free facts derived from one terminal Provider response."""
+
+    call_count: int
+    failed_count: int
+    action_types: tuple[str, ...]
+    source_count: int
+    citation_count: int
+    discarded_citation_count: int = 0
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.call_count,
+                self.failed_count,
+                self.source_count,
+                self.citation_count,
+                self.discarded_citation_count,
+            )
+        ):
+            raise ValueError("provider search observation counts are invalid")
+        if self.failed_count > self.call_count:
+            raise ValueError("provider search failed count exceeds call count")
+        allowed_actions = {"search", "open_page", "find_in_page", "unknown"}
+        if (
+            not isinstance(self.action_types, tuple)
+            or len(self.action_types) > 8
+            or len(set(self.action_types)) != len(self.action_types)
+            or any(action not in allowed_actions for action in self.action_types)
+        ):
+            raise ValueError("provider search action types are invalid")
+
+
+ProviderStreamEvent = ProviderTextDelta | ProviderSearchActivity
+ProviderTextDeltaSink = Callable[[ProviderStreamEvent], None]
 
 
 class StreamingConversationProvider(Protocol):
@@ -70,6 +125,7 @@ class ProviderResponseOutcome:
     text_was_streamed: bool
     usage: ProviderTokenUsage | None = None
     context_report: ContextFitReport | None = None
+    search_observation: ProviderSearchObservation | None = None
 
 
 def respond_with_streaming(
@@ -85,10 +141,10 @@ def respond_with_streaming(
     if cancellation is not None:
         cancellation.check()
 
-    def checked_sink(delta: ProviderTextDelta) -> None:
+    def checked_sink(event: ProviderStreamEvent) -> None:
         if cancellation is not None:
             cancellation.check()
-        event_sink(delta)
+        event_sink(event)
 
     observed_method = getattr(provider, "respond_with_observation", None)
     if callable(observed_method):
@@ -123,19 +179,22 @@ def respond_with_streaming(
     character_count = 0
     byte_count = 0
 
-    def receive(delta: ProviderTextDelta) -> None:
+    def receive(event: ProviderStreamEvent) -> None:
         nonlocal character_count, byte_count
-        if not isinstance(delta, ProviderTextDelta):
+        if isinstance(event, ProviderSearchActivity):
+            checked_sink(event)
+            return
+        if not isinstance(event, ProviderTextDelta):
             raise ValueError("provider stream emitted an invalid event")
-        character_count += len(delta.text)
-        byte_count += len(delta.text.encode("utf-8"))
+        character_count += len(event.text)
+        byte_count += len(event.text.encode("utf-8"))
         if (
             character_count > MAX_PROVIDER_STREAM_TEXT_CHARACTERS
             or byte_count > MAX_PROVIDER_STREAM_TEXT_BYTES
         ):
             raise ValueError("provider stream text exceeds the supported size")
-        text_parts.append(delta.text)
-        checked_sink(delta)
+        text_parts.append(event.text)
+        checked_sink(event)
 
     if callable(stream_outcome_method):
         outcome = stream_outcome_method(request, event_sink=receive)
@@ -143,17 +202,31 @@ def respond_with_streaming(
             raise ValueError("provider stream returned an invalid response outcome")
         response = outcome.response
         usage = outcome.usage
+        search_observation = outcome.search_observation
     else:
         response = stream_method(request, event_sink=receive)
         usage = None
-    if not isinstance(response, (AssistantText, ToolUse, AssistantToolBatch)):
+        search_observation = None
+    if not isinstance(
+        response, (AssistantText, ToolUse, AssistantToolBatch, ProviderResponseEnvelope)
+    ):
         raise ValueError("provider stream returned an invalid response")
     streamed_text = "".join(text_parts)
+    visible_response = (
+        response.response if isinstance(response, ProviderResponseEnvelope) else response
+    )
     response_text = (
-        response.text if isinstance(response, AssistantText) else response.assistant_text or ""
+        visible_response.text
+        if isinstance(visible_response, AssistantText)
+        else visible_response.assistant_text or ""
     )
     if streamed_text != response_text:
         raise ValueError("provider stream text does not match its completed response")
     if cancellation is not None:
         cancellation.check()
-    return ProviderResponseOutcome(response, bool(text_parts), usage)
+    return ProviderResponseOutcome(
+        response,
+        bool(text_parts),
+        usage,
+        search_observation=search_observation,
+    )

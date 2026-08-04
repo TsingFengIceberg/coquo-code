@@ -13,6 +13,7 @@ from leonervis_code.core.contracts import (
     ConversationItem,
     ConversationRequest,
     ConversationTurn,
+    ProviderOwnedItem,
     SystemPromptSnapshot,
     ToolArguments,
     ToolResult,
@@ -22,8 +23,10 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 5
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 6
+PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 5
+PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 6
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 7
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 8
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
@@ -94,6 +97,8 @@ class EffectiveContextSnapshot:
             2,
             3,
             4,
+            PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }
@@ -127,6 +132,7 @@ class EffectiveContextSnapshot:
             if self.representation_version not in {
                 1,
                 3,
+                PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError(
@@ -140,6 +146,7 @@ class EffectiveContextSnapshot:
             if self.representation_version not in {
                 2,
                 4,
+                PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError("compacted effective context uses an unsupported representation")
@@ -187,10 +194,10 @@ class EffectiveContextSnapshot:
                 for turn in self.effective_turns
             ],
         }
-        if self.representation_version in {
-            EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
-            COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
-        }:
+        if (
+            self.representation_version
+            >= PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+        ):
             instructions = self.project_instructions
             manifest["project_instructions"] = (
                 None
@@ -270,7 +277,14 @@ def validate_complete_history(
             raise ValueError("conversation turn must start with a user message")
         index += 1
 
-        while index < len(history) and isinstance(history[index], (ToolUse, AssistantToolBatch)):
+        while index < len(history):
+            while index < len(history) and isinstance(history[index], ProviderOwnedItem):
+                _validate_item(history[index])
+                index += 1
+            if index >= len(history) or not isinstance(
+                history[index], (ToolUse, AssistantToolBatch)
+            ):
+                break
             response = history[index]
             _validate_item(response)
             requests = (
@@ -360,6 +374,17 @@ def _validate_item(item: object) -> None:
         if type(item.is_error) is not bool or type(item.truncated) is not bool:
             raise ValueError("tool result flags must be booleans")
         return
+    if isinstance(item, ProviderOwnedItem):
+        try:
+            ProviderOwnedItem(
+                item.protocol,
+                item.item_type,
+                item.item_id,
+                item.canonical_json,
+            )
+        except ValueError:
+            raise ValueError("provider-owned item is invalid") from None
+        return
     raise ValueError("conversation history contains an unknown item")
 
 
@@ -385,6 +410,14 @@ def _item_identity(item: ConversationItem) -> dict[str, object]:
             "item_type": "assistant_tool_batch",
             "assistant_text": item.assistant_text,
             "tool_uses": [_item_identity(request) for request in item.tool_uses],
+        }
+    if isinstance(item, ProviderOwnedItem):
+        return {
+            "item_type": "provider_owned_item",
+            "protocol": item.protocol,
+            "provider_item_type": item.item_type,
+            "provider_item_id": item.item_id,
+            "value": item.as_mapping(),
         }
     assert isinstance(item, ToolResult)
     return {

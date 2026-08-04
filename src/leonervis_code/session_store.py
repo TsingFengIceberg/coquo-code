@@ -29,6 +29,7 @@ from leonervis_code.core.contracts import (
     CommittedTurn,
     ConversationItem,
     ConversationTurn,
+    ProviderOwnedItem,
     ToolOutcomeEntry,
     ToolRequestOutcome,
     ToolResult,
@@ -113,6 +114,51 @@ class SessionStoreError(RuntimeError):
     """Raised when session persistence cannot proceed safely."""
 
 
+def _preview_turns(state: ReplayState) -> tuple[SessionPreviewTurn, ...]:
+    records = tuple(record for record in state.records if isinstance(record, TurnCommitted))
+    if len(records) != len(state.turns):
+        raise SessionRecordError("Session turn projection is inconsistent")
+    projected: list[SessionPreviewTurn] = []
+    for record, turn in zip(records, state.turns, strict=True):
+        calls = 0
+        failed = 0
+        actions: list[str] = []
+        sources = 0
+        for item in record.items:
+            if not isinstance(item, ProviderOwnedItem) or item.item_type != "web_search_call":
+                continue
+            calls += 1
+            mapping = item.as_mapping()
+            failed += int(mapping.get("status") == "failed")
+            action = mapping.get("action")
+            action_type = action.get("type") if isinstance(action, dict) else None
+            safe_action = (
+                action_type if action_type in {"search", "open_page", "find_in_page"} else "unknown"
+            )
+            if safe_action not in actions and len(actions) < 8:
+                actions.append(safe_action)
+            raw_sources = action.get("sources") if isinstance(action, dict) else None
+            if isinstance(raw_sources, list):
+                sources = min(1000, sources + len(raw_sources[:100]))
+        citation_count = min(
+            20,
+            turn.assistant.text.count("\n- [") if "\n\nSources:\n" in turn.assistant.text else 0,
+        )
+        summary = (
+            ProviderSearchTurnSummary(
+                calls,
+                failed,
+                tuple(actions),
+                sources,
+                citation_count,
+            )
+            if calls
+            else None
+        )
+        projected.append(SessionPreviewTurn(turn.user, turn.assistant, summary))
+    return tuple(projected)
+
+
 @dataclass(frozen=True)
 class TurnToolLedger:
     """One committed turn's replay-validated tool-ledger availability and data."""
@@ -133,12 +179,28 @@ class ToolLedgerQueryResult:
 
 
 @dataclass(frozen=True)
+class ProviderSearchTurnSummary:
+    call_count: int
+    failed_count: int
+    action_types: tuple[str, ...]
+    source_count: int
+    citation_count: int
+
+
+@dataclass(frozen=True)
+class SessionPreviewTurn:
+    user: UserMessage
+    assistant: AssistantText
+    provider_search: ProviderSearchTurnSummary | None
+
+
+@dataclass(frozen=True)
 class SessionPreview:
     """Bounded final-text projection from one strictly replayed Session."""
 
     info: SessionInfo
     total_turns: int
-    turns: tuple[ConversationTurn, ...]
+    turns: tuple[SessionPreviewTurn, ...]
 
 
 @dataclass(frozen=True)
@@ -148,7 +210,7 @@ class SessionTurnRange:
     info: SessionInfo
     total_turns: int
     start_turn: int
-    turns: tuple[ConversationTurn, ...]
+    turns: tuple[SessionPreviewTurn, ...]
 
 
 @dataclass(frozen=True)
@@ -585,10 +647,11 @@ class SessionStore:
         _validate_existing_session_root(self.root, self.workspace)
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         state = self._load_state(path, allow_repair=False)
+        turns = _preview_turns(state)
         return SessionPreview(
             info=_info(path, state),
-            total_turns=len(state.turns),
-            turns=state.turns[-limit:],
+            total_turns=len(turns),
+            turns=turns[-limit:],
         )
 
     def turn_range(
@@ -606,7 +669,8 @@ class SessionStore:
             )
         path = self._resolve_existing_path(selector)
         state = self._load_state(path, allow_repair=False)
-        total = len(state.turns)
+        turns = _preview_turns(state)
+        total = len(turns)
         if total and start_turn > total:
             raise SessionStoreError(f"session turn start exceeds the {total} committed turns")
         if not total and start_turn != 1:
@@ -615,7 +679,7 @@ class SessionStore:
             info=_info(path, state),
             total_turns=total,
             start_turn=start_turn,
-            turns=state.turns[start_turn - 1 : start_turn - 1 + count],
+            turns=turns[start_turn - 1 : start_turn - 1 + count],
         )
 
     def turn_evidence(

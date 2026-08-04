@@ -33,6 +33,8 @@ from leonervis_code.core.contracts import (
     AssistantText,
     CommittedTurn,
     ConversationTurn,
+    ProviderOwnedItem,
+    ProviderResponseEnvelope,
     ToolRequestOutcome,
     ToolResult,
     ToolUse,
@@ -52,6 +54,37 @@ from leonervis_code.tools.catalog import (
 
 _TASK_ID = "11111111-1111-4111-8111-111111111111"
 _STAGE_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_loop_commits_provider_owned_items_without_dispatching_them(tmp_path) -> None:
+    provider_item = ProviderOwnedItem.from_mapping(
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "current docs"},
+        }
+    )
+    provider = ScriptedFakeProvider(
+        [ProviderResponseEnvelope((provider_item,), AssistantText("found"))]
+    )
+    committed: list[CommittedTurn] = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
+    )
+
+    assert loop.run("search") == "found"
+    assert committed[0].items == (
+        UserMessage("search"),
+        provider_item,
+        AssistantText("found"),
+    )
+    assert committed[0].tool_ledger.entries == ()
 
 
 def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
@@ -1451,7 +1484,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v5-")
+    assert proposals[0].context_id.startswith("ctx-v7-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

@@ -203,15 +203,27 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider use", "Use a workspace provider profile"),
     SlashCompletionSpec("/search status", "Show web search source activation"),
     SlashCompletionSpec("/search sources", "List supported and available search sources"),
+    SlashCompletionSpec("/search use provider", "Use provider-native search as primary"),
     SlashCompletionSpec("/search use brave", "Use Brave as the primary search source"),
     SlashCompletionSpec("/search use tavily", "Use Tavily as the primary search source"),
+    SlashCompletionSpec(
+        "/search use provider tavily", "Use Provider search with explicit Tavily fallback"
+    ),
+    SlashCompletionSpec("/search mode auto", "Let the Provider decide whether to search"),
+    SlashCompletionSpec("/search mode required", "Require Provider search for each invocation"),
+    SlashCompletionSpec("/search domains", "Set Provider search allowed domains"),
+    SlashCompletionSpec("/search domains reset", "Clear Provider search domain filtering"),
+    SlashCompletionSpec("/search context low", "Use low Provider search context"),
+    SlashCompletionSpec("/search context medium", "Use medium Provider search context"),
+    SlashCompletionSpec("/search context high", "Use high Provider search context"),
+    SlashCompletionSpec("/search context reset", "Clear Provider search context override"),
     SlashCompletionSpec(
         "/search use brave tavily", "Activate Brave then Tavily; execute Brave only for now"
     ),
     SlashCompletionSpec(
         "/search use tavily brave", "Activate Tavily then Brave; execute Tavily only for now"
     ),
-    SlashCompletionSpec("/search reset", "Restore startup-environment search selection"),
+    SlashCompletionSpec("/search reset", "Restore provider-native default or disable search"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -425,6 +437,12 @@ class ReplSession(Protocol):
     def set_web_search_sources(self, sources: tuple[str, ...]): ...
 
     def reset_web_search_sources(self): ...
+
+    def set_native_search_mode(self, mode: str): ...
+
+    def set_native_search_domains(self, domains: tuple[str, ...] | None): ...
+
+    def set_native_search_context(self, size: str | None): ...
 
 
 @dataclass(frozen=True)
@@ -809,12 +827,20 @@ def dispatch_slash(
         return _search_reset(session)
     if command == "/search use" or command.startswith("/search use "):
         return _search_use(command, session)
+    if command == "/search mode" or command.startswith("/search mode "):
+        return _search_mode(command, session)
+    if command == "/search domains" or command.startswith("/search domains "):
+        return _search_domains(command, session)
+    if command == "/search context" or command.startswith("/search context "):
+        return _search_context(command, session)
     if command.startswith("/search "):
         subcommand = command.split(maxsplit=2)[1]
-        suggestion = _suggest_token(subcommand, ("status", "sources", "use", "reset"))
+        suggestion = _suggest_token(
+            subcommand, ("status", "sources", "use", "mode", "domains", "context", "reset")
+        )
         return _usage(
             f"Unknown search command: {subcommand}{_suggestion_line(suggestion)}\n"
-            "Usage: /search <status|sources|use|reset>"
+            "Usage: /search <status|sources|use|mode|domains|context|reset>"
         )
     if command == "/model" or command.startswith("/model "):
         return _model(command, session)
@@ -861,6 +887,41 @@ def _search_reset(session: ReplSession) -> SlashResult:
         lambda: render_web_search_sources(session.reset_web_search_sources()),
         kind="success",
         failure_prefix="Search source reset failed",
+    )
+
+
+def _search_mode(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /search mode <auto|required>")
+    return _call(
+        lambda: render_web_search_sources(session.set_native_search_mode(parts[2])),
+        kind="success",
+        failure_prefix="Provider search mode update failed",
+    )
+
+
+def _search_domains(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) < 3:
+        return _usage("Usage: /search domains <domain> [domain...] | reset")
+    domains = None if parts[2:] == ["reset"] else tuple(parts[2:])
+    return _call(
+        lambda: render_web_search_sources(session.set_native_search_domains(domains)),
+        kind="success",
+        failure_prefix="Provider search domain update failed",
+    )
+
+
+def _search_context(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3 or parts[2] not in {"low", "medium", "high", "reset"}:
+        return _usage("Usage: /search context <low|medium|high|reset>")
+    size = None if parts[2] == "reset" else parts[2]
+    return _call(
+        lambda: render_web_search_sources(session.set_native_search_context(size)),
+        kind="success",
+        failure_prefix="Provider search context update failed",
     )
 
 

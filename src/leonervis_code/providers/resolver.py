@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -17,6 +18,11 @@ from leonervis_code.providers.definitions import (
     ProviderDefinition,
     RuntimeProviderRoute,
     WireProtocol,
+)
+from leonervis_code.providers.native_search import (
+    NativeSearchAdapterId,
+    NativeSearchConfiguration,
+    resolve_native_search_configuration,
 )
 
 if TYPE_CHECKING:
@@ -47,9 +53,12 @@ def resolve_runtime_route(
 
     custom_values = (custom_protocol, custom_base_url, custom_api_key_env)
     if any(value is not None for value in custom_values):
-        if custom_protocol != "openai-compatible" or custom_base_url is None:
+        if (
+            custom_protocol not in {"openai-compatible", "openai-responses"}
+            or custom_base_url is None
+        ):
             raise RuntimeRouteError(
-                "custom providers require --provider-protocol openai-compatible and --base-url"
+                "custom providers require --provider-protocol openai-compatible or openai-responses and --base-url"
             )
         if custom_api_key_env is not None and not custom_api_key_env.strip():
             raise RuntimeRouteError("custom API key environment variable must not be blank")
@@ -57,7 +66,11 @@ def resolve_runtime_route(
             raise RuntimeRouteError("custom API key environment variable name is invalid")
         definition = ProviderDefinition(
             provider_id="custom",
-            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            protocol=(
+                WireProtocol.OPENAI_RESPONSES
+                if custom_protocol == "openai-responses"
+                else WireProtocol.OPENAI_CHAT_COMPLETIONS
+            ),
             credential_env=custom_api_key_env,
             credential_required=custom_api_key_env is not None,
             default_base_url=normalize_compatible_base_url(custom_base_url),
@@ -126,6 +139,12 @@ def resolve_profile_route(
             credential_required=profile.api_key_env is not None,
             default_base_url=profile.base_url,
         )
+        native_search = resolve_native_search_configuration(
+            builtin_adapter=None,
+            selected_adapter=profile.native_search_adapter,
+            manifest=profile.native_search_manifest,
+        )
+        _validate_native_search_protocol(native_search, profile.protocol)
         return _route(
             definition,
             model,
@@ -134,9 +153,11 @@ def resolve_profile_route(
             "profile",
             profile.max_output_tokens,
             profile.temperature,
+            native_search,
         )
 
     definition = BUILTIN_PROVIDERS[profile.provider_id]
+    definition = replace(definition, protocol=profile.protocol)
     if profile.api_key_env is not None:
         definition = replace(
             definition,
@@ -155,10 +176,19 @@ def resolve_profile_route(
             if configured:
                 base_url = configured
                 source = "environment"
-    if definition.protocol == WireProtocol.OPENAI_CHAT_COMPLETIONS:
+    if definition.protocol in {
+        WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        WireProtocol.OPENAI_RESPONSES,
+    }:
         base_url = normalize_compatible_base_url(base_url)
     else:
         base_url = validate_base_url(base_url)
+    native_search = resolve_native_search_configuration(
+        builtin_adapter=_builtin_native_search_for_model(definition, wire_model),
+        selected_adapter=profile.native_search_adapter,
+        manifest=profile.native_search_manifest,
+    )
+    _validate_native_search_protocol(native_search, definition.protocol)
     return _route(
         definition,
         model,
@@ -167,6 +197,7 @@ def resolve_profile_route(
         source,
         profile.max_output_tokens,
         profile.temperature,
+        native_search,
     )
 
 
@@ -206,6 +237,8 @@ def _route_for_definition(
     max_output_tokens: int,
     temperature: float | None,
 ) -> RuntimeProviderRoute:
+    if definition.provider_id == "deepseek" and wire_model == "deepseek-v4-flash":
+        definition = replace(definition, protocol=WireProtocol.OPENAI_RESPONSES)
     base_url = definition.default_base_url
     source = "default"
     if definition.base_url_env:
@@ -213,7 +246,10 @@ def _route_for_definition(
         if configured:
             base_url = configured
             source = "environment"
-    if definition.protocol == WireProtocol.OPENAI_CHAT_COMPLETIONS:
+    if definition.protocol in {
+        WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        WireProtocol.OPENAI_RESPONSES,
+    }:
         base_url = normalize_compatible_base_url(base_url)
     else:
         base_url = validate_base_url(base_url)
@@ -236,6 +272,7 @@ def _route(
     base_url_source: str,
     max_output_tokens: int,
     temperature: float | None,
+    native_search: NativeSearchConfiguration | None = None,
 ) -> RuntimeProviderRoute:
     return RuntimeProviderRoute(
         definition=definition,
@@ -245,7 +282,64 @@ def _route(
         base_url_source=base_url_source,
         max_output_tokens=max_output_tokens,
         temperature=temperature,
+        native_search=(
+            native_search
+            if native_search is not None
+            else resolve_native_search_configuration(
+                builtin_adapter=_builtin_native_search_for_model(definition, wire_model),
+                selected_adapter=None,
+                manifest=None,
+            )
+        ),
     )
+
+
+def _builtin_native_search_for_model(
+    definition: ProviderDefinition,
+    wire_model: str,
+) -> NativeSearchAdapterId | None:
+    adapter = definition.native_search_adapter
+    if (
+        adapter is NativeSearchAdapterId.OPENAI_CHAT_WEB_SEARCH_OPTIONS_V1
+        and "search-preview" not in wire_model.lower()
+    ):
+        return None
+    if (
+        adapter is NativeSearchAdapterId.OPENAI_RESPONSES_WEB_SEARCH_V1
+        and definition.provider_id == "deepseek"
+        and wire_model != "deepseek-v4-flash"
+    ):
+        return None
+    return adapter
+
+
+def _validate_native_search_protocol(
+    configuration: NativeSearchConfiguration,
+    protocol: WireProtocol,
+) -> None:
+    adapter = configuration.adapter_id
+    if adapter is None or adapter is NativeSearchAdapterId.CUSTOM_MANIFEST_V1:
+        return
+    if protocol is WireProtocol.ANTHROPIC_MESSAGES:
+        if adapter is not NativeSearchAdapterId.ANTHROPIC_WEB_SEARCH_20250305:
+            raise RuntimeRouteError(
+                f"native-search adapter {adapter.value} requires an OpenAI-compatible protocol"
+            )
+        return
+    if protocol is WireProtocol.OPENAI_RESPONSES:
+        if adapter is not NativeSearchAdapterId.OPENAI_RESPONSES_WEB_SEARCH_V1:
+            raise RuntimeRouteError(
+                f"native-search adapter {adapter.value} requires a chat-completions protocol"
+            )
+        return
+    if adapter is NativeSearchAdapterId.OPENAI_RESPONSES_WEB_SEARCH_V1:
+        raise RuntimeRouteError(
+            "native-search adapter openai-responses-web-search-v1 requires openai-responses"
+        )
+    if adapter is NativeSearchAdapterId.ANTHROPIC_WEB_SEARCH_20250305:
+        raise RuntimeRouteError(
+            "native-search adapter anthropic-web-search-20250305 requires anthropic-messages"
+        )
 
 
 def normalize_compatible_base_url(value: str) -> str:
@@ -255,7 +349,7 @@ def normalize_compatible_base_url(value: str) -> str:
     path = parsed.path.rstrip("/")
     if path.endswith("/chat/completions"):
         return validated[: -len("/chat/completions")].rstrip("/")
-    if path.endswith("/v1") or path.endswith("/api/v1"):
+    if re.search(r"/v[0-9]+\Z", path):
         return validated.rstrip("/")
     return f"{validated.rstrip('/')}/v1"
 

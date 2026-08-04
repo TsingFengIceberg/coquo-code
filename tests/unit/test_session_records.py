@@ -14,6 +14,7 @@ from leonervis_code.core.compaction import (
 from leonervis_code.core.contracts import (
     AssistantToolBatch,
     AssistantText,
+    ProviderOwnedItem,
     ToolArguments,
     ToolOutcomeEntry,
     ToolRequestOutcome,
@@ -568,6 +569,48 @@ def test_turn_schema_v3_round_trips_structured_arguments_with_null_companion_tex
     assert b'"arguments":{"pattern":"src/**/*.py"},"arguments_version":1' in encoded
     assert b'"arguments":{"include":"src/**/*.py","query":"ToolUse("}' in encoded
     assert encoded.count(b'"assistant_text":null') == 3
+
+
+def test_current_turn_schema_round_trips_provider_owned_responses_items() -> None:
+    provider_item = ProviderOwnedItem.from_mapping(
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "current docs"},
+        }
+    )
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(UserMessage("search"), provider_item, AssistantText("done")),
+    )
+
+    encoded = encode_record(turn)
+
+    assert decode_record(encoded) == turn
+    assert b'"item_type":"provider_owned_item"' in encoded
+    assert b'"provider_item_id":"ws_1"' in encoded
+
+
+def test_legacy_turn_schema_rejects_provider_owned_item() -> None:
+    turn = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(
+            UserMessage("search"),
+            ProviderOwnedItem.from_mapping(
+                {"type": "reasoning", "id": "rs_1", "status": "completed"}
+            ),
+            AssistantText("done"),
+        ),
+        schema_version=TURN_COMMITTED_NAMING_SCHEMA_VERSION,
+    )
+
+    with pytest.raises(SessionRecordError, match="newer"):
+        encode_record(turn)
 
 
 def test_turn_schema_v3_round_trips_assistant_tool_text_without_normalizing_it() -> None:

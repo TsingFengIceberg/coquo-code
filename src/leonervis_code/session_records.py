@@ -36,6 +36,7 @@ from leonervis_code.core.contracts import (
     CommittedTurn,
     ConversationItem,
     ConversationTurn,
+    ProviderOwnedItem,
     ToolArguments,
     ToolOutcomeEntry,
     ToolRequestOutcome,
@@ -63,6 +64,7 @@ from leonervis_code.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+    PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
     validate_complete_history,
 )
 from leonervis_code.providers.usage import (
@@ -80,7 +82,8 @@ TURN_COMMITTED_BATCH_SCHEMA_VERSION = 4
 TURN_COMMITTED_LEDGER_SCHEMA_VERSION = 5
 TURN_COMMITTED_USAGE_SCHEMA_VERSION = 6
 TURN_COMMITTED_NAMING_SCHEMA_VERSION = 7
-TURN_COMMITTED_SCHEMA_VERSION = 8
+TURN_COMMITTED_TITLE_SCHEMA_VERSION = 8
+TURN_COMMITTED_SCHEMA_VERSION = 9
 TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
 TURN_FAILED_SCHEMA_VERSION = 2
 SESSION_RESUMED_LEGACY_SCHEMA_VERSION = 1
@@ -1187,7 +1190,7 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             common["session_name_source"] = (
                 record.session_name_source.value if record.session_name_source is not None else None
             )
-        if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+        if record.schema_version >= TURN_COMMITTED_TITLE_SCHEMA_VERSION:
             common["session_title_fallback_reason"] = (
                 record.session_title_fallback_reason.value
                 if record.session_title_fallback_reason is not None
@@ -1395,6 +1398,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_NAMING_SCHEMA_VERSION,
+            TURN_COMMITTED_TITLE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     elif record_type == "turn_failed":
@@ -1461,7 +1465,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             fields.add("provider_usage")
         if version >= TURN_COMMITTED_NAMING_SCHEMA_VERSION:
             fields.update({"session_name", "session_name_source"})
-        if version == TURN_COMMITTED_SCHEMA_VERSION:
+        if version >= TURN_COMMITTED_TITLE_SCHEMA_VERSION:
             fields.add("session_title_fallback_reason")
         _closed_fields(
             value,
@@ -1505,7 +1509,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
                 _session_title_fallback_reason_from_value(
                     value.get("session_title_fallback_reason")
                 )
-                if version == TURN_COMMITTED_SCHEMA_VERSION
+                if version >= TURN_COMMITTED_TITLE_SCHEMA_VERSION
                 else None
             ),
             schema_version=version,
@@ -2007,6 +2011,7 @@ def _item_to_dict(
         TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
         TURN_COMMITTED_USAGE_SCHEMA_VERSION,
         TURN_COMMITTED_NAMING_SCHEMA_VERSION,
+        TURN_COMMITTED_TITLE_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -2016,6 +2021,22 @@ def _item_to_dict(
     if isinstance(item, AssistantText):
         _text_payload(item.text, "assistant text")
         return {"item_type": "assistant_text", "text": item.text}
+    if isinstance(item, ProviderOwnedItem):
+        if schema_version < TURN_COMMITTED_SCHEMA_VERSION:
+            raise SessionRecordError(
+                "provider-owned item requires a newer turn_committed schema version"
+            )
+        try:
+            item.__post_init__()
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        return {
+            "item_type": "provider_owned_item",
+            "protocol": item.protocol,
+            "provider_item_type": item.item_type,
+            "provider_item_id": item.item_id,
+            "value": item.as_mapping(),
+        }
     if isinstance(item, ToolUse):
         _required_text(item.tool_use_id, "tool_use ID")
         _required_text(item.name, "tool_use name")
@@ -2109,6 +2130,37 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         _closed_fields(value, {"item_type", "text"}, item_type)
         text = _required_field_payload_text(value, "text", item_type)
         return UserMessage(text) if item_type == "user_message" else AssistantText(text)
+    if item_type == "provider_owned_item":
+        if schema_version < TURN_COMMITTED_SCHEMA_VERSION:
+            raise SessionRecordError(
+                "provider-owned item requires a newer turn_committed schema version"
+            )
+        _closed_fields(
+            value,
+            {
+                "item_type",
+                "protocol",
+                "provider_item_type",
+                "provider_item_id",
+                "value",
+            },
+            item_type,
+        )
+        raw_item = value.get("value")
+        if not isinstance(raw_item, dict):
+            raise SessionRecordError("provider-owned item value must be an object")
+        try:
+            item = ProviderOwnedItem.from_mapping(
+                raw_item,
+                protocol=_required_field_text(value, "protocol", item_type),
+            )
+        except ValueError as error:
+            raise SessionRecordError(str(error)) from None
+        if item.item_type != _required_field_text(
+            value, "provider_item_type", item_type
+        ) or item.item_id != _required_field_text(value, "provider_item_id", item_type):
+            raise SessionRecordError("provider-owned item identity is inconsistent")
+        return item
     if item_type == "tool_use":
         if schema_version == TURN_COMMITTED_LEGACY_SCHEMA_VERSION:
             _closed_fields(value, {"item_type", "tool_use_id", "name", "path"}, item_type)
@@ -2440,7 +2492,7 @@ def _validate_turn_session_name(record: TurnCommitted) -> None:
         SessionNameSource.FALLBACK,
     }:
         raise SessionRecordError("turn_committed Session name source is invalid")
-    if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION:
+    if record.schema_version >= TURN_COMMITTED_TITLE_SCHEMA_VERSION:
         if (
             record.session_name_source == SessionNameSource.FALLBACK
             and record.session_title_fallback_reason is None
@@ -2518,6 +2570,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_LEDGER_SCHEMA_VERSION,
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_NAMING_SCHEMA_VERSION,
+            TURN_COMMITTED_TITLE_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -2637,6 +2690,7 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
         raise SessionRecordError("context_compacted continuation provenance is unsupported")
     if record.effective_context_representation_version not in {
         2,
+        PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
         COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     }:
         raise SessionRecordError(
@@ -2691,7 +2745,7 @@ def _validate_context_compacted(
 
 
 def _context_id(value: object, label: str) -> None:
-    if not isinstance(value, str) or re.fullmatch(r"ctx-v[1-6]-[0-9a-f]{64}", value) is None:
+    if not isinstance(value, str) or re.fullmatch(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}", value) is None:
         raise SessionRecordError(f"{label} is invalid")
 
 

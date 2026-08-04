@@ -109,6 +109,12 @@ from leonervis_code.providers.manager import (
     RuntimeSwitchResult,
     TurnRuntimeSnapshot,
 )
+from leonervis_code.providers.native_search import (
+    NativeSearchContextSize,
+    NativeSearchMode,
+    NativeSearchRuntimeOptions,
+    canonical_native_search_domain,
+)
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.profile import NamedProviderProfile
 from leonervis_code.providers.profile_store import ProviderProfileStore
@@ -137,7 +143,7 @@ from leonervis_code.session_records import (
     SessionTitleFallbackReason,
     SessionRecord,
     TurnCommitted,
-    TURN_COMMITTED_SCHEMA_VERSION,
+    TURN_COMMITTED_USAGE_SCHEMA_VERSION,
     TurnFailed,
     TURN_FAILED_SCHEMA_VERSION,
 )
@@ -742,6 +748,11 @@ class ProjectSession:
         self._git_log = git_log or GitLogTool(workspace)
         self._git_show = git_show or GitShowTool(workspace)
         self._web_search = web_search or WebSearchTool()
+        self._web_search.disable_sources()
+        self._search_source_order = (
+            ("provider",) if self._manager.status().native_search_available else ()
+        )
+        self._native_search_options = NativeSearchRuntimeOptions()
         self._project_instructions_loader = (
             project_instructions_loader or ProjectInstructionsLoader(workspace)
         )
@@ -2407,6 +2418,10 @@ class ProjectSession:
             enabled_tool_names = (
                 ORDINARY_PROMPT_TOOL_NAMES if _enabled_tool_names is None else _enabled_tool_names
             )
+            if not any(source in {"brave", "tavily"} for source in self._search_source_order):
+                enabled_tool_names = tuple(
+                    name for name in enabled_tool_names if name != WEB_SEARCH_TOOL_NAME
+                )
             prepared = self._loop.prepare_turn(
                 text,
                 allow_tools=_allow_tools,
@@ -2564,21 +2579,136 @@ class ProjectSession:
         """Inspect process-local search source activation without provider or Session work."""
         with self._lock:
             self._ensure_open()
-            return self._web_search.source_configuration()
+            external = self._web_search.source_configuration()
+            status = self._manager.status()
+            return replace(
+                external,
+                ordered_sources=self._search_source_order,
+                provider_available=status.native_search_available,
+                provider_active="provider" in self._search_source_order,
+                provider_adapter=status.native_search_adapter,
+                provider_mode=self._native_search_options.mode.value,
+                provider_allowed_domains=self._native_search_options.allowed_domains,
+                provider_context_size=(
+                    self._native_search_options.context_size.value
+                    if self._native_search_options.context_size is not None
+                    else None
+                ),
+                error=(
+                    None if self._search_source_order else "all web search sources are disabled"
+                ),
+            )
 
     def set_web_search_sources(self, sources: tuple[str, ...]) -> WebSearchSourceConfiguration:
-        """Activate ordered sources; current execution uses the first source only."""
+        """Activate one primary and optional model-mediated independent fallbacks."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._web_search.configure_sources(sources)
+            if not isinstance(sources, tuple) or not sources or len(sources) > 3:
+                raise WebSearchPreparationError("one or more web search sources are required")
+            if len(set(sources)) != len(sources):
+                raise WebSearchPreparationError("web search sources must not contain duplicates")
+            supported = {"provider", "brave", "tavily"}
+            if any(source not in supported for source in sources):
+                raise WebSearchPreparationError(
+                    "web search sources must be selected from: provider, brave, tavily"
+                )
+            status = self._manager.status()
+            if "provider" in sources and not status.native_search_available:
+                raise WebSearchPreparationError(
+                    "web search source 'provider' requires a declared native-search adapter"
+                )
+            external_names = tuple(source for source in sources if source != "provider")
+            available = {
+                source.value for source in self._web_search.source_configuration().available_sources
+            }
+            for source in external_names:
+                if source not in available:
+                    raise WebSearchPreparationError(
+                        f"web search source '{source}' requires a valid credential environment value"
+                    )
+            self._manager.set_native_search_enabled(sources[0] == "provider")
+            if external_names:
+                self._web_search.configure_sources(external_names)
+            else:
+                self._web_search.disable_sources()
+            self._search_source_order = sources
+            return self.inspect_web_search_sources()
 
     def reset_web_search_sources(self) -> WebSearchSourceConfiguration:
-        """Restore source selection derived from the startup environment."""
+        """Restore provider-native default or disable all search when unavailable."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._web_search.reset_source_configuration()
+            self._web_search.disable_sources()
+            status = self._manager.status()
+            self._native_search_options = NativeSearchRuntimeOptions()
+            self._manager.set_native_search_options(self._native_search_options)
+            self._manager.set_native_search_enabled(status.native_search_available)
+            self._search_source_order = ("provider",) if status.native_search_available else ()
+            return self.inspect_web_search_sources()
+
+    def _search_execution_source(self) -> str | None:
+        return self._search_source_order[0] if self._search_source_order else None
+
+    def set_native_search_mode(self, mode: str) -> WebSearchSourceConfiguration:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            try:
+                selected = NativeSearchMode(mode)
+            except ValueError:
+                raise WebSearchPreparationError(
+                    "provider search mode must be auto or required"
+                ) from None
+            candidate = replace(self._native_search_options, mode=selected)
+            self._manager.set_native_search_options(candidate)
+            self._native_search_options = candidate
+            return self.inspect_web_search_sources()
+
+    def set_native_search_domains(
+        self, domains: tuple[str, ...] | None
+    ) -> WebSearchSourceConfiguration:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if domains is None:
+                canonical = ()
+            else:
+                if not domains or len(domains) > 20:
+                    raise WebSearchPreparationError(
+                        "provider search requires between 1 and 20 allowed domains"
+                    )
+                try:
+                    canonical = tuple(canonical_native_search_domain(value) for value in domains)
+                except ValueError as error:
+                    raise WebSearchPreparationError(str(error)) from None
+                if len(set(canonical)) != len(canonical):
+                    raise WebSearchPreparationError(
+                        "provider search allowed domains must not contain duplicates"
+                    )
+            candidate = replace(self._native_search_options, allowed_domains=canonical)
+            self._manager.set_native_search_options(candidate)
+            self._native_search_options = candidate
+            return self.inspect_web_search_sources()
+
+    def set_native_search_context(self, size: str | None) -> WebSearchSourceConfiguration:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if size is None:
+                selected = None
+            else:
+                try:
+                    selected = NativeSearchContextSize(size)
+                except ValueError:
+                    raise WebSearchPreparationError(
+                        "provider search context must be low, medium, high, or reset"
+                    ) from None
+            candidate = replace(self._native_search_options, context_size=selected)
+            self._manager.set_native_search_options(candidate)
+            self._native_search_options = candidate
+            return self.inspect_web_search_sources()
 
     def compact_context(self) -> CompactContextResult:
         """Run the shared controlled-compaction transaction manually."""
@@ -3462,6 +3592,13 @@ class ProjectSession:
             action = prepared_patch.action
             precondition = prepared_patch.precondition
         elif request.name == WEB_SEARCH_TOOL_NAME:
+            if not any(source in {"brave", "tavily"} for source in self._search_source_order):
+                return _invalid_tool_request(
+                    request,
+                    WebSearchPreparationError(
+                        "independent web search is not an active primary or fallback source"
+                    ),
+                )
             try:
                 prepared_web_search = self._web_search.prepare(request)
             except WebSearchPreparationError as error:
@@ -3944,6 +4081,11 @@ class ProjectSession:
         )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
+        self._web_search.disable_sources()
+        self._native_search_options = NativeSearchRuntimeOptions()
+        self._manager.set_native_search_options(self._native_search_options)
+        self._manager.set_native_search_enabled(result.status.native_search_available)
+        self._search_source_order = ("provider",) if result.status.native_search_available else ()
         try:
             self._writer.runtime_changed(binding_from_status(result.status), reason=reason)
         except Exception as error:
@@ -3994,7 +4136,7 @@ def _durable_usage_operations(
             occurred_at = record.committed_at
             invocations = (
                 record.provider_usage
-                if record.schema_version == TURN_COMMITTED_SCHEMA_VERSION
+                if record.schema_version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION
                 else None
             )
         elif isinstance(record, TurnFailed):
