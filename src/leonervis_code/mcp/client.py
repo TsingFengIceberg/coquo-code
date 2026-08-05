@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import importlib.metadata
 import json
 import os
@@ -69,6 +70,37 @@ _BASE_ENVIRONMENT_ALLOWLIST = (
 )
 
 
+class McpNotificationKind(StrEnum):
+    """Closed content-free notification classes retained by the Host."""
+
+    PROGRESS = "progress"
+    MESSAGE = "message"
+    TOOLS_LIST_CHANGED = "tools-list-changed"
+
+
+@dataclass(frozen=True)
+class McpNotificationSummary:
+    """Bounded notification counts without server-provided content."""
+
+    progress_count: int = 0
+    message_count: int = 0
+    tools_list_changed_count: int = 0
+    ignored_count: int = 0
+
+    @property
+    def total_count(self) -> int:
+        return (
+            self.progress_count
+            + self.message_count
+            + self.tools_list_changed_count
+            + self.ignored_count
+        )
+
+    @property
+    def catalog_invalidated(self) -> bool:
+        return self.tools_list_changed_count > 0
+
+
 class McpClientError(RuntimeError):
     """One sanitized MCP transport, protocol, timeout, or cleanup failure."""
 
@@ -79,11 +111,13 @@ class McpClientError(RuntimeError):
         *,
         cleanup_complete: bool = True,
         outcome_uncertain: bool = False,
+        notifications: McpNotificationSummary | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.cleanup_complete = cleanup_complete
         self.outcome_uncertain = outcome_uncertain
+        self.notifications = notifications or McpNotificationSummary()
 
 
 @dataclass(frozen=True)
@@ -145,6 +179,7 @@ class McpToolCallResult:
     process_reused: bool
     stderr_bytes: int
     stderr_truncated: bool
+    notifications: McpNotificationSummary = McpNotificationSummary()
 
 
 @dataclass(frozen=True)
@@ -275,6 +310,64 @@ class _ProcessOwner:
         return cleanup_complete and process.poll() is not None
 
 
+class _NotificationCollector:
+    def __init__(
+        self,
+        sink: Callable[[McpNotificationKind], None] | None,
+    ) -> None:
+        self._sink = sink
+        self._seen: set[McpNotificationKind] = set()
+        self._progress = 0
+        self._message = 0
+        self._tools_list_changed = 0
+        self._ignored = 0
+
+    @property
+    def summary(self) -> McpNotificationSummary:
+        return McpNotificationSummary(
+            progress_count=self._progress,
+            message_count=self._message,
+            tools_list_changed_count=self._tools_list_changed,
+            ignored_count=self._ignored,
+        )
+
+    def observe(self, message: dict[str, object]) -> None:
+        if self.summary.total_count >= MAX_MCP_NOTIFICATIONS_PER_REQUEST:
+            raise McpClientError(
+                "mcp_notification_limit",
+                "MCP server exceeded the notification limit",
+            )
+        method = message.get("method")
+        if not isinstance(method, str):
+            raise McpClientError(
+                "mcp_notification_invalid",
+                "MCP notification method is invalid",
+            )
+        if method == "notifications/progress":
+            _validate_progress_notification(message)
+            self._progress += 1
+            self._emit_once(McpNotificationKind.PROGRESS)
+        elif method == "notifications/message":
+            _validate_message_notification(message)
+            self._message += 1
+            self._emit_once(McpNotificationKind.MESSAGE)
+        elif method == "notifications/tools/list_changed":
+            _validate_tools_list_changed_notification(message)
+            self._tools_list_changed += 1
+            self._emit_once(McpNotificationKind.TOOLS_LIST_CHANGED)
+        else:
+            self._ignored += 1
+
+    def _emit_once(self, kind: McpNotificationKind) -> None:
+        if self._sink is None or kind in self._seen:
+            return
+        self._seen.add(kind)
+        try:
+            self._sink(kind)
+        except Exception:
+            pass
+
+
 class _JsonRpcConnection:
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
         if process.stdin is None or process.stdout is None:
@@ -302,7 +395,8 @@ class _JsonRpcConnection:
         timeout_seconds: float,
         cancellation: TurnCancellation | None = None,
         outcome_uncertain: bool = False,
-    ) -> object:
+        notification_sink: Callable[[McpNotificationKind], None] | None = None,
+    ) -> tuple[object, McpNotificationSummary]:
         self._send(
             {
                 "jsonrpc": "2.0",
@@ -312,65 +406,69 @@ class _JsonRpcConnection:
             }
         )
         deadline = time.monotonic() + timeout_seconds
-        notifications = 0
-        while True:
-            if cancellation is not None and cancellation.requested:
-                try:
-                    self.notify(
-                        "notifications/cancelled",
-                        {"requestId": request_id, "reason": "client turn cancelled"},
-                    )
-                except McpClientError:
-                    pass
-                raise McpClientError(
-                    "mcp_cancelled",
-                    "MCP request was cancelled",
-                    outcome_uncertain=outcome_uncertain,
-                )
-            message = self._read_message(deadline, cancellation=cancellation)
-            if "method" in message:
-                if "id" in message:
-                    self._send(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": message["id"],
-                            "error": {
-                                "code": -32601,
-                                "message": "Server-to-client requests are not supported",
-                            },
-                        }
-                    )
+        collector = _NotificationCollector(notification_sink)
+        try:
+            while True:
+                if cancellation is not None and cancellation.requested:
+                    try:
+                        self.notify(
+                            "notifications/cancelled",
+                            {"requestId": request_id, "reason": "client turn cancelled"},
+                        )
+                    except McpClientError:
+                        pass
                     raise McpClientError(
-                        "mcp_server_request_unsupported",
-                        "MCP server sent an unsupported server-to-client request",
+                        "mcp_cancelled",
+                        "MCP request was cancelled",
+                        outcome_uncertain=outcome_uncertain,
                     )
-                notifications += 1
-                if notifications > MAX_MCP_NOTIFICATIONS_PER_REQUEST:
+                message = self._read_message(deadline, cancellation=cancellation)
+                if "method" in message:
+                    if "id" in message:
+                        self._send(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": message["id"],
+                                "error": {
+                                    "code": -32601,
+                                    "message": "Server-to-client requests are not supported",
+                                },
+                            }
+                        )
+                        raise McpClientError(
+                            "mcp_server_request_unsupported",
+                            "MCP server sent an unsupported server-to-client request",
+                        )
+                    collector.observe(message)
+                    continue
+                if type(message.get("id")) is not int or message["id"] != request_id:
                     raise McpClientError(
-                        "mcp_notification_limit",
-                        "MCP server exceeded the notification limit",
+                        "mcp_response_id_mismatch",
+                        "MCP response ID does not match the active request",
                     )
-                continue
-            if type(message.get("id")) is not int or message["id"] != request_id:
-                raise McpClientError(
-                    "mcp_response_id_mismatch",
-                    "MCP response ID does not match the active request",
-                )
-            has_result = "result" in message
-            has_error = "error" in message
-            if has_result == has_error:
-                raise McpClientError(
-                    "mcp_response_invalid",
-                    "MCP response must contain exactly one result or error",
-                )
-            if has_error:
-                _validate_rpc_error(message["error"])
-                raise McpClientError(
-                    "mcp_server_error",
-                    "MCP server returned a JSON-RPC error",
-                    outcome_uncertain=False,
-                )
-            return message["result"]
+                has_result = "result" in message
+                has_error = "error" in message
+                if has_result == has_error:
+                    raise McpClientError(
+                        "mcp_response_invalid",
+                        "MCP response must contain exactly one result or error",
+                    )
+                if has_error:
+                    _validate_rpc_error(message["error"])
+                    raise McpClientError(
+                        "mcp_server_error",
+                        "MCP server returned a JSON-RPC error",
+                        outcome_uncertain=False,
+                    )
+                return message["result"], collector.summary
+        except McpClientError as error:
+            raise McpClientError(
+                error.code,
+                str(error),
+                cleanup_complete=error.cleanup_complete,
+                outcome_uncertain=error.outcome_uncertain,
+                notifications=collector.summary,
+            ) from error
 
     def _send(self, message: dict[str, object]) -> None:
         payload = _canonical_json(message).encode("utf-8") + b"\n"
@@ -527,6 +625,7 @@ class McpStdioSession:
         process_generation: int,
         process_reused: bool,
         cancellation: TurnCancellation | None = None,
+        notification_sink: Callable[[McpNotificationKind], None] | None = None,
     ) -> McpToolCallResult:
         if self._closed or not self.alive:
             raise McpClientError("mcp_process_unavailable", "MCP process is not available")
@@ -539,13 +638,14 @@ class McpStdioSession:
         self._next_request_id += 1
         started = time.monotonic()
         try:
-            result = self._connection.request(
+            result, notifications = self._connection.request(
                 request_id,
                 "tools/call",
                 {"arguments": arguments, "name": remote_name},
                 timeout_seconds=MCP_CALL_TOOL_TIMEOUT_SECONDS,
                 cancellation=cancellation,
                 outcome_uncertain=True,
+                notification_sink=notification_sink,
             )
         except McpClientError as error:
             if error.code == "mcp_server_error":
@@ -556,6 +656,7 @@ class McpStdioSession:
                 "mcp_message_incomplete",
                 "mcp_message_invalid",
                 "mcp_message_limit",
+                "mcp_notification_invalid",
                 "mcp_notification_limit",
                 "mcp_response_id_mismatch",
                 "mcp_response_invalid",
@@ -570,6 +671,7 @@ class McpStdioSession:
                     str(error),
                     cleanup_complete=error.cleanup_complete,
                     outcome_uncertain=True,
+                    notifications=error.notifications,
                 ) from error
             raise
         self._calls_completed += 1
@@ -583,6 +685,7 @@ class McpStdioSession:
             process_reused=process_reused,
             stderr_bytes=self.stderr_bytes,
             stderr_truncated=self.stderr_truncated,
+            notifications=notifications,
         )
 
     def close(self) -> bool:
@@ -704,7 +807,7 @@ class McpStdioClient:
         try:
             owner.activate()
             connection = _JsonRpcConnection(process)
-            initialize = connection.request(
+            initialize, _ = connection.request(
                 1,
                 "initialize",
                 {
@@ -840,7 +943,7 @@ def _list_tools(
         params: dict[str, object] = {}
         if cursor is not None:
             params["cursor"] = cursor
-        result = connection.request(
+        result, _ = connection.request(
             1 + page,
             "tools/list",
             params,
@@ -920,6 +1023,79 @@ def _bounded_text(value: object, label: str, limit: int = MAX_MCP_TEXT_CHARACTER
 
 def _optional_bounded_text(value: object, label: str) -> str | None:
     return None if value is None else _bounded_text(value, label)
+
+
+def _notification_params(
+    message: dict[str, object],
+    *,
+    allowed: frozenset[str],
+    required: frozenset[str] = frozenset(),
+) -> dict[str, object]:
+    if set(message) - {"jsonrpc", "method", "params"}:
+        raise McpClientError(
+            "mcp_notification_invalid",
+            "MCP notification contains unsupported fields",
+        )
+    params = message.get("params", {})
+    if not isinstance(params, dict) or set(params) - allowed or not required <= set(params):
+        raise McpClientError(
+            "mcp_notification_invalid",
+            "MCP notification parameters are invalid",
+        )
+    return params
+
+
+def _validate_progress_notification(message: dict[str, object]) -> None:
+    params = _notification_params(
+        message,
+        allowed=frozenset({"message", "progress", "progressToken", "total"}),
+        required=frozenset({"progress", "progressToken"}),
+    )
+    token = params["progressToken"]
+    progress = params["progress"]
+    total = params.get("total")
+    if (
+        (not isinstance(token, (str, int)) or isinstance(token, bool) or token == "")
+        or not isinstance(progress, (int, float))
+        or isinstance(progress, bool)
+        or (total is not None and (not isinstance(total, (int, float)) or isinstance(total, bool)))
+    ):
+        raise McpClientError(
+            "mcp_notification_invalid",
+            "MCP progress notification is invalid",
+        )
+    if isinstance(token, str):
+        _bounded_text(token, "MCP progress token")
+    if "message" in params:
+        _bounded_text(params["message"], "MCP progress message")
+
+
+def _validate_message_notification(message: dict[str, object]) -> None:
+    params = _notification_params(
+        message,
+        allowed=frozenset({"data", "level", "logger"}),
+        required=frozenset({"data", "level"}),
+    )
+    if params["level"] not in {
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency",
+    }:
+        raise McpClientError(
+            "mcp_notification_invalid",
+            "MCP message notification level is invalid",
+        )
+    if "logger" in params:
+        _bounded_text(params["logger"], "MCP message logger")
+
+
+def _validate_tools_list_changed_notification(message: dict[str, object]) -> None:
+    _notification_params(message, allowed=frozenset())
 
 
 def _validate_rpc_error(value: object) -> None:

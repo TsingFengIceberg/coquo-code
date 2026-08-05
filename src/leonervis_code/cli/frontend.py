@@ -218,6 +218,8 @@ def _activity_status(event: object) -> str:
         return f"Provider search {getattr(event, 'phase').value}"
     if name == "ProviderSearchSummaryReceived":
         return "Recording provider search"
+    if name == "McpNotificationActivityReceived":
+        return f"MCP {getattr(event, 'kind').value}"
     if name == "ToolRequestStarted":
         tool_name = getattr(event, "tool_name", "tool")
         return f"Running {tool_name}"

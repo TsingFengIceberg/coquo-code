@@ -16,6 +16,10 @@ TOOL_MODES = {
     "call-invalid-result",
     "call-oversized",
     "call-unsupported-content",
+    "call-notifications",
+    "call-malformed-notification",
+    "call-notification-flood",
+    "call-list-changed-rpc-error",
 }
 
 
@@ -100,6 +104,51 @@ for line in sys.stdin:
         result(request["id"], payload)
     elif method == "tools/call":
         CALLS += 1
+        if MODE == "call-notifications":
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": "token-1",
+                        "progress": 1,
+                        "total": 2,
+                        "message": "SECRET_PROGRESS",
+                    },
+                }
+            )
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {"level": "info", "data": "SECRET_LOG_DATA"},
+                }
+            )
+            send({"jsonrpc": "2.0", "method": "notifications/unknown", "params": {}})
+            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        if MODE == "call-malformed-notification":
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {"progress": "SECRET_INVALID"},
+                }
+            )
+            continue
+        if MODE == "call-notification-flood":
+            for _ in range(257):
+                send({"jsonrpc": "2.0", "method": "notifications/unknown", "params": {}})
+            continue
+        if MODE == "call-list-changed-rpc-error":
+            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {"code": -32000, "message": "SECRET_CALL_ERROR"},
+                }
+            )
+            continue
         if MODE == "call-timeout":
             time.sleep(30)
             continue

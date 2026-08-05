@@ -15,6 +15,11 @@ from leonervis_code.mcp.catalog import (
 from leonervis_code.mcp.client import McpListedTool, McpProbeResult
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.mcp.policy import (
+    McpPolicyDisposition,
+    McpToolPolicyRule,
+    McpToolPolicyStore,
+)
 
 
 def _entry(name: str = "fixture", *, revision: int = 3) -> McpServerEntry:
@@ -163,3 +168,45 @@ def test_catalog_registry_keeps_candidates_deferred_and_content_addressed() -> N
     promoted = initial.promote(registry, (candidate.qualified_name,))
     assert promoted.epoch == 1
     assert promoted.names[-1] == candidate.qualified_name
+
+
+def test_catalog_applies_only_an_exact_local_policy_and_binds_identity(tmp_path) -> None:
+    tools = (_tool("read_widget", {"type": "object", "properties": {}}),)
+    baseline = build_mcp_quarantine_catalog((_entry(),), CatalogClient(tools))
+    candidate = baseline.accepted[0]
+    policy_store = McpToolPolicyStore(tmp_path / "user.json", tmp_path / "project.json")
+    policy_store.set_rule(
+        McpToolPolicyRule(
+            qualified_name=candidate.qualified_name,
+            configured_name=candidate.configured_name,
+            server_scope=candidate.scope,
+            configuration_revision=candidate.configuration_revision,
+            remote_name=candidate.remote_name,
+            protocol_version=candidate.protocol_version,
+            schema_fingerprint=candidate.schema_fingerprint,
+            action=PermissionAction.WORKSPACE_READ,
+        ),
+        policy_scope="project",
+    )
+
+    applied = build_mcp_quarantine_catalog(
+        (_entry(),), CatalogClient(tools), policy_store=policy_store
+    )
+    trusted = applied.accepted[0]
+    assert trusted.policy_disposition is McpPolicyDisposition.APPLIED
+    assert trusted.permission_action is PermissionAction.WORKSPACE_READ
+    assert trusted.policy_revision == 1
+    assert trusted.contract is not None
+    assert trusted.contract.permission_actions == (PermissionAction.WORKSPACE_READ,)
+    assert trusted.contract.contract_id != candidate.contract.contract_id
+    assert applied.catalog_id != baseline.catalog_id
+
+    stale = build_mcp_quarantine_catalog(
+        (replace(_entry(), configuration=replace(_entry().configuration, revision=4)),),
+        CatalogClient(tools),
+        policy_store=policy_store,
+    ).accepted[0]
+    assert stale.policy_disposition is McpPolicyDisposition.STALE
+    assert stale.permission_action is PermissionAction.DANGEROUS
+    assert stale.contract is not None
+    assert stale.contract.permission_actions == (PermissionAction.DANGEROUS,)

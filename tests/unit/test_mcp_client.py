@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.mcp.client import McpClientError, McpStdioClient
+from leonervis_code.mcp.client import (
+    McpClientError,
+    McpNotificationKind,
+    McpStdioClient,
+)
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
 
@@ -148,3 +152,52 @@ def test_default_client_uses_read_only_workspace_sandbox(tmp_path, monkeypatch) 
     McpStdioClient(tmp_path, environment={})
 
     assert observed == {"workspace_writable": False}
+
+
+def test_tool_call_retains_only_bounded_notification_kinds_and_counts(tmp_path) -> None:
+    session = client(tmp_path).connect(entry("call-notifications"))
+    activities = []
+
+    call = session.call_tool(
+        "read_widget",
+        {"widget": "blue"},
+        process_generation=1,
+        process_reused=False,
+        notification_sink=activities.append,
+    )
+
+    assert activities == [
+        McpNotificationKind.PROGRESS,
+        McpNotificationKind.MESSAGE,
+        McpNotificationKind.TOOLS_LIST_CHANGED,
+    ]
+    assert call.notifications.progress_count == 1
+    assert call.notifications.message_count == 1
+    assert call.notifications.tools_list_changed_count == 1
+    assert call.notifications.ignored_count == 1
+    assert "SECRET" not in repr(call.notifications)
+    assert session.close() is True
+
+
+@pytest.mark.parametrize(
+    "mode,code",
+    [
+        ("call-malformed-notification", "mcp_notification_invalid"),
+        ("call-notification-flood", "mcp_notification_limit"),
+    ],
+)
+def test_tool_call_rejects_malformed_or_flooded_notifications(tmp_path, mode, code) -> None:
+    session = client(tmp_path).connect(entry(mode))
+
+    with pytest.raises(McpClientError) as raised:
+        session.call_tool(
+            "read_widget",
+            {"widget": "blue"},
+            process_generation=1,
+            process_reused=False,
+        )
+
+    assert raised.value.code == code
+    assert raised.value.outcome_uncertain is True
+    assert "SECRET" not in str(raised.value)
+    assert session.close() is True

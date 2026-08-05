@@ -19,6 +19,10 @@ from leonervis_code.core.extensions import (
 )
 from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult, McpStdioClient
 from leonervis_code.mcp.config import McpServerEntry, McpServerStore
+from leonervis_code.mcp.policy import (
+    McpPolicyDisposition,
+    McpToolPolicyStore,
+)
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 
@@ -85,11 +89,18 @@ class McpToolCandidate:
     reason_code: str | None
     contract: ExtensionToolContract | None
     search_text: str
+    policy_disposition: McpPolicyDisposition = McpPolicyDisposition.DEFAULT
+    permission_action: PermissionAction = PermissionAction.DANGEROUS
+    policy_revision: int | None = None
 
     def __post_init__(self) -> None:
         accepted = self.disposition is McpCandidateDisposition.ACCEPTED
         if accepted != (self.contract is not None) or accepted == (self.reason_code is not None):
             raise ValueError("MCP candidate disposition is inconsistent")
+        if type(self.policy_disposition) is not McpPolicyDisposition:
+            raise ValueError("MCP candidate policy disposition is invalid")
+        if type(self.permission_action) is not PermissionAction:
+            raise ValueError("MCP candidate permission action is invalid")
 
     def identity_mapping(self) -> dict[str, object]:
         return {
@@ -98,6 +109,9 @@ class McpToolCandidate:
             "contract_id": None if self.contract is None else self.contract.contract_id,
             "disposition": self.disposition.value,
             "protocol_version": self.protocol_version,
+            "policy_disposition": self.policy_disposition.value,
+            "policy_revision": self.policy_revision,
+            "permission_action": self.permission_action.value,
             "qualified_name": self.qualified_name,
             "reason_code": self.reason_code,
             "remote_name": self.remote_name,
@@ -162,32 +176,52 @@ class McpQuarantineCatalog:
 class McpCatalogService:
     """Cache one content-addressed catalog until MCP configuration changes."""
 
-    def __init__(self, store: McpServerStore, client: McpStdioClient) -> None:
+    def __init__(
+        self,
+        store: McpServerStore,
+        client: McpStdioClient,
+        policy_store: McpToolPolicyStore | None = None,
+    ) -> None:
         self._store = store
         self._client = client
+        self._policy_store = policy_store
         self._cached: McpQuarantineCatalog | None = None
 
     def snapshot(self, *, refresh: bool = False) -> McpQuarantineCatalog:
         entries = self._store.list_servers()
-        configuration_id = _configuration_id(entries)
+        configuration_id = _configuration_id(
+            entries,
+            None if self._policy_store is None else self._policy_store.policy_id,
+        )
         if (
             not refresh
             and self._cached is not None
             and self._cached.configuration_id == configuration_id
         ):
             return self._cached
-        catalog = build_mcp_quarantine_catalog(entries, self._client, configuration_id)
+        catalog = build_mcp_quarantine_catalog(
+            entries,
+            self._client,
+            configuration_id,
+            policy_store=self._policy_store,
+        )
         self._cached = catalog
         return catalog
 
     def registry_snapshot(self) -> ToolRegistrySnapshot:
         return self.snapshot().registry_snapshot()
 
+    def invalidate(self) -> None:
+        """Discard the cache without mutating any already-frozen ToolSet."""
+        self._cached = None
+
 
 def build_mcp_quarantine_catalog(
     entries: tuple[McpServerEntry, ...],
     client: McpStdioClient,
     configuration_id: str | None = None,
+    *,
+    policy_store: McpToolPolicyStore | None = None,
 ) -> McpQuarantineCatalog:
     candidates: list[McpToolCandidate] = []
     issues: list[McpCatalogSourceIssue] = []
@@ -207,7 +241,7 @@ def build_mcp_quarantine_catalog(
                 )
             )
             continue
-        candidates.extend(_normalize_probe(entry, probe))
+        candidates.extend(_normalize_probe(entry, probe, policy_store))
         if len(candidates) > MAX_MCP_CATALOG_CANDIDATES:
             issues.append(
                 McpCatalogSourceIssue(
@@ -220,23 +254,35 @@ def build_mcp_quarantine_catalog(
             candidates = candidates[:MAX_MCP_CATALOG_CANDIDATES]
             break
     return McpQuarantineCatalog(
-        configuration_id or _configuration_id(entries),
+        configuration_id
+        or _configuration_id(
+            entries,
+            None if policy_store is None else policy_store.policy_id,
+        ),
         tuple(sorted(candidates, key=lambda item: item.qualified_name)),
         tuple(sorted(issues, key=lambda item: (item.configured_name, item.reason_code))),
     )
 
 
-def _normalize_probe(entry: McpServerEntry, probe: McpProbeResult) -> tuple[McpToolCandidate, ...]:
-    return tuple(_normalize_tool(entry, probe, tool) for tool in probe.tools)
+def _normalize_probe(
+    entry: McpServerEntry,
+    probe: McpProbeResult,
+    policy_store: McpToolPolicyStore | None,
+) -> tuple[McpToolCandidate, ...]:
+    return tuple(_normalize_tool(entry, probe, tool, policy_store) for tool in probe.tools)
 
 
 def _normalize_tool(
     entry: McpServerEntry,
     probe: McpProbeResult,
     tool: McpListedTool,
+    policy_store: McpToolPolicyStore | None,
 ) -> McpToolCandidate:
     qualified_name = _qualified_name(entry.configuration.name, tool.name)
     fingerprint = mcp_schema_fingerprint(tool.input_schema_json)
+    policy_disposition = McpPolicyDisposition.DEFAULT
+    permission_action = PermissionAction.DANGEROUS
+    policy_revision = None
     reason = _schema_rejection_reason(tool.input_schema_json)
     description_text = _normalized_description(tool.description)
     search_text = " ".join(
@@ -255,6 +301,19 @@ def _normalize_tool(
             reason,
             None,
             search_text,
+            policy_disposition,
+            permission_action,
+            policy_revision,
+        )
+    if policy_store is not None:
+        policy_disposition, permission_action, policy_revision = policy_store.resolve(
+            qualified_name=qualified_name,
+            configured_name=entry.configuration.name,
+            server_scope=entry.scope,
+            configuration_revision=entry.configuration.revision,
+            remote_name=tool.name,
+            protocol_version=probe.protocol_version,
+            schema_fingerprint=fingerprint,
         )
     schema = json.loads(tool.input_schema_json)
     definition = CanonicalToolDefinition.from_mapping(
@@ -278,7 +337,7 @@ def _normalize_tool(
         source,
         ToolExecutionKind.MCP_REMOTE,
         ToolExposure.DEFERRED,
-        (PermissionAction.DANGEROUS,),
+        (permission_action,),
     )
     return McpToolCandidate(
         entry.configuration.name,
@@ -292,6 +351,9 @@ def _normalize_tool(
         None,
         contract,
         search_text,
+        policy_disposition,
+        permission_action,
+        policy_revision,
     )
 
 
@@ -388,11 +450,14 @@ def mcp_schema_fingerprint(schema_json: str) -> str:
     return f"mcp-schema-v{MCP_SCHEMA_FINGERPRINT_VERSION}-{digest}"
 
 
-def _configuration_id(entries: tuple[McpServerEntry, ...]) -> str:
-    manifest = [
-        {"configuration": entry.configuration.as_mapping(), "scope": entry.scope}
-        for entry in entries
-    ]
+def _configuration_id(entries: tuple[McpServerEntry, ...], policy_id: str | None = None) -> str:
+    manifest = {
+        "entries": [
+            {"configuration": entry.configuration.as_mapping(), "scope": entry.scope}
+            for entry in entries
+        ],
+        "policy_id": policy_id,
+    }
     digest = hashlib.sha256(_CONFIG_ID_DOMAIN + _canonical_bytes(manifest)).hexdigest()
     return f"mcp-config-set-v1-{digest}"
 

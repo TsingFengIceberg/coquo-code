@@ -209,3 +209,28 @@ def test_json_rpc_tool_error_counts_as_completed_call(tmp_path) -> None:
     assert result.outcome is McpRuntimeOutcome.FAILED
     assert manager.statuses()[0].calls_completed == 1
     assert manager.close() is True
+
+
+def test_list_changed_notification_retires_generation_without_retry(tmp_path) -> None:
+    manager, catalog, candidate = _runtime(tmp_path, "call-notifications")
+
+    result = manager.execute(prepare_mcp_call(candidate, catalog.catalog_id, {"widget": "blue"}))
+
+    assert result.outcome is McpRuntimeOutcome.SUCCEEDED
+    assert result.catalog_invalidated is True
+    assert result.notifications.tools_list_changed_count == 1
+    assert manager.statuses() == ()
+    assert manager.close() is True
+
+
+def test_list_changed_survives_known_rpc_failure_and_retires_generation(tmp_path) -> None:
+    manager, catalog, candidate = _runtime(tmp_path, "call-list-changed-rpc-error")
+
+    result = manager.execute(prepare_mcp_call(candidate, catalog.catalog_id, {"widget": "blue"}))
+
+    assert result.outcome is McpRuntimeOutcome.FAILED
+    assert result.result_code == "mcp_server_error"
+    assert result.catalog_invalidated is True
+    assert result.notifications.tools_list_changed_count == 1
+    assert manager.statuses() == ()
+    assert manager.close() is True

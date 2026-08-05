@@ -378,6 +378,8 @@ uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 
 `demo-read` 不是实际模型接口，不写文件、不执行 shell，也不访问网络。
 
+本地MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact qualified name与schema fingerprint，再用`mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read`为该精确版本声明只读策略；`mcp policy list|show|clear`用于检查和撤销。
+
 ## 配置与本地状态
 
 | 路径 | 内容 |
@@ -385,6 +387,8 @@ uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles 与 active selection |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP server定义；只保存环境变量名称映射 |
 | `<workspace>/.leonervis-code/mcp-servers.json` | project MCP server定义；新server默认disabled |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | user MCP tool精确权限策略 |
+| `<workspace>/.leonervis-code/mcp-tool-policies.json` | project MCP tool精确权限策略 |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcript |
 | `<workspace>/.leonervis-code/tasks/.../*.jsonl` | 独立的Task transcript |
@@ -507,4 +511,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Leonervis Code目前提供33个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载及渐进式MCP发现，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持本地受限stdio配置、隔离目录、渐进发现、同Turn精确ToolSet晋升、统一权限审计、结果规范化及有界进程复用。Skills、浏览器自动化、后台或并行智能体及远程MCP服务尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持本地受限stdio配置、隔离目录、渐进发现、同Turn精确ToolSet晋升、统一权限审计、结果规范化、有界进程复用、脱敏通知处理及精确指纹本地权限策略。Skills、浏览器自动化、后台或并行智能体及远程MCP服务尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

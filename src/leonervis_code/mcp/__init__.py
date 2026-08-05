@@ -12,6 +12,8 @@ from leonervis_code.mcp.client import (
     McpClientError,
     McpListedTool,
     McpLiveProcessStatus,
+    McpNotificationKind,
+    McpNotificationSummary,
     McpProbeResult,
     McpServerStatus,
     McpStdioClient,
@@ -33,6 +35,12 @@ from leonervis_code.mcp.runtime import (
     PreparedMcpCall,
     prepare_mcp_call,
 )
+from leonervis_code.mcp.policy import (
+    McpPolicyDisposition,
+    McpToolPolicyError,
+    McpToolPolicyRule,
+    McpToolPolicyStore,
+)
 
 __all__ = [
     "McpConfigurationError",
@@ -42,6 +50,9 @@ __all__ = [
     "McpCatalogSourceIssue",
     "McpListedTool",
     "McpLiveProcessStatus",
+    "McpNotificationKind",
+    "McpNotificationSummary",
+    "McpPolicyDisposition",
     "McpCallPreparationError",
     "McpProbeResult",
     "McpQuarantineCatalog",
@@ -53,6 +64,9 @@ __all__ = [
     "McpStdioSession",
     "McpToolCandidate",
     "McpToolCallResult",
+    "McpToolPolicyError",
+    "McpToolPolicyRule",
+    "McpToolPolicyStore",
     "McpProcessManager",
     "McpRuntimeExecution",
     "McpRuntimeOutcome",

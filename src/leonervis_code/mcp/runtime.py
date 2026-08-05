@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import json
@@ -15,6 +16,8 @@ from leonervis_code.mcp.catalog import McpCandidateDisposition, McpToolCandidate
 from leonervis_code.mcp.client import (
     McpClientError,
     McpLiveProcessStatus,
+    McpNotificationKind,
+    McpNotificationSummary,
     McpStdioClient,
     McpStdioSession,
     McpToolCallResult,
@@ -60,6 +63,8 @@ class McpRuntimeExecution:
     process_reused: bool | None = None
     result_blocks: int | None = None
     cleanup_complete: bool = True
+    notifications: McpNotificationSummary = McpNotificationSummary()
+    catalog_invalidated: bool = False
 
     def __post_init__(self) -> None:
         if (self.outcome is McpRuntimeOutcome.SUCCEEDED) == self.is_error:
@@ -121,6 +126,7 @@ class McpProcessManager:
         prepared: PreparedMcpCall,
         *,
         cancellation: TurnCancellation | None = None,
+        notification_sink: Callable[[McpNotificationKind], None] | None = None,
     ) -> McpRuntimeExecution:
         with self._lock:
             if self._closed:
@@ -202,24 +208,53 @@ class McpProcessManager:
                     process_generation=managed.generation,
                     process_reused=reused,
                     cancellation=cancellation,
+                    notification_sink=notification_sink,
                 )
             except McpClientError as error:
                 cleanup = True
-                if error.code != "mcp_server_error":
+                if error.code != "mcp_server_error" or error.notifications.catalog_invalidated:
                     cleanup = self._retire(key)
-                return _client_failure(error, cleanup_complete=cleanup)
+                return _client_failure(
+                    error,
+                    cleanup_complete=cleanup,
+                    process_generation=managed.generation,
+                    process_reused=reused,
+                )
             try:
                 normalized = _normalize_call_result(call)
             except McpClientError as error:
                 cleanup = self._retire(key)
-                return _partial(
+                result = _partial(
                     error.code,
                     str(error),
                     cleanup_complete=cleanup,
                     duration_ms=call.duration_ms,
                     process_generation=call.process_generation,
                     process_reused=call.process_reused,
+                    notifications=call.notifications,
                 )
+                return replace(
+                    result,
+                    catalog_invalidated=call.notifications.catalog_invalidated,
+                )
+            normalized = replace(
+                normalized,
+                notifications=call.notifications,
+                catalog_invalidated=call.notifications.catalog_invalidated,
+            )
+            if call.notifications.catalog_invalidated:
+                cleanup = self._retire(key)
+                if not cleanup:
+                    return _partial(
+                        "mcp_cleanup_incomplete",
+                        "MCP catalog changed and process cleanup is incomplete",
+                        cleanup_complete=False,
+                        duration_ms=call.duration_ms,
+                        process_generation=call.process_generation,
+                        process_reused=call.process_reused,
+                        notifications=call.notifications,
+                        catalog_invalidated=True,
+                    )
             if normalized.outcome is McpRuntimeOutcome.PARTIAL:
                 return replace(normalized, cleanup_complete=self._retire(key))
             return normalized
@@ -550,14 +585,37 @@ def _client_failure(
     error: McpClientError,
     *,
     cleanup_complete: bool | None = None,
+    process_generation: int | None = None,
+    process_reused: bool | None = None,
 ) -> McpRuntimeExecution:
     cleanup = error.cleanup_complete if cleanup_complete is None else cleanup_complete
     if error.outcome_uncertain or not cleanup:
-        return _partial(error.code, str(error), cleanup_complete=cleanup)
-    return _failed(error.code, str(error), cleanup_complete=cleanup)
+        return _partial(
+            error.code,
+            str(error),
+            cleanup_complete=cleanup,
+            process_generation=process_generation,
+            process_reused=process_reused,
+            notifications=error.notifications,
+            catalog_invalidated=error.notifications.catalog_invalidated,
+        )
+    return _failed(
+        error.code,
+        str(error),
+        cleanup_complete=cleanup,
+        notifications=error.notifications,
+        catalog_invalidated=error.notifications.catalog_invalidated,
+    )
 
 
-def _failed(code: str, message: str, *, cleanup_complete: bool = True) -> McpRuntimeExecution:
+def _failed(
+    code: str,
+    message: str,
+    *,
+    cleanup_complete: bool = True,
+    notifications: McpNotificationSummary = McpNotificationSummary(),
+    catalog_invalidated: bool = False,
+) -> McpRuntimeExecution:
     return McpRuntimeExecution(
         content=message,
         is_error=True,
@@ -566,6 +624,8 @@ def _failed(code: str, message: str, *, cleanup_complete: bool = True) -> McpRun
         result_code=code,
         audit_message=f"MCP execution failed: {code}",
         cleanup_complete=cleanup_complete,
+        notifications=notifications,
+        catalog_invalidated=catalog_invalidated,
     )
 
 
@@ -577,6 +637,8 @@ def _partial(
     duration_ms: int | None = None,
     process_generation: int | None = None,
     process_reused: bool | None = None,
+    notifications: McpNotificationSummary = McpNotificationSummary(),
+    catalog_invalidated: bool = False,
 ) -> McpRuntimeExecution:
     return McpRuntimeExecution(
         content=message,
@@ -589,6 +651,8 @@ def _partial(
         process_generation=process_generation,
         process_reused=process_reused,
         cleanup_complete=cleanup_complete,
+        notifications=notifications,
+        catalog_invalidated=catalog_invalidated,
     )
 
 

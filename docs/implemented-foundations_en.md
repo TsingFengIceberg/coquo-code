@@ -1223,6 +1223,16 @@ Promoted `mcp-remote` contracts now receive the Host-assigned `dangerous` Permis
 
 The canonical system prompt advances to v35 with fingerprint `v35-8537a2ef36ba8aa29068cc93f9b09231c0ea4e51a534fdb473e591408a7b5dca`, and the empty full-context ID becomes `ctx-v9-8e257b8889c2794ab1deef575bf96a22a9394cdac71e54234cb769adeaafadc7`; Effective Context remains `ctx-v9`/`ctx-v10`. ApprovalPreview advances to v4. The Provider adapter contract remains v38 because wire projection and parsing do not change. Extension, Registry, ToolSet, ToolArguments, ActionIdentity, Session, Task, Action Audit, Profile, and compaction schemas remain unchanged, and old records are not rewritten. See [0111: Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md).
 
+## Bounded MCP Notifications and Exact Local Tool Policy
+
+MCP JSON-RPC now strictly recognizes `notifications/progress`, `notifications/message`, and `notifications/tools/list_changed`, while unknown notifications continue to consume the same per-request limit. The Host retains only per-class counts and emits at most one content-free activity event per recognized class; progress messages, tokens, logging data, and other server content are never retained or rendered. A malformed recognized notification or flood after call delivery fails with outcome-uncertain semantics while preserving the content-free notification observation.
+
+`tools/list_changed` never mutates the active Turn's frozen ToolSet and never retries the current call. After the call terminates, the Host retires that process generation and invalidates the quarantine-catalog cache. A later catalog-dependent operation probes again; changed schema or other identity causes the existing contract and lease checks to reject stale execution. Terminal tool details add only redacted counts and a catalog-invalidated fact. See [0112: Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md).
+
+An independent schema-v1 MCP tool-policy store has XDG user and workspace project scopes with scope locks, revision CAS, symlink rejection, mode `0600`, and atomic replacement. Each rule exactly binds qualified name, server scope/name/revision, remote name, protocol, input-schema fingerprint, action, and policy revision; only `workspace-read` and `dangerous` are accepted. A complete match is `applied`, absence is `default`, and any mismatch is `stale` with a `dangerous` fallback. Annotations, descriptions, notifications, and results cannot grant authority.
+
+Policy identity enters catalog configuration identity; disposition, effective action, and revision enter candidate identity; and the effective action continues into the contract, Registry, ToolSet, Effective Context, ActionIdentity precondition, and process generation. `mcp policy list|show|set|clear` manages local rules. `set` must first resolve an exact candidate from a live accepted catalog and verify the caller-supplied schema fingerprint, so it cannot authorize guessed, rejected, or stale tools. The system prompt advances to v36 with fingerprint `v36-0ab649c44e73ce244ef761512272188dd4540f46ed5243bcd61c2bbf63d9815d`; the empty full-context ID becomes `ctx-v9-97c4e14f393e36bfc0f7b17f6715ca84a0dde30771a46fd81da434b08f538693`. Provider adapter remains v38 and durable schemas remain unchanged. See [0113: Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1336,3 +1346,5 @@ The canonical system prompt advances to v35 with fingerprint `v35-8537a2ef36ba8a
 109. [0109: MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)
 110. [0110: Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)
 111. [0111: Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)
+112. [0112: Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md)
+113. [0113: Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)

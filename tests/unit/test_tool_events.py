@@ -8,6 +8,7 @@ from leonervis_code.agent.tool_events import (
     MAX_TOOL_EVENT_DETAIL_BYTES,
     MAX_TOOL_EVENT_SUMMARY_CHARACTERS,
     MAX_TOOL_RESULT_DETAIL_LINES,
+    McpNotificationActivityReceived,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -19,10 +20,20 @@ from leonervis_code.agent.tool_events import (
     safe_tool_request_summary,
 )
 from leonervis_code.core.contracts import ToolArguments, ToolResult, ToolUse
+from leonervis_code.mcp.client import McpNotificationKind
 
 
 def request(name: str, arguments: dict[str, object]) -> ToolUse:
     return ToolUse("tool-1", name, ToolArguments.from_mapping(arguments))
+
+
+def test_mcp_notification_activity_requires_a_closed_content_free_kind() -> None:
+    assert (
+        McpNotificationActivityReceived(McpNotificationKind.PROGRESS).kind
+        is McpNotificationKind.PROGRESS
+    )
+    with pytest.raises(ValueError, match="kind"):
+        McpNotificationActivityReceived("progress")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

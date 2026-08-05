@@ -10,6 +10,7 @@ import pytest
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    McpNotificationActivityReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
@@ -67,6 +68,7 @@ from leonervis_code.cli.presentation import (
     render_durable_usage_summary,
     render_usage_summary,
 )
+from leonervis_code.mcp.client import McpNotificationKind
 from leonervis_code.providers.manager import (
     CurrentTargetContextAssessment,
     OutputBudgetUpdateResult,
@@ -790,6 +792,15 @@ def test_provider_search_events_render_content_free_progress_and_degradation() -
     assert malformed_kind == "warning"
     assert missing.startswith("Provider search completed; structured citations unavailable.")
     assert missing_kind == "warning"
+
+
+def test_mcp_notification_activity_renders_no_server_content() -> None:
+    rendered, kind = render_prompt_event(
+        McpNotificationActivityReceived(McpNotificationKind.TOOLS_LIST_CHANGED)
+    )
+
+    assert rendered == "MCP server reported a changed tool catalog"
+    assert kind == "info"
 
 
 def test_session_management_projection_renderers_are_safe_and_structured(tmp_path: Path) -> None:

@@ -1223,6 +1223,16 @@ Promotion仍使用同一Registry snapshot的canonical `ToolSetSnapshot.promote()
 
 Canonical system prompt升级v35，fingerprint为`v35-8537a2ef36ba8aa29068cc93f9b09231c0ea4e51a534fdb473e591408a7b5dca`，empty full-context ID更新为`ctx-v9-8e257b8889c2794ab1deef575bf96a22a9394cdac71e54234cb769adeaafadc7`；Effective Context仍为`ctx-v9`/`ctx-v10`。ApprovalPreview升级v4。Provider adapter contract保持v38，因为wire projection与parser没有变化；其他Extension、Registry、ToolSet、ToolArguments、ActionIdentity、Session、Task、Action Audit、Profile及compaction schema均不变，旧记录不重写。详见[0111：Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)。
 
+## 有界MCP通知与精确本地Tool Policy
+
+MCP JSON-RPC现在严格识别`notifications/progress`、`notifications/message`和`notifications/tools/list_changed`，同时继续把unknown notification计入同一每请求上限。Host只保留各类型计数并最多发出一次无正文活动事件，不保存或展示progress message、token、logging data及其他server内容。畸形已识别通知或洪泛在call送达后按outcome-uncertain失败，通知状态仍随runtime observation返回。
+
+`tools/list_changed`不会原地修改当前Turn冻结的ToolSet，也不会自动重试当前call。Host在call终止后淘汰对应process generation并使quarantine catalog缓存失效；后续catalog-dependent操作重新probe，若schema或其他身份变化，既有contract/lease检查按stale拒绝。Terminal tool details只新增脱敏计数和`catalog-invalidated`事实。详见[0112：Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md)。
+
+独立schema-v1 MCP tool policy分为XDG user与workspace project scope，使用scope lock、revision CAS、symlink拒绝、`0600`及atomic replace。每条rule精确绑定qualified name、server scope/name/revision、remote name、protocol、input-schema fingerprint、action与policy revision，只允许`workspace-read`或`dangerous`。完全匹配为`applied`；缺失为`default`；任一字段变化为`stale`并回退`dangerous`。Annotation、description、notification及result均不能授予权限。
+
+Policy identity进入catalog configuration identity；disposition、effective action及revision进入candidate identity，effective action继续进入contract、Registry、ToolSet、Effective Context、ActionIdentity precondition与process generation。`mcp policy list|show|set|clear`提供本地管理；`set`必须先从实时accepted catalog解析exact candidate并核对调用者提供的schema fingerprint，不能为猜测、rejected或stale工具写规则。System prompt升级v36，fingerprint为`v36-0ab649c44e73ce244ef761512272188dd4540f46ed5243bcd61c2bbf63d9815d`，empty full-context ID为`ctx-v9-97c4e14f393e36bfc0f7b17f6715ca84a0dde30771a46fd81da434b08f538693`；provider adapter保持v38，持久schema不变。详见[0113：Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1336,3 +1346,5 @@ Canonical system prompt升级v35，fingerprint为`v35-8537a2ef36ba8aa29068cc93f9
 109. [0109：MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)
 110. [0110：Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)
 111. [0111：Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)
+112. [0112：Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md)
+113. [0113：Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)

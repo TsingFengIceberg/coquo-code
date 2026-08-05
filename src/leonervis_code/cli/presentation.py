@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    McpNotificationActivityReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
@@ -352,7 +353,10 @@ def render_mcp_catalog(catalog: McpQuarantineCatalog) -> str:
     ]
     for candidate in catalog.candidates:
         detail = (
-            f"schema {_safe_inline(candidate.schema_fingerprint)}"
+            f"schema {_safe_inline(candidate.schema_fingerprint)}; "
+            f"policy {candidate.policy_disposition.value}/"
+            f"{candidate.permission_action.value}"
+            + ("" if candidate.policy_revision is None else f" r{candidate.policy_revision}")
             if candidate.disposition is McpCandidateDisposition.ACCEPTED
             else f"reason {_safe_inline(candidate.reason_code or 'unknown')}"
         )
@@ -2022,6 +2026,13 @@ def render_prompt_event(
                 "warning",
             )
         return f"Provider search completed: {detail}", "info"
+    if isinstance(event, McpNotificationActivityReceived):
+        labels = {
+            "progress": "MCP server reported progress",
+            "message": "MCP server emitted a logging notification",
+            "tools-list-changed": "MCP server reported a changed tool catalog",
+        }
+        return labels[event.kind.value], "info"
     if isinstance(event, TaskAdmissionProposed):
         return (
             "Task admission proposal committed:\n"

@@ -16,6 +16,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.task_admission import TaskAdmissionProposal
+from leonervis_code.mcp.client import McpNotificationKind
 from leonervis_code.providers.streaming import (
     ProviderSearchObservation,
     ProviderSearchPhase,
@@ -98,6 +99,17 @@ class ProviderSearchSummaryReceived:
     def __post_init__(self) -> None:
         if type(self.observation) is not ProviderSearchObservation:
             raise ValueError("provider search summary is invalid")
+
+
+@dataclass(frozen=True)
+class McpNotificationActivityReceived:
+    """One content-free MCP notification class, emitted at most once per request."""
+
+    kind: McpNotificationKind
+
+    def __post_init__(self) -> None:
+        if type(self.kind) is not McpNotificationKind:
+            raise ValueError("MCP notification activity kind is invalid")
 
 
 @dataclass(frozen=True)
@@ -316,6 +328,7 @@ AgentPromptEvent = (
     | ProviderInvocationUsageReceived
     | ProviderSearchActivityReceived
     | ProviderSearchSummaryReceived
+    | McpNotificationActivityReceived
     | TaskAdmissionProposed
     | TaskLifecycleCommitted
 )

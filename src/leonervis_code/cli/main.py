@@ -56,7 +56,7 @@ from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
-from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.mcp import (
     McpCatalogService,
     McpClientError,
@@ -64,6 +64,9 @@ from leonervis_code.mcp import (
     McpServerConfiguration,
     McpServerStore,
     McpStdioClient,
+    McpToolPolicyError,
+    McpToolPolicyRule,
+    McpToolPolicyStore,
 )
 from leonervis_code.mcp.config import parse_environment_bindings
 from leonervis_code.evals import (
@@ -443,6 +446,24 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_probe = mcp_commands.add_parser("probe", help="temporarily initialize and list tools")
     mcp_probe.add_argument("name")
     mcp_commands.add_parser("catalog", help="refresh the normalized MCP quarantine catalog")
+    mcp_policy = mcp_commands.add_parser("policy", help="manage exact MCP tool trust policy")
+    mcp_policy_commands = mcp_policy.add_subparsers(dest="mcp_policy_command", required=True)
+    mcp_policy_commands.add_parser("list", help="list local MCP tool policies")
+    mcp_policy_show = mcp_policy_commands.add_parser("show", help="show one MCP tool policy")
+    mcp_policy_show.add_argument("qualified_name")
+    mcp_policy_set = mcp_policy_commands.add_parser(
+        "set", help="bind one exact catalog candidate to a permission action"
+    )
+    mcp_policy_set.add_argument("qualified_name")
+    mcp_policy_set.add_argument("--scope", choices=["user", "project"], default="project")
+    mcp_policy_set.add_argument("--schema-fingerprint", required=True)
+    mcp_policy_set.add_argument("--action", choices=["workspace-read", "dangerous"], required=True)
+    mcp_policy_set.add_argument("--replace", action="store_true")
+    mcp_policy_set.add_argument("--if-revision", type=int)
+    mcp_policy_clear = mcp_policy_commands.add_parser("clear", help="remove one MCP tool policy")
+    mcp_policy_clear.add_argument("qualified_name")
+    mcp_policy_clear.add_argument("--scope", choices=["user", "project"], default="project")
+    mcp_policy_clear.add_argument("--if-revision", type=int)
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -944,6 +965,8 @@ def handle_mcp_command(
     environment: Mapping[str, str],
     user_mcp_path: Path | None,
     project_mcp_path: Path | None,
+    user_mcp_policy_path: Path | None,
+    project_mcp_policy_path: Path | None,
     mcp_client_factory,
     stdout: TextIO,
 ) -> int:
@@ -955,6 +978,12 @@ def handle_mcp_command(
         project_path=project_mcp_path,
     )
     client = (mcp_client_factory or McpStdioClient)(workspace, environment=environment)
+    policy_store = McpToolPolicyStore.for_workspace(
+        workspace,
+        environment=environment,
+        user_path=user_mcp_policy_path,
+        project_path=project_mcp_policy_path,
+    )
     command = arguments.mcp_command
     if command == "add":
         entry = store.add_server(
@@ -1004,8 +1033,75 @@ def handle_mcp_command(
         stdout.write(f"{render_mcp_probe_result(client.probe(store.get_server(arguments.name)))}\n")
     elif command == "catalog":
         stdout.write(
-            f"{render_mcp_catalog(McpCatalogService(store, client).snapshot(refresh=True))}\n"
+            f"{render_mcp_catalog(McpCatalogService(store, client, policy_store).snapshot(refresh=True))}\n"
         )
+    elif command == "policy":
+        policy_command = arguments.mcp_policy_command
+        if policy_command == "list":
+            rules = policy_store.list_rules()
+            if not rules:
+                stdout.write("No MCP tool policies configured.\n")
+            else:
+                for scope, rule in rules:
+                    stdout.write(
+                        f"{rule.qualified_name}: {scope}, {rule.action.value}, r{rule.revision}, "
+                        f"schema {rule.schema_fingerprint}\n"
+                    )
+        elif policy_command == "show":
+            scope, rule = policy_store.get_rule(arguments.qualified_name)
+            stdout.write(
+                f"MCP tool policy: {rule.qualified_name}\n"
+                f"Policy scope: {scope}\n"
+                f"Action: {rule.action.value}\n"
+                f"Policy revision: {rule.revision}\n"
+                f"Server: {rule.server_scope}/{rule.configured_name} "
+                f"r{rule.configuration_revision}\n"
+                f"Remote tool: {rule.remote_name}\n"
+                f"Protocol: {rule.protocol_version}\n"
+                f"Schema fingerprint: {rule.schema_fingerprint}\n"
+            )
+        elif policy_command == "set":
+            catalog = McpCatalogService(store, client, policy_store).snapshot(refresh=True)
+            candidate = next(
+                (
+                    item
+                    for item in catalog.accepted
+                    if item.qualified_name == arguments.qualified_name
+                ),
+                None,
+            )
+            if candidate is None:
+                raise McpToolPolicyError(
+                    "MCP policy candidate is not present in the current accepted catalog"
+                )
+            if candidate.schema_fingerprint != arguments.schema_fingerprint:
+                raise McpToolPolicyError("MCP policy schema fingerprint is stale")
+            rule = policy_store.set_rule(
+                McpToolPolicyRule(
+                    qualified_name=candidate.qualified_name,
+                    configured_name=candidate.configured_name,
+                    server_scope=candidate.scope,
+                    configuration_revision=candidate.configuration_revision,
+                    remote_name=candidate.remote_name,
+                    protocol_version=candidate.protocol_version,
+                    schema_fingerprint=candidate.schema_fingerprint,
+                    action=PermissionAction(arguments.action),
+                ),
+                policy_scope=arguments.scope,
+                replace_existing=arguments.replace,
+                expected_revision=arguments.if_revision,
+            )
+            stdout.write(
+                f"Saved {arguments.scope} MCP tool policy {rule.qualified_name} at revision "
+                f"{rule.revision} ({rule.action.value}).\n"
+            )
+        elif policy_command == "clear":
+            policy_store.clear_rule(
+                arguments.qualified_name,
+                policy_scope=arguments.scope,
+                expected_revision=arguments.if_revision,
+            )
+            stdout.write(f"Removed {arguments.scope} MCP tool policy {arguments.qualified_name}.\n")
     return 0
 
 
@@ -1268,6 +1364,8 @@ def main(
     project_profile_path: Path | None = None,
     user_mcp_path: Path | None = None,
     project_mcp_path: Path | None = None,
+    user_mcp_policy_path: Path | None = None,
+    project_mcp_policy_path: Path | None = None,
     mcp_client_factory=None,
     provider_factory=None,
 ) -> int:
@@ -1396,6 +1494,8 @@ def main(
                 environment=env,
                 user_mcp_path=user_mcp_path,
                 project_mcp_path=project_mcp_path,
+                user_mcp_policy_path=user_mcp_policy_path,
+                project_mcp_policy_path=project_mcp_policy_path,
                 mcp_client_factory=mcp_client_factory,
                 stdout=output,
             )
@@ -1516,6 +1616,8 @@ def main(
             project_profile_path=project_profile_path,
             user_mcp_path=user_mcp_path,
             project_mcp_path=project_mcp_path,
+            user_mcp_policy_path=user_mcp_policy_path,
+            project_mcp_policy_path=project_mcp_policy_path,
             provider_factory=factory,
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
@@ -1614,6 +1716,9 @@ def main(
         return 2
     except McpConfigurationError as error:
         print(f"MCP configuration error: {error}", file=errors)
+        return 2
+    except McpToolPolicyError as error:
+        print(f"MCP tool policy error: {error}", file=errors)
         return 2
     except McpClientError as error:
         cleanup = " cleanup incomplete" if not error.cleanup_complete else ""

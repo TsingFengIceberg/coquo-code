@@ -6,9 +6,14 @@ from pathlib import Path
 from leonervis_code.core.action_coordinator import ApprovalResolution
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.agent.tool_events import (
+    McpNotificationActivityReceived,
+    ToolRequestFinished,
+)
 from leonervis_code.mcp.catalog import McpCatalogService
 from leonervis_code.mcp.client import McpStdioClient
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerStore
+from leonervis_code.mcp.policy import McpToolPolicyRule, McpToolPolicyStore
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import ActionAuditStatus
@@ -125,5 +130,90 @@ def test_project_session_denies_mcp_without_starting_runtime_process(tmp_path) -
     assert session.prompt("Find and call the widget tool") == "MCP call handled"
     audit = session.action_audits()[0]
     assert audit.status is ActionAuditStatus.DENIED
+    assert session.inspect_mcp_runtime() == ()
+    session.close()
+
+
+def test_exact_workspace_read_policy_allows_confined_mcp_in_read_only_mode(tmp_path) -> None:
+    user_path, project_path, candidate = _configured(tmp_path)
+    user_policy_path = tmp_path / "config" / "mcp-policy.json"
+    project_policy_path = tmp_path / ".leonervis-code" / "mcp-policy-test.json"
+    policies = McpToolPolicyStore(user_policy_path, project_policy_path)
+    policies.set_rule(
+        McpToolPolicyRule(
+            qualified_name=candidate.qualified_name,
+            configured_name=candidate.configured_name,
+            server_scope=candidate.scope,
+            configuration_revision=candidate.configuration_revision,
+            remote_name=candidate.remote_name,
+            protocol_version=candidate.protocol_version,
+            schema_fingerprint=candidate.schema_fingerprint,
+            action=PermissionAction.WORKSPACE_READ,
+        ),
+        policy_scope="project",
+    )
+    provider = _provider(candidate.qualified_name)
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_mcp_path=user_path,
+        project_mcp_path=project_path,
+        user_mcp_policy_path=user_policy_path,
+        project_mcp_policy_path=project_policy_path,
+        fake_provider_factory=lambda: provider,
+        mcp_client_factory=_client_factory,
+        permission_mode=PermissionMode.READ_ONLY,
+        approval_mode=ApprovalMode.AUTO,
+    )
+
+    assert session.prompt("Read the widget") == "MCP call handled"
+    audit = session.action_audits()[0]
+    assert audit.status is ActionAuditStatus.SUCCEEDED
+    assert audit.identity.action is PermissionAction.WORKSPACE_READ
+    session.close()
+
+
+def test_project_session_surfaces_content_free_notifications_and_invalidates_catalog(
+    tmp_path,
+) -> None:
+    user_path = tmp_path / "config" / "mcp.json"
+    project_path = tmp_path / ".leonervis-code" / "mcp-servers-test.json"
+    store = McpServerStore(user_path, project_path)
+    store.add_server(
+        McpServerConfiguration(
+            name="fixture",
+            command=sys.executable,
+            args=(str(FIXTURE), "call-notifications"),
+            enabled=True,
+        ),
+        scope="project",
+    )
+    client = _client_factory(tmp_path, environment={})
+    catalog = McpCatalogService(store, client).snapshot(refresh=True)
+    candidate = next(item for item in catalog.accepted if item.remote_name == "read_widget")
+    events = []
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_mcp_path=user_path,
+        project_mcp_path=project_path,
+        fake_provider_factory=lambda: _provider(candidate.qualified_name),
+        mcp_client_factory=_client_factory,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+    )
+
+    assert session.prompt("Read the widget", event_sink=events.append) == "MCP call handled"
+    activities = [event for event in events if isinstance(event, McpNotificationActivityReceived)]
+    assert [event.kind.value for event in activities] == [
+        "progress",
+        "message",
+        "tools-list-changed",
+    ]
+    finished = [event for event in events if isinstance(event, ToolRequestFinished)][-1]
+    assert finished.result_details is not None
+    assert "catalog-invalidated=true" in finished.result_details.compact_summary
+    assert "SECRET" not in repr(events)
+    assert session._mcp_catalog_service._cached is None
     assert session.inspect_mcp_runtime() == ()
     session.close()

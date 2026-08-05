@@ -33,6 +33,7 @@ from leonervis_code.core.task_admission import (
 )
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
+    McpNotificationActivityReceived,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
     ToolDispatchResult,
@@ -111,6 +112,7 @@ from leonervis_code.mcp import (
     McpServerStatus,
     McpServerStore,
     McpStdioClient,
+    McpToolPolicyStore,
     PreparedMcpCall,
     prepare_mcp_call,
 )
@@ -779,6 +781,7 @@ class ProjectSession:
         project_instructions_loader: ProjectInstructionsLoader | None = None,
         mcp_store: McpServerStore | None = None,
         mcp_client: McpStdioClient | None = None,
+        mcp_policy_store: McpToolPolicyStore | None = None,
         mcp_process_manager: McpProcessManager | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
@@ -821,7 +824,12 @@ class ProjectSession:
         self._download_file = download_file or DownloadFileTool(workspace)
         self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
         self._mcp_client = mcp_client or McpStdioClient(workspace)
-        self._mcp_catalog_service = McpCatalogService(self._mcp_store, self._mcp_client)
+        self._mcp_policy_store = mcp_policy_store or McpToolPolicyStore.for_workspace(workspace)
+        self._mcp_catalog_service = McpCatalogService(
+            self._mcp_store,
+            self._mcp_client,
+            self._mcp_policy_store,
+        )
         self._mcp_process_manager = mcp_process_manager or McpProcessManager(
             self._mcp_store, self._mcp_client
         )
@@ -881,6 +889,8 @@ class ProjectSession:
         project_profile_path: Path | None = None,
         user_mcp_path: Path | None = None,
         project_mcp_path: Path | None = None,
+        user_mcp_policy_path: Path | None = None,
+        project_mcp_policy_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
         fake_provider_factory: Callable[[], ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
@@ -993,6 +1003,12 @@ class ProjectSession:
                 resolved_workspace,
                 environment=resolved_environment,
             )
+            mcp_policy_store = McpToolPolicyStore.for_workspace(
+                resolved_workspace,
+                environment=resolved_environment,
+                user_path=user_mcp_policy_path,
+                project_path=project_mcp_policy_path,
+            )
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -1041,12 +1057,17 @@ class ProjectSession:
                     project_instructions_loader=project_instructions_loader,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
+                    mcp_policy_store=mcp_policy_store,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
             session_holder: dict[str, ProjectSession] = {}
             try:
-                resume_mcp_catalog = McpCatalogService(mcp_store, mcp_client)
+                resume_mcp_catalog = McpCatalogService(
+                    mcp_store,
+                    mcp_client,
+                    mcp_policy_store,
+                )
                 loop = cls._loop_from_state(
                     prepared.state,
                     read_file,
@@ -1135,6 +1156,7 @@ class ProjectSession:
                     project_instructions_loader=project_instructions_loader,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
+                    mcp_policy_store=mcp_policy_store,
                     startup_resume_result=result,
                 )
                 session_holder["session"] = session
@@ -3804,7 +3826,9 @@ class ProjectSession:
                 )
             except McpCallPreparationError as error:
                 return _invalid_tool_request(request, error)
-            action = PermissionAction.DANGEROUS
+            if len(contract.permission_actions) != 1:
+                raise RuntimeError("MCP tool contract must classify exactly one permission action")
+            action = contract.permission_actions[0]
             precondition = ActionPrecondition.expected_configuration(
                 prepared_mcp.precondition_sha256
             )
@@ -4116,8 +4140,14 @@ class ProjectSession:
                 mcp_result = self._mcp_process_manager.execute(
                     prepared_mcp,
                     cancellation=cancellation,
+                    notification_sink=lambda kind: self._emit_prompt_event(
+                        self._active_event_sink,
+                        McpNotificationActivityReceived(kind),
+                    ),
                 )
                 mcp_observation = mcp_result
+                if mcp_result.catalog_invalidated:
+                    self._mcp_catalog_service.invalidate()
                 outcome = {
                     McpRuntimeOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
                     McpRuntimeOutcome.FAILED: ActionExecutionOutcome.FAILED,
@@ -4981,9 +5011,18 @@ def _mcp_result_details(observation: McpRuntimeExecution) -> ToolResultDetails:
         else str(observation.process_reused).lower()
     )
     blocks = "unavailable" if observation.result_blocks is None else str(observation.result_blocks)
+    notifications = observation.notifications
+    notification_summary = (
+        f"notifications=progress:{notifications.progress_count},"
+        f"message:{notifications.message_count},"
+        f"list-changed:{notifications.tools_list_changed_count},"
+        f"ignored:{notifications.ignored_count}"
+    )
     compact = (
         f"process-generation={generation} reused={reused} duration={duration} "
-        f"blocks={blocks} cleanup={str(observation.cleanup_complete).lower()}"
+        f"blocks={blocks} cleanup={str(observation.cleanup_complete).lower()} "
+        f"{notification_summary} catalog-invalidated="
+        f"{str(observation.catalog_invalidated).lower()}"
     )
     return ToolResultDetails(
         compact,
@@ -4992,6 +5031,8 @@ def _mcp_result_details(observation: McpRuntimeExecution) -> ToolResultDetails:
             f"process_reused: {reused}",
             f"duration: {duration}",
             f"result_blocks: {blocks}",
+            notification_summary,
+            f"catalog_invalidated: {str(observation.catalog_invalidated).lower()} "
             f"cleanup_complete: {str(observation.cleanup_complete).lower()}",
         ),
     )
