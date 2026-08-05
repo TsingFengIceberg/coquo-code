@@ -1187,6 +1187,16 @@ Each ordinary Turn freezes an exact `ToolSetSnapshot` from one Registry generati
 
 Epoch zero accepts only `direct` contracts. The pure `promote()` boundary can add only canonically ordered `deferred` contracts from the same Registry snapshot to a later epoch, and only before an ActionLease is issued. Every current built-in remains direct; this slice adds no MCP transport, server lifecycle, credential handling, model-visible discovery tool, or automatic promotion. Provider-native search remains adapter-owned and Task coordination retains its dedicated dispatcher. Effective Context advances to `ctx-v9`/`ctx-v10`, with empty full-context ID `ctx-v9-6e8bb3a51d3138760bdb6e8ea9db1ab94927599529048ba7bee2d7e792fe2b0e`; the provider adapter contract advances to v37, the system prompt remains v33, other durable schemas remain unchanged, and old Sessions are not rewritten. See [0107: Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md).
 
+## Confined stdio MCP Configuration and Read-only Probe
+
+MCP configuration schema v1 accepts only local `stdio` and `confined-stdio` trust, split between XDG user and workspace project scopes; a same-name cross-scope collision is rejected. Server commands must be absolute POSIX executables, with hard bounds on arguments, workspace-relative cwd, and environment mappings. Configuration stores only `TARGET=SOURCE_ENV_NAME`, never values, and new servers default to disabled. Scope locks, revision CAS, symlink rejection, `0600` temporary files, and atomic replacement implement add/replace, enable/disable, and remove.
+
+Each `mcp probe` starts one temporary process through `LinuxBubblewrapCommandSandbox(workspace_writable=False)`: host root and workspace are read-only, temp/home/config are private, sensitive HOME paths are masked, capabilities are dropped, and seccomp denies sockets. Only after verified sandbox activation does the Host send `initialize`, `notifications/initialized`, and bounded paginated `tools/list`. Success, protocol errors, timeouts, and cancellation all close stdin and reclaim the process by exit, process-group terminate, then kill; incomplete cleanup is a distinct error.
+
+Stdio uses strict newline-delimited JSON-RPC and rejects duplicate keys, non-finite numbers, wrong IDs, server-to-client requests, unknown protocols, repeated cursors or tools, oversized or excessive messages/pages/tools, and overly deep or broad JSON. Server instructions, descriptions, schemas, annotations, JSON-RPC error bodies, and stderr contents are not rendered. The terminal shows only sanitized identity, capability/tool names, schema byte counts, pages, duration, stderr byte counts, and cleanup status. Standalone commands provide `mcp add|list|show|enable|disable|remove|probe`; the REPL provides only Host-side `/mcp list|status|show|probe`.
+
+This stage has no `tools/call`, persistent server manager, HTTP/SSE/OAuth, resources/prompts/sampling, or import into Extension Contracts, Registry, ToolSet, Provider requests, PermissionGate, Action Audit, or Session history. The canonical system prompt stays v33, adapter contract stays v37, Effective Context stays `ctx-v9`/`ctx-v10`, and all existing durable schemas remain unchanged. See [0108: Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1296,3 +1306,4 @@ Epoch zero accepts only `direct` contracts. The pure `promote()` boundary can ad
 105. [0105: Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)
 106. [0106: Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)
 107. [0107: Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)
+108. [0108: Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)

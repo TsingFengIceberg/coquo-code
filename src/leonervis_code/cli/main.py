@@ -33,6 +33,9 @@ from leonervis_code.cli.presentation import (
     MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
+    render_mcp_probe_result,
+    render_mcp_server_status,
+    render_mcp_server_statuses,
     render_resume_rejection,
     render_session_resume,
     render_session_diagnosis,
@@ -53,6 +56,14 @@ from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.mcp import (
+    McpClientError,
+    McpConfigurationError,
+    McpServerConfiguration,
+    McpServerStore,
+    McpStdioClient,
+)
+from leonervis_code.mcp.config import parse_environment_bindings
 from leonervis_code.evals import (
     EvalError,
     builtin_eval_cases,
@@ -406,6 +417,29 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--native-search-manifest", type=Path)
     replace_parser.add_argument("--if-revision", type=int)
     provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v5")
+
+    mcp_parser = subcommands.add_parser("mcp", help="configure and inspect local MCP servers")
+    mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)
+    mcp_add = mcp_commands.add_parser("add", help="add one disabled local stdio server")
+    mcp_add.add_argument("name")
+    mcp_add.add_argument("--scope", choices=["user", "project"], default="project")
+    mcp_add.add_argument("--command", dest="mcp_executable", required=True)
+    mcp_add.add_argument("--arg", action="append", default=[])
+    mcp_add.add_argument("--server-cwd", default=".")
+    mcp_add.add_argument("--env", action="append", default=[])
+    mcp_add.add_argument("--enabled", action="store_true")
+    mcp_add.add_argument("--replace", action="store_true")
+    mcp_add.add_argument("--if-revision", type=int)
+    mcp_commands.add_parser("list", help="list configured MCP servers")
+    mcp_show = mcp_commands.add_parser("show", help="show one redacted MCP server configuration")
+    mcp_show.add_argument("name")
+    for action in ("enable", "disable", "remove"):
+        command = mcp_commands.add_parser(action, help=f"{action} one MCP server")
+        command.add_argument("name")
+        command.add_argument("--scope", choices=["user", "project"], default="project")
+        command.add_argument("--if-revision", type=int)
+    mcp_probe = mcp_commands.add_parser("probe", help="temporarily initialize and list tools")
+    mcp_probe.add_argument("name")
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -900,6 +934,74 @@ def handle_provider_command(
     return 0
 
 
+def handle_mcp_command(
+    arguments: argparse.Namespace,
+    *,
+    workspace: Path,
+    environment: Mapping[str, str],
+    user_mcp_path: Path | None,
+    project_mcp_path: Path | None,
+    mcp_client_factory,
+    stdout: TextIO,
+) -> int:
+    """Execute credential-free MCP configuration or one temporary probe."""
+    store = McpServerStore.for_workspace(
+        workspace,
+        environment=environment,
+        user_path=user_mcp_path,
+        project_path=project_mcp_path,
+    )
+    client = (mcp_client_factory or McpStdioClient)(workspace, environment=environment)
+    command = arguments.mcp_command
+    if command == "add":
+        entry = store.add_server(
+            McpServerConfiguration(
+                name=arguments.name,
+                command=arguments.mcp_executable,
+                args=tuple(arguments.arg),
+                cwd=arguments.server_cwd,
+                environment=parse_environment_bindings(arguments.env),
+                enabled=arguments.enabled,
+            ),
+            scope=arguments.scope,
+            replace_existing=arguments.replace,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Saved {entry.scope} MCP server {entry.configuration.name} at revision "
+            f"{entry.configuration.revision} ({'enabled' if entry.configuration.enabled else 'disabled'}).\n"
+        )
+    elif command == "list":
+        statuses = tuple(client.inspect_status(entry) for entry in store.list_servers())
+        stdout.write(f"{render_mcp_server_statuses(statuses)}\n")
+    elif command == "show":
+        stdout.write(
+            f"{render_mcp_server_status(client.inspect_status(store.get_server(arguments.name)))}\n"
+        )
+    elif command in {"enable", "disable"}:
+        entry = store.set_enabled(
+            arguments.name,
+            scope=arguments.scope,
+            enabled=command == "enable",
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"MCP server {entry.configuration.name} is now "
+            f"{'enabled' if entry.configuration.enabled else 'disabled'} at revision "
+            f"{entry.configuration.revision}.\n"
+        )
+    elif command == "remove":
+        store.remove_server(
+            arguments.name,
+            scope=arguments.scope,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(f"Removed {arguments.scope} MCP server {arguments.name}.\n")
+    elif command == "probe":
+        stdout.write(f"{render_mcp_probe_result(client.probe(store.get_server(arguments.name)))}\n")
+    return 0
+
+
 def render_session_info(info, stdout: TextIO) -> None:
     """Render durable Session metadata without transcript content."""
     stdout.write(f"session name: {info.name}\n")
@@ -1157,6 +1259,9 @@ def main(
     environment: Mapping[str, str] | None = None,
     user_profile_path: Path | None = None,
     project_profile_path: Path | None = None,
+    user_mcp_path: Path | None = None,
+    project_mcp_path: Path | None = None,
+    mcp_client_factory=None,
     provider_factory=None,
 ) -> int:
     """Run a command or launch one persistent project conversation session."""
@@ -1266,6 +1371,25 @@ def main(
                 user_profile_path=user_profile_path,
                 project_profile_path=project_profile_path,
                 provider_factory=factory,
+                stdout=output,
+            )
+        if arguments.command == "mcp":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_profile_id is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with MCP management"
+                )
+            return handle_mcp_command(
+                arguments,
+                workspace=workspace,
+                environment=env,
+                user_mcp_path=user_mcp_path,
+                project_mcp_path=project_mcp_path,
+                mcp_client_factory=mcp_client_factory,
                 stdout=output,
             )
         if arguments.command == "session":
@@ -1383,6 +1507,8 @@ def main(
             environment=env,
             user_profile_path=user_profile_path,
             project_profile_path=project_profile_path,
+            user_mcp_path=user_mcp_path,
+            project_mcp_path=project_mcp_path,
             provider_factory=factory,
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
@@ -1478,4 +1604,11 @@ def main(
         return 2
     except TaskStoreError as error:
         print(f"task error: {error}", file=errors)
+        return 2
+    except McpConfigurationError as error:
+        print(f"MCP configuration error: {error}", file=errors)
+        return 2
+    except McpClientError as error:
+        cleanup = " cleanup incomplete" if not error.cleanup_complete else ""
+        print(f"MCP client error [{error.code}]{cleanup}: {error}", file=errors)
         return 2

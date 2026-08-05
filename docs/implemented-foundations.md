@@ -1187,6 +1187,16 @@ MCP接入前，所有现有模型可见工具先迁入同一套不可变`Extensi
 
 Epoch 0只允许`direct` contract；纯`promote()`接口只能从同一Registry快照按canonical顺序增加`deferred` contract并生成后续epoch，且只能发生在ActionLease发放前。当前所有built-in仍为direct，本阶段没有MCP transport、server lifecycle、credential、model-visible discovery tool或自动promotion。Provider原生搜索仍是adapter拥有的能力，Task coordination仍走专用dispatcher。Effective Context升级为`ctx-v9`/`ctx-v10`，empty full-context ID为`ctx-v9-6e8bb3a51d3138760bdb6e8ea9db1ab94927599529048ba7bee2d7e792fe2b0e`；provider adapter contract升级v37，system prompt保持v33，其他持久schema不变且旧Session不重写。详见[0107：Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)。
 
+## Confined stdio MCP 配置与只读探测
+
+MCP配置schema v1只接受本地`stdio`与`confined-stdio` trust，分为XDG user和workspace project两个scope，同名跨scope冲突即拒绝。Server command必须是absolute POSIX executable；args、workspace-relative cwd及环境映射均有硬边界。配置只保存`TARGET=SOURCE_ENV_NAME`，不保存值；新server默认disabled。配置通过scope lock、revision CAS、symlink拒绝、`0600`临时文件和atomic replace实现add/replace、enable/disable与remove。
+
+`mcp probe`每次只启动一个temporary process，并复用`LinuxBubblewrapCommandSandbox(workspace_writable=False)`：host root与workspace均只读，private temp/home/config，遮蔽敏感HOME路径，drop capability且seccomp禁止socket。Host确认sandbox activation后才发送`initialize`、`notifications/initialized`和有界分页`tools/list`；成功、协议错误、timeout与cancel都会关闭stdin并按exit、process-group terminate、kill顺序回收。Cleanup不完整单独报错。
+
+Stdio使用严格newline-delimited JSON-RPC，拒绝duplicate key、non-finite number、wrong ID、server-to-client request、未知protocol、重复cursor/tool、过大message、过多message/page/tool及过深或过宽JSON。Server instructions、description、schema、annotation、JSON-RPC error正文及stderr内容均不展示；终端只显示脱敏身份、capability/tool名称、schema byte数、页数、时长、stderr byte数及cleanup状态。Standalone提供`mcp add|list|show|enable|disable|remove|probe`；REPL只提供Host-only `/mcp list|status|show|probe`。
+
+本阶段没有`tools/call`、常驻server manager、HTTP/SSE/OAuth、resources/prompts/sampling，也不把枚举工具加入Extension Contract、Registry、ToolSet、Provider request、PermissionGate、Action Audit或Session history。Canonical system prompt保持v33、adapter contract保持v37、Effective Context保持`ctx-v9`/`ctx-v10`，全部既有持久schema不变。详见[0108：Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1296,3 +1306,4 @@ Epoch 0只允许`direct` contract；纯`promote()`接口只能从同一Registry�
 105. [0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)
 106. [0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)
 107. [0107：Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)
+108. [0108：Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)

@@ -332,6 +332,9 @@ Common REPL operations:
 /actions last
 /tools catalog
 /tools catalog run_command
+/mcp list
+/mcp show <server-name>
+/mcp probe <server-name>
 /permissions
 /permissions workspace-write auto
 /tools details 3
@@ -378,6 +381,8 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 | Path | Contents |
 | --- | --- |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles and active selection |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP server definitions; environment-name mappings only |
+| `<workspace>/.leonervis-code/mcp-servers.json` | project MCP server definitions; new servers default to disabled |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
 | `<workspace>/.leonervis-code/tasks/.../*.jsonl` | independent Task transcripts |
@@ -500,4 +505,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Leonervis Code currently provides 31 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, directory movement, and controlled downloads, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype; MCP, Skills, browser automation, background or parallel agents, and remote services are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP currently supports only confined local stdio configuration, initialization, and tool-list probing; MCP tools are not yet exposed to or executed for the model. Skills, browser automation, background or parallel agents, and remote services are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

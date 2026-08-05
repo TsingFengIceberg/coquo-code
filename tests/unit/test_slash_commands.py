@@ -28,6 +28,8 @@ from leonervis_code.session import (
 )
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.mcp.client import McpListedTool, McpProbeResult, McpServerStatus
+from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionOutcome,
@@ -110,6 +112,15 @@ class Session:
                 BRAVE_SEARCH_API_KEY_ENV: "brave-secret",
                 TAVILY_SEARCH_API_KEY_ENV: "tavily-secret",
             }
+        )
+        self.mcp_entry = McpServerEntry(
+            "project",
+            McpServerConfiguration(
+                name="fixture",
+                command="/usr/bin/python3",
+                args=("server.py",),
+                enabled=True,
+            ),
         )
         proposal = TaskAdmissionProposal.from_request(
             ToolUse(
@@ -194,6 +205,39 @@ class Session:
 
     def inspect_web_search_sources(self):
         return self.web_search.source_configuration()
+
+    def inspect_mcp_servers(self):
+        return (McpServerStatus(self.mcp_entry, True, ()),)
+
+    def inspect_mcp_server(self, name):
+        if name != "fixture":
+            raise ValueError(f"unknown MCP server: {name}")
+        return self.inspect_mcp_servers()[0]
+
+    def probe_mcp_server(self, name):
+        self.inspect_mcp_server(name)
+        return McpProbeResult(
+            configured_name=name,
+            protocol_version="2025-06-18",
+            server_name="fixture-server",
+            server_version="1.0",
+            capability_names=("tools",),
+            tools=(
+                McpListedTool(
+                    "read_widget",
+                    None,
+                    "UNTRUSTED_DESCRIPTION",
+                    '{"type":"object"}',
+                    None,
+                    None,
+                ),
+            ),
+            pages=1,
+            duration_ms=4,
+            stderr_bytes=0,
+            stderr_truncated=False,
+            cleanup_complete=True,
+        )
 
     def set_web_search_sources(self, sources):
         return self.web_search.configure_sources(sources)
@@ -718,8 +762,9 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Input controls:" in dispatch_slash("/help input", session).message
     assert "Policy commands:" in dispatch_slash("/help policy", session).message
     assert "Search source commands:" in dispatch_slash("/help search", session).message
+    assert "MCP inspection commands:" in dispatch_slash("/help mcp", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|task|tools|git|context|provider|search|policy|input]"
+        "Usage: /help [session|task|tools|git|context|provider|search|mcp|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -1419,6 +1464,29 @@ def test_search_commands_switch_primary_and_reserve_ordered_multi_source_activat
     assert session.prompts == []
 
 
+def test_mcp_commands_are_host_only_and_probe_does_not_expose_tools(tmp_path) -> None:
+    session = Session(tmp_path)
+    original_turns = session.turns
+
+    listed = dispatch_slash("/mcp list", session)
+    assert listed.handled and listed.kind == "info"
+    assert "fixture: project, enabled, ready, r1" in listed.message
+    shown = dispatch_slash("/mcp show fixture", session)
+    assert "Exposure: Host-only" in shown.message
+    probed = dispatch_slash("/mcp probe fixture", session)
+    assert probed.kind == "success"
+    assert "read_widget" in probed.message
+    assert "UNTRUSTED_DESCRIPTION" not in probed.message
+    assert "not added to any model ToolSet" in probed.message
+    assert session.turns == original_turns
+
+    assert dispatch_slash("/mcp show", session).message == "Usage: /mcp show <server-name>"
+    assert dispatch_slash("/mcp probe extra value", session).message == (
+        "Usage: /mcp probe <server-name>"
+    )
+    assert "Did you mean probe?" in dispatch_slash("/mcp proeb", session).message
+
+
 def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_write_session(
     tmp_path,
 ) -> None:
@@ -1447,6 +1515,37 @@ def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_wr
             session.history,
             session.action_audits(),
             session.usage(),
+        ) == before
+    finally:
+        session.close()
+
+
+def test_real_mcp_inspection_does_not_mutate_session_or_tool_surface(tmp_path) -> None:
+    project_mcp_path = tmp_path / ".leonervis-code" / "mcp-test.json"
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_mcp_path=tmp_path / "user-mcp.json",
+        project_mcp_path=project_mcp_path,
+    )
+    transcript = session.transcript_path
+    before = (
+        transcript.read_bytes(),
+        session.history,
+        session.action_audits(),
+        session.usage(),
+        session.project_status().tool_count,
+    )
+    try:
+        listed = dispatch_slash("/mcp list", session)
+        assert listed.kind == "info"
+        assert listed.message == "No MCP servers configured."
+        assert (
+            transcript.read_bytes(),
+            session.history,
+            session.action_audits(),
+            session.usage(),
+            session.project_status().tool_count,
         ) == before
     finally:
         session.close()

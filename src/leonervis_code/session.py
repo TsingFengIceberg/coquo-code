@@ -100,6 +100,8 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
 )
 from leonervis_code.core.extensions import ToolExecutionKind, ToolSetSnapshot
+from leonervis_code.mcp import McpServerStatus, McpServerStore, McpStdioClient
+from leonervis_code.mcp.client import McpProbeResult
 from leonervis_code.providers.manager import (
     CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
@@ -762,6 +764,8 @@ class ProjectSession:
         action_uuid_factory: Callable[[], UUID | str] = uuid4,
         loop: AgentLoop | None = None,
         project_instructions_loader: ProjectInstructionsLoader | None = None,
+        mcp_store: McpServerStore | None = None,
+        mcp_client: McpStdioClient | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
         self.workspace = workspace
@@ -801,6 +805,8 @@ class ProjectSession:
         self._archive_list = archive_list or ArchiveListTool(workspace)
         self._move_directory = move_directory or MoveDirectoryTool(workspace)
         self._download_file = download_file or DownloadFileTool(workspace)
+        self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
+        self._mcp_client = mcp_client or McpStdioClient(workspace)
         self._web_search.disable_sources()
         self._search_source_order = (
             ("provider",) if self._manager.status().native_search_available else ()
@@ -854,6 +860,8 @@ class ProjectSession:
         environment: Mapping[str, str] | None = None,
         user_profile_path: Path | None = None,
         project_profile_path: Path | None = None,
+        user_mcp_path: Path | None = None,
+        project_mcp_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
         fake_provider_factory: Callable[[], ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
@@ -955,6 +963,13 @@ class ProjectSession:
             move_directory = move_directory_factory(resolved_workspace)
             download_file = download_file_factory(resolved_workspace)
             project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
+            mcp_store = McpServerStore.for_workspace(
+                resolved_workspace,
+                environment=resolved_environment,
+                user_path=user_mcp_path,
+                project_path=project_mcp_path,
+            )
+            mcp_client = McpStdioClient(resolved_workspace, environment=resolved_environment)
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -1001,6 +1016,8 @@ class ProjectSession:
                     approval_handler=approval_handler,
                     action_uuid_factory=action_uuid_factory,
                     project_instructions_loader=project_instructions_loader,
+                    mcp_store=mcp_store,
+                    mcp_client=mcp_client,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -1091,6 +1108,8 @@ class ProjectSession:
                     action_uuid_factory=action_uuid_factory,
                     loop=loop,
                     project_instructions_loader=project_instructions_loader,
+                    mcp_store=mcp_store,
+                    mcp_client=mcp_client,
                     startup_resume_result=result,
                 )
                 session_holder["session"] = session
@@ -1166,6 +1185,26 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._git_show.observe(commit_id, path)
+
+    def inspect_mcp_servers(self) -> tuple[McpServerStatus, ...]:
+        """Inspect configured MCP readiness without starting a process or changing state."""
+        with self._lock:
+            self._ensure_open()
+            return tuple(
+                self._mcp_client.inspect_status(entry) for entry in self._mcp_store.list_servers()
+            )
+
+    def inspect_mcp_server(self, name: str) -> McpServerStatus:
+        """Inspect one configured MCP server without starting it."""
+        with self._lock:
+            self._ensure_open()
+            return self._mcp_client.inspect_status(self._mcp_store.get_server(name))
+
+    def probe_mcp_server(self, name: str) -> McpProbeResult:
+        """Start one temporary confined server for initialize and tools/list only."""
+        with self._lock:
+            self._ensure_open()
+            return self._mcp_client.probe(self._mcp_store.get_server(name))
 
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""

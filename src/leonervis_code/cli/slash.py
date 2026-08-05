@@ -23,6 +23,7 @@ from leonervis_code.cli.presentation import (
     MAX_SESSION_LIST_COUNT,
     MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
+    MCP_HELP,
     PROVIDER_HELP,
     SEARCH_HELP,
     SESSION_HELP,
@@ -39,6 +40,9 @@ from leonervis_code.cli.presentation import (
     render_git_log,
     render_git_show,
     render_git_status,
+    render_mcp_probe_result,
+    render_mcp_server_status,
+    render_mcp_server_statuses,
     render_provider_adapter_error,
     render_project_status,
     render_project_instructions_inspection,
@@ -124,6 +128,7 @@ TOP_LEVEL_COMMANDS = (
     "/compactions",
     "/provider",
     "/search",
+    "/mcp",
     "/model",
     "/session",
     "/task",
@@ -150,6 +155,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help context", "Context, usage, and compaction"),
     SlashCompletionSpec("/help provider", "Provider and model selection"),
     SlashCompletionSpec("/help search", "Independent web search sources"),
+    SlashCompletionSpec("/help mcp", "Configured MCP server inspection"),
     SlashCompletionSpec("/help policy", "Permission, approval, and command sandbox"),
     SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
@@ -191,6 +197,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/compactions", "Show durable compaction history", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
     SlashCompletionSpec("/search", "Web search source commands", True),
+    SlashCompletionSpec("/mcp", "MCP server inspection", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
@@ -224,6 +231,10 @@ SLASH_COMPLETIONS = (
         "/search use tavily brave", "Activate Tavily then Brave; execute Tavily only for now"
     ),
     SlashCompletionSpec("/search reset", "Restore provider-native default or disable search"),
+    SlashCompletionSpec("/mcp list", "List configured MCP servers"),
+    SlashCompletionSpec("/mcp status", "Show configured MCP server readiness"),
+    SlashCompletionSpec("/mcp show", "Show one redacted MCP server configuration"),
+    SlashCompletionSpec("/mcp probe", "Temporarily initialize and list MCP tools"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -315,6 +326,12 @@ class ReplSession(Protocol):
     def git_log(self, limit: int, path: str): ...
 
     def git_show(self, commit_id: str, path: str): ...
+
+    def inspect_mcp_servers(self): ...
+
+    def inspect_mcp_server(self, name: str): ...
+
+    def probe_mcp_server(self, name: str): ...
 
     def status(self): ...
 
@@ -521,6 +538,8 @@ def dispatch_slash(
         return _info(PROVIDER_HELP)
     if command == "/search":
         return _info(SEARCH_HELP)
+    if command == "/mcp":
+        return _info(MCP_HELP)
     if command == "/status":
         return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):
@@ -817,6 +836,37 @@ def dispatch_slash(
         if command != "/search status":
             return _usage("Usage: /search status")
         return _search_status(session)
+    if command in {"/mcp list", "/mcp status"}:
+        return _call(
+            lambda: render_mcp_server_statuses(session.inspect_mcp_servers()),
+            kind="info",
+            failure_prefix="MCP server inspection failed",
+        )
+    if command == "/mcp show" or command.startswith("/mcp show "):
+        parts = command.split()
+        if len(parts) != 3:
+            return _usage("Usage: /mcp show <server-name>")
+        return _call(
+            lambda: render_mcp_server_status(session.inspect_mcp_server(parts[2])),
+            kind="info",
+            failure_prefix="MCP server inspection failed",
+        )
+    if command == "/mcp probe" or command.startswith("/mcp probe "):
+        parts = command.split()
+        if len(parts) != 3:
+            return _usage("Usage: /mcp probe <server-name>")
+        return _call(
+            lambda: render_mcp_probe_result(session.probe_mcp_server(parts[2])),
+            kind="success",
+            failure_prefix="MCP probe failed",
+        )
+    if command.startswith("/mcp "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("list", "status", "show", "probe"))
+        return _usage(
+            f"Unknown MCP command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Usage: /mcp <list|status|show|probe>"
+        )
     if command == "/search sources" or command.startswith("/search sources "):
         if command != "/search sources":
             return _usage("Usage: /search sources")

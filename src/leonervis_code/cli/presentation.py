@@ -32,6 +32,7 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
+from leonervis_code.mcp.client import McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -94,6 +95,7 @@ HELP_TOPICS = (
     "context",
     "provider",
     "search",
+    "mcp",
     "policy",
     "input",
 )
@@ -106,6 +108,7 @@ HELP_TEXT = (
     "  /help context   Context, usage, output budget, and compaction\n"
     "  /help provider  Provider and model selection\n"
     "  /help search    Independent web search source selection\n"
+    "  /help mcp       Configured MCP server inspection\n"
     "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
@@ -207,6 +210,15 @@ SEARCH_HELP = (
     "matters: later independent sources are explicit model-mediated fallbacks and are never "
     "queried automatically. Provider controls are process-local and adapter-validated."
 )
+MCP_HELP = (
+    "MCP inspection commands:\n"
+    "  /mcp list | /mcp status\n"
+    "  /mcp show <server-name>\n"
+    "  /mcp probe <server-name>\n"
+    "These are Host-only inspections. Probe starts one temporary confined stdio process, performs "
+    "initialize and tools/list, then closes it. Listed tools are not exposed to the model or added "
+    "to the current Turn ToolSet. Use the standalone leonervis-code mcp commands to edit configuration."
+)
 POLICY_HELP = (
     "Policy commands:\n"
     "  /status\n"
@@ -235,9 +247,79 @@ HELP_BY_TOPIC = {
     "context": CONTEXT_HELP,
     "provider": PROVIDER_HELP,
     "search": SEARCH_HELP,
+    "mcp": MCP_HELP,
     "policy": POLICY_HELP,
     "input": INPUT_HELP,
 }
+
+
+def render_mcp_server_status(status: McpServerStatus) -> str:
+    """Render one credential-free MCP readiness view."""
+    entry = status.entry
+    configured = entry.configuration
+    environment = (
+        ", ".join(f"{target}<-{source}" for target, source in configured.environment) or "none"
+    )
+    missing = ", ".join(status.missing_environment) or "none"
+    return "\n".join(
+        (
+            f"MCP server: {_safe_inline(configured.name)}",
+            f"Scope: {entry.scope}",
+            f"State: {'enabled' if configured.enabled else 'disabled'}; "
+            f"{'ready' if status.ready else 'not ready'}; revision {configured.revision}",
+            f"Transport/trust: {configured.transport.value}/{configured.trust.value}",
+            f"Command: {_safe_inline(configured.command)} ({len(configured.args)} configured arguments)",
+            f"Server cwd: {_safe_inline(configured.cwd)}",
+            f"Environment bindings: {environment}",
+            f"Command available: {'yes' if status.command_available else 'no'}",
+            f"Missing source environment names: {missing}",
+            "Authority: read-only workspace, read-only host root, private temp/home, and no sockets.",
+            "Exposure: Host-only; no MCP tools are model-visible in this implementation stage.",
+        )
+    )
+
+
+def render_mcp_server_statuses(statuses: tuple[McpServerStatus, ...]) -> str:
+    """Render a compact MCP configuration list without credential values."""
+    if not statuses:
+        return "No MCP servers configured."
+    lines = [f"Configured MCP servers: {len(statuses)}"]
+    for status in statuses:
+        configured = status.entry.configuration
+        state = "ready" if status.ready else "not ready"
+        lines.append(
+            f"  {configured.name}: {status.entry.scope}, "
+            f"{'enabled' if configured.enabled else 'disabled'}, {state}, r{configured.revision}"
+        )
+    lines.append("Model exposure: none; configuration changes apply only to later MCP stages.")
+    return "\n".join(lines)
+
+
+def render_mcp_probe_result(result: McpProbeResult) -> str:
+    """Render bounded MCP negotiation facts without untrusted server prose or schemas."""
+    capabilities = ", ".join(result.capability_names) or "none"
+    lines = [
+        f"MCP probe succeeded: {_safe_inline(result.configured_name)}",
+        f"Protocol: {_safe_inline(result.protocol_version)}",
+        f"Server identity: {_safe_inline(result.server_name)}"
+        + (f" {_safe_inline(result.server_version)}" if result.server_version else ""),
+        f"Capabilities: {capabilities}",
+        f"Tools listed: {len(result.tools)} across {result.pages} page(s)",
+    ]
+    for index, tool in enumerate(result.tools, start=1):
+        lines.append(
+            f"  {index}. {_safe_inline(tool.name)} "
+            f"(input-schema {len(tool.input_schema_json.encode('utf-8'))} bytes)"
+        )
+    lines.extend(
+        (
+            f"Process: {result.duration_ms} ms; stderr {result.stderr_bytes} bytes"
+            + (" (truncated)" if result.stderr_truncated else ""),
+            f"Cleanup complete: {'yes' if result.cleanup_complete else 'no'}",
+            "Exposure: inspection only; these tools were not added to any model ToolSet.",
+        )
+    )
+    return "\n".join(lines)
 
 
 def render_web_search_sources(configuration: WebSearchSourceConfiguration) -> str:
