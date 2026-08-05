@@ -677,6 +677,14 @@ def download_file_tool_definition() -> dict[str, object]:
     return _named_tool_definition("download_file")
 
 
+def tool_search_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("tool_search")
+
+
+def tool_promote_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("tool_promote")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
     return _named_tool_definition("task_propose_plan")
 

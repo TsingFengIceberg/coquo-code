@@ -15,17 +15,29 @@ from leonervis_code.mcp.client import (
     McpServerStatus,
     McpStdioClient,
 )
+from leonervis_code.mcp.catalog import (
+    McpCandidateDisposition,
+    McpCatalogService,
+    McpCatalogSourceIssue,
+    McpQuarantineCatalog,
+    McpToolCandidate,
+)
 
 __all__ = [
     "McpConfigurationError",
     "McpClientError",
+    "McpCandidateDisposition",
+    "McpCatalogService",
+    "McpCatalogSourceIssue",
     "McpListedTool",
     "McpProbeResult",
+    "McpQuarantineCatalog",
     "McpServerConfiguration",
     "McpServerEntry",
     "McpServerStore",
     "McpServerStatus",
     "McpStdioClient",
+    "McpToolCandidate",
     "McpTransport",
     "McpTrustMode",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+import json
 
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
@@ -63,7 +64,13 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
-from leonervis_code.core.extensions import ToolRegistrySnapshot, ToolSetSnapshot
+from leonervis_code.core.extensions import (
+    ExtensionSourceKind,
+    ToolExecutionKind,
+    ToolExposure,
+    ToolRegistrySnapshot,
+    ToolSetSnapshot,
+)
 from leonervis_code.providers.streaming import (
     ProviderResponseOutcome,
     ProviderSearchActivity,
@@ -77,6 +84,7 @@ from leonervis_code.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_REGISTRY_SNAPSHOT,
+    tool_input_from_use,
 )
 from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
 from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
@@ -96,6 +104,7 @@ from leonervis_code.tools.list_tree import LIST_TREE_TOOL_NAME, ListTreeTool
 from leonervis_code.tools.read_file import READ_FILE_TOOL_NAME, ReadFileTool
 from leonervis_code.tools.read_file_lines import READ_FILE_LINES_TOOL_NAME, ReadFileLinesTool
 from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
+from leonervis_code.tools.tool_discovery import TOOL_PROMOTE_TOOL_NAME, TOOL_SEARCH_TOOL_NAME
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
@@ -121,6 +130,20 @@ class TaskControlProtocolError(RuntimeError):
     """Raised when a provider violates the terminal Task-control call contract."""
 
 
+class ToolDiscoveryProtocolError(RuntimeError):
+    """Raised when a provider violates the isolated discovery-call contract."""
+
+
+@dataclass(frozen=True)
+class ToolDiscoveryDispatchResult:
+    dispatch: ToolDispatchResult
+    discovered_names: tuple[str, ...] = ()
+    promoted_snapshot: ToolSetSnapshot | None = None
+
+
+ToolSetTransitionDispatcher = Callable[["PreparedAgentTurn", ToolSetSnapshot], "PreparedAgentTurn"]
+
+
 @dataclass(frozen=True)
 class PreparedAgentTurn:
     """One pending user item pinned to one committed Effective Context."""
@@ -128,6 +151,7 @@ class PreparedAgentTurn:
     user: UserMessage
     context: EffectiveContextSnapshot
     pending_items: tuple[ConversationItem, ...]
+    registry_snapshot: ToolRegistrySnapshot
     tool_set_snapshot: ToolSetSnapshot
     allow_tools: bool = True
     enabled_tool_names: tuple[str, ...] | None = None
@@ -140,6 +164,13 @@ class PreparedAgentTurn:
             raise ValueError("prepared turn tool exposure flag is invalid")
         if not isinstance(self.tool_set_snapshot, ToolSetSnapshot):
             raise ValueError("prepared turn tool set snapshot is invalid")
+        if not isinstance(self.registry_snapshot, ToolRegistrySnapshot):
+            raise ValueError("prepared turn registry snapshot is invalid")
+        if (
+            self.registry_snapshot.snapshot_id != self.tool_set_snapshot.registry_id
+            or self.registry_snapshot.generation != self.tool_set_snapshot.registry_generation
+        ):
+            raise ValueError("prepared turn registry does not match its tool set snapshot")
         if (
             self.context.tool_definitions != self.tool_set_snapshot.definitions
             or self.context.tool_set_id != self.tool_set_snapshot.snapshot_id
@@ -201,6 +232,12 @@ class PreparedAgentTurn:
             tool_set_snapshot=snapshot,
             enabled_tool_names=snapshot.names,
         )
+
+    def retire_action_lease(self) -> PreparedAgentTurn:
+        """Return an unleased copy for one Host-controlled ToolSet transition."""
+        if self.action_lease is None:
+            raise ValueError("prepared turn has no action lease to retire")
+        return replace(self, action_lease=None)
 
     def with_action_lease(self, lease: ActionLease) -> PreparedAgentTurn:
         """Bind one non-recreatable lease after automatic compaction is complete."""
@@ -297,6 +334,7 @@ class AgentLoop:
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
+        self._tool_set_transition_dispatcher: ToolSetTransitionDispatcher | None = None
 
     @property
     def history(self) -> tuple[ConversationItem, ...]:
@@ -400,6 +438,7 @@ class AgentLoop:
             user=user,
             context=context,
             pending_items=(user,),
+            registry_snapshot=registry,
             tool_set_snapshot=tool_set,
             allow_tools=allow_tools,
             enabled_tool_names=(tool_set.names if enabled_tool_names is not None else None),
@@ -457,6 +496,7 @@ class AgentLoop:
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
         attempt_usage = ToolAttemptUsage()
         pending_task_proposal: TaskProposal | None = None
+        discovered_names: set[str] = set()
         self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:
@@ -532,6 +572,16 @@ class AgentLoop:
                 )
             if control_requests and task_proposal_sink is None:
                 raise TaskControlProtocolError("Task control tool requires a proposal sink")
+            discovery_requests = tuple(
+                request
+                for request in requests
+                if prepared.tool_set_snapshot.contract(request.name).execution_kind
+                is ToolExecutionKind.TOOL_DISCOVERY
+            )
+            if discovery_requests and len(requests) != 1:
+                raise ToolDiscoveryProtocolError(
+                    "tool discovery must be the only call in its assistant response"
+                )
 
             if response.assistant_text is not None:
                 companion_event = (
@@ -635,11 +685,36 @@ class AgentLoop:
                     ),
                 )
                 try:
+                    contract = prepared.tool_set_snapshot.contract(request.name)
                     if request.name in self._task_control_names:
                         control = self._execute_task_control(request, context.context_id)
                         dispatch = control.dispatch
                         pending_task_proposal = control.proposal
                         force_final = True
+                    elif contract.execution_kind is ToolExecutionKind.TOOL_DISCOVERY:
+                        discovery = self._execute_tool_discovery(
+                            request,
+                            prepared,
+                            frozenset(discovered_names),
+                        )
+                        dispatch = discovery.dispatch
+                        discovered_names.update(discovery.discovered_names)
+                        if discovery.promoted_snapshot is not None:
+                            prepared = self._transition_tool_set(
+                                prepared,
+                                discovery.promoted_snapshot,
+                            )
+                            context = prepared.context
+                    elif contract.execution_kind is ToolExecutionKind.MCP_REMOTE:
+                        dispatch = ToolDispatchResult(
+                            ToolResult(
+                                request.tool_use_id,
+                                "MCP tool execution is unavailable in this runtime slice",
+                                is_error=True,
+                            ),
+                            ToolEventStatus.ERROR,
+                            "mcp_execution_unavailable",
+                        )
                     else:
                         dispatch = self._execute(request, prepared.action_lease)
                 except BaseException:
@@ -795,6 +870,17 @@ class AgentLoop:
         self._task_control_names = frozenset(tool_names)
         self._task_control_dispatcher = dispatcher
 
+    def install_tool_set_transition_dispatcher(
+        self,
+        dispatcher: ToolSetTransitionDispatcher,
+    ) -> None:
+        """Install the Session-owned lease replacement seam exactly once."""
+        if self._tool_set_transition_dispatcher is not None:
+            raise ValueError("tool set transition dispatcher is already installed")
+        if not callable(dispatcher):
+            raise ValueError("tool set transition dispatcher is invalid")
+        self._tool_set_transition_dispatcher = dispatcher
+
     def install_compaction(
         self,
         *,
@@ -885,6 +971,111 @@ class AgentLoop:
                 is_error=True,
             )
         return infer_tool_dispatch_result(result)
+
+    def _execute_tool_discovery(
+        self,
+        request: ToolUse,
+        prepared: PreparedAgentTurn,
+        discovered_names: frozenset[str],
+    ) -> ToolDiscoveryDispatchResult:
+        arguments = tool_input_from_use(request)
+        if request.name == TOOL_SEARCH_TOOL_NAME:
+            query = arguments["query"]
+            limit = arguments["max_results"]
+            if not isinstance(query, str) or type(limit) is not int:
+                raise ValueError("tool_search input is malformed")
+            terms = tuple(part for part in query.casefold().split() if part)
+            matches: list[tuple[int, str, str, str]] = []
+            for contract in prepared.registry_snapshot.contracts:
+                if (
+                    contract.exposure is not ToolExposure.DEFERRED
+                    or contract.source.kind is not ExtensionSourceKind.MCP
+                ):
+                    continue
+                mapping = contract.definition.as_mapping()
+                description = mapping.get("description", "")
+                haystack = f"{contract.name} {description}".casefold()
+                if terms and not all(term in haystack for term in terms):
+                    continue
+                score = sum(haystack.count(term) for term in terms)
+                matches.append((score, contract.name, contract.source.name, str(description)))
+            selected = sorted(matches, key=lambda item: (-item[0], item[1]))[:limit]
+            content = "\n".join(
+                json.dumps(
+                    {
+                        "description": description[:512],
+                        "name": name,
+                        "source": source,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for _, name, source, description in selected
+            )
+            if not content:
+                content = json.dumps({"matches": 0}, separators=(",", ":"), sort_keys=True)
+            names = tuple(item[1] for item in selected)
+            return ToolDiscoveryDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(request.tool_use_id, content),
+                    ToolEventStatus.SUCCEEDED,
+                    "tool_search_completed",
+                ),
+                discovered_names=names,
+            )
+        if request.name == TOOL_PROMOTE_TOOL_NAME:
+            raw_names = arguments["names"]
+            if not isinstance(raw_names, list) or not all(
+                isinstance(name, str) for name in raw_names
+            ):
+                raise ValueError("tool_promote input is malformed")
+            names = tuple(raw_names)
+            if not set(names).issubset(discovered_names):
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "only exact names returned by tool_search in this Turn can be promoted",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "tool_candidate_not_discovered",
+                    )
+                )
+            promoted = prepared.tool_set_snapshot.promote(prepared.registry_snapshot, names)
+            content = json.dumps(
+                {
+                    "epoch": promoted.epoch,
+                    "promoted": list(names),
+                    "tool_set_id": promoted.snapshot_id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            return ToolDiscoveryDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(request.tool_use_id, content),
+                    ToolEventStatus.SUCCEEDED,
+                    "tool_set_promoted",
+                ),
+                promoted_snapshot=(None if promoted is prepared.tool_set_snapshot else promoted),
+            )
+        raise ValueError("unsupported tool discovery request")
+
+    def _transition_tool_set(
+        self,
+        prepared: PreparedAgentTurn,
+        snapshot: ToolSetSnapshot,
+    ) -> PreparedAgentTurn:
+        if self._tool_set_transition_dispatcher is not None:
+            transitioned = self._tool_set_transition_dispatcher(prepared, snapshot)
+            if not isinstance(transitioned, PreparedAgentTurn):
+                raise ValueError("tool set transition dispatcher returned an invalid turn")
+            return transitioned
+        if prepared.action_lease is not None:
+            raise RuntimeError("leased ToolSet transition requires a Session dispatcher")
+        return prepared.advance_tool_set(snapshot)
 
     def _execute_task_control(
         self,

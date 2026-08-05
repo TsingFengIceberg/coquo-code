@@ -1197,6 +1197,22 @@ Stdio uses strict newline-delimited JSON-RPC and rejects duplicate keys, non-fin
 
 This stage has no `tools/call`, persistent server manager, HTTP/SSE/OAuth, resources/prompts/sampling, or import into Extension Contracts, Registry, ToolSet, Provider requests, PermissionGate, Action Audit, or Session history. The canonical system prompt stays v33, adapter contract stays v37, Effective Context stays `ctx-v9`/`ctx-v10`, and all existing durable schemas remain unchanged. See [0108: Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md).
 
+## MCP Tool Normalization and Quarantine Catalog
+
+Enabled confined stdio servers can now be normalized into a content-addressed `McpQuarantineCatalog` without entering the initial ToolSet. Every listed tool receives a qualified name of at most 64 characters derived from configured server, remote name, and a hash, and binds user/project scope, configuration revision, negotiated protocol, schema fingerprint, and stable disposition. Schema normalization accepts only an object root and a closed recursive keyword/type subset. Unsupported references, keywords, composition, required sets, or additional-properties forms remain rejected candidates with sanitized reason codes. A failed server probe remains a sanitized source issue without server error or stderr bodies.
+
+An accepted candidate becomes an `ExtensionToolContract` with `source=mcp`, `execution=mcp-remote`, `exposure=deferred`, and no PermissionAction. Its source name binds scope, server, and protocol, while source generation binds configuration revision. The schema and bounded description enter the exact definition, but the description is explicitly marked as untrusted server data. MCP annotations and output schemas do not enter the contract, so `readOnlyHint` and similar hints cannot grant workspace-read or any other permission. Catalog order is canonical by qualified name and its identity covers complete accepted and rejected facts; the Session-local service caches only while the credential-free configuration identity is unchanged.
+
+Standalone `mcp catalog` and Host-only `/mcp catalog` explicitly refresh and show only catalog ID, counts, qualified names, scope/server, revision, protocol, schema fingerprints, and reason codes. They hide descriptions, schemas, annotations, arguments, credentials, server errors, and stderr, invoke no Provider, and write no Session or Action Audit. The built-in source and Registry advance to generation 2 for Slice 4's fixed discovery contracts; a Registry combined with MCP uses generation 3. See [0109: MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md).
+
+## Progressive MCP Discovery and ToolSet Epoch Transition
+
+The model initially sees two fixed direct contracts, `tool_search(query,max_results)` and `tool_promote(names)`, rather than every MCP schema. Search performs bounded case-insensitive literal-term matching only against MCP deferred contracts in the Registry frozen for the current Turn and returns at most eight candidates. Promotion accepts at most eight exact qualified names actually returned by an earlier same-Turn search. Each discovery call must be the only call in its assistant tool response, enters neither PermissionGate nor Action Audit, and cannot activate a candidate from annotations, guesses, or another extension source.
+
+Promotion still uses canonical `ToolSetSnapshot.promote()` against the same Registry snapshot and remains idempotent for already visible names; a real addition creates the next epoch. For a ProjectSession that already holds an ActionLease, the Host revalidates Session, runtime generation, old context, old ToolSet, and current MCP Registry identity, retires the old lease, constructs an Effective Context bound to the new ToolSet ID, and issues a fresh non-recreatable lease. The next Provider count and create paths use the same new definitions. Old approvals and ActionIdentity values cannot cross epochs; stale configuration or Registry state rejects the transition without committing the candidate Turn.
+
+`tools/call` remains unimplemented. A model request for a promoted MCP contract receives only an `mcp_execution_unavailable` ToolResult and never enters a built-in executor, PermissionGate, approval, Action Audit, or MCP process. The canonical system prompt advances to v34 and provider adapter contract to v38. Effective Context representations remain `ctx-v9`/`ctx-v10`, while the empty full-context ID becomes `ctx-v9-2f737163e792a16fbae49a629f54afc5cf43d49b75f1afe47b12ff5ed4e60d3e`; durable Session, Task, Action Audit, and related schemas remain unchanged. See [0110: Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1307,3 +1323,5 @@ This stage has no `tools/call`, persistent server manager, HTTP/SSE/OAuth, resou
 106. [0106: Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)
 107. [0107: Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)
 108. [0108: Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)
+109. [0109: MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)
+110. [0110: Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)

@@ -99,8 +99,14 @@ from leonervis_code.core.effective_context import (
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EffectiveContextSnapshot,
 )
-from leonervis_code.core.extensions import ToolExecutionKind, ToolSetSnapshot
-from leonervis_code.mcp import McpServerStatus, McpServerStore, McpStdioClient
+from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
+from leonervis_code.mcp import (
+    McpCatalogService,
+    McpQuarantineCatalog,
+    McpServerStatus,
+    McpServerStore,
+    McpStdioClient,
+)
 from leonervis_code.mcp.client import McpProbeResult
 from leonervis_code.providers.manager import (
     CompactionRuntimeSnapshot,
@@ -807,6 +813,7 @@ class ProjectSession:
         self._download_file = download_file or DownloadFileTool(workspace)
         self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
         self._mcp_client = mcp_client or McpStdioClient(workspace)
+        self._mcp_catalog_service = McpCatalogService(self._mcp_store, self._mcp_client)
         self._web_search.disable_sources()
         self._search_source_order = (
             ("provider",) if self._manager.status().native_search_available else ()
@@ -842,6 +849,7 @@ class ProjectSession:
             self._loop.install_task_control_dispatcher(
                 TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
             )
+            self._loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         self._startup_resume_result = startup_resume_result
 
     @classmethod
@@ -1023,6 +1031,7 @@ class ProjectSession:
             writer_holder: dict[str, SessionWriter] = {}
             session_holder: dict[str, ProjectSession] = {}
             try:
+                resume_mcp_catalog = McpCatalogService(mcp_store, mcp_client)
                 loop = cls._loop_from_state(
                     prepared.state,
                     read_file,
@@ -1047,6 +1056,7 @@ class ProjectSession:
                         writer_holder["writer"], turn
                     ),
                     project_instructions_factory=project_instructions_loader.load,
+                    tool_registry_factory=resume_mcp_catalog.registry_snapshot,
                 )
                 snapshot = loop.effective_context_snapshot()
                 with manager.provider_for_context_transition() as runtime:
@@ -1205,6 +1215,13 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._mcp_client.probe(self._mcp_store.get_server(name))
+
+    def inspect_mcp_catalog(self) -> McpQuarantineCatalog:
+        """Refresh and return the redaction-safe MCP quarantine catalog."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._mcp_catalog_service.snapshot(refresh=True)
 
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""
@@ -2485,11 +2502,13 @@ class ProjectSession:
                     self._archive_list,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                     project_instructions_factory=self._project_instructions_loader.load,
+                    tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
                 loop.install_task_control_dispatcher(
                     TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
                 )
+                loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
                 snapshot = loop.effective_context_snapshot()
                 with self._manager.provider_for_context_transition() as runtime:
                     assessment = runtime.assess_context(snapshot.to_conversation_request())
@@ -3358,6 +3377,7 @@ class ProjectSession:
         *,
         commit_turn,
         project_instructions_factory,
+        tool_registry_factory=None,
     ) -> AgentLoop:
         return AgentLoop(
             None,
@@ -3385,6 +3405,11 @@ class ProjectSession:
             initial_effective_source=state.effective_source,
             commit_turn=commit_turn,
             project_instructions_factory=project_instructions_factory,
+            **(
+                {}
+                if tool_registry_factory is None
+                else {"tool_registry_factory": tool_registry_factory}
+            ),
         )
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
@@ -3410,10 +3435,48 @@ class ProjectSession:
             self._archive_list,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
             project_instructions_factory=self._project_instructions_loader.load,
+            tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
         )
         loop.install_action_dispatcher(self._dispatch_action)
         loop.install_task_control_dispatcher(TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control)
+        loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         return loop
+
+    def _transition_tool_set(
+        self,
+        prepared: PreparedAgentTurn,
+        snapshot: ToolSetSnapshot,
+    ) -> PreparedAgentTurn:
+        """Retire the active lease and issue an exact replacement for a later ToolSet epoch."""
+        lease = prepared.action_lease
+        if lease is None:
+            raise RuntimeError("active ToolSet transition requires an action lease")
+        self._assert_action_lease(lease)
+        if self._active_turn_runtime is None or self._active_action_binding is None:
+            raise RuntimeError("active ToolSet transition requires a pinned runtime")
+        has_mcp = any(
+            contract.source.kind is ExtensionSourceKind.MCP
+            for contract in prepared.registry_snapshot.contracts
+        )
+        if has_mcp:
+            current = self._mcp_catalog_service.registry_snapshot()
+            if (
+                current.snapshot_id != prepared.registry_snapshot.snapshot_id
+                or current.generation != prepared.registry_snapshot.generation
+            ):
+                raise RuntimeError("MCP registry changed before ToolSet promotion")
+        advanced = prepared.retire_action_lease().advance_tool_set(snapshot)
+        new_lease = ActionLease(
+            session_id=self._writer.session_id,
+            lease_id=_uuid4_text(self._action_uuid_factory(), "action lease ID"),
+            runtime_generation=self._active_turn_runtime.status.generation,
+            context_id=advanced.context.context_id,
+        )
+        transitioned = advanced.with_action_lease(new_lease)
+        self._active_action_lease = new_lease
+        self._active_turn_context = transitioned.context
+        self._active_tool_set_snapshot = transitioned.tool_set_snapshot
+        return transitioned
 
     def _dispatch_task_control(
         self, request: ToolUse, context_id: str

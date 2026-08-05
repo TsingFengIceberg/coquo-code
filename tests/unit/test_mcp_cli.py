@@ -84,7 +84,15 @@ def test_mcp_cli_configures_disabled_server_then_enables_probes_and_removes(tmp_
     assert "list_widgets" in rendered
     assert "UNTRUSTED" not in rendered
     assert "secret-value" not in rendered
-    assert "not added to any model ToolSet" in rendered
+    assert "use mcp catalog to inspect normalized quarantine candidates" in rendered
+
+    output = io.StringIO()
+    assert main(["mcp", "catalog"], stdout=output, stderr=errors, **common) == 0
+    catalog = output.getvalue()
+    assert "MCP quarantine catalog: mcp-catalog-v1-" in catalog
+    assert "Candidates: 2 accepted, 0 rejected" in catalog
+    assert "UNTRUSTED" not in catalog
+    assert "secret-value" not in catalog
 
     assert main(["mcp", "remove", "fixture", "--if-revision", "2"], **common) == 0
     output = io.StringIO()

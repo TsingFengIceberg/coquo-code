@@ -209,6 +209,143 @@ def test_project_session_rejects_contract_action_mismatch_before_action_audit(
     session.close()
 
 
+def test_project_session_retires_action_lease_when_discovery_promotes_a_later_epoch(
+    tmp_path: Path,
+) -> None:
+    from leonervis_code.core.effective_context import CanonicalToolDefinition
+    from leonervis_code.core.extensions import (
+        ExtensionSource,
+        ExtensionSourceKind,
+        ExtensionToolContract,
+        ToolExecutionKind,
+        ToolExposure,
+    )
+
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+    remote = ExtensionToolContract(
+        CanonicalToolDefinition.from_mapping(
+            {
+                "name": "mcp_fixture_lookup_1234567890",
+                "description": "Untrusted MCP lookup.",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ),
+        ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.fixture.2025-06-18", 1),
+        ToolExecutionKind.MCP_REMOTE,
+        ToolExposure.DEFERRED,
+        (),
+    )
+    registry = ToolRegistrySnapshot(2, (*TOOL_REGISTRY_SNAPSHOT.contracts, remote))
+    provider = RecordingProvider("unused")
+    provider.responses = [
+        ToolUse(
+            "search-lease",
+            "tool_search",
+            ToolArguments.from_mapping({"query": "lookup", "max_results": 2}),
+        ),
+        ToolUse(
+            "promote-lease",
+            "tool_promote",
+            ToolArguments.from_mapping({"names": [remote.name]}),
+        ),
+        ToolUse(
+            "read-after-promotion",
+            "read_file",
+            ToolArguments.from_mapping({"path": "README.md"}),
+        ),
+        AssistantText("done"),
+    ]
+
+    def respond(request):
+        provider.requests.append(request)
+        return provider.responses.pop(0)
+
+    provider.respond = respond
+    lease_ids = iter(
+        (
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+        )
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        action_uuid_factory=lambda: next(lease_ids),
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    session._loop._tool_registry_factory = lambda: registry
+    session._mcp_catalog_service.registry_snapshot = lambda: registry
+
+    assert session.prompt("lookup then read") == "done"
+    assert provider.requests[0].tool_set_id == provider.requests[1].tool_set_id
+    assert provider.requests[2].tool_set_id != provider.requests[1].tool_set_id
+    audit = session.action_audits()[0]
+    assert audit.identity.lease.lease_id == "22222222-2222-4222-8222-222222222222"
+    session.close()
+
+
+def test_project_session_rejects_mcp_promotion_when_frozen_registry_is_stale(
+    tmp_path: Path,
+) -> None:
+    from leonervis_code.core.effective_context import CanonicalToolDefinition
+    from leonervis_code.core.extensions import (
+        ExtensionSource,
+        ExtensionSourceKind,
+        ExtensionToolContract,
+        ToolExecutionKind,
+        ToolExposure,
+    )
+
+    remote = ExtensionToolContract(
+        CanonicalToolDefinition.from_mapping(
+            {
+                "name": "mcp_stale_lookup_1234567890",
+                "description": "Untrusted MCP stale lookup.",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ),
+        ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.stale.2025-06-18", 1),
+        ToolExecutionKind.MCP_REMOTE,
+        ToolExposure.DEFERRED,
+        (),
+    )
+    registry = ToolRegistrySnapshot(2, (*TOOL_REGISTRY_SNAPSHOT.contracts, remote))
+    provider = RecordingProvider("unused")
+    responses = [
+        ToolUse(
+            "search-stale",
+            "tool_search",
+            ToolArguments.from_mapping({"query": "stale lookup", "max_results": 2}),
+        ),
+        ToolUse(
+            "promote-stale",
+            "tool_promote",
+            ToolArguments.from_mapping({"names": [remote.name]}),
+        ),
+    ]
+
+    def respond(request):
+        provider.requests.append(request)
+        return responses.pop(0)
+
+    provider.respond = respond
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    session._loop._tool_registry_factory = lambda: registry
+
+    with pytest.raises(RuntimeError, match="MCP registry changed before ToolSet promotion"):
+        session.prompt("stale lookup")
+    assert session.history == ()
+    assert session.action_audits() == ()
+    session.close()
+
+
 def test_first_tool_after_resume_uses_the_current_runtime_binding(tmp_path: Path) -> None:
     store = ProviderProfileStore(tmp_path / "user.json", tmp_path / "project.json")
     store.add_profile(

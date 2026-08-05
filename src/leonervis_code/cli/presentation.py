@@ -32,6 +32,7 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
+from leonervis_code.mcp import McpCandidateDisposition, McpQuarantineCatalog
 from leonervis_code.mcp.client import McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
@@ -215,9 +216,10 @@ MCP_HELP = (
     "  /mcp list | /mcp status\n"
     "  /mcp show <server-name>\n"
     "  /mcp probe <server-name>\n"
-    "These are Host-only inspections. Probe starts one temporary confined stdio process, performs "
-    "initialize and tools/list, then closes it. Listed tools are not exposed to the model or added "
-    "to the current Turn ToolSet. Use the standalone leonervis-code mcp commands to edit configuration."
+    "  /mcp catalog\n"
+    "These are Host-only inspections. Probe shows raw negotiation facts; catalog refreshes normalized "
+    "quarantine identities. The model initially sees only fixed discovery tools, and exact candidates "
+    "can enter only a later Turn ToolSet epoch. Use standalone mcp commands to edit configuration."
 )
 POLICY_HELP = (
     "Policy commands:\n"
@@ -274,7 +276,7 @@ def render_mcp_server_status(status: McpServerStatus) -> str:
             f"Command available: {'yes' if status.command_available else 'no'}",
             f"Missing source environment names: {missing}",
             "Authority: read-only workspace, read-only host root, private temp/home, and no sockets.",
-            "Exposure: Host-only; no MCP tools are model-visible in this implementation stage.",
+            "Exposure: enabled servers contribute only normalized deferred candidates to later Turns.",
         )
     )
 
@@ -291,7 +293,7 @@ def render_mcp_server_statuses(statuses: tuple[McpServerStatus, ...]) -> str:
             f"  {configured.name}: {status.entry.scope}, "
             f"{'enabled' if configured.enabled else 'disabled'}, {state}, r{configured.revision}"
         )
-    lines.append("Model exposure: none; configuration changes apply only to later MCP stages.")
+    lines.append("Model exposure: fixed discovery tools only; MCP candidates remain deferred.")
     return "\n".join(lines)
 
 
@@ -316,9 +318,40 @@ def render_mcp_probe_result(result: McpProbeResult) -> str:
             f"Process: {result.duration_ms} ms; stderr {result.stderr_bytes} bytes"
             + (" (truncated)" if result.stderr_truncated else ""),
             f"Cleanup complete: {'yes' if result.cleanup_complete else 'no'}",
-            "Exposure: inspection only; these tools were not added to any model ToolSet.",
+            "Exposure: probe only; use mcp catalog to inspect normalized quarantine candidates.",
         )
     )
+    return "\n".join(lines)
+
+
+def render_mcp_catalog(catalog: McpQuarantineCatalog) -> str:
+    """Render candidate identities and sanitized reason codes without server prose or schemas."""
+    lines = [
+        f"MCP quarantine catalog: {_safe_inline(catalog.catalog_id)}",
+        f"Candidates: {len(catalog.accepted)} accepted, {len(catalog.rejected)} rejected; "
+        f"source issues {len(catalog.source_issues)}",
+    ]
+    for candidate in catalog.candidates:
+        detail = (
+            f"schema {_safe_inline(candidate.schema_fingerprint)}"
+            if candidate.disposition is McpCandidateDisposition.ACCEPTED
+            else f"reason {_safe_inline(candidate.reason_code or 'unknown')}"
+        )
+        lines.append(
+            f"  {candidate.disposition.value}: {_safe_inline(candidate.qualified_name)} "
+            f"[{_safe_inline(candidate.scope)}/{_safe_inline(candidate.configured_name)} "
+            f"r{candidate.configuration_revision}; {_safe_inline(candidate.protocol_version)}; {detail}]"
+        )
+    for issue in catalog.source_issues:
+        lines.append(
+            f"  source-rejected: {_safe_inline(issue.configured_name)} "
+            f"[{_safe_inline(issue.scope)} r{issue.configuration_revision}; "
+            f"reason {_safe_inline(issue.reason_code)}]"
+        )
+    lines.append(
+        "Descriptions, schemas, annotations, server errors, stderr, arguments, and credentials are hidden."
+    )
+    lines.append("Accepted candidates remain deferred until exact in-Turn search and promotion.")
     return "\n".join(lines)
 
 
@@ -1432,6 +1465,8 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "archive_list": "ZIP or uncompressed TAR metadata only; no extraction; 64 MiB archive, 1,000 entries, and 32 KiB output.",
     "move_directory": "Atomic no-replace same-filesystem directory-tree rename; rejects symlinks, descendants, stale state, and unsupported platforms.",
     "download_file": "Public HTTP(S) GET to one regular workspace file; 5 redirects, 30-second timeout, 16 MiB body, exact-state recheck, and atomic install.",
+    "tool_search": "Literal case-insensitive search over only the current Turn's frozen deferred catalog; at most 8 results.",
+    "tool_promote": "Exact same-Turn discovered MCP names only; at most 8 names; creates one later immutable ToolSet epoch.",
     "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
     "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
     "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",
@@ -1547,6 +1582,8 @@ def _tool_policy_availability(
         return "available only in an ordinary Prompt; explicit user acceptance required"
     if policy == "task-lifecycle":
         return "available only in an ordinary Prompt for the current user's explicit decision"
+    if policy == "tool-discovery":
+        return "available; discovery is isolated and does not execute candidates"
     if policy == "dangerous":
         if mode != "danger-full-access":
             return "denied by current permission mode"

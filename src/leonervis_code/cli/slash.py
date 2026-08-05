@@ -40,6 +40,7 @@ from leonervis_code.cli.presentation import (
     render_git_log,
     render_git_show,
     render_git_status,
+    render_mcp_catalog,
     render_mcp_probe_result,
     render_mcp_server_status,
     render_mcp_server_statuses,
@@ -235,6 +236,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/mcp status", "Show configured MCP server readiness"),
     SlashCompletionSpec("/mcp show", "Show one redacted MCP server configuration"),
     SlashCompletionSpec("/mcp probe", "Temporarily initialize and list MCP tools"),
+    SlashCompletionSpec("/mcp catalog", "Refresh the normalized MCP quarantine catalog"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -332,6 +334,8 @@ class ReplSession(Protocol):
     def inspect_mcp_server(self, name: str): ...
 
     def probe_mcp_server(self, name: str): ...
+
+    def inspect_mcp_catalog(self): ...
 
     def status(self): ...
 
@@ -860,12 +864,18 @@ def dispatch_slash(
             kind="success",
             failure_prefix="MCP probe failed",
         )
+    if command == "/mcp catalog":
+        return _call(
+            lambda: render_mcp_catalog(session.inspect_mcp_catalog()),
+            kind="info",
+            failure_prefix="MCP catalog inspection failed",
+        )
     if command.startswith("/mcp "):
         subcommand = command.split(maxsplit=2)[1]
-        suggestion = _suggest_token(subcommand, ("list", "status", "show", "probe"))
+        suggestion = _suggest_token(subcommand, ("list", "status", "show", "probe", "catalog"))
         return _usage(
             f"Unknown MCP command: {subcommand}{_suggestion_line(suggestion)}\n"
-            "Usage: /mcp <list|status|show|probe>"
+            "Usage: /mcp <list|status|show|probe|catalog>"
         )
     if command == "/search sources" or command.startswith("/search sources "):
         if command != "/search sources":

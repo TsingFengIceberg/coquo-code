@@ -29,6 +29,7 @@ from leonervis_code.session import (
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.mcp.client import McpListedTool, McpProbeResult, McpServerStatus
+from leonervis_code.mcp.catalog import build_mcp_quarantine_catalog
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
@@ -237,6 +238,12 @@ class Session:
             stderr_bytes=0,
             stderr_truncated=False,
             cleanup_complete=True,
+        )
+
+    def inspect_mcp_catalog(self):
+        return build_mcp_quarantine_catalog(
+            (self.mcp_entry,),
+            SimpleNamespace(probe=lambda entry: self.probe_mcp_server(entry.configuration.name)),
         )
 
     def set_web_search_sources(self, sources):
@@ -908,7 +915,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert "Registry snapshot: registry-v1-" in catalog
-    assert " generation=1" in catalog
+    assert " generation=2" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert (
         "22. web_search: network-read; available "
@@ -917,7 +924,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "Contract: tool-v1-" in run_command
-    assert "Source: builtin:leonervis-code generation=1" in run_command
+    assert "Source: builtin:leonervis-code generation=2" in run_command
     assert "Exposure: direct" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
@@ -1472,12 +1479,16 @@ def test_mcp_commands_are_host_only_and_probe_does_not_expose_tools(tmp_path) ->
     assert listed.handled and listed.kind == "info"
     assert "fixture: project, enabled, ready, r1" in listed.message
     shown = dispatch_slash("/mcp show fixture", session)
-    assert "Exposure: Host-only" in shown.message
+    assert "normalized deferred candidates" in shown.message
     probed = dispatch_slash("/mcp probe fixture", session)
     assert probed.kind == "success"
     assert "read_widget" in probed.message
     assert "UNTRUSTED_DESCRIPTION" not in probed.message
-    assert "not added to any model ToolSet" in probed.message
+    assert "use mcp catalog to inspect normalized quarantine candidates" in probed.message
+    catalog = dispatch_slash("/mcp catalog", session)
+    assert catalog.kind == "info"
+    assert "Candidates: 1 accepted, 0 rejected" in catalog.message
+    assert "UNTRUSTED_DESCRIPTION" not in catalog.message
     assert session.turns == original_turns
 
     assert dispatch_slash("/mcp show", session).message == "Usage: /mcp show <server-name>"
@@ -1540,6 +1551,9 @@ def test_real_mcp_inspection_does_not_mutate_session_or_tool_surface(tmp_path) -
         listed = dispatch_slash("/mcp list", session)
         assert listed.kind == "info"
         assert listed.message == "No MCP servers configured."
+        catalog = dispatch_slash("/mcp catalog", session)
+        assert catalog.kind == "info"
+        assert "Candidates: 0 accepted, 0 rejected" in catalog.message
         assert (
             transcript.read_bytes(),
             session.history,

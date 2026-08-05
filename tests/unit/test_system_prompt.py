@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v33-ecefd82d8e51e9542404288e5911fcd8355e1179d1f9c13c2b3ec09492fac4f5"
+EXPECTED_FINGERPRINT = "v34-970ee912f58cfa0a5a4e7cab4f959723f97664107ef63ddc4376fbe5d5ebbdf2"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 33
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 34
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -40,6 +40,9 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "`web_fetch`, `compare_files`, `git_blame`, `git_refs`, `json_query`" in prompt.text
     assert "Use `web_search` to discover candidate URLs and `web_fetch`" in prompt.text
     assert "one `network-write` action" in prompt.text
+    assert "fixed catalog additionally contains `tool_search` and `tool_promote`" in prompt.text
+    assert "exact names returned by an earlier successful `tool_search`" in prompt.text
+    assert "MCP execution is not implemented in this runtime slice" in prompt.text
     assert "never extracts entries" in prompt.text
     assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text

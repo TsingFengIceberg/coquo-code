@@ -33,6 +33,7 @@ from leonervis_code.cli.presentation import (
     MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
+    render_mcp_catalog,
     render_mcp_probe_result,
     render_mcp_server_status,
     render_mcp_server_statuses,
@@ -57,6 +58,7 @@ from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.mcp import (
+    McpCatalogService,
     McpClientError,
     McpConfigurationError,
     McpServerConfiguration,
@@ -440,6 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--if-revision", type=int)
     mcp_probe = mcp_commands.add_parser("probe", help="temporarily initialize and list tools")
     mcp_probe.add_argument("name")
+    mcp_commands.add_parser("catalog", help="refresh the normalized MCP quarantine catalog")
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -999,6 +1002,10 @@ def handle_mcp_command(
         stdout.write(f"Removed {arguments.scope} MCP server {arguments.name}.\n")
     elif command == "probe":
         stdout.write(f"{render_mcp_probe_result(client.probe(store.get_server(arguments.name)))}\n")
+    elif command == "catalog":
+        stdout.write(
+            f"{render_mcp_catalog(McpCatalogService(store, client).snapshot(refresh=True))}\n"
+        )
     return 0
 
 

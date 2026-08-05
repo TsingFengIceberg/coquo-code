@@ -162,6 +162,8 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "archive_list",
         "move_directory",
         "download_file",
+        "tool_search",
+        "tool_promote",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -518,6 +520,86 @@ def test_prepared_turn_advances_only_through_an_explicit_later_tool_set_epoch(
     assert advanced.initial_request.enabled_tool_names == ("read_file", "grep")
     assert advanced.initial_request.tool_definitions == promoted.definitions
     assert advanced.initial_request.tool_set_id == promoted.snapshot_id
+
+
+def test_discovery_search_promotes_exact_candidate_for_later_invocation_without_execution(
+    tmp_path,
+) -> None:
+    from leonervis_code.core.effective_context import CanonicalToolDefinition
+    from leonervis_code.core.extensions import (
+        ExtensionSource,
+        ExtensionSourceKind,
+        ExtensionToolContract,
+        ToolExecutionKind,
+    )
+
+    remote = ExtensionToolContract(
+        CanonicalToolDefinition.from_mapping(
+            {
+                "name": "mcp_fixture_find_widgets_1234567890",
+                "description": "Untrusted MCP tool for widget lookup.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            }
+        ),
+        ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.fixture.2025-06-18", 1),
+        ToolExecutionKind.MCP_REMOTE,
+        ToolExposure.DEFERRED,
+        (),
+    )
+    registry = ToolRegistrySnapshot(
+        2,
+        (*TOOL_REGISTRY_SNAPSHOT.contracts, remote),
+    )
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "search-1",
+                "tool_search",
+                ToolArguments.from_mapping({"query": "widget", "max_results": 4}),
+            ),
+            ToolUse(
+                "promote-1",
+                "tool_promote",
+                ToolArguments.from_mapping({"names": [remote.name]}),
+            ),
+            ToolUse(
+                "remote-1",
+                remote.name,
+                ToolArguments.from_mapping({"query": "blue"}),
+            ),
+            AssistantText("execution remained unavailable"),
+        ]
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        tool_registry_factory=lambda: registry,
+    )
+
+    assert loop.run("find widgets") == "execution remained unavailable"
+    assert remote.name not in tuple(
+        definition.name for definition in provider.received_requests[0].tool_definitions
+    )
+    assert remote.name not in tuple(
+        definition.name for definition in provider.received_requests[1].tool_definitions
+    )
+    assert remote.name in provider.received_requests[2].enabled_tool_names
+    assert provider.received_requests[2].tool_set_id != provider.received_requests[1].tool_set_id
+    remote_result = next(
+        item
+        for item in loop.history
+        if isinstance(item, ToolResult) and item.tool_use_id == "remote-1"
+    )
+    assert remote_result.is_error
+    assert remote_result.content == "MCP tool execution is unavailable in this runtime slice"
 
 
 def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_path) -> None:

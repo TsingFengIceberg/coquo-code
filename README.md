@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及31个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取和受控文件传输。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及33个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输和渐进式MCP工具发现。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ## 目录
 
@@ -335,6 +335,7 @@ Task用于管理可恢复的前台多阶段工作，既可由自然语言交互�
 /mcp list
 /mcp show <server-name>
 /mcp probe <server-name>
+/mcp catalog
 /permissions
 /permissions workspace-write auto
 /tools details 3
@@ -503,6 +504,6 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-Leonervis Code目前提供31个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、目录移动和受控下载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
+Leonervis Code目前提供33个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载及渐进式MCP发现，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前只实现本地受限stdio配置、初始化与工具列表探测，尚未向模型暴露或执行MCP工具。Skills、浏览器自动化、后台或并行智能体及远程服务尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持本地受限stdio配置、隔离目录、固定发现工具及同Turn精确ToolSet晋升，但尚未执行MCP工具。Skills、浏览器自动化、后台或并行智能体及远程服务尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

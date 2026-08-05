@@ -47,6 +47,8 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "archive_list",
         "move_directory",
         "download_file",
+        "tool_search",
+        "tool_promote",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -98,6 +100,34 @@ def test_provider_input_defers_bounded_ordinary_tool_validation_only() -> None:
         tool_use_from_provider_input("task-1", "task_accept_plan", {"task_id": "bad"})
     with pytest.raises(ValueError):
         tool_use_from_provider_input("unknown-1", "unknown", {})
+
+
+def test_discovery_inputs_are_bounded_and_remote_mcp_arguments_remain_generic() -> None:
+    search = tool_use_from_input(
+        "search-1",
+        "tool_search",
+        {"query": "database lookup", "max_results": 4},
+    )
+    assert tool_input_from_use(search) == {"query": "database lookup", "max_results": 4}
+
+    promote = tool_use_from_input(
+        "promote-1",
+        "tool_promote",
+        {"names": ["mcp_fixture_lookup_1234567890"]},
+    )
+    assert tool_input_from_use(promote) == {"names": ["mcp_fixture_lookup_1234567890"]}
+
+    remote = tool_use_from_provider_input(
+        "remote-1",
+        "mcp_fixture_lookup_1234567890",
+        {"nested": {"value": 1}},
+    )
+    assert tool_input_for_provider_history(remote) == {"nested": {"value": 1}}
+
+    with pytest.raises(ValueError, match="max_results"):
+        tool_use_from_input("bad-search", "tool_search", {"query": "x", "max_results": 9})
+    with pytest.raises(ValueError, match="only MCP"):
+        tool_use_from_input("bad-promote", "tool_promote", {"names": ["read_file"]})
 
 
 def test_catalog_validates_closed_task_coordination_inputs() -> None:

@@ -75,6 +75,8 @@ from leonervis_code.providers.anthropic import (
     task_propose_plan_tool_definition,
     task_report_blocker_tool_definition,
     task_report_reflection_tool_definition,
+    tool_promote_tool_definition,
+    tool_search_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
@@ -1305,6 +1307,8 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 archive_list_tool_definition(),
                 move_directory_tool_definition(),
                 download_file_tool_definition(),
+                tool_search_tool_definition(),
+                tool_promote_tool_definition(),
                 task_propose_plan_tool_definition(),
                 task_report_reflection_tool_definition(),
                 task_report_blocker_tool_definition(),

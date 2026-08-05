@@ -1197,6 +1197,22 @@ Stdio使用严格newline-delimited JSON-RPC，拒绝duplicate key、non-finite n
 
 本阶段没有`tools/call`、常驻server manager、HTTP/SSE/OAuth、resources/prompts/sampling，也不把枚举工具加入Extension Contract、Registry、ToolSet、Provider request、PermissionGate、Action Audit或Session history。Canonical system prompt保持v33、adapter contract保持v37、Effective Context保持`ctx-v9`/`ctx-v10`，全部既有持久schema不变。详见[0108：Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)。
 
+## MCP Tool Normalization 与 Quarantine Catalog
+
+启用的受限stdio server现在可以被归一为content-addressed `McpQuarantineCatalog`，但不会直接进入初始ToolSet。每个listed tool都会获得由configured server、remote name和hash组成的最长64字符qualified name，并绑定user/project scope、configuration revision、negotiated protocol、schema fingerprint及稳定disposition。Schema规范化只接受object root与闭合的递归关键字/type子集；不支持的reference、keyword、composition、required或additional-properties形式会作为带脱敏reason code的rejected candidate保留。一个server probe失败则保留脱敏source issue，不展示server error或stderr正文。
+
+Accepted candidate被转换为`source=mcp`、`execution=mcp-remote`、`exposure=deferred`且无PermissionAction的`ExtensionToolContract`。Source name绑定scope、server与protocol，source generation绑定配置revision；schema与有界description进入精确定义，但description明确标记为untrusted server data。MCP annotation与output schema不进入contract，`readOnlyHint`等提示不能授予workspace-read或其他权限。Catalog按qualified name canonical排序并由完整候选/拒绝事实生成identity；Session-local service只在credential-free配置identity不变时缓存。
+
+Standalone `mcp catalog`与Host-only `/mcp catalog`会显式刷新并仅显示catalog ID、数量、qualified name、scope/server、revision、protocol、schema fingerprint和reason code；不显示description、schema、annotation、argument、credential、server error或stderr，也不调用Provider、不写Session或Action Audit。Built-in source与Registry因新增Slice 4 discovery contract升级generation 2，组合MCP的Registry使用generation 3。详见[0109：MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)。
+
+## Progressive MCP Discovery 与 ToolSet Epoch Transition
+
+模型初始只看到两个固定direct contract：`tool_search(query,max_results)`和`tool_promote(names)`，而不是全部MCP schema。前者只对当前Turn冻结Registry里的MCP deferred contract执行有界case-insensitive literal-term搜索并最多返回8个候选；后者最多接受8个同Turn先前搜索实际返回的exact qualified name。两类discovery call都必须独占一个assistant tool response，不进入PermissionGate或Action Audit，也不能依据annotation、猜测或其他extension自动激活。
+
+Promotion仍使用同一Registry snapshot的canonical `ToolSetSnapshot.promote()`，重复可见名称保持幂等；真实增加时生成下一epoch。对于已经持有ActionLease的ProjectSession，Host先复核Session、runtime generation、旧context、旧ToolSet及当前MCP Registry identity，然后退休旧lease，构造绑定新ToolSet ID的Effective Context并签发新的non-recreatable lease，下一次Provider count/create统一使用新定义。旧approval与ActionIdentity无法跨epoch复用；配置或Registry stale会拒绝且不提交candidate Turn。
+
+本阶段仍不实现`tools/call`。模型即使请求已晋升MCP contract，也只会收到`mcp_execution_unavailable` ToolResult，不会进入built-in executor、PermissionGate、approval、Action Audit或MCP process。Canonical system prompt升级v34、provider adapter contract升级v38；Effective Context representation仍为`ctx-v9`/`ctx-v10`，empty full-context ID更新为`ctx-v9-2f737163e792a16fbae49a629f54afc5cf43d49b75f1afe47b12ff5ed4e60d3e`，持久Session/Task/Action Audit等schema不变。详见[0110：Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1307,3 +1323,5 @@ Stdio使用严格newline-delimited JSON-RPC，拒绝duplicate key、non-finite n
 106. [0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)
 107. [0107：Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)
 108. [0108：Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)
+109. [0109：MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)
+110. [0110：Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)

@@ -37,6 +37,8 @@ class ToolExecutionKind(StrEnum):
     TASK_STAGE_CONTROL = "task-control"
     TASK_ADMISSION = "task-admission"
     TASK_LIFECYCLE = "task-lifecycle"
+    TOOL_DISCOVERY = "tool-discovery"
+    MCP_REMOTE = "mcp-remote"
 
 
 class ToolExposure(StrEnum):

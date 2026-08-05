@@ -116,6 +116,16 @@ from leonervis_code.tools.task_coordination import (
     TASK_REPORT_REFLECTION_TOOL_NAME,
     task_control_tool_snapshots,
 )
+from leonervis_code.tools.tool_discovery import (
+    MAX_TOOL_PROMOTIONS,
+    MAX_TOOL_SEARCH_QUERY_CHARACTERS,
+    MAX_TOOL_SEARCH_RESULTS,
+    MIN_TOOL_SEARCH_RESULTS,
+    TOOL_DISCOVERY_TOOL_NAMES,
+    TOOL_PROMOTE_TOOL_NAME,
+    TOOL_SEARCH_TOOL_NAME,
+    tool_discovery_snapshots,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -157,6 +167,7 @@ ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     archive_list_tool_snapshot(),
     move_directory_tool_snapshot(),
     download_file_tool_snapshot(),
+    *tool_discovery_snapshots(),
 )
 ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
 ORDINARY_PROMPT_TOOL_NAMES = (
@@ -171,8 +182,8 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *task_control_tool_snapshots(),
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 1
-TOOL_REGISTRY_GENERATION = 1
+BUILTIN_TOOL_SOURCE_GENERATION = 2
+TOOL_REGISTRY_GENERATION = 2
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "leonervis-code",
@@ -247,6 +258,9 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
     elif name == TASK_PROPOSE_START_TOOL_NAME:
         execution_kind = ToolExecutionKind.TASK_ADMISSION
         permission_actions = ()
+    elif name in TOOL_DISCOVERY_TOOL_NAMES:
+        execution_kind = ToolExecutionKind.TOOL_DISCOVERY
+        permission_actions = ()
     elif name in _TASK_LIFECYCLE_NAMES:
         execution_kind = ToolExecutionKind.TASK_LIFECYCLE
         permission_actions = ()
@@ -309,6 +323,15 @@ def tool_use_from_input(
     assistant_text: str | None = None,
 ) -> ToolUse:
     """Validate one exact known-tool input and freeze its neutral arguments."""
+    if name.startswith("mcp_"):
+        if not isinstance(tool_input, dict):
+            raise ValueError(f"{name} input is malformed")
+        return ToolUse(
+            tool_use_id=tool_use_id,
+            name=name,
+            arguments=ToolArguments.from_mapping(tool_input),
+            assistant_text=assistant_text,
+        )
     expected = _expected_keys(name)
     if not isinstance(tool_input, dict) or set(tool_input) != expected:
         raise ValueError(f"{name} input is malformed")
@@ -341,6 +364,8 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
     if not isinstance(request.arguments, ToolArguments):
         raise ValueError("tool arguments are invalid")
     tool_input = request.arguments.as_mapping()
+    if request.name.startswith("mcp_"):
+        return tool_input
     expected = _expected_keys(request.name)
     if set(tool_input) != expected:
         raise ValueError(f"{request.name} input is malformed")
@@ -418,6 +443,10 @@ def _expected_keys(name: str) -> set[str]:
         return {"source", "destination"}
     if name == DOWNLOAD_FILE_TOOL_NAME:
         return {"url", "path"}
+    if name == TOOL_SEARCH_TOOL_NAME:
+        return {"query", "max_results"}
+    if name == TOOL_PROMOTE_TOOL_NAME:
+        return {"names"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -436,6 +465,42 @@ def _expected_keys(name: str) -> set[str]:
 
 
 def _validate_known_input(name: str, tool_input: dict[str, object], expected: set[str]) -> None:
+    if name == TOOL_SEARCH_TOOL_NAME:
+        query = tool_input["query"]
+        max_results = tool_input["max_results"]
+        _validate_input_string(
+            query,
+            label="tool_search query",
+            max_characters=MAX_TOOL_SEARCH_QUERY_CHARACTERS,
+            max_bytes=MAX_TOOL_SEARCH_QUERY_CHARACTERS * 4,
+        )
+        if type(max_results) is not int or not (
+            MIN_TOOL_SEARCH_RESULTS <= max_results <= MAX_TOOL_SEARCH_RESULTS
+        ):
+            raise ValueError(
+                f"tool_search max_results must be an integer from "
+                f"{MIN_TOOL_SEARCH_RESULTS} to {MAX_TOOL_SEARCH_RESULTS}"
+            )
+        return
+    if name == TOOL_PROMOTE_TOOL_NAME:
+        names = tool_input["names"]
+        if (
+            not isinstance(names, list)
+            or not 1 <= len(names) <= MAX_TOOL_PROMOTIONS
+            or len(names) != len(set(names))
+        ):
+            raise ValueError(f"tool_promote names must contain 1 to {MAX_TOOL_PROMOTIONS} names")
+        for name_value in names:
+            _validate_input_string(
+                name_value,
+                label="tool_promote name",
+                allow_whitespace=False,
+                max_characters=64,
+                max_bytes=64,
+            )
+            if not name_value.startswith("mcp_"):
+                raise ValueError("tool_promote accepts only MCP candidate names")
+        return
     if name == RUN_COMMAND_TOOL_NAME:
         argv = tool_input["argv"]
         cwd = tool_input["cwd"]
