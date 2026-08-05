@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID
 
@@ -23,6 +23,8 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
+from leonervis_code.core.extensions import ToolRegistrySnapshot
+from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
@@ -55,6 +57,7 @@ from leonervis_code.session_records import (
 )
 from leonervis_code.session_store import SessionStore, SessionStoreError
 from leonervis_code.system_prompt import build_system_prompt
+from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -153,6 +156,56 @@ def test_project_session_projects_one_exact_private_tool_subset(tmp_path: Path) 
 
     assert provider.requests[0].allow_tools is True
     assert provider.requests[0].enabled_tool_names == ("read_file", "grep")
+    assert provider.requests[0].tool_definitions is not None
+    assert tuple(tool.name for tool in provider.requests[0].tool_definitions) == (
+        "read_file",
+        "grep",
+    )
+    assert provider.requests[0].tool_set_id is not None
+    session.close()
+
+
+def test_project_session_rejects_contract_action_mismatch_before_action_audit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "README.md").write_text("notes\n", encoding="utf-8")
+
+    class ReadProvider(RecordingProvider):
+        def respond(self, request):
+            self.requests.append(request)
+            return ToolUse(
+                "read-misclassified",
+                "read_file",
+                ToolArguments.from_mapping({"path": "README.md"}),
+            )
+
+    provider = ReadProvider("mismatch")
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    contracts = tuple(
+        replace(
+            contract,
+            permission_actions=(PermissionAction.WORKSPACE_CREATE,),
+        )
+        if contract.name == "read_file"
+        else contract
+        for contract in TOOL_REGISTRY_SNAPSHOT.contracts
+    )
+    registry = ToolRegistrySnapshot(2, contracts)
+    session._loop._tool_registry_factory = lambda: registry
+
+    with pytest.raises(RuntimeError, match="classification violates"):
+        session.prompt("read the file")
+
+    request = provider.requests[0]
+    assert request.enabled_tool_names is not None
+    assert request.tool_set_id == registry.select(request.enabled_tool_names).snapshot_id
+    assert session.action_audits() == ()
+    assert session.history == ()
     session.close()
 
 
@@ -1339,7 +1392,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v8-")
+    assert session.inspect_context().context_id.startswith("ctx-v10-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     history = session.compaction_history(5)

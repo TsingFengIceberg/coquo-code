@@ -1179,6 +1179,14 @@ Responses stream以语义event的terminal response object为最终真相，增�
 
 `move_directory`使用Linux `renameat2(RENAME_NOREPLACE)`，只允许同文件系统移动到missing destination，拒绝symlink parent、descendant destination、replacement、stale state和不支持原子no-replace的平台。三类新action都有独立ApprovalPreview v3；Routine terminal摘要继续隐藏URL、query、pointer和正文，ask审批则显示授权所需的exact URL/path。Transport或durability不确定性保持partial且不得自动retry。Canonical system prompt升级v33，provider adapter contract升级v36，empty full-context ID变为`ctx-v7-d9d80c3188613943154a2c3f8df40062d52ff14fdb19b3b8628d557e81e13c95`；Effective Context仍为`ctx-v7`/`ctx-v8`，所有持久schema及旧transcript replay不变。详见[0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)。
 
+## Unified Extension Contract 与 ToolSet Snapshot
+
+MCP接入前，所有现有模型可见工具先迁入同一套不可变`ExtensionToolContract`。每份contract同时绑定精确provider-neutral schema、`builtin | mcp | extension`来源及generation、`host-action | task-*`执行归属、`direct | deferred`暴露方式和允许的`PermissionAction`集合，并生成覆盖全部字段的content identity。Generation-one `ToolRegistrySnapshot`成为catalog、终端权限标签和未来extension来源的统一事实；`/tools catalog`可以检查registry、contract、source generation与exposure，不再维护重复的权限展示表。
+
+每个普通Turn在prepare时从一个Registry generation冻结精确`ToolSetSnapshot`。Provider count与create都投影该快照内的原始定义；Provider若返回快照外工具会在dispatch前拒绝且不提交Turn。Compaction rebase继续使用同一快照，ActionLease也通过新Effective Context identity绑定它。ProjectSession在PermissionGate和执行前确认contract存在、归属Host action并允许executor推导出的权限分类；这层一致性校验不替代workspace、stale、approval、sandbox、audit及各工具硬边界。
+
+Epoch 0只允许`direct` contract；纯`promote()`接口只能从同一Registry快照按canonical顺序增加`deferred` contract并生成后续epoch，且只能发生在ActionLease发放前。当前所有built-in仍为direct，本阶段没有MCP transport、server lifecycle、credential、model-visible discovery tool或自动promotion。Provider原生搜索仍是adapter拥有的能力，Task coordination仍走专用dispatcher。Effective Context升级为`ctx-v9`/`ctx-v10`，empty full-context ID为`ctx-v9-6e8bb3a51d3138760bdb6e8ea9db1ab94927599529048ba7bee2d7e792fe2b0e`；provider adapter contract升级v37，system prompt保持v33，其他持久schema不变且旧Session不重写。详见[0107：Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1287,3 +1295,4 @@ Responses stream以语义event的terminal response object为最终真相，增�
 104. [0104：OpenAI Responses Protocol and Provider-owned History](./decisions/0104-openai-responses-protocol-and-provider-owned-history.md)
 105. [0105：Provider Search Resilience, Controls, and Observability](./decisions/0105-provider-search-resilience-controls-and-observability.md)
 106. [0106：Bounded Fetch, Structured Read, and Controlled Transfer Tools](./decisions/0106-bounded-fetch-structured-read-and-controlled-transfer-tools.md)
+107. [0107：Unified Extension Contract and ToolSet Snapshots](./decisions/0107-unified-extension-contract-and-tool-set-snapshots.md)

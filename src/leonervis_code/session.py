@@ -99,6 +99,7 @@ from leonervis_code.core.effective_context import (
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EffectiveContextSnapshot,
 )
+from leonervis_code.core.extensions import ToolExecutionKind, ToolSetSnapshot
 from leonervis_code.providers.manager import (
     CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
@@ -819,6 +820,7 @@ class ProjectSession:
         self._active_action_lease: ActionLease | None = None
         self._active_turn_context: EffectiveContextSnapshot | None = None
         self._active_action_binding: BindingSnapshot | None = None
+        self._active_tool_set_snapshot: ToolSetSnapshot | None = None
         self._active_usage_cursor: int | None = None
         self._active_turn_runtime: TurnRuntimeSnapshot | None = None
         self._active_cancellation: TurnCancellation | None = None
@@ -2577,6 +2579,7 @@ class ProjectSession:
                     self._active_action_lease = lease
                     self._active_turn_context = prepared.context
                     self._active_action_binding = binding
+                    self._active_tool_set_snapshot = prepared.tool_set_snapshot
                     response = loop.run_prepared(
                         prepared,
                         provider=runtime,
@@ -2617,6 +2620,7 @@ class ProjectSession:
                 self._active_action_lease = None
                 self._active_turn_context = None
                 self._active_action_binding = None
+                self._active_tool_set_snapshot = None
                 self._active_usage_cursor = None
                 self._active_turn_runtime = None
                 self._active_cancellation = None
@@ -2988,6 +2992,7 @@ class ProjectSession:
             system_prompt=source.system_prompt,
             project_instructions=source.project_instructions,
             tool_definitions=source.tool_definitions,
+            tool_set_id=source.tool_set_id,
             full_history=source.full_history,
             effective_history=prepared.plan.retained_history,
             effective_summary=summary,
@@ -3613,6 +3618,12 @@ class ProjectSession:
     def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolDispatchResult:
         """Prepare and run one model tool request through the exact Host boundary."""
         self._assert_action_lease(lease)
+        tool_set = self._active_tool_set_snapshot
+        if tool_set is None:
+            raise RuntimeError("prepared tool set snapshot is unavailable")
+        contract = tool_set.contract(request.name)
+        if contract.execution_kind is not ToolExecutionKind.HOST_ACTION:
+            raise RuntimeError("tool contract does not use the Host action boundary")
         cancellation = self._active_cancellation
         if cancellation is not None:
             cancellation.check()
@@ -3756,6 +3767,9 @@ class ProjectSession:
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
+
+        if not contract.permits(action):
+            raise RuntimeError("tool action classification violates its extension contract")
 
         identity = ActionIdentity(
             request_id=_uuid4_text(self._action_uuid_factory(), "action request ID"),
@@ -4172,15 +4186,23 @@ class ProjectSession:
     def _assert_action_lease(self, lease: ActionLease) -> None:
         active = self._active_action_lease
         context = self._active_turn_context
-        if active != lease or context is None or context.context_id != lease.context_id:
+        tool_set = self._active_tool_set_snapshot
+        if (
+            active != lease
+            or context is None
+            or tool_set is None
+            or context.context_id != lease.context_id
+            or context.tool_set_id != tool_set.snapshot_id
+        ):
             raise RuntimeError("prepared action lease is stale")
+        current_context = self._loop.effective_context_snapshot_with_project_instructions(
+            context.project_instructions,
+            tool_set_snapshot=tool_set,
+        )
         if (
             self._writer.session_id != lease.session_id
             or self._manager.status().generation != lease.runtime_generation
-            or self._loop.effective_context_snapshot_with_project_instructions(
-                context.project_instructions
-            ).context_id
-            != lease.context_id
+            or current_context.context_id != lease.context_id
         ):
             raise RuntimeError("prepared action lease no longer matches runtime context")
 

@@ -470,7 +470,12 @@ def build_input_projection(
         ],
     }
     if request_snapshot.allow_tools:
-        projection["tools"] = list(model_tool_definitions(request_snapshot.enabled_tool_names))
+        projection["tools"] = list(
+            model_tool_definitions(
+                request_snapshot.enabled_tool_names,
+                definitions=request_snapshot.tool_definitions,
+            )
+        )
         projection["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         if native_search_enabled:
             _apply_native_search_projection(projection, config.native_search, native_search_options)

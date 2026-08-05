@@ -48,7 +48,7 @@ from leonervis_code.task_runtime import TaskNextAction, TaskRunStopped
 from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
-from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.web_search import WebSearchBackend, WebSearchSourceConfiguration
 
 RESET = "\x1b[0m"
@@ -1318,48 +1318,6 @@ def render_command_sandbox_inspection(inspection: CommandSandboxInspectionView) 
     return "\n".join(lines)
 
 
-_TOOL_POLICY_LABELS = {
-    "read_file": "workspace-read",
-    "glob": "workspace-read",
-    "grep": "workspace-read",
-    "write_file": "workspace-create/overwrite",
-    "edit_file": "workspace-overwrite",
-    "run_command": "dangerous",
-    "mkdir": "workspace-create",
-    "move_file": "workspace-move",
-    "delete_file": "workspace-delete",
-    "delete_directory": "workspace-delete",
-    "list_directory": "workspace-read",
-    "copy_file": "workspace-create",
-    "read_file_lines": "workspace-read",
-    "stat_path": "workspace-read",
-    "list_tree": "workspace-read",
-    "grep_regex": "workspace-read",
-    "patch_file": "workspace-overwrite",
-    "git_status": "workspace-read",
-    "git_diff": "workspace-read",
-    "git_log": "workspace-read",
-    "git_show": "workspace-read",
-    "web_search": "network-read",
-    "web_fetch": "network-read",
-    "compare_files": "workspace-read",
-    "git_blame": "workspace-read",
-    "git_refs": "workspace-read",
-    "json_query": "workspace-read",
-    "checksum_file": "workspace-read",
-    "archive_list": "workspace-read",
-    "move_directory": "workspace-move",
-    "download_file": "network-write",
-    "task_propose_plan": "task-control",
-    "task_report_reflection": "task-control",
-    "task_report_blocker": "task-control",
-    "task_propose_completion": "task-control",
-    "task_propose_start": "task-admission",
-    "task_accept_admission": "task-lifecycle",
-    "task_accept_plan": "task-lifecycle",
-    "task_confirm_completion": "task-lifecycle",
-}
-
 _TOOL_HARD_BOUND_SUMMARIES = {
     "read_file": "Existing UTF-8 regular file; no symlink traversal; output retained up to 32 KiB.",
     "glob": "Regular files only; no symlink traversal; bounded scan, 200 paths, and 32 KiB output.",
@@ -1408,17 +1366,19 @@ def render_tool_catalog(status: ProjectStatusView, tool_name: str | None = None)
     mode = getattr(status.permission_mode, "value", str(status.permission_mode))
     approval = getattr(status.approval_mode, "value", str(status.approval_mode))
     if tool_name is not None:
-        definition = next(
-            (candidate for candidate in TOOL_CATALOG if candidate.name == tool_name),
-            None,
-        )
-        if definition is None:
+        try:
+            contract = TOOL_REGISTRY_SNAPSHOT.contract(tool_name)
+        except ValueError:
             raise ValueError(f"unknown model-visible tool: {tool_name}")
+        definition = contract.definition
         index = TOOL_CATALOG.index(definition) + 1
-        policy = _TOOL_POLICY_LABELS[definition.name]
+        policy = contract.permission_label
         return "\n".join(
             (
                 f"Tool {index}/{len(TOOL_CATALOG)}: {definition.name}",
+                f"Contract: {contract.contract_id}",
+                f"Source: {contract.source.kind.value}:{contract.source.name} generation={contract.source.generation}",
+                f"Exposure: {contract.exposure.value}",
                 f"Permission class: {policy}",
                 f"Current policy: {_tool_policy_availability(policy, status, definition.name)}",
                 "Arguments:",
@@ -1429,11 +1389,13 @@ def render_tool_catalog(status: ProjectStatusView, tool_name: str | None = None)
         )
     lines = [
         f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order",
+        f"Registry snapshot: {TOOL_REGISTRY_SNAPSHOT.snapshot_id} generation={TOOL_REGISTRY_SNAPSHOT.generation}",
         f"Current policy: permission={mode}, approval={approval}",
         "Availability below is policy-level; every request still passes tool hard validation.",
     ]
-    for index, definition in enumerate(TOOL_CATALOG, start=1):
-        policy = _TOOL_POLICY_LABELS[definition.name]
+    for index, contract in enumerate(TOOL_REGISTRY_SNAPSHOT.contracts, start=1):
+        definition = contract.definition
+        policy = contract.permission_label
         availability = _tool_policy_availability(policy, status, definition.name)
         lines.append(f"{index:>2}. {definition.name}: {policy}; {availability}")
     lines.append(

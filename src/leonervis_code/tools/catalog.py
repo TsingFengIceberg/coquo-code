@@ -4,6 +4,16 @@ from __future__ import annotations
 
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.effective_context import CanonicalToolDefinition
+from leonervis_code.core.extensions import (
+    ExtensionSource,
+    ExtensionSourceKind,
+    ExtensionToolContract,
+    ToolExecutionKind,
+    ToolExposure,
+    ToolRegistrySnapshot,
+    ToolSetSnapshot,
+)
+from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, archive_list_tool_snapshot
 from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, checksum_file_tool_snapshot
@@ -161,12 +171,119 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *task_control_tool_snapshots(),
 )
 
+BUILTIN_TOOL_SOURCE_GENERATION = 1
+TOOL_REGISTRY_GENERATION = 1
+_BUILTIN_SOURCE = ExtensionSource(
+    ExtensionSourceKind.BUILTIN,
+    "leonervis-code",
+    BUILTIN_TOOL_SOURCE_GENERATION,
+)
+_WORKSPACE_READ_TOOLS = frozenset(
+    {
+        READ_FILE_TOOL_NAME,
+        GLOB_TOOL_NAME,
+        GREP_TOOL_NAME,
+        LIST_DIRECTORY_TOOL_NAME,
+        READ_FILE_LINES_TOOL_NAME,
+        STAT_PATH_TOOL_NAME,
+        LIST_TREE_TOOL_NAME,
+        GREP_REGEX_TOOL_NAME,
+        GIT_STATUS_TOOL_NAME,
+        GIT_DIFF_TOOL_NAME,
+        GIT_LOG_TOOL_NAME,
+        GIT_SHOW_TOOL_NAME,
+        COMPARE_FILES_TOOL_NAME,
+        GIT_BLAME_TOOL_NAME,
+        GIT_REFS_TOOL_NAME,
+        JSON_QUERY_TOOL_NAME,
+        CHECKSUM_FILE_TOOL_NAME,
+        ARCHIVE_LIST_TOOL_NAME,
+    }
+)
+_HOST_PERMISSION_ACTIONS: dict[str, tuple[PermissionAction, ...]] = {
+    **{name: (PermissionAction.WORKSPACE_READ,) for name in _WORKSPACE_READ_TOOLS},
+    WRITE_FILE_TOOL_NAME: (
+        PermissionAction.WORKSPACE_CREATE,
+        PermissionAction.WORKSPACE_OVERWRITE,
+    ),
+    EDIT_FILE_TOOL_NAME: (PermissionAction.WORKSPACE_OVERWRITE,),
+    RUN_COMMAND_TOOL_NAME: (PermissionAction.DANGEROUS,),
+    MKDIR_TOOL_NAME: (PermissionAction.WORKSPACE_CREATE,),
+    MOVE_FILE_TOOL_NAME: (PermissionAction.WORKSPACE_MOVE,),
+    DELETE_FILE_TOOL_NAME: (PermissionAction.WORKSPACE_DELETE,),
+    DELETE_DIRECTORY_TOOL_NAME: (PermissionAction.WORKSPACE_DELETE,),
+    COPY_FILE_TOOL_NAME: (PermissionAction.WORKSPACE_CREATE,),
+    PATCH_FILE_TOOL_NAME: (PermissionAction.WORKSPACE_OVERWRITE,),
+    WEB_SEARCH_TOOL_NAME: (PermissionAction.NETWORK_READ,),
+    WEB_FETCH_TOOL_NAME: (PermissionAction.NETWORK_READ,),
+    MOVE_DIRECTORY_TOOL_NAME: (PermissionAction.WORKSPACE_MOVE,),
+    DOWNLOAD_FILE_TOOL_NAME: (PermissionAction.NETWORK_WRITE,),
+}
+_TASK_STAGE_CONTROL_NAMES = frozenset(
+    {
+        TASK_PROPOSE_PLAN_TOOL_NAME,
+        TASK_REPORT_REFLECTION_TOOL_NAME,
+        TASK_REPORT_BLOCKER_TOOL_NAME,
+        TASK_PROPOSE_COMPLETION_TOOL_NAME,
+    }
+)
+_TASK_LIFECYCLE_NAMES = frozenset(
+    {
+        TASK_ACCEPT_ADMISSION_TOOL_NAME,
+        TASK_ACCEPT_PLAN_TOOL_NAME,
+        TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    }
+)
+
+
+def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContract:
+    name = definition.name
+    if name in _HOST_PERMISSION_ACTIONS:
+        execution_kind = ToolExecutionKind.HOST_ACTION
+        permission_actions = _HOST_PERMISSION_ACTIONS[name]
+    elif name in _TASK_STAGE_CONTROL_NAMES:
+        execution_kind = ToolExecutionKind.TASK_STAGE_CONTROL
+        permission_actions = ()
+    elif name == TASK_PROPOSE_START_TOOL_NAME:
+        execution_kind = ToolExecutionKind.TASK_ADMISSION
+        permission_actions = ()
+    elif name in _TASK_LIFECYCLE_NAMES:
+        execution_kind = ToolExecutionKind.TASK_LIFECYCLE
+        permission_actions = ()
+    else:
+        raise RuntimeError(f"canonical tool lacks an extension contract: {name}")
+    return ExtensionToolContract(
+        definition=definition,
+        source=_BUILTIN_SOURCE,
+        execution_kind=execution_kind,
+        exposure=ToolExposure.DIRECT,
+        permission_actions=permission_actions,
+    )
+
+
+TOOL_REGISTRY_SNAPSHOT = ToolRegistrySnapshot(
+    generation=TOOL_REGISTRY_GENERATION,
+    contracts=tuple(_builtin_contract(definition) for definition in TOOL_CATALOG),
+)
+
 
 def model_tool_definitions(
     enabled_tool_names: tuple[str, ...] | None = None,
+    *,
+    definitions: tuple[CanonicalToolDefinition, ...] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Return fresh definitions for one exact canonical model-visible tool set."""
-    selected = select_tool_definitions(enabled_tool_names)
+    if definitions is not None:
+        if not isinstance(definitions, tuple) or not definitions:
+            raise ValueError("model tool definitions must be a non-empty tuple")
+        selected = definitions
+        if (
+            enabled_tool_names is not None
+            and tuple(definition.name for definition in definitions) != enabled_tool_names
+        ):
+            raise ValueError("model tool definitions do not match enabled tool names")
+    else:
+        selected = select_tool_definitions(enabled_tool_names)
     return tuple(definition.as_mapping() for definition in selected)
 
 
@@ -174,19 +291,14 @@ def select_tool_definitions(
     enabled_tool_names: tuple[str, ...] | None,
 ) -> tuple[CanonicalToolDefinition, ...]:
     """Select a validated subset while preserving global canonical order."""
-    if enabled_tool_names is None:
-        return TOOL_CATALOG
-    if not isinstance(enabled_tool_names, tuple) or not enabled_tool_names:
-        raise ValueError("enabled tool names must be a non-empty tuple")
-    if len(set(enabled_tool_names)) != len(enabled_tool_names) or not all(
-        isinstance(name, str) and name and name.isascii() for name in enabled_tool_names
-    ):
-        raise ValueError("enabled tool names are invalid")
-    requested = frozenset(enabled_tool_names)
-    selected = tuple(definition for definition in TOOL_CATALOG if definition.name in requested)
-    if len(selected) != len(requested):
-        raise ValueError("enabled tool names contain an unsupported tool")
-    return selected
+    return TOOL_REGISTRY_SNAPSHOT.select(enabled_tool_names).definitions
+
+
+def select_tool_set(
+    enabled_tool_names: tuple[str, ...] | None,
+) -> ToolSetSnapshot:
+    """Return the current registry's immutable epoch-zero tool set."""
+    return TOOL_REGISTRY_SNAPSHOT.select(enabled_tool_names)
 
 
 def tool_use_from_input(

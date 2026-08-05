@@ -63,6 +63,7 @@ from leonervis_code.core.effective_context import (
     validate_complete_history,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
+from leonervis_code.core.extensions import ToolRegistrySnapshot, ToolSetSnapshot
 from leonervis_code.providers.streaming import (
     ProviderResponseOutcome,
     ProviderSearchActivity,
@@ -75,7 +76,7 @@ from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_CALLS_PER_RESPONSE,
     MAX_TOOL_REQUESTS_PER_TURN,
-    TOOL_CATALOG,
+    TOOL_REGISTRY_SNAPSHOT,
 )
 from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
 from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
@@ -98,6 +99,7 @@ from leonervis_code.tools.stat_path import STAT_PATH_TOOL_NAME, StatPathTool
 
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
+ToolRegistryFactory = Callable[[], ToolRegistrySnapshot]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
 ToolUsageSink = Callable[[ToolAttemptUsage], None]
@@ -105,6 +107,10 @@ ToolUsageSink = Callable[[ToolAttemptUsage], None]
 
 def _no_project_instructions() -> None:
     return None
+
+
+def _builtin_tool_registry() -> ToolRegistrySnapshot:
+    return TOOL_REGISTRY_SNAPSHOT
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -122,6 +128,7 @@ class PreparedAgentTurn:
     user: UserMessage
     context: EffectiveContextSnapshot
     pending_items: tuple[ConversationItem, ...]
+    tool_set_snapshot: ToolSetSnapshot
     allow_tools: bool = True
     enabled_tool_names: tuple[str, ...] | None = None
     action_lease: ActionLease | None = None
@@ -131,6 +138,13 @@ class PreparedAgentTurn:
             raise ValueError("prepared turn must contain exactly its pending user message")
         if type(self.allow_tools) is not bool:
             raise ValueError("prepared turn tool exposure flag is invalid")
+        if not isinstance(self.tool_set_snapshot, ToolSetSnapshot):
+            raise ValueError("prepared turn tool set snapshot is invalid")
+        if (
+            self.context.tool_definitions != self.tool_set_snapshot.definitions
+            or self.context.tool_set_id != self.tool_set_snapshot.snapshot_id
+        ):
+            raise ValueError("prepared turn context does not match its tool set snapshot")
         if self.enabled_tool_names is not None:
             if not self.allow_tools:
                 raise ValueError("disabled prepared turn cannot select enabled tools")
@@ -142,6 +156,8 @@ class PreparedAgentTurn:
                 or any(name not in available for name in self.enabled_tool_names)
             ):
                 raise ValueError("prepared turn enabled tools are invalid")
+            if self.enabled_tool_names != self.tool_set_snapshot.names:
+                raise ValueError("prepared turn enabled tools do not match its tool set snapshot")
 
     @property
     def initial_request(self) -> ConversationRequest:
@@ -154,7 +170,37 @@ class PreparedAgentTurn:
     def rebase(self, context: EffectiveContextSnapshot) -> PreparedAgentTurn:
         if self.action_lease is not None:
             raise ValueError("a leased prepared turn cannot be rebased")
-        return replace(self, context=context)
+        rebased = replace(
+            context,
+            tool_definitions=self.tool_set_snapshot.definitions,
+            tool_set_id=self.tool_set_snapshot.snapshot_id,
+        )
+        return replace(self, context=rebased)
+
+    def advance_tool_set(self, snapshot: ToolSetSnapshot) -> PreparedAgentTurn:
+        """Install one explicit later epoch before an action lease is issued."""
+        if self.action_lease is not None:
+            raise ValueError("a leased prepared turn cannot advance its tool set")
+        if not isinstance(snapshot, ToolSetSnapshot):
+            raise ValueError("advanced tool set snapshot is invalid")
+        if (
+            snapshot.registry_id != self.tool_set_snapshot.registry_id
+            or snapshot.registry_generation != self.tool_set_snapshot.registry_generation
+            or snapshot.epoch <= self.tool_set_snapshot.epoch
+            or not set(self.tool_set_snapshot.names).issubset(snapshot.names)
+        ):
+            raise ValueError("advanced tool set is not a later compatible epoch")
+        context = replace(
+            self.context,
+            tool_definitions=snapshot.definitions,
+            tool_set_id=snapshot.snapshot_id,
+        )
+        return replace(
+            self,
+            context=context,
+            tool_set_snapshot=snapshot,
+            enabled_tool_names=snapshot.names,
+        )
 
     def with_action_lease(self, lease: ActionLease) -> PreparedAgentTurn:
         """Bind one non-recreatable lease after automatic compaction is complete."""
@@ -197,6 +243,7 @@ class AgentLoop:
         commit_turn: TurnCommitter | None = None,
         system_prompt_factory: SystemPromptFactory = build_system_prompt,
         project_instructions_factory: ProjectInstructionsFactory = _no_project_instructions,
+        tool_registry_factory: ToolRegistryFactory = _builtin_tool_registry,
         action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
@@ -246,6 +293,7 @@ class AgentLoop:
         self._commit_turn = commit_turn
         self._system_prompt_factory = system_prompt_factory
         self._project_instructions_factory = project_instructions_factory
+        self._tool_registry_factory = tool_registry_factory
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
@@ -277,25 +325,39 @@ class AgentLoop:
 
     def effective_context_snapshot(self) -> EffectiveContextSnapshot:
         """Freeze the full and provider-visible committed context without mutation."""
+        registry = self._tool_registry_factory()
+        if not isinstance(registry, ToolRegistrySnapshot):
+            raise ValueError("tool registry factory returned an invalid snapshot")
         return self._effective_context_snapshot(
             self._project_instructions_factory(),
+            registry.select(),
         )
 
     def effective_context_snapshot_with_project_instructions(
         self,
         project_instructions: ProjectInstructionsSnapshot | None,
+        *,
+        tool_set_snapshot: ToolSetSnapshot | None = None,
     ) -> EffectiveContextSnapshot:
         """Rebuild committed identity while retaining one already pinned instruction snapshot."""
         if project_instructions is not None and not isinstance(
             project_instructions, ProjectInstructionsSnapshot
         ):
             raise ValueError("project instructions snapshot is invalid")
-        return self._effective_context_snapshot(project_instructions)
+        if tool_set_snapshot is None:
+            registry = self._tool_registry_factory()
+            if not isinstance(registry, ToolRegistrySnapshot):
+                raise ValueError("tool registry factory returned an invalid snapshot")
+            tool_set_snapshot = registry.select()
+        return self._effective_context_snapshot(project_instructions, tool_set_snapshot)
 
     def _effective_context_snapshot(
         self,
         project_instructions: ProjectInstructionsSnapshot | None,
+        tool_set: ToolSetSnapshot,
     ) -> EffectiveContextSnapshot:
+        if not isinstance(tool_set, ToolSetSnapshot):
+            raise ValueError("effective context tool set snapshot is invalid")
         representation_version = (
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
             if self._effective_summary is None
@@ -306,7 +368,8 @@ class AgentLoop:
             source=self._effective_source,
             system_prompt=self._system_prompt_factory(),
             project_instructions=project_instructions,
-            tool_definitions=TOOL_CATALOG,
+            tool_definitions=tool_set.definitions,
+            tool_set_id=tool_set.snapshot_id,
             full_history=self._full_history,
             effective_history=self._effective_history,
             effective_summary=self._effective_summary,
@@ -325,12 +388,21 @@ class AgentLoop:
     ) -> PreparedAgentTurn:
         """Freeze one pending user message without mutating conversation state."""
         user = UserMessage(text=prompt)
+        registry = self._tool_registry_factory()
+        if not isinstance(registry, ToolRegistrySnapshot):
+            raise ValueError("tool registry factory returned an invalid snapshot")
+        tool_set = registry.select(enabled_tool_names)
+        context = self._effective_context_snapshot(
+            self._project_instructions_factory(),
+            tool_set,
+        )
         return PreparedAgentTurn(
             user=user,
-            context=self.effective_context_snapshot(),
+            context=context,
             pending_items=(user,),
+            tool_set_snapshot=tool_set,
             allow_tools=allow_tools,
-            enabled_tool_names=enabled_tool_names,
+            enabled_tool_names=(tool_set.names if enabled_tool_names is not None else None),
         )
 
     def run(
@@ -448,10 +520,8 @@ class AgentLoop:
             if any(request.tool_use_id in seen_tool_ids for request in requests):
                 raise ValueError("provider reused a tool use ID")
             seen_tool_ids.update(request.tool_use_id for request in requests)
-            enabled_names = prepared.enabled_tool_names
-            if enabled_names is not None and any(
-                request.name not in enabled_names for request in requests
-            ):
+            visible_names = frozenset(prepared.tool_set_snapshot.names)
+            if any(request.name not in visible_names for request in requests):
                 raise ValueError("provider requested a tool outside the prepared tool set")
             control_requests = tuple(
                 request for request in requests if request.name in self._task_control_names
@@ -709,7 +779,10 @@ class AgentLoop:
         """Install one proposal-only Task coordination boundary exactly once."""
         if self._task_control_dispatcher is not None or self._task_control_names:
             raise ValueError("Task control dispatcher is already installed")
-        available = {definition.name for definition in TOOL_CATALOG}
+        registry = self._tool_registry_factory()
+        if not isinstance(registry, ToolRegistrySnapshot):
+            raise ValueError("tool registry factory returned an invalid snapshot")
+        available = set(registry.names)
         if (
             not isinstance(tool_names, tuple)
             or not tool_names

@@ -22,6 +22,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.project_instructions import render_project_instructions
 from leonervis_code.core.session_title import SessionTitleRequest
@@ -281,7 +282,12 @@ def build_input_projection(
         ),
     }
     if request_snapshot.allow_tools:
-        tools = list(responses_tool_definitions(request_snapshot.enabled_tool_names))
+        tools = list(
+            responses_tool_definitions(
+                request_snapshot.enabled_tool_names,
+                definitions=request_snapshot.tool_definitions,
+            )
+        )
         if native_search_enabled:
             _add_native_search_tool(route, tools, native_search_options)
         projection["tools"] = tools
@@ -346,6 +352,8 @@ def build_compact_summary_request(
 
 def responses_tool_definitions(
     enabled_tool_names: tuple[str, ...] | None = None,
+    *,
+    definitions: tuple[CanonicalToolDefinition, ...] | None = None,
 ) -> tuple[dict[str, object], ...]:
     return tuple(
         {
@@ -355,7 +363,10 @@ def responses_tool_definitions(
             "parameters": definition["input_schema"],
             "strict": False,
         }
-        for definition in model_tool_definitions(enabled_tool_names)
+        for definition in model_tool_definitions(
+            enabled_tool_names,
+            definitions=definitions,
+        )
     )
 
 

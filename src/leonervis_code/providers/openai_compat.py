@@ -21,6 +21,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.effective_context import CanonicalToolDefinition
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.core.project_instructions import render_project_instructions
 from leonervis_code.core.session_title import SessionTitleRequest
@@ -481,10 +482,16 @@ def task_confirm_completion_tool_definition() -> dict[str, object]:
 
 def model_tool_definitions_for_openai(
     enabled_tool_names: tuple[str, ...] | None = None,
+    *,
+    definitions: tuple[CanonicalToolDefinition, ...] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Wrap every canonical tool in its fixed provider-visible order."""
     return tuple(
-        _compatible_tool_definition(item) for item in model_tool_definitions(enabled_tool_names)
+        _compatible_tool_definition(item)
+        for item in model_tool_definitions(
+            enabled_tool_names,
+            definitions=definitions,
+        )
     )
 
 
@@ -630,7 +637,10 @@ def build_input_projection(
     }
     if request_snapshot.allow_tools:
         projection["tools"] = list(
-            model_tool_definitions_for_openai(request_snapshot.enabled_tool_names)
+            model_tool_definitions_for_openai(
+                request_snapshot.enabled_tool_names,
+                definitions=request_snapshot.tool_definitions,
+            )
         )
         projection["parallel_tool_calls"] = False
         if native_search_enabled:

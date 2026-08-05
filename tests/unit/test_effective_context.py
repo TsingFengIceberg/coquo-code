@@ -25,7 +25,7 @@ from leonervis_code.core.effective_context import (
 )
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.core.project_instructions import ProjectInstructionsLoader
-from leonervis_code.tools.catalog import TOOL_CATALOG
+from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.read_file import read_file_model_definition
 
 
@@ -36,6 +36,7 @@ def snapshot(*history) -> EffectiveContextSnapshot:
         source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
         system_prompt=build_system_prompt(),
         tool_definitions=TOOL_CATALOG,
+        tool_set_id=TOOL_REGISTRY_SNAPSHOT.select().snapshot_id,
         full_history=items,
         effective_history=items,
     )
@@ -48,21 +49,29 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v7-d9d80c3188613943154a2c3f8df40062d52ff14fdb19b3b8628d557e81e13c95"
+        == "ctx-v9-6e8bb3a51d3138760bdb6e8ea9db1ab94927599529048ba7bee2d7e792fe2b0e"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
     assert first.to_conversation_request().history == ()
 
 
-def test_effective_context_projects_request_local_tool_subset_without_changing_identity() -> None:
+def test_effective_context_projects_exact_frozen_tool_set_and_identity() -> None:
     context = snapshot()
-    request = context.to_conversation_request(enabled_tool_names=("read_file", "grep"))
+    tool_set = TOOL_REGISTRY_SNAPSHOT.select(("read_file", "grep"))
+    selected = replace(
+        context,
+        tool_definitions=tool_set.definitions,
+        tool_set_id=tool_set.snapshot_id,
+    )
+    request = selected.to_conversation_request(enabled_tool_names=tool_set.names)
 
-    assert request.enabled_tool_names == ("read_file", "grep")
-    assert context.context_id == snapshot().context_id
+    assert selected.context_id != context.context_id
+    assert request.enabled_tool_names == tool_set.names
+    assert request.tool_definitions == tool_set.definitions
+    assert request.tool_set_id == tool_set.snapshot_id
     with pytest.raises(ValueError, match="disabled-tool"):
-        context.to_conversation_request(
+        selected.to_conversation_request(
             allow_tools=False,
             enabled_tool_names=("read_file",),
         )
@@ -266,12 +275,13 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
         system_prompt=build_system_prompt(),
         tool_definitions=TOOL_CATALOG,
+        tool_set_id=TOOL_REGISTRY_SNAPSHOT.select().snapshot_id,
         full_history=full,
         effective_history=full[-4:],
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v8-")
+    assert context.context_id.startswith("ctx-v10-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

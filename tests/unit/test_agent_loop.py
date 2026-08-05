@@ -42,6 +42,7 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.core.project_instructions import ProjectInstructionsLoader
+from leonervis_code.core.extensions import ToolExposure, ToolRegistrySnapshot
 from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -50,6 +51,7 @@ from leonervis_code.tools.read_file import ReadFileTool
 from leonervis_code.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_REQUESTS_PER_TURN,
+    TOOL_REGISTRY_SNAPSHOT,
 )
 
 _TASK_ID = "11111111-1111-4111-8111-111111111111"
@@ -422,11 +424,15 @@ def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) 
 
     assert loop.history == ()
     assert prepared.initial_request.history == (prepared.user,)
+    assert prepared.initial_request.tool_definitions == prepared.tool_set_snapshot.definitions
+    assert prepared.initial_request.tool_set_id == prepared.tool_set_snapshot.snapshot_id
     summary = EffectiveContextSummary("earlier")
     loop.install_compaction(summary=summary, retained_history=())
     rebased = prepared.rebase(loop.effective_context_snapshot())
     assert rebased.user is prepared.user
     assert rebased.pending_items is prepared.pending_items
+    assert rebased.tool_set_snapshot is prepared.tool_set_snapshot
+    assert rebased.context.tool_set_id == prepared.context.tool_set_id
     assert rebased.initial_request.history == (prepared.user,)
     assert rebased.initial_request.effective_summary == summary
 
@@ -452,10 +458,66 @@ def test_prepared_turn_is_read_only_and_rebases_the_same_pending_user(tmp_path) 
         ListDirectoryTool(tmp_path),
     )
 
-    assert loop.run("Search") == "The requested tool is unavailable."
-    assert provider.received_requests[1].history[-1] == ToolResult(
-        tool_use_id="unknown-1", content="unknown tool: search", is_error=True
+    with pytest.raises(ValueError, match="outside the prepared tool set"):
+        loop.run("Search")
+    assert loop.history == ()
+    assert len(provider.received_requests) == 1
+
+
+def test_pinned_tool_set_rebuild_does_not_reopen_the_registry(tmp_path) -> None:
+    loop = AgentLoop(
+        ScriptedFakeProvider([AssistantText("done")]),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
     )
+    prepared = loop.prepare_turn("inspect", enabled_tool_names=("read_file",))
+
+    def fail_registry_lookup():
+        raise AssertionError("a pinned ToolSet must not reopen the registry")
+
+    loop._tool_registry_factory = fail_registry_lookup
+    rebuilt = loop.effective_context_snapshot_with_project_instructions(
+        prepared.context.project_instructions,
+        tool_set_snapshot=prepared.tool_set_snapshot,
+    )
+
+    assert rebuilt.context_id == prepared.context.context_id
+    assert rebuilt.tool_definitions == prepared.tool_set_snapshot.definitions
+    assert rebuilt.tool_set_id == prepared.tool_set_snapshot.snapshot_id
+
+
+def test_prepared_turn_advances_only_through_an_explicit_later_tool_set_epoch(
+    tmp_path,
+) -> None:
+    read_contract = TOOL_REGISTRY_SNAPSHOT.contract("read_file")
+    grep_contract = replace(
+        TOOL_REGISTRY_SNAPSHOT.contract("grep"),
+        exposure=ToolExposure.DEFERRED,
+    )
+    registry = ToolRegistrySnapshot(2, (read_contract, grep_contract))
+    loop = AgentLoop(
+        ScriptedFakeProvider([AssistantText("done")]),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        tool_registry_factory=lambda: registry,
+    )
+    prepared = loop.prepare_turn("inspect")
+
+    assert prepared.tool_set_snapshot.epoch == 0
+    assert prepared.tool_set_snapshot.names == ("read_file",)
+    promoted = prepared.tool_set_snapshot.promote(registry, ("grep",))
+    advanced = prepared.advance_tool_set(promoted)
+
+    assert advanced.tool_set_snapshot.epoch == 1
+    assert advanced.tool_set_snapshot.names == ("read_file", "grep")
+    assert advanced.context.context_id != prepared.context.context_id
+    assert advanced.initial_request.enabled_tool_names == ("read_file", "grep")
+    assert advanced.initial_request.tool_definitions == promoted.definitions
+    assert advanced.initial_request.tool_set_id == promoted.snapshot_id
 
 
 def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_path) -> None:
@@ -1439,6 +1501,8 @@ def test_prepared_tool_subset_rejects_unexposed_provider_call_before_dispatch(tm
     assert dispatched == []
     assert loop.history == ()
     assert provider.received_requests[0].enabled_tool_names == ("glob",)
+    assert provider.received_requests[0].tool_definitions == prepared.tool_set_snapshot.definitions
+    assert provider.received_requests[0].tool_set_id == prepared.tool_set_snapshot.snapshot_id
 
 
 def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(tmp_path) -> None:
@@ -1493,7 +1557,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v7-")
+    assert proposals[0].context_id.startswith("ctx-v9-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

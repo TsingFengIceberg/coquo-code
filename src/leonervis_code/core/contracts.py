@@ -6,15 +6,18 @@ from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
+import re
 from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
 
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 
 if TYPE_CHECKING:
     from leonervis_code.core.compaction import EffectiveContextSummary
+    from leonervis_code.core.effective_context import CanonicalToolDefinition
 
 _SYSTEM_PROMPT_FINGERPRINT_DOMAIN = b"leonervis-code-system-prompt\0"
 TOOL_ARGUMENTS_VERSION = 1
+_TOOL_SET_ID = re.compile(r"toolset-v1-[0-9a-f]{64}\Z")
 MAX_TOOL_ARGUMENTS_BYTES = 16 * 1024
 MAX_ASSISTANT_TOOL_TEXT_CHARACTERS = 32 * 1024
 MAX_ASSISTANT_TOOL_TEXT_BYTES = 32 * 1024
@@ -447,6 +450,8 @@ class ConversationRequest:
     allow_tools: bool = True
     project_instructions: ProjectInstructionsSnapshot | None = None
     enabled_tool_names: tuple[str, ...] | None = None
+    tool_definitions: tuple["CanonicalToolDefinition", ...] | None = None
+    tool_set_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.allow_tools) is not bool:
@@ -461,6 +466,30 @@ class ConversationRequest:
                 for name in self.enabled_tool_names
             ):
                 raise ValueError("conversation request enabled tool names are invalid")
+        if self.tool_definitions is not None:
+            from leonervis_code.core.effective_context import CanonicalToolDefinition
+
+            if not self.allow_tools:
+                raise ValueError("disabled-tool request cannot carry tool definitions")
+            if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
+                raise ValueError("conversation request tool definitions are invalid")
+            names: list[str] = []
+            for definition in self.tool_definitions:
+                if not isinstance(definition, CanonicalToolDefinition):
+                    raise ValueError("conversation request contains an invalid tool definition")
+                CanonicalToolDefinition.from_mapping(definition.as_mapping())
+                names.append(definition.name)
+            if len(set(names)) != len(names):
+                raise ValueError("conversation request contains duplicate tool definitions")
+            if self.enabled_tool_names is not None and tuple(names) != self.enabled_tool_names:
+                raise ValueError("conversation request tool definitions do not match enabled tools")
+            if (
+                not isinstance(self.tool_set_id, str)
+                or _TOOL_SET_ID.fullmatch(self.tool_set_id) is None
+            ):
+                raise ValueError("conversation request tool set identity is invalid")
+        elif self.tool_set_id is not None:
+            raise ValueError("conversation request tool set identity requires definitions")
         if self.project_instructions is not None and not isinstance(
             self.project_instructions, ProjectInstructionsSnapshot
         ):

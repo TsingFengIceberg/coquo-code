@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
@@ -25,11 +26,12 @@ from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 
 PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 5
 PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 6
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 7
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 8
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 9
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 10
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
+_TOOL_SET_ID = re.compile(r"toolset-v1-[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,7 @@ class EffectiveContextSnapshot:
     effective_history: tuple[ConversationItem, ...]
     project_instructions: ProjectInstructionsSnapshot | None = None
     effective_summary: EffectiveContextSummary | None = None
+    tool_set_id: str | None = None
 
     def __post_init__(self) -> None:
         supported = {
@@ -97,6 +100,8 @@ class EffectiveContextSnapshot:
             2,
             3,
             4,
+            7,
+            8,
             PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
@@ -116,6 +121,17 @@ class EffectiveContextSnapshot:
             raise ValueError("effective context contains invalid project instructions")
         if self.representation_version in {1, 2, 3, 4} and self.project_instructions is not None:
             raise ValueError("legacy effective context cannot contain project instructions")
+        if self.representation_version in {
+            EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+        }:
+            if (
+                not isinstance(self.tool_set_id, str)
+                or _TOOL_SET_ID.fullmatch(self.tool_set_id) is None
+            ):
+                raise ValueError("current effective context requires a tool set identity")
+        elif self.tool_set_id is not None:
+            raise ValueError("legacy effective context cannot contain a tool set identity")
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
             raise ValueError("effective context requires immutable tool definitions")
         tool_names: set[str] = set()
@@ -132,6 +148,7 @@ class EffectiveContextSnapshot:
             if self.representation_version not in {
                 1,
                 3,
+                7,
                 PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
@@ -146,6 +163,7 @@ class EffectiveContextSnapshot:
             if self.representation_version not in {
                 2,
                 4,
+                8,
                 PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
@@ -210,6 +228,8 @@ class EffectiveContextSnapshot:
                     "fingerprint": instructions.fingerprint,
                 }
             )
+        if self.representation_version >= EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+            manifest["tool_set_id"] = self.tool_set_id
         if self.effective_summary is not None:
             manifest["effective_summary"] = {
                 "assistant_acknowledgement": self.effective_summary.assistant_acknowledgement,
@@ -238,6 +258,8 @@ class EffectiveContextSnapshot:
             effective_summary=self.effective_summary,
             allow_tools=allow_tools,
             enabled_tool_names=enabled_tool_names,
+            tool_definitions=self.tool_definitions if allow_tools else None,
+            tool_set_id=self.tool_set_id if allow_tools else None,
         )
 
 
