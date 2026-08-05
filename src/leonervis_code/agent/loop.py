@@ -706,15 +706,18 @@ class AgentLoop:
                             )
                             context = prepared.context
                     elif contract.execution_kind is ToolExecutionKind.MCP_REMOTE:
-                        dispatch = ToolDispatchResult(
-                            ToolResult(
-                                request.tool_use_id,
-                                "MCP tool execution is unavailable in this runtime slice",
-                                is_error=True,
-                            ),
-                            ToolEventStatus.ERROR,
-                            "mcp_execution_unavailable",
-                        )
+                        if self._action_dispatcher is None:
+                            dispatch = ToolDispatchResult(
+                                ToolResult(
+                                    request.tool_use_id,
+                                    "MCP tool execution requires a ProjectSession action boundary",
+                                    is_error=True,
+                                ),
+                                ToolEventStatus.ERROR,
+                                "mcp_execution_boundary_unavailable",
+                            )
+                        else:
+                            dispatch = self._execute(request, prepared.action_lease)
                     else:
                         dispatch = self._execute(request, prepared.action_lease)
                 except BaseException:

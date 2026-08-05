@@ -233,7 +233,7 @@ def test_project_session_retires_action_lease_when_discovery_promotes_a_later_ep
         ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.fixture.2025-06-18", 1),
         ToolExecutionKind.MCP_REMOTE,
         ToolExposure.DEFERRED,
-        (),
+        (PermissionAction.DANGEROUS,),
     )
     registry = ToolRegistrySnapshot(2, (*TOOL_REGISTRY_SNAPSHOT.contracts, remote))
     provider = RecordingProvider("unused")
@@ -309,7 +309,7 @@ def test_project_session_rejects_mcp_promotion_when_frozen_registry_is_stale(
         ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.stale.2025-06-18", 1),
         ToolExecutionKind.MCP_REMOTE,
         ToolExposure.DEFERRED,
-        (),
+        (PermissionAction.DANGEROUS,),
     )
     registry = ToolRegistrySnapshot(2, (*TOOL_REGISTRY_SNAPSHOT.contracts, remote))
     provider = RecordingProvider("unused")

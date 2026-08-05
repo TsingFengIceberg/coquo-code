@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and 33 ordinary bounded tools are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, and progressive MCP tool discovery. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
+> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and 33 ordinary bounded tools are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, and audited MCP tool execution. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
 
 ## Contents
 
@@ -333,6 +333,7 @@ Common REPL operations:
 /tools catalog
 /tools catalog run_command
 /mcp list
+/mcp status
 /mcp show <server-name>
 /mcp probe <server-name>
 /mcp catalog
@@ -506,4 +507,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Leonervis Code currently provides 33 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, and progressive MCP discovery, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP currently supports confined local stdio configuration, a quarantine catalog, fixed discovery tools, and exact same-Turn ToolSet promotion, but does not execute MCP tools yet. Skills, browser automation, background or parallel agents, and remote services are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP currently supports confined local stdio configuration, a quarantine catalog, progressive discovery, exact same-Turn ToolSet promotion, unified permission auditing, result normalization, and bounded process reuse. Skills, browser automation, background or parallel agents, and remote MCP services are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

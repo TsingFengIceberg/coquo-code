@@ -101,7 +101,10 @@ class ExtensionToolContract:
             raise ValueError("extension tool permission action is invalid")
         if len(set(self.permission_actions)) != len(self.permission_actions):
             raise ValueError("extension tool permission actions are invalid")
-        is_action = self.execution_kind is ToolExecutionKind.HOST_ACTION
+        is_action = self.execution_kind in {
+            ToolExecutionKind.HOST_ACTION,
+            ToolExecutionKind.MCP_REMOTE,
+        }
         if is_action != bool(self.permission_actions):
             raise ValueError("extension tool execution kind and permission actions disagree")
         if PermissionAction.UNKNOWN in self.permission_actions:
@@ -126,6 +129,8 @@ class ExtensionToolContract:
 
     @property
     def permission_label(self) -> str:
+        if self.execution_kind is ToolExecutionKind.MCP_REMOTE:
+            return "mcp-remote:" + "/".join(action.value for action in self.permission_actions)
         if self.execution_kind is not ToolExecutionKind.HOST_ACTION:
             return self.execution_kind.value
         if self.permission_actions == (

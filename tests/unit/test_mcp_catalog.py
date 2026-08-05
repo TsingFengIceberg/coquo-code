@@ -14,6 +14,7 @@ from leonervis_code.mcp.catalog import (
 )
 from leonervis_code.mcp.client import McpListedTool, McpProbeResult
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
+from leonervis_code.core.permissions import PermissionAction
 
 
 def _entry(name: str = "fixture", *, revision: int = 3) -> McpServerEntry:
@@ -92,7 +93,7 @@ def test_catalog_normalizes_candidates_with_stable_content_id_and_no_annotation_
     assert candidate.contract.source.generation == 3
     assert candidate.contract.exposure is ToolExposure.DEFERRED
     assert candidate.contract.execution_kind is ToolExecutionKind.MCP_REMOTE
-    assert candidate.contract.permission_actions == ()
+    assert candidate.contract.permission_actions == (PermissionAction.DANGEROUS,)
     assert "readOnlyHint" not in candidate.contract.definition.canonical_json
 
     changed = build_mcp_quarantine_catalog(
@@ -126,6 +127,26 @@ def test_catalog_quarantines_unsupported_schemas_with_only_sanitized_reason_code
     )
     assert all(candidate.contract is None for candidate in catalog.rejected)
     assert "SECRET" not in catalog.catalog_id
+
+
+def test_catalog_quarantines_pattern_instead_of_executing_an_untrusted_regex() -> None:
+    catalog = build_mcp_quarantine_catalog(
+        (_entry(),),
+        CatalogClient(
+            (
+                _tool(
+                    "unsafe_pattern",
+                    {
+                        "type": "object",
+                        "properties": {"value": {"type": "string", "pattern": "^(a+)+$"}},
+                    },
+                ),
+            )
+        ),
+    )
+
+    assert not catalog.accepted
+    assert catalog.rejected[0].reason_code == "mcp_schema_keyword_unsupported"
 
 
 def test_catalog_registry_keeps_candidates_deferred_and_content_addressed() -> None:

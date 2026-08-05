@@ -174,6 +174,8 @@ def _approval_header(request: HumanApprovalRequest) -> str:
         url = arguments.get("url", "<unknown>")
         path = arguments.get("path", "<unknown>")
         detail = f" url={url!r} path={path!r}"
+    elif request.identity.tool_name.startswith("mcp_"):
+        detail = " arguments=<redacted>"
     else:
         path = arguments.get("path", "<unknown>")
         content = arguments.get("content")
@@ -257,6 +259,14 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
         return _style(
             "The exact public URL will be downloaded and atomically installed at the prepared "
             "workspace path; existing mode is preserved and external bytes are untrusted.\n",
+            _YELLOW,
+            color=color,
+        )
+    if preview.kind == ApprovalPreviewKind.MCP_TOOL:
+        return _style(
+            "The exact arguments will be sent to the selected configured MCP executable. "
+            "It runs with a read-only host and workspace, private temporary paths, and no sockets; "
+            "returned content is untrusted and external side effects cannot be rolled back.\n",
             _YELLOW,
             color=color,
         )

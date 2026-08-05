@@ -7,6 +7,16 @@ import time
 
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+CALLS = 0
+TOOL_MODES = {
+    "normal",
+    "call-error",
+    "call-rpc-error",
+    "call-timeout",
+    "call-invalid-result",
+    "call-oversized",
+    "call-unsupported-content",
+}
 
 
 def send(value: object) -> None:
@@ -67,7 +77,7 @@ for line in sys.stdin:
         cursor = request.get("params", {}).get("cursor")
         if cursor is None:
             next_cursor = (
-                "page-2" if MODE in {"normal", "repeated-cursor", "duplicate-tool"} else None
+                "page-2" if MODE in TOOL_MODES | {"repeated-cursor", "duplicate-tool"} else None
             )
             tools = [
                 {
@@ -88,3 +98,49 @@ for line in sys.stdin:
         if next_cursor is not None:
             payload["nextCursor"] = next_cursor
         result(request["id"], payload)
+    elif method == "tools/call":
+        CALLS += 1
+        if MODE == "call-timeout":
+            time.sleep(30)
+            continue
+        if MODE == "call-rpc-error":
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {"code": -32000, "message": "SECRET_CALL_ERROR"},
+                }
+            )
+            continue
+        if MODE == "call-invalid-result":
+            result(request["id"], {"content": "not-an-array"})
+            continue
+        if MODE == "call-unsupported-content":
+            result(request["id"], {"content": [{"type": "video", "data": "SECRET"}]})
+            continue
+        if MODE == "call-oversized":
+            result(
+                request["id"],
+                {"content": [{"type": "text", "text": "x" * 8192} for _ in range(9)]},
+            )
+            continue
+        arguments = request.get("params", {}).get("arguments", {})
+        tool_name = request.get("params", {}).get("name")
+        if MODE == "call-error":
+            result(
+                request["id"],
+                {"content": [{"type": "text", "text": "fixture error"}], "isError": True},
+            )
+            continue
+        result(
+            request["id"],
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"called {tool_name} #{CALLS}",
+                    }
+                ],
+                "structuredContent": {"arguments": arguments, "calls": CALLS},
+            },
+        )

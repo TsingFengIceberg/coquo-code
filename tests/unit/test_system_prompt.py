@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v34-970ee912f58cfa0a5a4e7cab4f959723f97664107ef63ddc4376fbe5d5ebbdf2"
+EXPECTED_FINGERPRINT = "v35-8537a2ef36ba8aa29068cc93f9b09231c0ea4e51a534fdb473e591408a7b5dca"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 34
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 35
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -42,7 +42,8 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "one `network-write` action" in prompt.text
     assert "fixed catalog additionally contains `tool_search` and `tool_promote`" in prompt.text
     assert "exact names returned by an earlier successful `tool_search`" in prompt.text
-    assert "MCP execution is not implemented in this runtime slice" in prompt.text
+    assert "A promoted MCP tool request is a `dangerous` Host action" in prompt.text
+    assert "must not be retried automatically" in prompt.text
     assert "never extracts entries" in prompt.text
     assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text

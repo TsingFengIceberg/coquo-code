@@ -33,7 +33,7 @@ from leonervis_code.core.permissions import (
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 from leonervis_code.mcp import McpCandidateDisposition, McpQuarantineCatalog
-from leonervis_code.mcp.client import McpProbeResult, McpServerStatus
+from leonervis_code.mcp.client import McpLiveProcessStatus, McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -217,7 +217,7 @@ MCP_HELP = (
     "  /mcp show <server-name>\n"
     "  /mcp probe <server-name>\n"
     "  /mcp catalog\n"
-    "These are Host-only inspections. Probe shows raw negotiation facts; catalog refreshes normalized "
+    "These are Host-only inspections. Status also shows content-free process reuse facts. Probe shows raw negotiation facts; catalog refreshes normalized "
     "quarantine identities. The model initially sees only fixed discovery tools, and exact candidates "
     "can enter only a later Turn ToolSet epoch. Use standalone mcp commands to edit configuration."
 )
@@ -294,6 +294,25 @@ def render_mcp_server_statuses(statuses: tuple[McpServerStatus, ...]) -> str:
             f"{'enabled' if configured.enabled else 'disabled'}, {state}, r{configured.revision}"
         )
     lines.append("Model exposure: fixed discovery tools only; MCP candidates remain deferred.")
+    return "\n".join(lines)
+
+
+def render_mcp_runtime_statuses(statuses: tuple[McpLiveProcessStatus, ...]) -> str:
+    """Render content-free current-process lifecycle facts."""
+    if not statuses:
+        return "MCP runtime processes: none"
+    lines = [f"MCP runtime processes: {len(statuses)}"]
+    for status in statuses:
+        lines.append(
+            f"  {status.configured_name}: {status.scope} r{status.configuration_revision}; "
+            f"protocol {status.protocol_version}; generation {status.process_generation}; "
+            f"calls {status.calls_completed}; {'alive' if status.alive else 'exited'}; "
+            f"stderr {status.stderr_bytes} bytes"
+            + (" (truncated)" if status.stderr_truncated else "")
+        )
+    lines.append(
+        "Processes are REPL-local, serial, generation-bound, and closed on invalidation or exit."
+    )
     return "\n".join(lines)
 
 

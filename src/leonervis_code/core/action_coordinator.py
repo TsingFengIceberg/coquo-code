@@ -257,7 +257,12 @@ _TOOL_PREVIEW_KINDS = {
 def _validate_approval_preview(identity: ActionIdentity, preview: ApprovalPreview) -> None:
     if type(preview) is not ApprovalPreview or preview.action_digest != identity.digest:
         raise ValueError("approval preview does not match action identity")
-    if _TOOL_PREVIEW_KINDS.get(identity.tool_name) != preview.kind:
+    expected = (
+        ApprovalPreviewKind.MCP_TOOL
+        if identity.tool_name.startswith("mcp_")
+        else _TOOL_PREVIEW_KINDS.get(identity.tool_name)
+    )
+    if expected != preview.kind:
         raise ValueError("approval preview kind does not match action tool")
 
 

@@ -28,7 +28,12 @@ from leonervis_code.session import (
 )
 from leonervis_code.core.contracts import ToolArguments, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
-from leonervis_code.mcp.client import McpListedTool, McpProbeResult, McpServerStatus
+from leonervis_code.mcp.client import (
+    McpListedTool,
+    McpLiveProcessStatus,
+    McpProbeResult,
+    McpServerStatus,
+)
 from leonervis_code.mcp.catalog import build_mcp_quarantine_catalog
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.core.task_admission import (
@@ -244,6 +249,21 @@ class Session:
         return build_mcp_quarantine_catalog(
             (self.mcp_entry,),
             SimpleNamespace(probe=lambda entry: self.probe_mcp_server(entry.configuration.name)),
+        )
+
+    def inspect_mcp_runtime(self):
+        return (
+            McpLiveProcessStatus(
+                "fixture",
+                "project",
+                1,
+                "2025-06-18",
+                2,
+                3,
+                True,
+                0,
+                False,
+            ),
         )
 
     def set_web_search_sources(self, sources):
@@ -1478,6 +1498,8 @@ def test_mcp_commands_are_host_only_and_probe_does_not_expose_tools(tmp_path) ->
     listed = dispatch_slash("/mcp list", session)
     assert listed.handled and listed.kind == "info"
     assert "fixture: project, enabled, ready, r1" in listed.message
+    status = dispatch_slash("/mcp status", session)
+    assert "generation 2; calls 3; alive" in status.message
     shown = dispatch_slash("/mcp show fixture", session)
     assert "normalized deferred candidates" in shown.message
     probed = dispatch_slash("/mcp probe fixture", session)

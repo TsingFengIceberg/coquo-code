@@ -93,6 +93,7 @@ def test_metadata_preview_rejects_file_change_without_a_diff() -> None:
         ApprovalPreviewKind.WEB_FETCH,
         ApprovalPreviewKind.DIRECTORY_MOVE,
         ApprovalPreviewKind.FILE_DOWNLOAD,
+        ApprovalPreviewKind.MCP_TOOL,
     ),
 )
 def test_additional_action_previews_are_content_free(kind: ApprovalPreviewKind) -> None:
@@ -101,7 +102,7 @@ def test_additional_action_previews_are_content_free(kind: ApprovalPreviewKind) 
     assert preview.kind is kind
     assert preview.body is None
     assert preview.byte_count is None
-    assert preview.version == APPROVAL_PREVIEW_VERSION == 3
+    assert preview.version == APPROVAL_PREVIEW_VERSION == 4
 
 
 def test_web_search_preview_requires_a_supported_backend() -> None:
@@ -111,7 +112,7 @@ def test_web_search_preview_requires_a_supported_backend() -> None:
         backend="tavily",
     )
     assert tavily.backend == "tavily"
-    assert tavily.version == APPROVAL_PREVIEW_VERSION == 3
+    assert tavily.version == APPROVAL_PREVIEW_VERSION == 4
     assert (
         build_metadata_preview(
             action_digest=ACTION_DIGEST,

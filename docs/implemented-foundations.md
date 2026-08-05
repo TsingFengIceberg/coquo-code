@@ -1213,6 +1213,16 @@ Promotion仍使用同一Registry snapshot的canonical `ToolSetSnapshot.promote()
 
 本阶段仍不实现`tools/call`。模型即使请求已晋升MCP contract，也只会收到`mcp_execution_unavailable` ToolResult，不会进入built-in executor、PermissionGate、approval、Action Audit或MCP process。Canonical system prompt升级v34、provider adapter contract升级v38；Effective Context representation仍为`ctx-v9`/`ctx-v10`，empty full-context ID更新为`ctx-v9-2f737163e792a16fbae49a629f54afc5cf43d49b75f1afe47b12ff5ed4e60d3e`，持久Session/Task/Action Audit等schema不变。详见[0110：Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)。
 
+## 受审计MCP执行、结果规范化与进程生命周期
+
+晋升后的`mcp-remote` contract现在由Host固定赋予`dangerous` PermissionAction，不采信server的`readOnlyHint`、`destructiveHint`或其他annotation。MCP调用必须处于`danger-full-access`并按ask/auto经过现有PermissionGate；ask preview只显示exact qualified tool并隐藏arguments。ActionIdentity通过当前lease绑定ToolSet/context，另以expected-configuration precondition绑定catalog candidate、server scope/revision、protocol、schema及catalog ID。参数在Action Audit前按照冻结的受支持JSON Schema子集校验；`pattern`、引用及其他不支持的keyword会被隔离而不会在Host内执行server正则或schema代码；permission deny或approval reject不会启动可复用process。
+
+`McpProcessManager`按scope、server、configuration revision、protocol与catalog ID惰性启动受限stdio process，并在首次call前重新完成initialize、tools/list及remote name/schema fingerprint验证。健康process只接受串行调用，当前进程最多保留8个server、每个generation最多128次完成调用，容量满时按确定性LRU退出。配置/catalog变化、process退出、协议失败、取消、call上限、Session关闭或live schema不匹配都会淘汰generation；status检查会对照当前启用配置，catalog refresh会回收其他catalog generation，cleanup失败的generation仍由manager持有以便再次有界回收；request送出后不自动retry。`/mcp status`只显示server、scope、revision、protocol、generation、完成调用数、alive及stderr byte元数据。
+
+`tools/call`使用30秒timeout和已有严格newline-delimited JSON-RPC边界。取消会尽力发送`notifications/cancelled`，随后回收process。结果只接受闭合CallToolResult形状、最多64个content block及可选structured content；text进入总计64 KiB的模型结果，image/audio/blob只保留经过base64校验的类型、MIME及byte count，resource link和embedded resource做有界结构校验，`_meta`与annotation被丢弃。普通结果为succeeded，`isError`及JSON-RPC error为known failed；timeout、cancel、送达后的transport/protocol错误、畸形结果、截断或cleanup不完整为partial/outcome-uncertain，均进入既有Action Audit与ToolResult因果且不得自动retry。
+
+Canonical system prompt升级v35，fingerprint为`v35-8537a2ef36ba8aa29068cc93f9b09231c0ea4e51a534fdb473e591408a7b5dca`，empty full-context ID更新为`ctx-v9-8e257b8889c2794ab1deef575bf96a22a9394cdac71e54234cb769adeaafadc7`；Effective Context仍为`ctx-v9`/`ctx-v10`。ApprovalPreview升级v4。Provider adapter contract保持v38，因为wire projection与parser没有变化；其他Extension、Registry、ToolSet、ToolArguments、ActionIdentity、Session、Task、Action Audit、Profile及compaction schema均不变，旧记录不重写。详见[0111：Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1325,3 +1335,4 @@ Promotion仍使用同一Registry snapshot的canonical `ToolSetSnapshot.promote()
 108. [0108：Confined stdio MCP Configuration and Inspection](./decisions/0108-confined-stdio-mcp-configuration-and-inspection.md)
 109. [0109：MCP Tool Normalization and Quarantine Catalog](./decisions/0109-mcp-tool-normalization-and-quarantine-catalog.md)
 110. [0110：Progressive MCP Discovery and ToolSet Epochs](./decisions/0110-progressive-mcp-discovery-and-toolset-epochs.md)
+111. [0111：Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)

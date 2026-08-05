@@ -16,6 +16,7 @@ from threading import Thread
 import time
 from typing import BinaryIO
 
+from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.mcp.config import McpServerEntry
 from leonervis_code.tools.command_sandbox import (
     CommandSandbox,
@@ -35,6 +36,7 @@ SUPPORTED_MCP_PROTOCOL_VERSIONS = (
 )
 MCP_INITIALIZE_TIMEOUT_SECONDS = 10.0
 MCP_LIST_TOOLS_TIMEOUT_SECONDS = 10.0
+MCP_CALL_TOOL_TIMEOUT_SECONDS = 30.0
 MCP_SANDBOX_ACTIVATION_TIMEOUT_SECONDS = 1.0
 MCP_PROCESS_EXIT_GRACE_SECONDS = 0.5
 MCP_PROCESS_TERMINATE_GRACE_SECONDS = 1.0
@@ -70,10 +72,18 @@ _BASE_ENVIRONMENT_ALLOWLIST = (
 class McpClientError(RuntimeError):
     """One sanitized MCP transport, protocol, timeout, or cleanup failure."""
 
-    def __init__(self, code: str, message: str, *, cleanup_complete: bool = True) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        cleanup_complete: bool = True,
+        outcome_uncertain: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.cleanup_complete = cleanup_complete
+        self.outcome_uncertain = outcome_uncertain
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,36 @@ class McpProbeResult:
     stderr_bytes: int
     stderr_truncated: bool
     cleanup_complete: bool
+
+
+@dataclass(frozen=True)
+class McpToolCallResult:
+    """One raw bounded tools/call result with content retained only in memory."""
+
+    configured_name: str
+    remote_name: str
+    protocol_version: str
+    result: object
+    duration_ms: int
+    process_generation: int
+    process_reused: bool
+    stderr_bytes: int
+    stderr_truncated: bool
+
+
+@dataclass(frozen=True)
+class McpLiveProcessStatus:
+    """Content-free lifecycle facts for one process owned by the current REPL."""
+
+    configured_name: str
+    scope: str
+    configuration_revision: int
+    protocol_version: str
+    process_generation: int
+    calls_completed: int
+    alive: bool
+    stderr_bytes: int
+    stderr_truncated: bool
 
 
 @dataclass
@@ -260,6 +300,8 @@ class _JsonRpcConnection:
         params: dict[str, object],
         *,
         timeout_seconds: float,
+        cancellation: TurnCancellation | None = None,
+        outcome_uncertain: bool = False,
     ) -> object:
         self._send(
             {
@@ -272,7 +314,20 @@ class _JsonRpcConnection:
         deadline = time.monotonic() + timeout_seconds
         notifications = 0
         while True:
-            message = self._read_message(deadline)
+            if cancellation is not None and cancellation.requested:
+                try:
+                    self.notify(
+                        "notifications/cancelled",
+                        {"requestId": request_id, "reason": "client turn cancelled"},
+                    )
+                except McpClientError:
+                    pass
+                raise McpClientError(
+                    "mcp_cancelled",
+                    "MCP request was cancelled",
+                    outcome_uncertain=outcome_uncertain,
+                )
+            message = self._read_message(deadline, cancellation=cancellation)
             if "method" in message:
                 if "id" in message:
                     self._send(
@@ -313,6 +368,7 @@ class _JsonRpcConnection:
                 raise McpClientError(
                     "mcp_server_error",
                     "MCP server returned a JSON-RPC error",
+                    outcome_uncertain=False,
                 )
             return message["result"]
 
@@ -332,7 +388,12 @@ class _JsonRpcConnection:
                 "MCP stdio transport closed while sending a message",
             ) from None
 
-    def _read_message(self, deadline: float) -> dict[str, object]:
+    def _read_message(
+        self,
+        deadline: float,
+        *,
+        cancellation: TurnCancellation | None = None,
+    ) -> dict[str, object]:
         while True:
             newline = self._buffer.find(b"\n")
             if newline >= 0:
@@ -349,8 +410,14 @@ class _JsonRpcConnection:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise McpClientError("mcp_timeout", "MCP server response timed out")
-            events = self._selector.select(remaining)
+            events = self._selector.select(
+                min(remaining, 0.1) if cancellation is not None else remaining
+            )
             if not events:
+                if cancellation is not None and cancellation.requested:
+                    continue
+                if time.monotonic() < deadline:
+                    continue
                 raise McpClientError("mcp_timeout", "MCP server response timed out")
             try:
                 chunk = os.read(self._stdout.fileno(), 64 * 1024)
@@ -405,6 +472,126 @@ class _JsonRpcConnection:
         return value
 
 
+class McpStdioSession:
+    """One initialized confined process that can serve sequential MCP calls."""
+
+    def __init__(
+        self,
+        *,
+        entry: McpServerEntry,
+        owner: _ProcessOwner,
+        connection: _JsonRpcConnection,
+        protocol_version: str,
+        server_name: str,
+        server_version: str | None,
+        capability_names: tuple[str, ...],
+        tools: tuple[McpListedTool, ...],
+        pages: int,
+        started: float,
+    ) -> None:
+        self.entry = entry
+        self.protocol_version = protocol_version
+        self.server_name = server_name
+        self.server_version = server_version
+        self.capability_names = capability_names
+        self.tools = tools
+        self.pages = pages
+        self._owner = owner
+        self._connection = connection
+        self._started = started
+        self._next_request_id = 2 + pages
+        self._calls_completed = 0
+        self._closed = False
+
+    @property
+    def alive(self) -> bool:
+        return self._owner.process.poll() is None
+
+    @property
+    def calls_completed(self) -> int:
+        return self._calls_completed
+
+    @property
+    def stderr_bytes(self) -> int:
+        return self._owner.stderr.total
+
+    @property
+    def stderr_truncated(self) -> bool:
+        return self.stderr_bytes > self._owner.stderr.limit
+
+    def call_tool(
+        self,
+        remote_name: str,
+        arguments: dict[str, object],
+        *,
+        process_generation: int,
+        process_reused: bool,
+        cancellation: TurnCancellation | None = None,
+    ) -> McpToolCallResult:
+        if self._closed or not self.alive:
+            raise McpClientError("mcp_process_unavailable", "MCP process is not available")
+        if not isinstance(remote_name, str) or not remote_name:
+            raise ValueError("MCP remote tool name is invalid")
+        if not isinstance(arguments, dict):
+            raise ValueError("MCP tool arguments must be an object")
+        _validate_json_bounds(arguments)
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        started = time.monotonic()
+        try:
+            result = self._connection.request(
+                request_id,
+                "tools/call",
+                {"arguments": arguments, "name": remote_name},
+                timeout_seconds=MCP_CALL_TOOL_TIMEOUT_SECONDS,
+                cancellation=cancellation,
+                outcome_uncertain=True,
+            )
+        except McpClientError as error:
+            if error.code == "mcp_server_error":
+                self._calls_completed += 1
+            uncertain_codes = {
+                "mcp_cancelled",
+                "mcp_message_count_limit",
+                "mcp_message_incomplete",
+                "mcp_message_invalid",
+                "mcp_message_limit",
+                "mcp_notification_limit",
+                "mcp_response_id_mismatch",
+                "mcp_response_invalid",
+                "mcp_server_request_unsupported",
+                "mcp_timeout",
+                "mcp_transport_closed",
+                "mcp_transport_failed",
+            }
+            if error.code in uncertain_codes and not error.outcome_uncertain:
+                raise McpClientError(
+                    error.code,
+                    str(error),
+                    cleanup_complete=error.cleanup_complete,
+                    outcome_uncertain=True,
+                ) from error
+            raise
+        self._calls_completed += 1
+        return McpToolCallResult(
+            configured_name=self.entry.configuration.name,
+            remote_name=remote_name,
+            protocol_version=self.protocol_version,
+            result=result,
+            duration_ms=_elapsed_ms(started),
+            process_generation=process_generation,
+            process_reused=process_reused,
+            stderr_bytes=self.stderr_bytes,
+            stderr_truncated=self.stderr_truncated,
+        )
+
+    def close(self) -> bool:
+        if not self._closed:
+            self._closed = True
+            self._connection.close()
+        return self._owner.close()
+
+
 class McpStdioClient:
     """Start one temporary confined stdio process and inspect its tool capability."""
 
@@ -443,7 +630,8 @@ class McpStdioClient:
         )
         return McpServerStatus(entry, command_available, missing)
 
-    def probe(self, entry: McpServerEntry) -> McpProbeResult:
+    def connect(self, entry: McpServerEntry) -> McpStdioSession:
+        """Start, initialize, and enumerate one confined process for later sequential use."""
         status = self.inspect_status(entry)
         configuration = entry.configuration
         if not configuration.enabled:
@@ -512,7 +700,6 @@ class McpStdioClient:
 
         owner = _ProcessOwner(process, launch)
         connection: _JsonRpcConnection | None = None
-        result: McpProbeResult | None = None
         caught: BaseException | None = None
         try:
             owner.activate()
@@ -533,55 +720,70 @@ class McpStdioClient:
             protocol, server_name, server_version, capabilities = _parse_initialize(initialize)
             connection.notify("notifications/initialized", {})
             tools, pages = _list_tools(connection, capabilities)
-            result = McpProbeResult(
-                configured_name=configuration.name,
+            return McpStdioSession(
+                entry=entry,
+                owner=owner,
+                connection=connection,
                 protocol_version=protocol,
                 server_name=server_name,
                 server_version=server_version,
                 capability_names=tuple(sorted(capabilities)),
                 tools=tools,
                 pages=pages,
-                duration_ms=_elapsed_ms(started),
-                stderr_bytes=0,
-                stderr_truncated=False,
-                cleanup_complete=False,
+                started=started,
             )
         except BaseException as error:
             caught = error
-        finally:
-            if connection is not None:
-                connection.close()
-            cleanup_complete = owner.close()
-
-        if caught is not None:
-            if isinstance(caught, KeyboardInterrupt):
+        if connection is not None:
+            connection.close()
+        cleanup_complete = owner.close()
+        assert caught is not None
+        if isinstance(caught, KeyboardInterrupt):
+            raise McpClientError(
+                "mcp_cancelled",
+                "MCP connection was cancelled",
+                cleanup_complete=cleanup_complete,
+            ) from caught
+        if isinstance(caught, McpClientError):
+            if not cleanup_complete:
                 raise McpClientError(
-                    "mcp_cancelled",
-                    "MCP probe was cancelled",
-                    cleanup_complete=cleanup_complete,
+                    "mcp_cleanup_incomplete",
+                    "MCP connection failed and process cleanup is incomplete",
+                    cleanup_complete=False,
                 ) from caught
-            if isinstance(caught, McpClientError):
-                if not cleanup_complete:
-                    raise McpClientError(
-                        "mcp_cleanup_incomplete",
-                        "MCP probe failed and process cleanup is incomplete",
-                        cleanup_complete=False,
-                    ) from caught
-                raise caught
             raise caught
+        raise caught
+
+    def probe(self, entry: McpServerEntry) -> McpProbeResult:
+        """Start one temporary process, inspect tools, and require complete cleanup."""
+        started = time.monotonic()
+        session = self.connect(entry)
+        result = McpProbeResult(
+            configured_name=entry.configuration.name,
+            protocol_version=session.protocol_version,
+            server_name=session.server_name,
+            server_version=session.server_version,
+            capability_names=session.capability_names,
+            tools=session.tools,
+            pages=session.pages,
+            duration_ms=_elapsed_ms(started),
+            stderr_bytes=session.stderr_bytes,
+            stderr_truncated=session.stderr_truncated,
+            cleanup_complete=False,
+        )
+        cleanup_complete = session.close()
         if not cleanup_complete:
             raise McpClientError(
                 "mcp_cleanup_incomplete",
                 "MCP probe completed but process cleanup is incomplete",
                 cleanup_complete=False,
             )
-        assert result is not None
         return McpProbeResult(
             **{
                 **result.__dict__,
                 "duration_ms": _elapsed_ms(started),
-                "stderr_bytes": owner.stderr.total,
-                "stderr_truncated": owner.stderr.total > owner.stderr.limit,
+                "stderr_bytes": session.stderr_bytes,
+                "stderr_truncated": session.stderr_truncated,
                 "cleanup_complete": True,
             }
         )

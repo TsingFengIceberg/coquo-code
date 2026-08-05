@@ -43,6 +43,7 @@ from leonervis_code.core.contracts import (
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.core.extensions import ToolExposure, ToolRegistrySnapshot
+from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.providers.streaming import ProviderTextDelta
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
@@ -549,7 +550,7 @@ def test_discovery_search_promotes_exact_candidate_for_later_invocation_without_
         ExtensionSource(ExtensionSourceKind.MCP, "mcp.project.fixture.2025-06-18", 1),
         ToolExecutionKind.MCP_REMOTE,
         ToolExposure.DEFERRED,
-        (),
+        (PermissionAction.DANGEROUS,),
     )
     registry = ToolRegistrySnapshot(
         2,
@@ -599,7 +600,7 @@ def test_discovery_search_promotes_exact_candidate_for_later_invocation_without_
         if isinstance(item, ToolResult) and item.tool_use_id == "remote-1"
     )
     assert remote_result.is_error
-    assert remote_result.content == "MCP tool execution is unavailable in this runtime slice"
+    assert remote_result.content == "MCP tool execution requires a ProjectSession action boundary"
 
 
 def test_loop_does_not_commit_candidate_when_provider_fails_after_a_tool(tmp_path) -> None:

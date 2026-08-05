@@ -101,11 +101,18 @@ from leonervis_code.core.effective_context import (
 )
 from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
 from leonervis_code.mcp import (
+    McpCallPreparationError,
     McpCatalogService,
+    McpLiveProcessStatus,
+    McpProcessManager,
     McpQuarantineCatalog,
+    McpRuntimeExecution,
+    McpRuntimeOutcome,
     McpServerStatus,
     McpServerStore,
     McpStdioClient,
+    PreparedMcpCall,
+    prepare_mcp_call,
 )
 from leonervis_code.mcp.client import McpProbeResult
 from leonervis_code.providers.manager import (
@@ -772,6 +779,7 @@ class ProjectSession:
         project_instructions_loader: ProjectInstructionsLoader | None = None,
         mcp_store: McpServerStore | None = None,
         mcp_client: McpStdioClient | None = None,
+        mcp_process_manager: McpProcessManager | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
         self.workspace = workspace
@@ -814,6 +822,9 @@ class ProjectSession:
         self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
         self._mcp_client = mcp_client or McpStdioClient(workspace)
         self._mcp_catalog_service = McpCatalogService(self._mcp_store, self._mcp_client)
+        self._mcp_process_manager = mcp_process_manager or McpProcessManager(
+            self._mcp_store, self._mcp_client
+        )
         self._web_search.disable_sources()
         self._search_source_order = (
             ("provider",) if self._manager.status().native_search_available else ()
@@ -903,6 +914,7 @@ class ProjectSession:
         archive_list_factory: Callable[[Path], ArchiveListTool] = ArchiveListTool,
         move_directory_factory: Callable[[Path], MoveDirectoryTool] = MoveDirectoryTool,
         download_file_factory: Callable[[Path], DownloadFileTool] = DownloadFileTool,
+        mcp_client_factory: Callable[..., McpStdioClient] = McpStdioClient,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -977,7 +989,10 @@ class ProjectSession:
                 user_path=user_mcp_path,
                 project_path=project_mcp_path,
             )
-            mcp_client = McpStdioClient(resolved_workspace, environment=resolved_environment)
+            mcp_client = mcp_client_factory(
+                resolved_workspace,
+                environment=resolved_environment,
+            )
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -1221,7 +1236,16 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._mcp_catalog_service.snapshot(refresh=True)
+            catalog = self._mcp_catalog_service.snapshot(refresh=True)
+            if not self._mcp_process_manager.synchronize_catalog(catalog.catalog_id):
+                raise RuntimeError("stale MCP process cleanup is incomplete")
+            return catalog
+
+    def inspect_mcp_runtime(self) -> tuple[McpLiveProcessStatus, ...]:
+        """Return content-free lifecycle facts for current REPL-owned MCP processes."""
+        with self._lock:
+            self._ensure_open()
+            return self._mcp_process_manager.statuses()
 
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""
@@ -3338,13 +3362,18 @@ class ProjectSession:
     def close(self) -> None:
         with self._lock:
             if self._closed:
+                if not self._mcp_process_manager.close():
+                    raise RuntimeError("MCP process cleanup is incomplete")
                 return
             self._ensure_not_compacting()
             self._closed = True
+            mcp_cleanup_complete = self._mcp_process_manager.close()
             try:
                 self._writer.close()
             finally:
                 self._manager.close()
+            if not mcp_cleanup_complete:
+                raise RuntimeError("MCP process cleanup is incomplete")
 
     def __enter__(self) -> ProjectSession:
         self._ensure_open()
@@ -3724,8 +3753,11 @@ class ProjectSession:
         if tool_set is None:
             raise RuntimeError("prepared tool set snapshot is unavailable")
         contract = tool_set.contract(request.name)
-        if contract.execution_kind is not ToolExecutionKind.HOST_ACTION:
-            raise RuntimeError("tool contract does not use the Host action boundary")
+        if contract.execution_kind not in {
+            ToolExecutionKind.HOST_ACTION,
+            ToolExecutionKind.MCP_REMOTE,
+        }:
+            raise RuntimeError("tool contract does not use an action boundary")
         cancellation = self._active_cancellation
         if cancellation is not None:
             cancellation.check()
@@ -3746,7 +3778,37 @@ class ProjectSession:
         prepared_web_fetch: PreparedWebFetch | None = None
         prepared_move_directory: PreparedMoveDirectory | None = None
         prepared_download: PreparedDownloadFile | None = None
-        if request.name in {
+        prepared_mcp: PreparedMcpCall | None = None
+        if contract.execution_kind is ToolExecutionKind.MCP_REMOTE:
+            catalog = self._mcp_catalog_service.snapshot()
+            candidate = next(
+                (
+                    item
+                    for item in catalog.accepted
+                    if item.qualified_name == request.name
+                    and item.contract is not None
+                    and item.contract.contract_id == contract.contract_id
+                ),
+                None,
+            )
+            if candidate is None:
+                return _invalid_tool_request(
+                    request,
+                    McpCallPreparationError("MCP tool catalog identity is stale"),
+                )
+            try:
+                prepared_mcp = prepare_mcp_call(
+                    candidate,
+                    catalog.catalog_id,
+                    request.arguments.as_mapping(),
+                )
+            except McpCallPreparationError as error:
+                return _invalid_tool_request(request, error)
+            action = PermissionAction.DANGEROUS
+            precondition = ActionPrecondition.expected_configuration(
+                prepared_mcp.precondition_sha256
+            )
+        elif request.name in {
             READ_FILE_TOOL_NAME,
             GLOB_TOOL_NAME,
             GREP_TOOL_NAME,
@@ -3959,12 +4021,18 @@ class ProjectSession:
                 action_digest=identity.digest,
                 kind=ApprovalPreviewKind.FILE_DOWNLOAD,
             )
+        elif prepared_mcp is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.MCP_TOOL,
+            )
         coordinator = ActionCoordinator(
             writer=self._writer,
             approval_handler=self._approval_handler,
             uuid_factory=self._action_uuid_factory,
         )
         command_observation: RunCommandExecutionObservation | None = None
+        mcp_observation: McpRuntimeExecution | None = None
 
         def revalidate(current: ActionIdentity) -> ActionIdentity:
             self._assert_action_lease(lease)
@@ -4009,13 +4077,63 @@ class ProjectSession:
             if prepared_download is not None:
                 refreshed = self._download_file.refresh_precondition(prepared_download)
                 return replace(current, precondition=refreshed)
+            if prepared_mcp is not None:
+                catalog = self._mcp_catalog_service.snapshot()
+                candidate = next(
+                    (
+                        item
+                        for item in catalog.accepted
+                        if item.qualified_name == request.name
+                        and item.contract is not None
+                        and item.contract.contract_id == contract.contract_id
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    return replace(
+                        current,
+                        precondition=ActionPrecondition.expected_configuration("0" * 64),
+                    )
+                refreshed = prepare_mcp_call(
+                    candidate,
+                    catalog.catalog_id,
+                    request.arguments.as_mapping(),
+                )
+                return replace(
+                    current,
+                    precondition=ActionPrecondition.expected_configuration(
+                        refreshed.precondition_sha256
+                    ),
+                )
             return current
 
         def execute(current: ActionIdentity) -> ActionExecutionResult:
-            nonlocal command_observation
+            nonlocal command_observation, mcp_observation
             self._assert_action_lease(lease)
             if cancellation is not None:
                 cancellation.check()
+            if prepared_mcp is not None:
+                mcp_result = self._mcp_process_manager.execute(
+                    prepared_mcp,
+                    cancellation=cancellation,
+                )
+                mcp_observation = mcp_result
+                outcome = {
+                    McpRuntimeOutcome.SUCCEEDED: ActionExecutionOutcome.SUCCEEDED,
+                    McpRuntimeOutcome.FAILED: ActionExecutionOutcome.FAILED,
+                    McpRuntimeOutcome.PARTIAL: ActionExecutionOutcome.PARTIAL,
+                }[mcp_result.outcome]
+                return ActionExecutionResult(
+                    tool_result=ToolResult(
+                        request.tool_use_id,
+                        mcp_result.content,
+                        is_error=mcp_result.is_error,
+                        truncated=mcp_result.truncated,
+                    ),
+                    outcome=outcome,
+                    result_code=mcp_result.result_code,
+                    audit_message=mcp_result.audit_message,
+                )
             if request.name == READ_FILE_TOOL_NAME:
                 result = self._read_file.execute(request)
             elif request.name == GLOB_TOOL_NAME:
@@ -4276,7 +4394,11 @@ class ProjectSession:
         result_details = (
             _command_result_details(command_observation)
             if coordinated.executed and command_observation is not None
-            else None
+            else (
+                _mcp_result_details(mcp_observation)
+                if coordinated.executed and mcp_observation is not None
+                else None
+            )
         )
         return ToolDispatchResult(
             coordinated.tool_result,
@@ -4844,6 +4966,35 @@ def _command_result_details(
         )
     )
     return ToolResultDetails(" ".join(compact), tuple(details))
+
+
+def _mcp_result_details(observation: McpRuntimeExecution) -> ToolResultDetails:
+    generation = (
+        "unavailable"
+        if observation.process_generation is None
+        else str(observation.process_generation)
+    )
+    duration = "unavailable" if observation.duration_ms is None else f"{observation.duration_ms}ms"
+    reused = (
+        "unavailable"
+        if observation.process_reused is None
+        else str(observation.process_reused).lower()
+    )
+    blocks = "unavailable" if observation.result_blocks is None else str(observation.result_blocks)
+    compact = (
+        f"process-generation={generation} reused={reused} duration={duration} "
+        f"blocks={blocks} cleanup={str(observation.cleanup_complete).lower()}"
+    )
+    return ToolResultDetails(
+        compact,
+        (
+            f"process_generation: {generation}",
+            f"process_reused: {reused}",
+            f"duration: {duration}",
+            f"result_blocks: {blocks}",
+            f"cleanup_complete: {str(observation.cleanup_complete).lower()}",
+        ),
+    )
 
 
 def _compact_stream_bytes(stream: RunCommandStreamObservation) -> str:

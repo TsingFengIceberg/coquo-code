@@ -42,6 +42,7 @@ from leonervis_code.cli.presentation import (
     render_git_status,
     render_mcp_catalog,
     render_mcp_probe_result,
+    render_mcp_runtime_statuses,
     render_mcp_server_status,
     render_mcp_server_statuses,
     render_provider_adapter_error,
@@ -336,6 +337,8 @@ class ReplSession(Protocol):
     def probe_mcp_server(self, name: str): ...
 
     def inspect_mcp_catalog(self): ...
+
+    def inspect_mcp_runtime(self): ...
 
     def status(self): ...
 
@@ -840,9 +843,19 @@ def dispatch_slash(
         if command != "/search status":
             return _usage("Usage: /search status")
         return _search_status(session)
-    if command in {"/mcp list", "/mcp status"}:
+    if command == "/mcp list":
         return _call(
             lambda: render_mcp_server_statuses(session.inspect_mcp_servers()),
+            kind="info",
+            failure_prefix="MCP server inspection failed",
+        )
+    if command == "/mcp status":
+        return _call(
+            lambda: (
+                render_mcp_server_statuses(session.inspect_mcp_servers())
+                + "\n"
+                + render_mcp_runtime_statuses(session.inspect_mcp_runtime())
+            ),
             kind="info",
             failure_prefix="MCP server inspection failed",
         )

@@ -19,6 +19,7 @@ from leonervis_code.core.extensions import (
 )
 from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult, McpStdioClient
 from leonervis_code.mcp.config import McpServerEntry, McpServerStore
+from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 
 
@@ -50,7 +51,6 @@ _SUPPORTED_SCHEMA_KEYS = frozenset(
         "minLength",
         "minimum",
         "oneOf",
-        "pattern",
         "properties",
         "required",
         "title",
@@ -236,7 +236,7 @@ def _normalize_tool(
     tool: McpListedTool,
 ) -> McpToolCandidate:
     qualified_name = _qualified_name(entry.configuration.name, tool.name)
-    fingerprint = _schema_fingerprint(tool.input_schema_json)
+    fingerprint = mcp_schema_fingerprint(tool.input_schema_json)
     reason = _schema_rejection_reason(tool.input_schema_json)
     description_text = _normalized_description(tool.description)
     search_text = " ".join(
@@ -278,7 +278,7 @@ def _normalize_tool(
         source,
         ToolExecutionKind.MCP_REMOTE,
         ToolExposure.DEFERRED,
-        (),
+        (PermissionAction.DANGEROUS,),
     )
     return McpToolCandidate(
         entry.configuration.name,
@@ -367,6 +367,12 @@ def _validate_schema_node(schema: object, *, root: bool = False) -> None:
     enum = schema.get("enum")
     if enum is not None and (not isinstance(enum, list) or not enum or len(enum) > 128):
         raise ValueError("mcp_schema_enum_invalid")
+    for keyword in ("minItems", "maxItems", "minLength", "maxLength"):
+        if keyword in schema and (type(schema[keyword]) is not int or schema[keyword] < 0):
+            raise ValueError("mcp_schema_bound_invalid")
+    for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+        if keyword in schema and type(schema[keyword]) not in {int, float}:
+            raise ValueError("mcp_schema_bound_invalid")
 
 
 def _normalized_description(value: str | None) -> str:
@@ -376,7 +382,8 @@ def _normalized_description(value: str | None) -> str:
     return single_line[:MAX_MCP_NORMALIZED_DESCRIPTION_CHARACTERS]
 
 
-def _schema_fingerprint(schema_json: str) -> str:
+def mcp_schema_fingerprint(schema_json: str) -> str:
+    """Return the public stable identity used to revalidate a live tool descriptor."""
     digest = hashlib.sha256(_SCHEMA_ID_DOMAIN + schema_json.encode("utf-8")).hexdigest()
     return f"mcp-schema-v{MCP_SCHEMA_FINGERPRINT_VERSION}-{digest}"
 
