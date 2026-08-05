@@ -154,6 +154,63 @@ def test_catalog_quarantines_pattern_instead_of_executing_an_untrusted_regex() -
     assert catalog.rejected[0].reason_code == "mcp_schema_keyword_unsupported"
 
 
+def test_catalog_accepts_known_root_schema_declaration_without_projecting_it() -> None:
+    catalog = build_mcp_quarantine_catalog(
+        (_entry(),),
+        CatalogClient(
+            (
+                _tool(
+                    "read_text_file",
+                    {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                ),
+            )
+        ),
+    )
+
+    assert len(catalog.accepted) == 1
+    candidate = catalog.accepted[0]
+    assert candidate.contract is not None
+    assert '"$schema"' not in candidate.contract.definition.canonical_json
+    assert candidate.schema_fingerprint.startswith("mcp-schema-v1-")
+
+
+def test_catalog_rejects_unknown_or_nested_schema_declarations() -> None:
+    catalog = build_mcp_quarantine_catalog(
+        (_entry(),),
+        CatalogClient(
+            (
+                _tool(
+                    "unknown_dialect",
+                    {"$schema": "https://example.test/schema", "type": "object"},
+                ),
+                _tool(
+                    "nested_dialect",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "$schema": "http://json-schema.org/draft-07/schema#",
+                                "type": "string",
+                            }
+                        },
+                    },
+                ),
+            )
+        ),
+    )
+
+    assert not catalog.accepted
+    assert all(
+        candidate.reason_code == "mcp_schema_declaration_unsupported"
+        for candidate in catalog.rejected
+    )
+
+
 def test_catalog_registry_keeps_candidates_deferred_and_content_addressed() -> None:
     catalog = build_mcp_quarantine_catalog(
         (_entry(),),

@@ -13,6 +13,7 @@ import re
 import stat
 import tempfile
 from threading import RLock
+from urllib.parse import urlsplit, urlunsplit
 
 if os.name == "nt":
     import msvcrt
@@ -20,7 +21,8 @@ else:
     import fcntl
 
 
-MCP_CONFIGURATION_SCHEMA_VERSION = 1
+MCP_CONFIGURATION_SCHEMA_VERSION = 2
+SUPPORTED_MCP_CONFIGURATION_SCHEMA_VERSIONS = (1, 2)
 MAX_MCP_CONFIGURATION_BYTES = 1024 * 1024
 MAX_MCP_SERVERS_PER_SCOPE = 64
 MAX_MCP_SERVER_NAME_CHARACTERS = 64
@@ -42,23 +44,32 @@ class McpTransport(StrEnum):
     """Closed MCP transport set implemented by the current client."""
 
     STDIO = "stdio"
+    STREAMABLE_HTTP = "streamable-http"
 
 
 class McpTrustMode(StrEnum):
     """Process authority granted to one configured MCP server."""
 
     CONFINED_STDIO = "confined-stdio"
+    REMOTE_HTTPS = "remote-https"
 
 
 @dataclass(frozen=True)
 class McpServerConfiguration:
-    """One credential-free, revisioned stdio server definition."""
+    """One revisioned local or remote MCP server definition without secret values."""
 
     name: str
-    command: str
+    command: str = ""
     args: tuple[str, ...] = ()
     cwd: str = "."
     environment: tuple[tuple[str, str], ...] = ()
+    endpoint: str | None = None
+    bearer_token_env: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret_env: str | None = None
+    oauth_scopes: tuple[str, ...] = ()
+    expose_workspace_root: bool = False
+    resource_subscriptions: tuple[str, ...] = ()
     enabled: bool = False
     transport: McpTransport = McpTransport.STDIO
     trust: McpTrustMode = McpTrustMode.CONFINED_STDIO
@@ -70,12 +81,41 @@ class McpServerConfiguration:
                 "MCP server name must start with a lowercase letter and contain only "
                 "lowercase ASCII letters, digits, dot, underscore, or hyphen"
             )
-        _validate_command(self.command)
-        _validate_args(self.args)
-        _validate_cwd(self.cwd)
-        _validate_environment(self.environment)
+        if self.transport is McpTransport.STDIO:
+            if self.trust is not McpTrustMode.CONFINED_STDIO:
+                raise McpConfigurationError("stdio MCP servers require confined-stdio trust")
+            _validate_command(self.command)
+            _validate_args(self.args)
+            _validate_cwd(self.cwd)
+            _validate_environment(self.environment)
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.endpoint,
+                        self.bearer_token_env,
+                        self.oauth_client_id,
+                        self.oauth_client_secret_env,
+                    )
+                )
+                or self.oauth_scopes
+            ):
+                raise McpConfigurationError("stdio MCP servers cannot contain remote fields")
+        elif self.transport is McpTransport.STREAMABLE_HTTP:
+            if self.trust is not McpTrustMode.REMOTE_HTTPS:
+                raise McpConfigurationError("remote MCP servers require remote-https trust")
+            if self.command or self.args or self.cwd != "." or self.environment:
+                raise McpConfigurationError("remote MCP servers cannot contain stdio fields")
+            object.__setattr__(self, "endpoint", _canonical_remote_endpoint(self.endpoint))
+            _validate_optional_environment_name(self.bearer_token_env, "bearer token")
+            _validate_oauth(self)
+        else:
+            raise McpConfigurationError("MCP server transport is unsupported")
         if type(self.enabled) is not bool:
             raise McpConfigurationError("MCP server enabled flag must be boolean")
+        if type(self.expose_workspace_root) is not bool:
+            raise McpConfigurationError("MCP workspace-root exposure flag must be boolean")
+        _validate_resource_subscriptions(self.resource_subscriptions)
         if type(self.transport) is not McpTransport:
             raise McpConfigurationError("MCP server transport is invalid")
         if type(self.trust) is not McpTrustMode:
@@ -93,6 +133,13 @@ class McpServerConfiguration:
             "cwd",
             "enabled",
             "environment",
+            "endpoint",
+            "bearer_token_env",
+            "oauth_client_id",
+            "oauth_client_secret_env",
+            "oauth_scopes",
+            "expose_workspace_root",
+            "resource_subscriptions",
             "name",
             "revision",
             "transport",
@@ -101,11 +148,31 @@ class McpServerConfiguration:
         unknown = set(value) - allowed
         if unknown:
             raise McpConfigurationError(f"MCP server contains unknown field: {sorted(unknown)[0]}")
-        if set(value) != allowed:
-            missing = sorted(allowed - set(value))[0]
-            raise McpConfigurationError(f"MCP server is missing required field: {missing}")
+        legacy = {
+            "args",
+            "command",
+            "cwd",
+            "enabled",
+            "environment",
+            "name",
+            "revision",
+            "transport",
+            "trust",
+        }
+        v2_without_root = allowed - {"expose_workspace_root", "resource_subscriptions"}
+        if set(value) not in {
+            frozenset(allowed),
+            frozenset(v2_without_root),
+            frozenset(legacy),
+        }:
+            missing = sorted(legacy - set(value))
+            if not missing:
+                missing = sorted(allowed - set(value))
+            raise McpConfigurationError(f"MCP server is missing required field: {missing[0]}")
         raw_args = value["args"]
         raw_environment = value["environment"]
+        raw_oauth_scopes = value.get("oauth_scopes", [])
+        raw_subscriptions = value.get("resource_subscriptions", [])
         if not isinstance(raw_args, list) or not all(isinstance(item, str) for item in raw_args):
             raise McpConfigurationError("MCP server args must be an array of strings")
         if not isinstance(raw_environment, dict) or not all(
@@ -114,6 +181,14 @@ class McpServerConfiguration:
             raise McpConfigurationError(
                 "MCP server environment must map target names to source environment names"
             )
+        if not isinstance(raw_oauth_scopes, list) or not all(
+            isinstance(item, str) for item in raw_oauth_scopes
+        ):
+            raise McpConfigurationError("MCP OAuth scopes must be an array of strings")
+        if not isinstance(raw_subscriptions, list) or not all(
+            isinstance(item, str) for item in raw_subscriptions
+        ):
+            raise McpConfigurationError("MCP resource subscriptions must be an array of strings")
         try:
             transport = McpTransport(value["transport"])
             trust = McpTrustMode(value["trust"])
@@ -127,6 +202,13 @@ class McpServerConfiguration:
             args=tuple(raw_args),
             cwd=value["cwd"],
             environment=tuple(sorted(raw_environment.items())),
+            endpoint=value.get("endpoint"),
+            bearer_token_env=value.get("bearer_token_env"),
+            oauth_client_id=value.get("oauth_client_id"),
+            oauth_client_secret_env=value.get("oauth_client_secret_env"),
+            oauth_scopes=tuple(raw_oauth_scopes),
+            expose_workspace_root=value.get("expose_workspace_root", False),
+            resource_subscriptions=tuple(raw_subscriptions),
             enabled=value["enabled"],
             transport=transport,
             trust=trust,
@@ -140,6 +222,13 @@ class McpServerConfiguration:
             "cwd": self.cwd,
             "enabled": self.enabled,
             "environment": dict(self.environment),
+            "endpoint": self.endpoint,
+            "bearer_token_env": self.bearer_token_env,
+            "oauth_client_id": self.oauth_client_id,
+            "oauth_client_secret_env": self.oauth_client_secret_env,
+            "oauth_scopes": list(self.oauth_scopes),
+            "expose_workspace_root": self.expose_workspace_root,
+            "resource_subscriptions": list(self.resource_subscriptions),
             "name": self.name,
             "revision": self.revision,
             "transport": self.transport.value,
@@ -358,6 +447,37 @@ class McpServerStore:
             del updated[name]
             self._write(path, updated)
 
+    def set_resource_subscriptions(
+        self,
+        name: str,
+        *,
+        scope: str,
+        subscriptions: tuple[str, ...],
+        expected_revision: int | None = None,
+    ) -> McpServerEntry:
+        _validate_server_name(name)
+        _validate_scope(scope)
+        _validate_resource_subscriptions(subscriptions)
+        with self.transaction():
+            path = self._path_for_scope(scope)
+            servers = self._load(path, scope)
+            try:
+                current = servers[name]
+            except KeyError:
+                raise McpConfigurationError(
+                    f"MCP server does not exist in {scope} scope: {name}"
+                ) from None
+            _check_revision(current, expected_revision)
+            if current.resource_subscriptions == subscriptions:
+                return McpServerEntry(scope, current)
+            updated = replace(
+                current,
+                resource_subscriptions=subscriptions,
+                revision=current.revision + 1,
+            )
+            self._write(path, {**servers, name: updated})
+            return McpServerEntry(scope, updated)
+
     def _path_for_scope(self, scope: str) -> Path:
         return self.user_path if scope == "user" else self.project_path
 
@@ -373,7 +493,7 @@ class McpServerStore:
                     f"{scope} MCP configuration contains unknown field: {sorted(unknown)[0]}"
                 )
             raise McpConfigurationError(f"{scope} MCP configuration is missing a required field")
-        if data["schema_version"] != MCP_CONFIGURATION_SCHEMA_VERSION:
+        if data["schema_version"] not in SUPPORTED_MCP_CONFIGURATION_SCHEMA_VERSIONS:
             raise McpConfigurationError(f"unsupported {scope} MCP configuration schema version")
         raw_servers = data["servers"]
         if not isinstance(raw_servers, dict):
@@ -485,6 +605,98 @@ def _validate_environment(environment: object) -> None:
         if target in targets:
             raise McpConfigurationError("MCP server environment target is duplicated")
         targets.add(target)
+
+
+def _validate_optional_environment_name(value: object, label: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or _ENVIRONMENT_NAME.fullmatch(value) is None:
+        raise McpConfigurationError(f"MCP {label} environment name is invalid")
+
+
+def _validate_oauth(configuration: McpServerConfiguration) -> None:
+    client_id = configuration.oauth_client_id
+    secret_env = configuration.oauth_client_secret_env
+    scopes = configuration.oauth_scopes
+    if configuration.bearer_token_env is not None and client_id is not None:
+        raise McpConfigurationError("MCP bearer and OAuth authentication are mutually exclusive")
+    if client_id is None:
+        if secret_env is not None or scopes:
+            raise McpConfigurationError("MCP OAuth scopes or secret require a client ID")
+        return
+    if (
+        not isinstance(client_id, str)
+        or not client_id
+        or len(client_id) > 512
+        or _contains_control(client_id)
+    ):
+        raise McpConfigurationError("MCP OAuth client ID is invalid")
+    _validate_optional_environment_name(secret_env, "OAuth client secret")
+    if not isinstance(scopes, tuple) or len(scopes) > 32:
+        raise McpConfigurationError("MCP OAuth scopes are invalid")
+    if tuple(sorted(set(scopes))) != scopes:
+        raise McpConfigurationError("MCP OAuth scopes must be unique and canonical")
+    for scope in scopes:
+        if (
+            not isinstance(scope, str)
+            or not scope
+            or len(scope) > 256
+            or any(character.isspace() or ord(character) < 0x21 for character in scope)
+        ):
+            raise McpConfigurationError("MCP OAuth scope is invalid")
+
+
+def _validate_resource_subscriptions(values: object) -> None:
+    if not isinstance(values, tuple) or len(values) > 64 or tuple(sorted(set(values))) != values:
+        raise McpConfigurationError("MCP resource subscriptions must be unique and canonical")
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 4096
+            or _contains_control(value)
+            or any(character.isspace() for character in value)
+            or not urlsplit(value).scheme
+            or urlsplit(value).fragment
+        ):
+            raise McpConfigurationError("MCP resource subscription URI is invalid")
+
+
+def _canonical_remote_endpoint(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or _contains_control(value)
+    ):
+        raise McpConfigurationError("remote MCP endpoint is invalid")
+    if len(value) > 4096 or len(value.encode("utf-8")) > 4096:
+        raise McpConfigurationError("remote MCP endpoint exceeds the supported size")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise McpConfigurationError("remote MCP endpoint is malformed") from None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or (port is not None and port != 443)
+    ):
+        raise McpConfigurationError(
+            "remote MCP endpoint must be credential-free HTTPS on the standard port"
+        )
+    host = parsed.hostname.rstrip(".").lower()
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise McpConfigurationError("remote MCP endpoint hostname is invalid") from None
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit(("https", netloc, parsed.path or "/", parsed.query, ""))
 
 
 def _check_revision(

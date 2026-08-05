@@ -7,6 +7,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+from collections.abc import Mapping
 from typing import Protocol
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 
@@ -32,6 +33,7 @@ class WebHttpResponse:
     body: bytes
     final_url: str
     redirects: int
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class WebGetTransport(Protocol):
@@ -76,6 +78,7 @@ class PinnedWebGetTransport:
                     response.body,
                     current,
                     redirect_count,
+                    response.headers,
                 )
             location = response.location
             if not location:
@@ -93,10 +96,55 @@ class PinnedWebGetTransport:
             current = canonical_public_web_url(urljoin(current, location))
         raise AssertionError("unreachable redirect loop")
 
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout_seconds: int,
+        max_response_bytes: int,
+    ) -> WebHttpResponse:
+        """Send one pinned public-address request without following redirects."""
+        if method not in {"GET", "POST", "DELETE"}:
+            raise ValueError("web request method is unsupported")
+        if type(headers) is not dict or any(
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or not key
+            or any(character in key + value for character in "\r\n")
+            for key, value in headers.items()
+        ):
+            raise ValueError("web request headers are invalid")
+        if body is not None and not isinstance(body, bytes):
+            raise ValueError("web request body is invalid")
+        canonical = canonical_public_web_url(url)
+        response = self._request_once(
+            canonical,
+            method=method,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+        )
+        return WebHttpResponse(
+            response.status_code,
+            response.content_type,
+            response.content_encoding,
+            response.body,
+            canonical,
+            0,
+            response.headers,
+        )
+
     def _request_once(
         self,
         url: str,
         *,
+        method: str = "GET",
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
         timeout_seconds: int,
         max_response_bytes: int,
     ) -> _OneResponse:
@@ -127,20 +175,22 @@ class PinnedWebGetTransport:
                     timeout=timeout_seconds,
                 )
             try:
-                connection.request(
-                    "GET",
-                    target,
-                    headers={
-                        "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
-                        "Accept-Encoding": "identity",
-                        "Connection": "close",
-                        "User-Agent": WEB_USER_AGENT,
-                    },
-                )
+                request_headers = {
+                    "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
+                    "Accept-Encoding": "identity",
+                    "Connection": "close",
+                    "User-Agent": WEB_USER_AGENT,
+                }
+                if headers is not None:
+                    request_headers.update(headers)
+                connection.request(method, target, body=body, headers=request_headers)
                 response = connection.getresponse()
                 content_type = response.getheader("Content-Type", "")
                 encoding = response.getheader("Content-Encoding", "").strip().lower()
                 location = response.getheader("Location")
+                response_headers = tuple(
+                    (key.lower(), value) for key, value in response.getheaders()
+                )
                 declared = response.getheader("Content-Length")
                 if declared is not None:
                     try:
@@ -159,7 +209,14 @@ class PinnedWebGetTransport:
                         delivery_unknown=False,
                     )
                 body = _read_bounded(response, max_response_bytes)
-                return _OneResponse(response.status, content_type, encoding, body, location)
+                return _OneResponse(
+                    response.status,
+                    content_type,
+                    encoding,
+                    body,
+                    location,
+                    response_headers,
+                )
             except WebTransportError:
                 raise
             except (TimeoutError, socket.timeout) as error:
@@ -188,6 +245,7 @@ class _OneResponse:
     content_encoding: str
     body: bytes
     location: str | None
+    headers: tuple[tuple[str, str], ...]
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):

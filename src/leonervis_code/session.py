@@ -102,6 +102,7 @@ from leonervis_code.core.effective_context import (
 )
 from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
 from leonervis_code.mcp import (
+    McpClient,
     McpCallPreparationError,
     McpCatalogService,
     McpLiveProcessStatus,
@@ -111,7 +112,6 @@ from leonervis_code.mcp import (
     McpRuntimeOutcome,
     McpServerStatus,
     McpServerStore,
-    McpStdioClient,
     McpToolPolicyStore,
     PreparedMcpCall,
     prepare_mcp_call,
@@ -780,7 +780,7 @@ class ProjectSession:
         loop: AgentLoop | None = None,
         project_instructions_loader: ProjectInstructionsLoader | None = None,
         mcp_store: McpServerStore | None = None,
-        mcp_client: McpStdioClient | None = None,
+        mcp_client: object | None = None,
         mcp_policy_store: McpToolPolicyStore | None = None,
         mcp_process_manager: McpProcessManager | None = None,
         startup_resume_result: SessionResumeResult | None = None,
@@ -823,7 +823,7 @@ class ProjectSession:
         self._move_directory = move_directory or MoveDirectoryTool(workspace)
         self._download_file = download_file or DownloadFileTool(workspace)
         self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
-        self._mcp_client = mcp_client or McpStdioClient(workspace)
+        self._mcp_client = mcp_client or McpClient(workspace)
         self._mcp_policy_store = mcp_policy_store or McpToolPolicyStore.for_workspace(workspace)
         self._mcp_catalog_service = McpCatalogService(
             self._mcp_store,
@@ -924,7 +924,7 @@ class ProjectSession:
         archive_list_factory: Callable[[Path], ArchiveListTool] = ArchiveListTool,
         move_directory_factory: Callable[[Path], MoveDirectoryTool] = MoveDirectoryTool,
         download_file_factory: Callable[[Path], DownloadFileTool] = DownloadFileTool,
-        mcp_client_factory: Callable[..., McpStdioClient] = McpStdioClient,
+        mcp_client_factory: Callable[..., object] = McpClient,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -5016,6 +5016,9 @@ def _mcp_result_details(observation: McpRuntimeExecution) -> ToolResultDetails:
         f"notifications=progress:{notifications.progress_count},"
         f"message:{notifications.message_count},"
         f"list-changed:{notifications.tools_list_changed_count},"
+        f"resources-list-changed:{notifications.resources_list_changed_count},"
+        f"resource-updated:{notifications.resource_updated_count},"
+        f"prompts-list-changed:{notifications.prompts_list_changed_count},"
         f"ignored:{notifications.ignored_count}"
     )
     compact = (

@@ -264,6 +264,27 @@ def render_mcp_server_status(status: McpServerStatus) -> str:
         ", ".join(f"{target}<-{source}" for target, source in configured.environment) or "none"
     )
     missing = ", ".join(status.missing_environment) or "none"
+    if configured.transport.value == "stdio":
+        transport_lines = (
+            f"Command: {_safe_inline(configured.command)} ({len(configured.args)} configured arguments)",
+            f"Server cwd: {_safe_inline(configured.cwd)}",
+            f"Environment bindings: {environment}",
+            f"Command available: {'yes' if status.command_available else 'no'}",
+            "Authority: read-only workspace, read-only host root, private temp/home, and no sockets.",
+        )
+    else:
+        auth = (
+            f"bearer environment {configured.bearer_token_env}"
+            if configured.bearer_token_env
+            else ("OAuth" if configured.oauth_client_id else "none")
+        )
+        transport_lines = (
+            f"Endpoint: {_safe_inline(configured.endpoint or '<none>')}",
+            f"Authentication: {auth}",
+            f"OAuth scopes: {len(configured.oauth_scopes)}",
+            f"Endpoint configured: {'yes' if status.command_available else 'no'}",
+            "Authority: pinned public HTTPS, verified TLS hostname, no redirects, and bounded responses.",
+        )
     return "\n".join(
         (
             f"MCP server: {_safe_inline(configured.name)}",
@@ -271,12 +292,8 @@ def render_mcp_server_status(status: McpServerStatus) -> str:
             f"State: {'enabled' if configured.enabled else 'disabled'}; "
             f"{'ready' if status.ready else 'not ready'}; revision {configured.revision}",
             f"Transport/trust: {configured.transport.value}/{configured.trust.value}",
-            f"Command: {_safe_inline(configured.command)} ({len(configured.args)} configured arguments)",
-            f"Server cwd: {_safe_inline(configured.cwd)}",
-            f"Environment bindings: {environment}",
-            f"Command available: {'yes' if status.command_available else 'no'}",
+            *transport_lines,
             f"Missing source environment names: {missing}",
-            "Authority: read-only workspace, read-only host root, private temp/home, and no sockets.",
             "Exposure: enabled servers contribute only normalized deferred candidates to later Turns.",
         )
     )
@@ -308,7 +325,9 @@ def render_mcp_runtime_statuses(statuses: tuple[McpLiveProcessStatus, ...]) -> s
             f"  {status.configured_name}: {status.scope} r{status.configuration_revision}; "
             f"protocol {status.protocol_version}; generation {status.process_generation}; "
             f"calls {status.calls_completed}; {'alive' if status.alive else 'exited'}; "
-            f"stderr {status.stderr_bytes} bytes"
+            f"transport {status.transport}"
+            + (" session-bound; " if status.session_bound else "; ")
+            + f"stderr {status.stderr_bytes} bytes"
             + (" (truncated)" if status.stderr_truncated else "")
         )
     lines.append(
@@ -2031,6 +2050,9 @@ def render_prompt_event(
             "progress": "MCP server reported progress",
             "message": "MCP server emitted a logging notification",
             "tools-list-changed": "MCP server reported a changed tool catalog",
+            "resources-list-changed": "MCP server reported a changed resource catalog",
+            "resource-updated": "MCP server reported an updated subscribed resource",
+            "prompts-list-changed": "MCP server reported a changed prompt catalog",
         }
         return labels[event.kind.value], "info"
     if isinstance(event, TaskAdmissionProposed):

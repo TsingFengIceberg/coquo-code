@@ -89,6 +89,11 @@ def test_mcp_cli_configures_disabled_server_then_enables_probes_and_removes(tmp_
     assert "use mcp catalog to inspect normalized quarantine candidates" in rendered
 
     output = io.StringIO()
+    assert main(["mcp", "doctor", "fixture"], stdout=output, stderr=errors, **common) == 0
+    assert "MCP conformance: passed" in output.getvalue()
+    assert "Legacy HTTP/SSE: intentionally unsupported" in output.getvalue()
+
+    output = io.StringIO()
     assert main(["mcp", "catalog"], stdout=output, stderr=errors, **common) == 0
     catalog = output.getvalue()
     assert "MCP quarantine catalog: mcp-catalog-v1-" in catalog
@@ -133,6 +138,41 @@ def test_mcp_cli_rejects_provider_selection_and_stale_revision(tmp_path) -> None
     errors = io.StringIO()
     assert main(["--model", "fake", "mcp", "list"], stderr=errors, **common) == 2
     assert "cannot be combined with MCP management" in errors.getvalue()
+
+
+def test_mcp_cli_adds_remote_server_without_persisting_bearer_value(tmp_path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    common = {
+        "cwd": tmp_path,
+        "environment": {"REMOTE_TOKEN": "secret-value"},
+        "user_mcp_path": user_path,
+        "project_mcp_path": project_path,
+        "mcp_client_factory": client_factory,
+    }
+    output = io.StringIO()
+    assert (
+        main(
+            [
+                "mcp",
+                "add-http",
+                "remote",
+                "--endpoint",
+                "https://mcp.example.test/mcp",
+                "--bearer-token-env",
+                "REMOTE_TOKEN",
+                "--expose-workspace-root",
+            ],
+            stdout=output,
+            **common,
+        )
+        == 0
+    )
+    configured = McpServerStore(user_path, project_path).get_server("remote").configuration
+    assert configured.endpoint == "https://mcp.example.test/mcp"
+    assert configured.bearer_token_env == "REMOTE_TOKEN"
+    assert configured.expose_workspace_root is True
+    assert "secret-value" not in project_path.read_text(encoding="utf-8")
 
 
 def test_mcp_cli_sets_inspects_and_clears_exact_tool_policy(tmp_path) -> None:

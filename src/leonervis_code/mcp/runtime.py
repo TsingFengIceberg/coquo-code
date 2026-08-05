@@ -10,6 +10,7 @@ from enum import StrEnum
 import json
 import re
 from threading import RLock
+from typing import Protocol
 
 from leonervis_code.core.cancellation import TurnCancellation
 from leonervis_code.mcp.catalog import McpCandidateDisposition, McpToolCandidate
@@ -18,8 +19,6 @@ from leonervis_code.mcp.client import (
     McpLiveProcessStatus,
     McpNotificationKind,
     McpNotificationSummary,
-    McpStdioClient,
-    McpStdioSession,
     McpToolCallResult,
 )
 from leonervis_code.mcp.config import McpServerEntry, McpServerStore
@@ -30,6 +29,27 @@ MAX_MCP_CALLS_PER_PROCESS = 128
 MAX_MCP_RESULT_BLOCKS = 64
 MAX_MCP_RESULT_OUTPUT_BYTES = 64 * 1024
 MAX_MCP_RESULT_FIELD_CHARACTERS = 8192
+
+
+class McpRuntimeSession(Protocol):
+    protocol_version: str
+    tools: tuple
+
+    @property
+    def alive(self) -> bool: ...
+
+    @property
+    def calls_completed(self) -> int: ...
+
+    @property
+    def stderr_bytes(self) -> int: ...
+
+    @property
+    def stderr_truncated(self) -> bool: ...
+
+    def call_tool(self, *args, **kwargs): ...  # noqa: ANN002, ANN003, ANN201
+
+    def close(self) -> bool: ...
 
 
 class McpRuntimeOutcome(StrEnum):
@@ -77,7 +97,7 @@ class _ManagedProcess:
     catalog_id: str
     protocol_version: str
     generation: int
-    session: McpStdioSession
+    session: McpRuntimeSession
     last_used: int
 
     @property
@@ -94,7 +114,7 @@ class _ManagedProcess:
 class McpProcessManager:
     """Own at most a bounded LRU set of sequential confined stdio processes."""
 
-    def __init__(self, store: McpServerStore, client: McpStdioClient) -> None:
+    def __init__(self, store: McpServerStore, client: object) -> None:
         self._store = store
         self._client = client
         self._processes: dict[tuple[str, str, int, str, str], _ManagedProcess] = {}
@@ -117,6 +137,10 @@ class McpProcessManager:
                     alive=managed.session.alive,
                     stderr_bytes=managed.session.stderr_bytes,
                     stderr_truncated=managed.session.stderr_truncated,
+                    transport=managed.entry.configuration.transport.value,
+                    session_bound=bool(
+                        getattr(getattr(managed.session, "_connection", None), "session_id", None)
+                    ),
                 )
                 for managed in sorted(self._processes.values(), key=lambda item: item.key)
             )
@@ -361,7 +385,7 @@ def prepare_mcp_call(
     return PreparedMcpCall(candidate, catalog_id, arguments, digest)
 
 
-def _session_matches_candidate(session: McpStdioSession, candidate: McpToolCandidate) -> bool:
+def _session_matches_candidate(session: McpRuntimeSession, candidate: McpToolCandidate) -> bool:
     if session.protocol_version != candidate.protocol_version:
         return False
     for tool in session.tools:

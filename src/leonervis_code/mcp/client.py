@@ -47,6 +47,7 @@ MAX_MCP_MESSAGE_BYTES = 1024 * 1024
 MAX_MCP_OUTBOUND_MESSAGE_BYTES = 256 * 1024
 MAX_MCP_MESSAGES_PER_PROBE = 1024
 MAX_MCP_NOTIFICATIONS_PER_REQUEST = 256
+MAX_MCP_SERVER_REQUESTS_PER_REQUEST = 8
 MAX_MCP_TOOL_PAGES = 16
 MAX_MCP_TOOLS = 256
 MAX_MCP_TOOL_NAME_CHARACTERS = 256
@@ -76,6 +77,9 @@ class McpNotificationKind(StrEnum):
     PROGRESS = "progress"
     MESSAGE = "message"
     TOOLS_LIST_CHANGED = "tools-list-changed"
+    RESOURCES_LIST_CHANGED = "resources-list-changed"
+    RESOURCE_UPDATED = "resource-updated"
+    PROMPTS_LIST_CHANGED = "prompts-list-changed"
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,9 @@ class McpNotificationSummary:
     progress_count: int = 0
     message_count: int = 0
     tools_list_changed_count: int = 0
+    resources_list_changed_count: int = 0
+    resource_updated_count: int = 0
+    prompts_list_changed_count: int = 0
     ignored_count: int = 0
 
     @property
@@ -93,6 +100,9 @@ class McpNotificationSummary:
             self.progress_count
             + self.message_count
             + self.tools_list_changed_count
+            + self.resources_list_changed_count
+            + self.resource_updated_count
+            + self.prompts_list_changed_count
             + self.ignored_count
         )
 
@@ -195,6 +205,8 @@ class McpLiveProcessStatus:
     alive: bool
     stderr_bytes: int
     stderr_truncated: bool
+    transport: str = "stdio"
+    session_bound: bool = False
 
 
 @dataclass
@@ -320,6 +332,9 @@ class _NotificationCollector:
         self._progress = 0
         self._message = 0
         self._tools_list_changed = 0
+        self._resources_list_changed = 0
+        self._resource_updated = 0
+        self._prompts_list_changed = 0
         self._ignored = 0
 
     @property
@@ -328,6 +343,9 @@ class _NotificationCollector:
             progress_count=self._progress,
             message_count=self._message,
             tools_list_changed_count=self._tools_list_changed,
+            resources_list_changed_count=self._resources_list_changed,
+            resource_updated_count=self._resource_updated,
+            prompts_list_changed_count=self._prompts_list_changed,
             ignored_count=self._ignored,
         )
 
@@ -355,6 +373,24 @@ class _NotificationCollector:
             _validate_tools_list_changed_notification(message)
             self._tools_list_changed += 1
             self._emit_once(McpNotificationKind.TOOLS_LIST_CHANGED)
+        elif method == "notifications/resources/list_changed":
+            _validate_tools_list_changed_notification(message)
+            self._resources_list_changed += 1
+            self._emit_once(McpNotificationKind.RESOURCES_LIST_CHANGED)
+        elif method == "notifications/resources/updated":
+            params = _notification_params(message)
+            if set(params) != {"uri"}:
+                raise McpClientError(
+                    "mcp_notification_invalid",
+                    "MCP resource-updated notification is invalid",
+                )
+            _bounded_text(params["uri"], "MCP resource URI")
+            self._resource_updated += 1
+            self._emit_once(McpNotificationKind.RESOURCE_UPDATED)
+        elif method == "notifications/prompts/list_changed":
+            _validate_tools_list_changed_notification(message)
+            self._prompts_list_changed += 1
+            self._emit_once(McpNotificationKind.PROMPTS_LIST_CHANGED)
         else:
             self._ignored += 1
 
@@ -369,7 +405,11 @@ class _NotificationCollector:
 
 
 class _JsonRpcConnection:
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        server_request_handler: Callable[[str, dict[str, object]], object] | None = None,
+    ) -> None:
         if process.stdin is None or process.stdout is None:
             raise McpClientError("mcp_spawn_failed", "MCP stdio pipes are unavailable")
         self._process = process
@@ -377,6 +417,7 @@ class _JsonRpcConnection:
         self._stdout = process.stdout
         self._buffer = bytearray()
         self._messages = 0
+        self._server_request_handler = server_request_handler
         self._selector = selectors.DefaultSelector()
         self._selector.register(self._stdout, selectors.EVENT_READ)
 
@@ -407,6 +448,7 @@ class _JsonRpcConnection:
         )
         deadline = time.monotonic() + timeout_seconds
         collector = _NotificationCollector(notification_sink)
+        server_requests = 0
         try:
             while True:
                 if cancellation is not None and cancellation.requested:
@@ -425,20 +467,49 @@ class _JsonRpcConnection:
                 message = self._read_message(deadline, cancellation=cancellation)
                 if "method" in message:
                     if "id" in message:
-                        self._send(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": message["id"],
-                                "error": {
-                                    "code": -32601,
-                                    "message": "Server-to-client requests are not supported",
-                                },
-                            }
-                        )
-                        raise McpClientError(
-                            "mcp_server_request_unsupported",
-                            "MCP server sent an unsupported server-to-client request",
-                        )
+                        server_requests += 1
+                        if server_requests > MAX_MCP_SERVER_REQUESTS_PER_REQUEST:
+                            raise McpClientError(
+                                "mcp_server_request_limit",
+                                "MCP server-to-client request limit was exceeded",
+                            )
+                        params = message.get("params", {})
+                        if not isinstance(message.get("id"), (int, str)) or not isinstance(
+                            params, dict
+                        ):
+                            raise McpClientError(
+                                "mcp_server_request_invalid",
+                                "MCP server-to-client request is invalid",
+                            )
+                        if self._server_request_handler is None:
+                            self._send(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": message["id"],
+                                    "error": {
+                                        "code": -32601,
+                                        "message": "Server-to-client request is not enabled",
+                                    },
+                                }
+                            )
+                            raise McpClientError(
+                                "mcp_server_request_unsupported",
+                                "MCP server sent an unsupported server-to-client request",
+                            )
+                        try:
+                            result = self._server_request_handler(message["method"], params)
+                        except McpClientError as handler_error:
+                            self._send(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": message["id"],
+                                    "error": {"code": -32000, "message": str(handler_error)},
+                                }
+                            )
+                            continue
+                        _validate_json_bounds(result)
+                        self._send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+                        continue
                     collector.observe(message)
                     continue
                 if type(message.get("id")) is not int or message["id"] != request_id:
@@ -634,15 +705,11 @@ class McpStdioSession:
         if not isinstance(arguments, dict):
             raise ValueError("MCP tool arguments must be an object")
         _validate_json_bounds(arguments)
-        request_id = self._next_request_id
-        self._next_request_id += 1
         started = time.monotonic()
         try:
-            result, notifications = self._connection.request(
-                request_id,
+            result, notifications = self.request(
                 "tools/call",
                 {"arguments": arguments, "name": remote_name},
-                timeout_seconds=MCP_CALL_TOOL_TIMEOUT_SECONDS,
                 cancellation=cancellation,
                 outcome_uncertain=True,
                 notification_sink=notification_sink,
@@ -688,6 +755,30 @@ class McpStdioSession:
             notifications=notifications,
         )
 
+    def request(
+        self,
+        method: str,
+        params: dict[str, object],
+        *,
+        timeout_seconds: float = MCP_CALL_TOOL_TIMEOUT_SECONDS,
+        cancellation: TurnCancellation | None = None,
+        outcome_uncertain: bool = False,
+        notification_sink: Callable[[McpNotificationKind], None] | None = None,
+    ) -> tuple[object, McpNotificationSummary]:
+        if self._closed or not self.alive:
+            raise McpClientError("mcp_process_unavailable", "MCP process is not available")
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        return self._connection.request(
+            request_id,
+            method,
+            params,
+            timeout_seconds=timeout_seconds,
+            cancellation=cancellation,
+            outcome_uncertain=outcome_uncertain,
+            notification_sink=notification_sink,
+        )
+
     def close(self) -> bool:
         if not self._closed:
             self._closed = True
@@ -705,6 +796,8 @@ class McpStdioClient:
         *,
         command_sandbox: CommandSandbox | None = None,
         popen_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        reverse_request_handler: Callable[[McpServerEntry, str, dict[str, object]], object]
+        | None = None,
     ) -> None:
         self._workspace = Path(workspace).resolve()
         if not self._workspace.is_dir():
@@ -714,6 +807,7 @@ class McpStdioClient:
             workspace_writable=False
         )
         self._popen_factory = popen_factory
+        self._reverse_request_handler = reverse_request_handler
 
     def inspect_status(self, entry: McpServerEntry) -> McpServerStatus:
         if not isinstance(entry, McpServerEntry):
@@ -806,13 +900,22 @@ class McpStdioClient:
         caught: BaseException | None = None
         try:
             owner.activate()
-            connection = _JsonRpcConnection(process)
+            root_handler = _server_request_handler(
+                self._workspace,
+                entry,
+                self._reverse_request_handler,
+            )
+            connection = _JsonRpcConnection(process, root_handler)
             initialize, _ = connection.request(
                 1,
                 "initialize",
                 {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {},
+                    "capabilities": (
+                        {"roots": {"listChanged": False}}
+                        if configuration.expose_workspace_root
+                        else {}
+                    ),
                     "clientInfo": {
                         "name": "leonervis-code",
                         "version": _client_version(),
@@ -823,7 +926,7 @@ class McpStdioClient:
             protocol, server_name, server_version, capabilities = _parse_initialize(initialize)
             connection.notify("notifications/initialized", {})
             tools, pages = _list_tools(connection, capabilities)
-            return McpStdioSession(
+            session = McpStdioSession(
                 entry=entry,
                 owner=owner,
                 connection=connection,
@@ -835,6 +938,12 @@ class McpStdioClient:
                 pages=pages,
                 started=started,
             )
+            _restore_resource_subscriptions(
+                session,
+                capabilities,
+                configuration.resource_subscriptions,
+            )
+            return session
         except BaseException as error:
             caught = error
         if connection is not None:
@@ -979,6 +1088,23 @@ def _list_tools(
         "mcp_page_limit",
         f"MCP tools/list exceeds the {MAX_MCP_TOOL_PAGES}-page inspection limit",
     )
+
+
+def _restore_resource_subscriptions(
+    session,
+    capabilities: dict[str, object],
+    subscriptions: tuple[str, ...],
+) -> None:  # noqa: ANN001
+    if not subscriptions:
+        return
+    resources = capabilities.get("resources")
+    if not isinstance(resources, dict) or resources.get("subscribe") is not True:
+        raise McpClientError(
+            "mcp_resource_subscribe_unsupported",
+            "MCP server does not support configured resource subscriptions",
+        )
+    for uri in subscriptions:
+        session.request("resources/subscribe", {"uri": uri})
 
 
 def _parse_tool(value: object) -> McpListedTool:
@@ -1175,6 +1301,46 @@ def _resolve_workspace_cwd(workspace: Path, relative: str) -> Path:
     if not stat.S_ISDIR(info.st_mode):
         raise McpClientError("mcp_cwd_invalid", "MCP server cwd is not a directory")
     return candidate
+
+
+def _workspace_root_handler(
+    workspace: Path,
+) -> Callable[[str, dict[str, object]], object]:
+    root = workspace.resolve()
+
+    def handle(method: str, params: dict[str, object]) -> object:
+        if method != "roots/list" or params:
+            raise McpClientError(
+                "mcp_server_request_unsupported",
+                "MCP server-to-client request is not enabled",
+            )
+        return {"roots": [{"name": root.name or "workspace", "uri": root.as_uri()}]}
+
+    return handle
+
+
+def _server_request_handler(
+    workspace: Path,
+    entry: McpServerEntry,
+    reverse: Callable[[McpServerEntry, str, dict[str, object]], object] | None,
+) -> Callable[[str, dict[str, object]], object] | None:
+    roots = (
+        _workspace_root_handler(workspace) if entry.configuration.expose_workspace_root else None
+    )
+    if roots is None and reverse is None:
+        return None
+
+    def handle(method: str, params: dict[str, object]) -> object:
+        if method == "roots/list" and roots is not None:
+            return roots(method, params)
+        if reverse is not None:
+            return reverse(entry, method, params)
+        raise McpClientError(
+            "mcp_server_request_unsupported",
+            "MCP server-to-client request is not enabled",
+        )
+
+    return handle
 
 
 def _drain_pipe(pipe: BinaryIO, observation: _BoundedDrain) -> None:

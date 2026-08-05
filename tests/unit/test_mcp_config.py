@@ -11,6 +11,8 @@ from leonervis_code.mcp.config import (
     McpConfigurationError,
     McpServerConfiguration,
     McpServerStore,
+    McpTransport,
+    McpTrustMode,
     parse_environment_bindings,
 )
 
@@ -48,6 +50,61 @@ def test_configuration_round_trips_without_credential_values() -> None:
         ("CACHE_TOKEN", "HOST_CACHE_TOKEN"),
         ("SERVICE_TOKEN", "HOST_SERVICE_TOKEN"),
     )
+
+
+def test_remote_configuration_is_https_credential_free_and_revisioned(tmp_path) -> None:
+    remote = McpServerConfiguration(
+        name="remote",
+        endpoint="https://mcp.example.test/mcp",
+        bearer_token_env="MCP_TOKEN",
+        expose_workspace_root=True,
+        resource_subscriptions=("file:///guide",),
+        transport=McpTransport.STREAMABLE_HTTP,
+        trust=McpTrustMode.REMOTE_HTTPS,
+    )
+    mapping = remote.as_mapping()
+    assert mapping["endpoint"] == "https://mcp.example.test/mcp"
+    assert mapping["bearer_token_env"] == "MCP_TOKEN"
+    assert "token-value" not in json.dumps(mapping)
+    assert McpServerConfiguration.from_mapping(mapping) == remote
+
+    registry = store(tmp_path)
+    created = registry.add_server(remote, scope="project")
+    updated = registry.set_resource_subscriptions(
+        "remote",
+        scope="project",
+        subscriptions=("file:///guide", "file:///other"),
+        expected_revision=created.configuration.revision,
+    )
+    assert updated.configuration.revision == 2
+
+
+def test_store_reads_legacy_v1_stdio_configuration_without_rewriting(tmp_path) -> None:
+    registry = store(tmp_path)
+    registry.project_path.parent.mkdir(parents=True)
+    legacy = {
+        "schema_version": 1,
+        "servers": {
+            "legacy": {
+                "args": [],
+                "command": "/bin/true",
+                "cwd": ".",
+                "enabled": False,
+                "environment": {},
+                "name": "legacy",
+                "revision": 1,
+                "transport": "stdio",
+                "trust": "confined-stdio",
+            }
+        },
+    }
+    original = json.dumps(legacy)
+    registry.project_path.write_text(original, encoding="utf-8")
+
+    loaded = registry.get_server("legacy")
+
+    assert loaded.configuration.transport is McpTransport.STDIO
+    assert registry.project_path.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.parametrize(

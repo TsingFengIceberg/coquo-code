@@ -378,16 +378,17 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 
 `demo-read` is not a real model interface. It does not write files, execute shell commands, or access the network.
 
-Local MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare that exact version read-only. Use `mcp policy list|show|clear` to inspect or revoke rules.
+MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
 
 ## Configuration and local state
 
 | Path | Contents |
 | --- | --- |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles and active selection |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP server definitions; environment-name mappings only |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP definitions; endpoints, client metadata, and environment names, never credential values |
 | `<workspace>/.leonervis-code/mcp-servers.json` | project MCP server definitions; new servers default to disabled |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | exact user MCP tool permission policies |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-oauth.json` | user remote-MCP OAuth pending state and tokens; private mode-`0600` file |
 | `<workspace>/.leonervis-code/mcp-tool-policies.json` | exact project MCP tool permission policies |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
@@ -511,4 +512,4 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 Leonervis Code currently provides 33 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, and progressive MCP discovery, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP currently supports confined local stdio configuration, a quarantine catalog, progressive discovery, exact same-Turn ToolSet promotion, unified permission auditing, result normalization, bounded process reuse, redacted notification handling, and exact fingerprint-bound local permission policy. Skills, browser automation, background or parallel agents, and remote MCP services are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP now supports confined stdio and Streamable HTTP, progressive discovery, unified permission auditing, OAuth, Resources, Prompts, Subscriptions, explicit Roots, and a default-denied reverse-request boundary. Skills, browser automation, and background or parallel agents are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

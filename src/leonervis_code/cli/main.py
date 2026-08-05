@@ -58,12 +58,18 @@ from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.mcp import (
+    McpClient,
     McpCatalogService,
+    McpCapabilityClient,
     McpClientError,
     McpConfigurationError,
+    McpOAuthError,
+    McpOAuthManager,
     McpServerConfiguration,
     McpServerStore,
-    McpStdioClient,
+    McpTransport,
+    McpTrustMode,
+    inspect_mcp_conformance,
     McpToolPolicyError,
     McpToolPolicyRule,
     McpToolPolicyStore,
@@ -423,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--if-revision", type=int)
     provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v5")
 
-    mcp_parser = subcommands.add_parser("mcp", help="configure and inspect local MCP servers")
+    mcp_parser = subcommands.add_parser("mcp", help="configure and inspect MCP servers")
     mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)
     mcp_add = mcp_commands.add_parser("add", help="add one disabled local stdio server")
     mcp_add.add_argument("name")
@@ -433,8 +439,23 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_add.add_argument("--server-cwd", default=".")
     mcp_add.add_argument("--env", action="append", default=[])
     mcp_add.add_argument("--enabled", action="store_true")
+    mcp_add.add_argument("--expose-workspace-root", action="store_true")
     mcp_add.add_argument("--replace", action="store_true")
     mcp_add.add_argument("--if-revision", type=int)
+    mcp_add_http = mcp_commands.add_parser(
+        "add-http", help="add one disabled remote Streamable HTTP server"
+    )
+    mcp_add_http.add_argument("name")
+    mcp_add_http.add_argument("--scope", choices=["user", "project"], default="project")
+    mcp_add_http.add_argument("--endpoint", required=True)
+    mcp_add_http.add_argument("--bearer-token-env")
+    mcp_add_http.add_argument("--oauth-client-id")
+    mcp_add_http.add_argument("--oauth-client-secret-env")
+    mcp_add_http.add_argument("--oauth-scope", action="append", default=[])
+    mcp_add_http.add_argument("--enabled", action="store_true")
+    mcp_add_http.add_argument("--expose-workspace-root", action="store_true")
+    mcp_add_http.add_argument("--replace", action="store_true")
+    mcp_add_http.add_argument("--if-revision", type=int)
     mcp_commands.add_parser("list", help="list configured MCP servers")
     mcp_show = mcp_commands.add_parser("show", help="show one redacted MCP server configuration")
     mcp_show.add_argument("name")
@@ -445,6 +466,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--if-revision", type=int)
     mcp_probe = mcp_commands.add_parser("probe", help="temporarily initialize and list tools")
     mcp_probe.add_argument("name")
+    mcp_doctor = mcp_commands.add_parser(
+        "doctor", help="run bounded transport and capability interoperability checks"
+    )
+    mcp_doctor.add_argument("name")
     mcp_commands.add_parser("catalog", help="refresh the normalized MCP quarantine catalog")
     mcp_policy = mcp_commands.add_parser("policy", help="manage exact MCP tool trust policy")
     mcp_policy_commands = mcp_policy.add_subparsers(dest="mcp_policy_command", required=True)
@@ -464,6 +489,46 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_policy_clear.add_argument("qualified_name")
     mcp_policy_clear.add_argument("--scope", choices=["user", "project"], default="project")
     mcp_policy_clear.add_argument("--if-revision", type=int)
+    mcp_oauth = mcp_commands.add_parser("oauth", help="manage remote MCP OAuth 2.1 credentials")
+    mcp_oauth_commands = mcp_oauth.add_subparsers(dest="mcp_oauth_command", required=True)
+    mcp_oauth_begin = mcp_oauth_commands.add_parser(
+        "begin", help="discover metadata and create one PKCE authorization URL"
+    )
+    mcp_oauth_begin.add_argument("name")
+    mcp_oauth_begin.add_argument("--redirect-uri", default="http://127.0.0.1:8765/callback")
+    mcp_oauth_complete = mcp_oauth_commands.add_parser(
+        "complete", help="validate state and exchange one authorization code"
+    )
+    mcp_oauth_complete.add_argument("name")
+    mcp_oauth_complete.add_argument("--code", required=True)
+    mcp_oauth_complete.add_argument("--state", required=True)
+    mcp_oauth_status = mcp_oauth_commands.add_parser("status", help="show redacted OAuth state")
+    mcp_oauth_status.add_argument("name")
+    mcp_oauth_logout = mcp_oauth_commands.add_parser("logout", help="delete local OAuth state")
+    mcp_oauth_logout.add_argument("name")
+    mcp_resources = mcp_commands.add_parser("resources", help="inspect bounded MCP resources")
+    mcp_resource_commands = mcp_resources.add_subparsers(dest="mcp_resource_command", required=True)
+    mcp_resource_list = mcp_resource_commands.add_parser("list", help="list resource metadata")
+    mcp_resource_list.add_argument("name")
+    mcp_resource_read = mcp_resource_commands.add_parser("read", help="read one bounded resource")
+    mcp_resource_read.add_argument("name")
+    mcp_resource_read.add_argument("uri")
+    for resource_action in ("subscribe", "unsubscribe"):
+        resource_parser = mcp_resource_commands.add_parser(
+            resource_action, help=f"persistently {resource_action} one resource URI"
+        )
+        resource_parser.add_argument("name")
+        resource_parser.add_argument("uri")
+        resource_parser.add_argument("--scope", choices=["user", "project"], default="project")
+        resource_parser.add_argument("--if-revision", type=int)
+    mcp_prompts = mcp_commands.add_parser("prompts", help="inspect non-authoritative MCP prompts")
+    mcp_prompt_commands = mcp_prompts.add_subparsers(dest="mcp_prompt_command", required=True)
+    mcp_prompt_list = mcp_prompt_commands.add_parser("list", help="list prompt metadata")
+    mcp_prompt_list.add_argument("name")
+    mcp_prompt_get = mcp_prompt_commands.add_parser("get", help="render one untrusted prompt")
+    mcp_prompt_get.add_argument("name")
+    mcp_prompt_get.add_argument("prompt_name")
+    mcp_prompt_get.add_argument("--arg", action="append", default=[])
 
     session_parser = subcommands.add_parser("session", help="inspect durable workspace sessions")
     session_commands = session_parser.add_subparsers(dest="session_command", required=True)
@@ -977,7 +1042,7 @@ def handle_mcp_command(
         user_path=user_mcp_path,
         project_path=project_mcp_path,
     )
-    client = (mcp_client_factory or McpStdioClient)(workspace, environment=environment)
+    client = (mcp_client_factory or McpClient)(workspace, environment=environment)
     policy_store = McpToolPolicyStore.for_workspace(
         workspace,
         environment=environment,
@@ -994,6 +1059,7 @@ def handle_mcp_command(
                 cwd=arguments.server_cwd,
                 environment=parse_environment_bindings(arguments.env),
                 enabled=arguments.enabled,
+                expose_workspace_root=arguments.expose_workspace_root,
             ),
             scope=arguments.scope,
             replace_existing=arguments.replace,
@@ -1002,6 +1068,29 @@ def handle_mcp_command(
         stdout.write(
             f"Saved {entry.scope} MCP server {entry.configuration.name} at revision "
             f"{entry.configuration.revision} ({'enabled' if entry.configuration.enabled else 'disabled'}).\n"
+        )
+    elif command == "add-http":
+        entry = store.add_server(
+            McpServerConfiguration(
+                name=arguments.name,
+                endpoint=arguments.endpoint,
+                bearer_token_env=arguments.bearer_token_env,
+                oauth_client_id=arguments.oauth_client_id,
+                oauth_client_secret_env=arguments.oauth_client_secret_env,
+                oauth_scopes=tuple(sorted(set(arguments.oauth_scope))),
+                enabled=arguments.enabled,
+                expose_workspace_root=arguments.expose_workspace_root,
+                transport=McpTransport.STREAMABLE_HTTP,
+                trust=McpTrustMode.REMOTE_HTTPS,
+            ),
+            scope=arguments.scope,
+            replace_existing=arguments.replace,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Saved {entry.scope} MCP server {entry.configuration.name} at revision "
+            f"{entry.configuration.revision} "
+            f"({'enabled' if entry.configuration.enabled else 'disabled'}).\n"
         )
     elif command == "list":
         statuses = tuple(client.inspect_status(entry) for entry in store.list_servers())
@@ -1031,6 +1120,19 @@ def handle_mcp_command(
         stdout.write(f"Removed {arguments.scope} MCP server {arguments.name}.\n")
     elif command == "probe":
         stdout.write(f"{render_mcp_probe_result(client.probe(store.get_server(arguments.name)))}\n")
+    elif command == "doctor":
+        entry = store.get_server(arguments.name)
+        report = inspect_mcp_conformance(entry, client.probe(entry))
+        stdout.write(
+            f"MCP conformance: {'passed' if report.passed else 'failed'}\n"
+            f"Server: {report.configured_name}\n"
+            f"Transport/protocol: {report.transport}/{report.protocol_version}\n"
+            f"Known capabilities: {', '.join(report.known_capabilities) or 'none'}\n"
+            f"Unknown capabilities: {', '.join(report.unknown_capabilities) or 'none'}\n"
+            f"Tools: {report.tools}\n"
+            f"Cleanup complete: {'yes' if report.cleanup_complete else 'no'}\n"
+            "Legacy HTTP/SSE: intentionally unsupported; use Streamable HTTP.\n"
+        )
     elif command == "catalog":
         stdout.write(
             f"{render_mcp_catalog(McpCatalogService(store, client, policy_store).snapshot(refresh=True))}\n"
@@ -1076,6 +1178,11 @@ def handle_mcp_command(
                 )
             if candidate.schema_fingerprint != arguments.schema_fingerprint:
                 raise McpToolPolicyError("MCP policy schema fingerprint is stale")
+            server = store.get_server(candidate.configured_name)
+            if server.configuration.transport is not McpTransport.STDIO:
+                raise McpToolPolicyError(
+                    "remote MCP tools remain dangerous and cannot receive local read-only policy"
+                )
             rule = policy_store.set_rule(
                 McpToolPolicyRule(
                     qualified_name=candidate.qualified_name,
@@ -1102,6 +1209,120 @@ def handle_mcp_command(
                 expected_revision=arguments.if_revision,
             )
             stdout.write(f"Removed {arguments.scope} MCP tool policy {arguments.qualified_name}.\n")
+    elif command == "oauth":
+        oauth = McpOAuthManager.default(environment)
+        entry = store.get_server(arguments.name)
+        oauth_command = arguments.mcp_oauth_command
+        if oauth_command == "begin":
+            authorization_url = oauth.begin(entry, arguments.redirect_uri)
+            stdout.write(
+                "MCP OAuth authorization is pending. Open this URL in a browser, then run "
+                "mcp oauth complete with the returned code and state:\n"
+                f"{authorization_url}\n"
+            )
+        elif oauth_command == "complete":
+            token = oauth.complete(entry, code=arguments.code, state=arguments.state)
+            stdout.write(
+                f"MCP OAuth authorization stored for {entry.configuration.name}; "
+                f"token revision {token.revision}.\n"
+            )
+        elif oauth_command == "status":
+            status = oauth.status(entry)
+            stdout.write(
+                f"MCP OAuth: {'configured' if status.configured else 'not configured'}; "
+                f"{'pending' if status.pending else 'not pending'}; "
+                f"{'authorized' if status.authorized else 'not authorized'}; "
+                f"{'expired' if status.expired else 'not expired'}; "
+                f"token revision {status.token_revision or 'none'}.\n"
+            )
+        elif oauth_command == "logout":
+            removed = oauth.logout(entry)
+            stdout.write(
+                f"MCP OAuth state {'removed' if removed else 'was already absent'} for "
+                f"{entry.configuration.name}.\n"
+            )
+    elif command == "resources":
+        resource_command = arguments.mcp_resource_command
+        entry = store.get_server(
+            arguments.name,
+            scope=(arguments.scope if resource_command in {"subscribe", "unsubscribe"} else None),
+        )
+        if resource_command in {"subscribe", "unsubscribe"}:
+            current = set(entry.configuration.resource_subscriptions)
+            if resource_command == "subscribe":
+                current.add(arguments.uri)
+            else:
+                current.discard(arguments.uri)
+            updated = store.set_resource_subscriptions(
+                arguments.name,
+                scope=arguments.scope,
+                subscriptions=tuple(sorted(current)),
+                expected_revision=arguments.if_revision,
+            )
+            stdout.write(
+                f"MCP resource subscriptions updated for {arguments.name} at revision "
+                f"{updated.configuration.revision}; {len(updated.configuration.resource_subscriptions)} configured.\n"
+            )
+        else:
+            session = client.connect(entry)
+            try:
+                capability = McpCapabilityClient(session)
+                if resource_command == "list":
+                    resources = capability.list_resources()
+                    stdout.write(f"MCP resources: {len(resources)}\n")
+                    for resource in resources:
+                        stdout.write(
+                            f"  {resource.uri}: {resource.name}; "
+                            f"{resource.mime_type or 'unknown MIME'}; "
+                            f"{resource.size if resource.size is not None else 'unknown size'}\n"
+                        )
+                else:
+                    resource = capability.read_resource(arguments.uri)
+                    stdout.write(
+                        "UNTRUSTED MCP RESOURCE DATA\n"
+                        f"URI: {resource.uri}\nBlocks: {resource.blocks}\n"
+                        f"Truncated: {'yes' if resource.truncated else 'no'}\n"
+                        f"{resource.content}\n"
+                    )
+            finally:
+                if not session.close():
+                    raise McpClientError(
+                        "mcp_cleanup_incomplete", "MCP capability session cleanup is incomplete"
+                    )
+    elif command == "prompts":
+        entry = store.get_server(arguments.name)
+        session = client.connect(entry)
+        try:
+            capability = McpCapabilityClient(session)
+            if arguments.mcp_prompt_command == "list":
+                prompts = capability.list_prompts()
+                stdout.write(f"MCP prompts: {len(prompts)}\n")
+                for prompt in prompts:
+                    stdout.write(
+                        f"  {prompt.name}: {len(prompt.arguments)} argument(s); "
+                        f"description {'present' if prompt.description else 'absent'}\n"
+                    )
+            else:
+                values: dict[str, str] = {}
+                for raw in arguments.arg:
+                    if raw.count("=") != 1:
+                        raise McpConfigurationError("MCP prompt argument must be NAME=VALUE")
+                    key, value = raw.split("=", 1)
+                    if key in values:
+                        raise McpConfigurationError("MCP prompt argument is duplicated")
+                    values[key] = value
+                prompt = capability.get_prompt(arguments.prompt_name, values)
+                stdout.write(
+                    "UNTRUSTED MCP PROMPT DATA - NOT HOST OR PROJECT INSTRUCTIONS\n"
+                    f"Prompt: {prompt.name}\nMessages: {prompt.messages}\n"
+                    f"Truncated: {'yes' if prompt.truncated else 'no'}\n"
+                    f"{prompt.content}\n"
+                )
+        finally:
+            if not session.close():
+                raise McpClientError(
+                    "mcp_cleanup_incomplete", "MCP capability session cleanup is incomplete"
+                )
     return 0
 
 
@@ -1719,6 +1940,9 @@ def main(
         return 2
     except McpToolPolicyError as error:
         print(f"MCP tool policy error: {error}", file=errors)
+        return 2
+    except McpOAuthError as error:
+        print(f"MCP OAuth error: {error}", file=errors)
         return 2
     except McpClientError as error:
         cleanup = " cleanup incomplete" if not error.cleanup_complete else ""

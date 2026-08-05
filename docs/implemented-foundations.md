@@ -1233,6 +1233,18 @@ MCP JSON-RPC现在严格识别`notifications/progress`、`notifications/message`
 
 Policy identity进入catalog configuration identity；disposition、effective action及revision进入candidate identity，effective action继续进入contract、Registry、ToolSet、Effective Context、ActionIdentity precondition与process generation。`mcp policy list|show|set|clear`提供本地管理；`set`必须先从实时accepted catalog解析exact candidate并核对调用者提供的schema fingerprint，不能为猜测、rejected或stale工具写规则。System prompt升级v36，fingerprint为`v36-0ab649c44e73ce244ef761512272188dd4540f46ed5243bcd61c2bbf63d9815d`，empty full-context ID为`ctx-v9-97c4e14f393e36bfc0f7b17f6715ca84a0dde30771a46fd81da434b08f538693`；provider adapter保持v38，持久schema不变。详见[0113：Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)。
 
+## 远程MCP、OAuth与扩展Capability
+
+MCP配置升级至v2并继续读取旧v1 stdio文件。`streamable-http`服务器使用credential-free HTTPS endpoint和`remote-https` trust；Host固定public DNS/IP、验证TLS hostname、拒绝redirect与压缩、限制JSON/SSE响应并在内存中校验`MCP-Session-Id`。静态bearer只按环境变量名读取；所有远程工具固定为`dangerous`并继续经过quarantine catalog、冻结ToolSet、PermissionGate、审批、ActionIdentity、结果规范化及Action Audit。详见[0114](./decisions/0114-streamable-http-and-remote-network-trust.md)。
+
+用户级`mcp-oauth.json`保存revision-bound OAuth 2.1 PKCE pending state及token，使用私有目录、`0600`和原子替换。`mcp oauth begin|complete|status|logout`完成HTTPS metadata discovery、S256、loopback redirect、state校验、code exchange、expiry和单次refresh；token值不进入project配置、terminal状态、Session、Action Audit或模型。详见[0115](./decisions/0115-local-oauth-21-pkce-lifecycle.md)。
+
+`mcp resources list|read|subscribe|unsubscribe`提供有界Resource读取与revisioned subscription恢复；binary只保留校验后的byte metadata，resource通知只保留计数。`mcp prompts list|get`只接受有界text消息并明确标为不可信、非权威模板，不自动进入Effective Context。Root默认不暴露，只有server配置显式开启时才响应唯一workspace URI。详见[0116](./decisions/0116-bounded-mcp-resources-prompts-subscriptions-and-roots.md)。
+
+Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制反向请求数、nesting、消息、token、schema及输出。Sampling必须同时具有Host授权和no-tools sampling callback，Elicitation必须具有显式交互callback；正常runtime默认不安装这些callback，因此安全默认值仍是拒绝。详见[0117](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)。
+
+`mcp doctor`执行一次脱敏live conformance probe，报告transport、protocol、known/unknown capability、tool数量和cleanup，不展示server正文、credential或session ID。初始化失败会尝试关闭remote session，status区分stdio与Streamable HTTP generation；legacy HTTP/SSE暂不支持。工具schema仅在根节点接受已知Draft 7 `$schema`声明，原始声明继续进入schema指纹但在Provider投影前移除；未知dialect、嵌套声明及其他不支持关键字仍被隔离。System prompt为v37，fingerprint为`v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`，empty full-context ID为`ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`；provider adapter保持v38。详见[0118](./decisions/0118-mcp-interoperability-and-production-hardening.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1348,3 +1360,8 @@ Policy identity进入catalog configuration identity；disposition、effective ac
 111. [0111：Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)
 112. [0112：Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md)
 113. [0113：Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)
+114. [0114：Streamable HTTP and Remote Network Trust](./decisions/0114-streamable-http-and-remote-network-trust.md)
+115. [0115：Local OAuth 2.1 PKCE Lifecycle](./decisions/0115-local-oauth-21-pkce-lifecycle.md)
+116. [0116：Bounded MCP Resources, Prompts, Subscriptions, and Roots](./decisions/0116-bounded-mcp-resources-prompts-subscriptions-and-roots.md)
+117. [0117：Bounded MCP Sampling and Elicitation](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)
+118. [0118：MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)

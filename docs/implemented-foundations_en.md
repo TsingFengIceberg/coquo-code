@@ -1233,6 +1233,18 @@ An independent schema-v1 MCP tool-policy store has XDG user and workspace projec
 
 Policy identity enters catalog configuration identity; disposition, effective action, and revision enter candidate identity; and the effective action continues into the contract, Registry, ToolSet, Effective Context, ActionIdentity precondition, and process generation. `mcp policy list|show|set|clear` manages local rules. `set` must first resolve an exact candidate from a live accepted catalog and verify the caller-supplied schema fingerprint, so it cannot authorize guessed, rejected, or stale tools. The system prompt advances to v36 with fingerprint `v36-0ab649c44e73ce244ef761512272188dd4540f46ed5243bcd61c2bbf63d9815d`; the empty full-context ID becomes `ctx-v9-97c4e14f393e36bfc0f7b17f6715ca84a0dde30771a46fd81da434b08f538693`. Provider adapter remains v38 and durable schemas remain unchanged. See [0113: Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md).
 
+## Remote MCP, OAuth, and Extended Capabilities
+
+MCP configuration advances to v2 while continuing to read legacy-v1 stdio files. A `streamable-http` server uses a credential-free HTTPS endpoint and `remote-https` trust. The Host pins public DNS/IP, verifies the TLS hostname, rejects redirects and compression, bounds JSON/SSE responses, and validates `MCP-Session-Id` in memory. Static bearer values are read only by environment name. Every remote tool remains `dangerous` and continues through the quarantine catalog, frozen ToolSet, PermissionGate, approval, ActionIdentity, result normalization, and Action Audit. See [0114](./decisions/0114-streamable-http-and-remote-network-trust.md).
+
+User-level `mcp-oauth.json` retains revision-bound OAuth 2.1 PKCE pending state and tokens using a private directory, mode `0600`, and atomic replacement. `mcp oauth begin|complete|status|logout` implements HTTPS metadata discovery, S256, a loopback redirect, state validation, code exchange, expiry, and one refresh. Token values never enter project configuration, terminal status, Session, Action Audit, or model data. See [0115](./decisions/0115-local-oauth-21-pkce-lifecycle.md).
+
+`mcp resources list|read|subscribe|unsubscribe` provides bounded Resource reads and revisioned subscription restoration; binary content retains only validated byte metadata, and resource notifications retain counts only. `mcp prompts list|get` accepts bounded text messages and labels them as untrusted non-authoritative templates that never enter Effective Context automatically. Roots remain hidden unless one server explicitly enables the single workspace URI. See [0116](./decisions/0116-bounded-mcp-resources-prompts-subscriptions-and-roots.md).
+
+Sampling and Elicitation use a separate `McpReverseRequestCoordinator` with reverse-request, nesting, message, token, schema, and output limits. Sampling requires both Host authorization and a no-tools sampling callback; Elicitation requires an explicit interaction callback. The normal runtime installs neither callback, so denial remains the secure default. See [0117](./decisions/0117-bounded-mcp-sampling-and-elicitation.md).
+
+`mcp doctor` runs one redacted live conformance probe and reports transport, protocol, known/unknown capabilities, tool count, and cleanup without server prose, credentials, or session IDs. Failed initialization attempts remote-session cleanup, status distinguishes stdio from Streamable HTTP generations, and legacy HTTP/SSE remains unsupported. Tool schemas accept a known Draft 7 `$schema` declaration only at the root; the raw declaration remains in the schema fingerprint but is removed before Provider projection, while unknown dialects, nested declarations, and other unsupported keywords remain quarantined. The system prompt is v37 with fingerprint `v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`; the empty full-context ID is `ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`; Provider adapter remains v38. See [0118](./decisions/0118-mcp-interoperability-and-production-hardening.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1348,3 +1360,8 @@ Policy identity enters catalog configuration identity; disposition, effective ac
 111. [0111: Audited MCP Execution and Process Lifecycle](./decisions/0111-audited-mcp-execution-and-process-lifecycle.md)
 112. [0112: Bounded MCP Notifications and Catalog Invalidation](./decisions/0112-bounded-mcp-notifications-and-catalog-invalidation.md)
 113. [0113: Fingerprint-bound Local MCP Tool Policy](./decisions/0113-fingerprint-bound-local-mcp-tool-policy.md)
+114. [0114: Streamable HTTP and Remote Network Trust](./decisions/0114-streamable-http-and-remote-network-trust.md)
+115. [0115: Local OAuth 2.1 PKCE Lifecycle](./decisions/0115-local-oauth-21-pkce-lifecycle.md)
+116. [0116: Bounded MCP Resources, Prompts, Subscriptions, and Roots](./decisions/0116-bounded-mcp-resources-prompts-subscriptions-and-roots.md)
+117. [0117: Bounded MCP Sampling and Elicitation](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)
+118. [0118: MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)

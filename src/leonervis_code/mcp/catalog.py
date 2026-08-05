@@ -17,8 +17,8 @@ from leonervis_code.core.extensions import (
     ToolExposure,
     ToolRegistrySnapshot,
 )
-from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult, McpStdioClient
-from leonervis_code.mcp.config import McpServerEntry, McpServerStore
+from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult
+from leonervis_code.mcp.config import McpServerEntry, McpServerStore, McpTransport
 from leonervis_code.mcp.policy import (
     McpPolicyDisposition,
     McpToolPolicyStore,
@@ -37,8 +37,15 @@ _CONFIG_ID_DOMAIN = b"leonervis-code-mcp-catalog-config-v1\0"
 _SCHEMA_ID_DOMAIN = b"leonervis-code-mcp-schema-v1\0"
 _NAME_COMPONENT = re.compile(r"[^a-z0-9]+")
 _SUPPORTED_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
+_SUPPORTED_SCHEMA_DECLARATIONS = frozenset(
+    {
+        "http://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft-07/schema",
+    }
+)
 _SUPPORTED_SCHEMA_KEYS = frozenset(
     {
+        "$schema",
         "additionalProperties",
         "anyOf",
         "const",
@@ -179,7 +186,7 @@ class McpCatalogService:
     def __init__(
         self,
         store: McpServerStore,
-        client: McpStdioClient,
+        client: object,
         policy_store: McpToolPolicyStore | None = None,
     ) -> None:
         self._store = store
@@ -218,7 +225,7 @@ class McpCatalogService:
 
 def build_mcp_quarantine_catalog(
     entries: tuple[McpServerEntry, ...],
-    client: McpStdioClient,
+    client: object,
     configuration_id: str | None = None,
     *,
     policy_store: McpToolPolicyStore | None = None,
@@ -305,7 +312,7 @@ def _normalize_tool(
             permission_action,
             policy_revision,
         )
-    if policy_store is not None:
+    if policy_store is not None and entry.configuration.transport is McpTransport.STDIO:
         policy_disposition, permission_action, policy_revision = policy_store.resolve(
             qualified_name=qualified_name,
             configured_name=entry.configuration.name,
@@ -316,6 +323,7 @@ def _normalize_tool(
             schema_fingerprint=fingerprint,
         )
     schema = json.loads(tool.input_schema_json)
+    schema.pop("$schema", None)
     definition = CanonicalToolDefinition.from_mapping(
         {
             "name": qualified_name,
@@ -390,6 +398,9 @@ def _validate_schema_node(schema: object, *, root: bool = False) -> None:
         raise ValueError("mcp_schema_node_invalid")
     if set(schema) - _SUPPORTED_SCHEMA_KEYS:
         raise ValueError("mcp_schema_keyword_unsupported")
+    declaration = schema.get("$schema")
+    if declaration is not None and (not root or declaration not in _SUPPORTED_SCHEMA_DECLARATIONS):
+        raise ValueError("mcp_schema_declaration_unsupported")
     raw_type = schema.get("type")
     if raw_type is not None:
         values = raw_type if isinstance(raw_type, list) else [raw_type]
