@@ -32,10 +32,12 @@ MCP_SCHEMA_FINGERPRINT_VERSION = 1
 MAX_MCP_NORMALIZED_DESCRIPTION_CHARACTERS = 1024
 MAX_MCP_QUALIFIED_TOOL_NAME_CHARACTERS = 64
 MAX_MCP_CATALOG_CANDIDATES = 512
+MAX_MCP_PARAMETER_HEADERS = 32
 _CATALOG_ID_DOMAIN = b"leonervis-code-mcp-quarantine-catalog-v1\0"
 _CONFIG_ID_DOMAIN = b"leonervis-code-mcp-catalog-config-v1\0"
 _SCHEMA_ID_DOMAIN = b"leonervis-code-mcp-schema-v1\0"
 _NAME_COMPONENT = re.compile(r"[^a-z0-9]+")
+_MCP_PARAMETER_HEADER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _SUPPORTED_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
 _SUPPORTED_SCHEMA_DECLARATIONS = frozenset(
     {
@@ -66,6 +68,7 @@ _SUPPORTED_SCHEMA_KEYS = frozenset(
         "required",
         "title",
         "type",
+        "x-mcp-header",
     }
 )
 
@@ -322,8 +325,7 @@ def _normalize_tool(
             protocol_version=probe.protocol_version,
             schema_fingerprint=fingerprint,
         )
-    schema = json.loads(tool.input_schema_json)
-    schema.pop("$schema", None)
+    schema = _provider_input_schema(json.loads(tool.input_schema_json))
     definition = CanonicalToolDefinition.from_mapping(
         {
             "name": qualified_name,
@@ -393,7 +395,12 @@ def _schema_rejection_reason(schema_json: str) -> str | None:
     return None
 
 
-def _validate_schema_node(schema: object, *, root: bool = False) -> None:
+def _validate_schema_node(
+    schema: object,
+    *,
+    root: bool = False,
+    header_hint_allowed: bool = False,
+) -> None:
     if not isinstance(schema, dict):
         raise ValueError("mcp_schema_node_invalid")
     if set(schema) - _SUPPORTED_SCHEMA_KEYS:
@@ -401,6 +408,14 @@ def _validate_schema_node(schema: object, *, root: bool = False) -> None:
     declaration = schema.get("$schema")
     if declaration is not None and (not root or declaration not in _SUPPORTED_SCHEMA_DECLARATIONS):
         raise ValueError("mcp_schema_declaration_unsupported")
+    header_hint = schema.get("x-mcp-header")
+    if header_hint is not None and (
+        not header_hint_allowed
+        or schema.get("type") != "string"
+        or not isinstance(header_hint, str)
+        or _MCP_PARAMETER_HEADER_NAME.fullmatch(header_hint) is None
+    ):
+        raise ValueError("mcp_schema_header_hint_unsupported")
     raw_type = schema.get("type")
     if raw_type is not None:
         values = raw_type if isinstance(raw_type, list) else [raw_type]
@@ -415,8 +430,16 @@ def _validate_schema_node(schema: object, *, root: bool = False) -> None:
         isinstance(name, str) and name for name in properties
     ):
         raise ValueError("mcp_schema_properties_invalid")
+    header_names: set[str] = set()
     for child in properties.values():
-        _validate_schema_node(child)
+        _validate_schema_node(child, header_hint_allowed=root)
+        child_hint = child.get("x-mcp-header")
+        if child_hint is not None:
+            if child_hint in header_names:
+                raise ValueError("mcp_schema_header_hint_duplicated")
+            header_names.add(child_hint)
+    if len(header_names) > MAX_MCP_PARAMETER_HEADERS:
+        raise ValueError("mcp_schema_header_hint_limit")
     required = schema.get("required", [])
     if (
         not isinstance(required, list)
@@ -446,6 +469,18 @@ def _validate_schema_node(schema: object, *, root: bool = False) -> None:
     for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
         if keyword in schema and type(schema[keyword]) not in {int, float}:
             raise ValueError("mcp_schema_bound_invalid")
+
+
+def _provider_input_schema(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _provider_input_schema(child)
+            for key, child in value.items()
+            if key not in {"$schema", "x-mcp-header"}
+        }
+    if isinstance(value, list):
+        return [_provider_input_schema(child) for child in value]
+    return value
 
 
 def _normalized_description(value: str | None) -> str:

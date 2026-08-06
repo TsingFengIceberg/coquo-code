@@ -1243,7 +1243,7 @@ MCP配置升级至v2并继续读取旧v1 stdio文件。`streamable-http`服务�
 
 Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制反向请求数、nesting、消息、token、schema及输出。Sampling必须同时具有Host授权和no-tools sampling callback，Elicitation必须具有显式交互callback；正常runtime默认不安装这些callback，因此安全默认值仍是拒绝。详见[0117](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)。
 
-`mcp doctor`执行一次脱敏live conformance probe，报告transport、protocol、known/unknown capability、tool数量和cleanup，不展示server正文、credential或session ID。初始化失败会尝试关闭remote session，status区分stdio与Streamable HTTP generation；legacy HTTP/SSE暂不支持。工具schema仅在根节点接受已知Draft 7 `$schema`声明，原始声明继续进入schema指纹但在Provider投影前移除；未知dialect、嵌套声明及其他不支持关键字仍被隔离。System prompt为v37，fingerprint为`v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`，empty full-context ID为`ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`；provider adapter保持v38。详见[0118](./decisions/0118-mcp-interoperability-and-production-hardening.md)。
+`mcp doctor`执行一次脱敏live conformance probe，报告transport、protocol、known/unknown capability、tool数量和cleanup，不展示server正文、credential或session ID。初始化失败会尝试关闭remote session，status区分stdio与Streamable HTTP generation；legacy HTTP/SSE暂不支持。单个SSE `data:`行可承载一个完整的有界MCP message，不再受无关的64 KiB行限制；解码消息与完整HTTP响应仍分别限制为1 MiB，event及JSON结构边界不变。工具schema仅在根节点接受已知Draft 7 `$schema`声明；直接根字符串属性还可携带有界`x-mcp-header`路由提示，原始元数据继续进入schema指纹但在Provider投影前移除，live schema复核后仅把安全参数投影为对应`MCP-Param-*` header。未知dialect、嵌套或重复header提示及其他不支持关键字仍被隔离。System prompt为v37，fingerprint为`v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`，empty full-context ID为`ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`；provider adapter保持v38。详见[0118](./decisions/0118-mcp-interoperability-and-production-hardening.md)。
 
 ## ADR 索引
 

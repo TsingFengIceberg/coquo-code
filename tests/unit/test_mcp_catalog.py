@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 
+import pytest
+
 from leonervis_code.core.extensions import (
     ExtensionSourceKind,
     ToolExecutionKind,
@@ -177,6 +179,74 @@ def test_catalog_accepts_known_root_schema_declaration_without_projecting_it() -
     assert candidate.contract is not None
     assert '"$schema"' not in candidate.contract.definition.canonical_json
     assert candidate.schema_fingerprint.startswith("mcp-schema-v1-")
+
+
+def test_catalog_accepts_bounded_root_parameter_headers_without_projecting_them() -> None:
+    catalog = build_mcp_quarantine_catalog(
+        (_entry(),),
+        CatalogClient(
+            (
+                _tool(
+                    "get_file_contents",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "owner": {"type": "string", "x-mcp-header": "owner"},
+                            "repo": {"type": "string", "x-mcp-header": "repo"},
+                            "path": {"type": "string", "default": "/"},
+                        },
+                        "required": ["owner", "repo"],
+                    },
+                ),
+            )
+        ),
+    )
+
+    assert len(catalog.accepted) == 1
+    candidate = catalog.accepted[0]
+    assert candidate.contract is not None
+    assert "x-mcp-header" not in candidate.contract.definition.canonical_json
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "number", "x-mcp-header": "owner"},
+            },
+        },
+        {
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "owner": {"type": "string", "x-mcp-header": "owner"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-mcp-header": "owner"},
+                "repo": {"type": "string", "x-mcp-header": "owner"},
+            },
+        },
+    ],
+)
+def test_catalog_rejects_unsafe_parameter_header_hints(schema) -> None:
+    catalog = build_mcp_quarantine_catalog(
+        (_entry(),), CatalogClient((_tool("unsafe_header", schema),))
+    )
+
+    assert not catalog.accepted
+    assert catalog.rejected[0].reason_code in {
+        "mcp_schema_header_hint_duplicated",
+        "mcp_schema_header_hint_unsupported",
+    }
 
 
 def test_catalog_rejects_unknown_or_nested_schema_declarations() -> None:

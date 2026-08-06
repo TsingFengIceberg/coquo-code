@@ -11,7 +11,11 @@ from leonervis_code.mcp.config import (
     McpTransport,
     McpTrustMode,
 )
-from leonervis_code.mcp.http_client import McpStreamableHttpClient
+from leonervis_code.mcp.http_client import (
+    MAX_MCP_HTTP_SSE_LINE_BYTES,
+    McpStreamableHttpClient,
+    _response_messages,
+)
 from leonervis_code.tools.web_transport import WebHttpResponse
 
 
@@ -66,7 +70,13 @@ def test_streamable_http_initializes_calls_with_sse_and_closes():
         [
             response(initialize_result(), headers=(("mcp-session-id", "session-1"),)),
             response(status=202),
-            response({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+            response(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]},
+                }
+            ),
             WebHttpResponse(200, "text/event-stream", "", sse, "https://mcp.example.test/mcp", 0),
             response(status=204),
         ]
@@ -90,6 +100,47 @@ def test_streamable_http_initializes_calls_with_sse_and_closes():
     assert transport.requests[2][2]["MCP-Protocol-Version"] == "2025-06-18"
 
 
+def test_streamable_http_accepts_one_large_sse_data_line_within_message_bound():
+    payload = "x" * (70 * 1024)
+    message = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "result": {"payload": payload}},
+        separators=(",", ":"),
+    ).encode()
+    body = b"data: " + message + b"\n\n"
+
+    messages = _response_messages(
+        WebHttpResponse(
+            200,
+            "text/event-stream",
+            "",
+            body,
+            "https://mcp.example.test/mcp",
+            0,
+        )
+    )
+
+    assert len(body.splitlines()[0]) > 64 * 1024
+    assert messages[0]["result"]["payload"] == payload
+
+
+def test_streamable_http_rejects_sse_line_beyond_message_bound():
+    body = b"data: " + (b"x" * (MAX_MCP_HTTP_SSE_LINE_BYTES + 1)) + b"\n\n"
+
+    with pytest.raises(McpClientError) as raised:
+        _response_messages(
+            WebHttpResponse(
+                200,
+                "text/event-stream",
+                "",
+                body,
+                "https://mcp.example.test/mcp",
+                0,
+            )
+        )
+
+    assert raised.value.code == "mcp_sse_line_limit"
+
+
 def test_streamable_http_uses_only_environment_named_bearer_token():
     transport = FakeHttpTransport(
         [
@@ -106,6 +157,89 @@ def test_streamable_http_uses_only_environment_named_bearer_token():
     )
     session = client.connect(entry(bearer_token_env="REMOTE_TOKEN"))
     assert transport.requests[0][2]["Authorization"] == "Bearer secret-value"
+    assert session.close() is True
+
+
+def test_streamable_http_projects_exact_tool_arguments_to_parameter_headers():
+    tools = [
+        {
+            "name": "get_file_contents",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "x-mcp-header": "owner"},
+                    "repo": {"type": "string", "x-mcp-header": "repo"},
+                    "path": {"type": "string"},
+                },
+                "required": ["owner", "repo"],
+            },
+        }
+    ]
+    transport = FakeHttpTransport(
+        [
+            response(initialize_result(), headers=(("mcp-session-id", "s"),)),
+            response(status=202),
+            response({"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}}),
+            response(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                }
+            ),
+            response(status=204),
+        ]
+    )
+    client = McpStreamableHttpClient("/tmp", {}, transport=transport)
+    session = client.connect(entry())
+
+    session.call_tool(
+        "get_file_contents",
+        {"owner": "github", "repo": "github-mcp-server", "path": "README.md"},
+        process_generation=1,
+        process_reused=False,
+    )
+
+    call_headers = transport.requests[3][2]
+    assert call_headers["MCP-Param-owner"] == "github"
+    assert call_headers["MCP-Param-repo"] == "github-mcp-server"
+    assert "MCP-Param-path" not in call_headers
+    assert "MCP-Param-owner" not in transport.requests[2][2]
+    assert session.close() is True
+
+
+def test_streamable_http_rejects_invalid_parameter_header_before_dispatch():
+    tools = [
+        {
+            "name": "get_file_contents",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "x-mcp-header": "owner"},
+                },
+            },
+        }
+    ]
+    transport = FakeHttpTransport(
+        [
+            response(initialize_result(), headers=(("mcp-session-id", "s"),)),
+            response(status=202),
+            response({"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}}),
+            response(status=204),
+        ]
+    )
+    session = McpStreamableHttpClient("/tmp", {}, transport=transport).connect(entry())
+
+    with pytest.raises(McpClientError) as raised:
+        session.call_tool(
+            "get_file_contents",
+            {"owner": "bad\nvalue"},
+            process_generation=1,
+            process_reused=False,
+        )
+
+    assert raised.value.code == "mcp_parameter_header_invalid"
+    assert len(transport.requests) == 3
     assert session.close() is True
 
 

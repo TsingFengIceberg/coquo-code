@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
 import os
+import re
 import time
 from typing import Protocol
 from pathlib import Path
@@ -48,7 +49,10 @@ from leonervis_code.tools.web_transport import (
 MAX_MCP_HTTP_RESPONSE_BYTES = 1024 * 1024
 MAX_MCP_HTTP_SESSION_ID_CHARACTERS = 512
 MAX_MCP_HTTP_SSE_EVENTS = 1024
-MAX_MCP_HTTP_SSE_LINE_BYTES = 64 * 1024
+MAX_MCP_HTTP_SSE_LINE_BYTES = MAX_MCP_MESSAGE_BYTES + len(b"data: ")
+MAX_MCP_HTTP_PARAMETER_HEADERS = 32
+MAX_MCP_HTTP_PARAMETER_VALUE_CHARACTERS = 1024
+_MCP_PARAMETER_HEADER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 
 
 class McpHttpTransport(Protocol):
@@ -110,6 +114,7 @@ class _HttpJsonRpcConnection:
         cancellation: TurnCancellation | None = None,
         outcome_uncertain: bool = False,
         notification_sink: Callable[[McpNotificationKind], None] | None = None,
+        parameter_headers: Mapping[str, str] | None = None,
     ) -> tuple[object, McpNotificationSummary]:
         if self.closed:
             raise McpClientError("mcp_transport_closed", "MCP HTTP session is closed")
@@ -125,6 +130,7 @@ class _HttpJsonRpcConnection:
             _canonical_json(message).encode("utf-8"),
             timeout_seconds=max(1, int(timeout_seconds)),
             outcome_uncertain=outcome_uncertain,
+            parameter_headers=parameter_headers,
         )
         if cancellation is not None and cancellation.requested:
             raise McpClientError(
@@ -257,6 +263,7 @@ class _HttpJsonRpcConnection:
         timeout_seconds: int,
         outcome_uncertain: bool,
         permit_closed: bool = False,
+        parameter_headers: Mapping[str, str] | None = None,
     ) -> WebHttpResponse:
         if self.closed and not permit_closed:
             raise McpClientError("mcp_transport_closed", "MCP HTTP session is closed")
@@ -270,6 +277,27 @@ class _HttpJsonRpcConnection:
         token = self._resolve_access_token()
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
+        if parameter_headers is not None:
+            if len(parameter_headers) > MAX_MCP_HTTP_PARAMETER_HEADERS:
+                raise McpClientError(
+                    "mcp_parameter_header_limit",
+                    "MCP parameter header count exceeds the limit",
+                )
+            for key, value in parameter_headers.items():
+                suffix = key.removeprefix("MCP-Param-")
+                if (
+                    suffix == key
+                    or _MCP_PARAMETER_HEADER_NAME.fullmatch(suffix) is None
+                    or not isinstance(value, str)
+                    or not value
+                    or len(value) > MAX_MCP_HTTP_PARAMETER_VALUE_CHARACTERS
+                    or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+                ):
+                    raise McpClientError(
+                        "mcp_parameter_header_invalid",
+                        "MCP parameter header is invalid",
+                    )
+                headers[key] = value
         try:
             response = self._transport.request(
                 method,
@@ -384,6 +412,7 @@ class McpHttpSession:
         cancellation: TurnCancellation | None = None,
         outcome_uncertain: bool = False,
         notification_sink: Callable[[McpNotificationKind], None] | None = None,
+        parameter_headers: Mapping[str, str] | None = None,
     ) -> tuple[object, McpNotificationSummary]:
         request_id = self._next_request_id
         self._next_request_id += 1
@@ -395,6 +424,7 @@ class McpHttpSession:
             cancellation=cancellation,
             outcome_uncertain=outcome_uncertain,
             notification_sink=notification_sink,
+            parameter_headers=parameter_headers,
         )
 
     def call_tool(
@@ -408,6 +438,7 @@ class McpHttpSession:
         notification_sink: Callable[[McpNotificationKind], None] | None = None,
     ) -> McpToolCallResult:
         started = time.monotonic()
+        parameter_headers = _tool_parameter_headers(self.tools, remote_name, arguments)
         try:
             result, notifications = self.request(
                 "tools/call",
@@ -415,6 +446,7 @@ class McpHttpSession:
                 cancellation=cancellation,
                 outcome_uncertain=True,
                 notification_sink=notification_sink,
+                parameter_headers=parameter_headers,
             )
         except McpClientError as error:
             if error.code == "mcp_server_error":
@@ -439,6 +471,62 @@ class McpHttpSession:
             return True
         self._closed = True
         return self._connection.close()
+
+
+def _tool_parameter_headers(
+    tools: tuple[McpListedTool, ...],
+    remote_name: str,
+    arguments: Mapping[str, object],
+) -> dict[str, str]:
+    tool = next((item for item in tools if item.name == remote_name), None)
+    if tool is None:
+        raise McpClientError("mcp_live_tool_missing", "MCP live tool is unavailable")
+    try:
+        schema = json.loads(
+            tool.input_schema_json,
+            object_pairs_hook=_closed_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise McpClientError("mcp_schema_invalid", "MCP live tool schema is invalid") from None
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    if not isinstance(properties, dict):
+        raise McpClientError("mcp_schema_invalid", "MCP live tool schema is invalid")
+    headers: dict[str, str] = {}
+    for argument_name, property_schema in properties.items():
+        if not isinstance(property_schema, dict):
+            continue
+        hint = property_schema.get("x-mcp-header")
+        if hint is None or argument_name not in arguments:
+            continue
+        if (
+            not isinstance(hint, str)
+            or _MCP_PARAMETER_HEADER_NAME.fullmatch(hint) is None
+            or property_schema.get("type") != "string"
+        ):
+            raise McpClientError(
+                "mcp_parameter_header_invalid",
+                "MCP parameter header mapping is invalid",
+            )
+        value = arguments[argument_name]
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_MCP_HTTP_PARAMETER_VALUE_CHARACTERS
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+        ):
+            raise McpClientError(
+                "mcp_parameter_header_invalid",
+                "MCP parameter header value is invalid",
+            )
+        header_name = f"MCP-Param-{hint}"
+        if header_name in headers:
+            raise McpClientError(
+                "mcp_parameter_header_invalid",
+                "MCP parameter header mapping is duplicated",
+            )
+        headers[header_name] = value
+    return headers
 
 
 class McpStreamableHttpClient:
