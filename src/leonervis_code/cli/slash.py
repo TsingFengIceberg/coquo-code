@@ -66,6 +66,10 @@ from leonervis_code.cli.presentation import (
     render_session_resume,
     render_session_summary,
     render_session_turn_range,
+    render_skill_activation,
+    render_skill_candidate,
+    render_skill_doctor,
+    render_skill_inventory,
     render_task_info,
     render_task_admission_info,
     render_task_admission_acceptance_preview,
@@ -131,6 +135,7 @@ TOP_LEVEL_COMMANDS = (
     "/provider",
     "/search",
     "/mcp",
+    "/skills",
     "/model",
     "/session",
     "/task",
@@ -158,6 +163,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help provider", "Provider and model selection"),
     SlashCompletionSpec("/help search", "Independent web search sources"),
     SlashCompletionSpec("/help mcp", "Configured MCP server inspection"),
+    SlashCompletionSpec("/help skills", "Skill activation and package diagnostics"),
     SlashCompletionSpec("/help policy", "Permission, approval, and command sandbox"),
     SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
@@ -200,6 +206,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/provider", "Provider commands", True),
     SlashCompletionSpec("/search", "Web search source commands", True),
     SlashCompletionSpec("/mcp", "MCP server inspection", True),
+    SlashCompletionSpec("/skills", "Skill activation and package diagnostics", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
@@ -238,6 +245,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/mcp show", "Show one redacted MCP server configuration"),
     SlashCompletionSpec("/mcp probe", "Temporarily initialize and list MCP tools"),
     SlashCompletionSpec("/mcp catalog", "Refresh the normalized MCP quarantine catalog"),
+    SlashCompletionSpec("/skills active", "Show Skills retained in Effective Context"),
+    SlashCompletionSpec("/skills list", "List active and shadowed Skill packages"),
+    SlashCompletionSpec("/skills show", "Show one bounded Skill package"),
+    SlashCompletionSpec("/skills doctor", "Show Skill roots and catalog issues"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -547,6 +558,33 @@ def dispatch_slash(
         return _info(SEARCH_HELP)
     if command == "/mcp":
         return _info(MCP_HELP)
+    if command == "/skills":
+        return _call(lambda: render_skill_activation(session.inspect_skills()), kind="info")
+    if command == "/skills active":
+        return _call(lambda: render_skill_activation(session.inspect_skills()), kind="info")
+    if command == "/skills list":
+        return _call(
+            lambda: render_skill_inventory(session.inspect_skill_inventory()[0]),
+            kind="info",
+            failure_prefix="Skill inventory inspection failed",
+        )
+    if command == "/skills doctor":
+        return _call(
+            lambda: render_skill_doctor(*session.inspect_skill_inventory()),
+            kind="info",
+            failure_prefix="Skill diagnosis failed",
+        )
+    if command.startswith("/skills show "):
+        name = command.removeprefix("/skills show ")
+        if not name or any(character.isspace() for character in name):
+            return _usage("Usage: /skills show <name>")
+        return _call(
+            lambda: render_skill_candidate(session.inspect_skill_inventory()[0].get(name)),
+            kind="info",
+            failure_prefix="Skill inspection failed",
+        )
+    if command == "/skills show" or command.startswith("/skills "):
+        return _usage("Usage: /skills [active|list|show <name>|doctor]")
     if command == "/status":
         return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):

@@ -1267,6 +1267,14 @@ Skill v1使用严格的`<name>/SKILL.md`包，frontmatter只接受`manifest-vers
 
 可选`allowed-tools`只对当前已有Host/MCP action tools做交集：缺失表示继承，空列表移除全部普通action，非空列表也不能增加或promote工具；Task、lifecycle与discovery control保留。加载后的限制创建后续immutable ToolSet epoch与replacement lease，并只从Effective Context中仍完整保留的Host成功`skill_load` pair跨Turn恢复；compaction删除该pair后，summary中的Skill文字不会重新激活。System prompt为v38，provider adapter为v39，full/compacted Effective Context升级v11/v12并加入`skill_inventory_id`，旧版本继续可验证。详见[0121](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)。
 
+## 有界Skill资源、组合预算与REPL观测
+
+Skill inventory v2把`SKILL.md`之外的包内regular files作为有界资源索引：最多64个resource、128个目录、单文件64 KiB、总计256 KiB，路径最长256字符。目录枚举与文件读取均使用no-follow descriptor，symlink、非regular file、越界、读取漂移与包逃逸全部fail closed。索引只包含相对path、bytes、严格UTF-8可读标记及path+content fingerprint；binary只可被索引，不能进入模型context。
+
+`skill_load`现在返回完整instructions与资源索引；`skill_read_resource`要求当前Effective Context中仍存在精确active Skill pair，并绑定Skill fingerprint、resource path、resource fingerprint及Turn-pinned inventory identity。Host重新加载并验证后只返回一个完整有界UTF-8 ToolResult，不执行资源、不安装依赖、不产生Action Audit，也不扩张ToolSet。
+
+最多4个不同Skill可同时active，每Turn最多尝试4次`skill_load`，active instructions累计最多65536 bytes；重复active name拒绝。多个Skill按成功load pair的因果顺序组合，`allowed-tools`依次求交，并只从Effective Context仍完整保留的Host结果恢复。`/skills|active|list|show|doctor`提供无provider、无Session mutation、无Action Audit的当前激活与catalog检查。Inventory升级`skills-v2`，full/compacted Effective Context升级v13/v14且继续严格验证legacy v11/v12，built-in Registry升级generation 4，system prompt升级v39，provider adapter升级v40。详见[0122](./decisions/0122-bounded-skill-resources-composition-and-observability.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1390,3 +1398,4 @@ Skill v1使用严格的`<name>/SKILL.md`包，frontmatter只接受`manifest-vers
 119. [0119：Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)
 120. [0120：Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)
 121. [0121：Bounded Declarative Skills and ToolSet Restriction](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)
+122. [0122：Bounded Skill Resources, Composition, and Observability](./decisions/0122-bounded-skill-resources-composition-and-observability.md)

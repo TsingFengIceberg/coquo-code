@@ -42,6 +42,7 @@ from leonervis_code.core.task_admission import (
     TaskAdmissionProposal,
 )
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
+from leonervis_code.skills import SkillActivationInspection, SkillInventoryLoader
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionConversationExport,
@@ -208,6 +209,14 @@ class Session:
 
     def inspect_project_instructions(self):
         return None
+
+    def inspect_skills(self):
+        inventory = SkillInventoryLoader(self.tmp_path, {}).load()
+        return SkillActivationInspection(inventory.snapshot_id, (), ("read_file", "grep"))
+
+    def inspect_skill_inventory(self):
+        loader = SkillInventoryLoader(self.tmp_path, {})
+        return loader.load(), loader.roots
 
     def inspect_web_search_sources(self):
         return self.web_search.source_configuration()
@@ -790,8 +799,9 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Policy commands:" in dispatch_slash("/help policy", session).message
     assert "Search source commands:" in dispatch_slash("/help search", session).message
     assert "MCP inspection commands:" in dispatch_slash("/help mcp", session).message
+    assert "Skill inspection commands:" in dispatch_slash("/help skills", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|task|tools|git|context|provider|search|mcp|policy|input]"
+        "Usage: /help [session|task|tools|git|context|provider|search|mcp|skills|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -863,7 +873,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v11-" in context.message
+    assert "Context ID: ctx-v13-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -935,7 +945,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert "Registry snapshot: registry-v1-" in catalog
-    assert " generation=3" in catalog
+    assert " generation=4" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert (
         "22. web_search: network-read; available "
@@ -944,7 +954,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "Contract: tool-v1-" in run_command
-    assert "Source: builtin:leonervis-code generation=3" in run_command
+    assert "Source: builtin:leonervis-code generation=4" in run_command
     assert "Exposure: direct" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
@@ -962,6 +972,31 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/tools details 21", session).message == (
         "Usage: /tools catalog [tool-name] | /tools [1-20] | /tools details [1-20]"
     )
+
+
+def test_skills_slash_commands_are_read_only_bounded_inspections(tmp_path) -> None:
+    package = tmp_path / ".agents" / "skills" / "demo"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nmanifest-version: 1\nname: demo\ndescription: Demo workflow\n---\nDo it.\n",
+        encoding="utf-8",
+    )
+    (package / "guide.md").write_text("Guide.\n", encoding="utf-8")
+    session = Session(tmp_path)
+
+    active = dispatch_slash("/skills", session)
+    listed = dispatch_slash("/skills list", session)
+    shown = dispatch_slash("/skills show demo", session)
+    doctor = dispatch_slash("/skills doctor", session)
+
+    assert "Active Skills: 0/4" in active.message
+    assert "No Skill load pair is retained" in active.message
+    assert "demo [active]" in listed.message
+    assert "Resources: 1" in shown.message
+    assert "guide.md" in shown.message
+    assert "Instructions:\nDo it.\n" in shown.message
+    assert "Issues: 0" in doctor.message
+    assert dispatch_slash("/skills nope", session).kind == "warning"
 
 
 def test_session_list_browses_recent_state_and_exact_model(tmp_path) -> None:

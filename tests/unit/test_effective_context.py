@@ -54,7 +54,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v11-0dfde8511ffa19a94bb560d6cc20d250287eed596477c5b740baf14a8e3e3648"
+        == "ctx-v13-b63c2427f9cbda99d973532d364aba1028676556ee521005bcedaaec67a98c3f"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -265,6 +265,23 @@ def test_full_history_source_requires_transcript_and_effective_equality() -> Non
         )
 
 
+def test_legacy_skill_context_requires_the_original_inventory_identity_version() -> None:
+    legacy = EffectiveContextSnapshot(
+        representation_version=11,
+        source=EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
+        system_prompt=build_system_prompt(),
+        tool_definitions=TOOL_CATALOG,
+        tool_set_id=TOOL_REGISTRY_SNAPSHOT.select().snapshot_id,
+        skill_inventory_id="skills-v1-" + "a" * 64,
+        full_history=(),
+        effective_history=(),
+    )
+
+    assert legacy.context_id.startswith("ctx-v11-")
+    with pytest.raises(ValueError, match="v1 inventory"):
+        replace(legacy, skill_inventory_id=SKILL_INVENTORY_ID)
+
+
 def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None:
     full = (
         UserMessage("one"),
@@ -287,7 +304,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v12-")
+    assert context.context_id.startswith("ctx-v14-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

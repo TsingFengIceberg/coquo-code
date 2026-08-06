@@ -380,7 +380,7 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 
 MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp catalog explain <reason-code>` explains quarantine reasons, `mcp policy stale` inspects invalid or currently unresolved policies, and `mcp policy prune --dry-run` only previews revision-bound cleanup commands. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
 
-Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills list`, `skills show <name>`, and `skills doctor` for read-only inspection. The model discovers and loads Skills on demand; implemented-foundations defines the exact format and authority boundary.
+Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills list|show|doctor` to inspect packages, or `/skills` in the REPL to inspect current activation and the composed tool scope. The model loads bounded instructions and explicitly selected text resources on demand; implemented-foundations defines the exact format, budgets, and authority boundary.
 
 ## Configuration and local state
 

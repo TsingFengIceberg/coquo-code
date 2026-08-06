@@ -28,13 +28,16 @@ PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 5
 PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 6
 TOOL_SET_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 9
 TOOL_SET_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 10
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 11
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 12
+LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 11
+LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 12
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 13
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 14
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
 _TOOL_SET_ID = re.compile(r"toolset-v1-[0-9a-f]{64}\Z")
-_SKILL_INVENTORY_ID = re.compile(r"skills-v1-[0-9a-f]{64}\Z")
+_SKILL_INVENTORY_V1_ID = re.compile(r"skills-v1-[0-9a-f]{64}\Z")
+_SKILL_INVENTORY_V2_ID = re.compile(r"skills-v2-[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,8 @@ class EffectiveContextSnapshot:
             PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             TOOL_SET_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             TOOL_SET_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }
@@ -136,14 +141,23 @@ class EffectiveContextSnapshot:
         elif self.tool_set_id is not None:
             raise ValueError("legacy effective context cannot contain a tool set identity")
         if self.representation_version in {
+            LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+        }:
+            if (
+                not isinstance(self.skill_inventory_id, str)
+                or _SKILL_INVENTORY_V1_ID.fullmatch(self.skill_inventory_id) is None
+            ):
+                raise ValueError("legacy Skill context requires a v1 inventory identity")
+        elif self.representation_version in {
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }:
             if (
                 not isinstance(self.skill_inventory_id, str)
-                or _SKILL_INVENTORY_ID.fullmatch(self.skill_inventory_id) is None
+                or _SKILL_INVENTORY_V2_ID.fullmatch(self.skill_inventory_id) is None
             ):
-                raise ValueError("current effective context requires a Skill inventory identity")
+                raise ValueError("current effective context requires a v2 Skill inventory identity")
         elif self.skill_inventory_id is not None:
             raise ValueError("legacy effective context cannot contain a Skill inventory identity")
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
@@ -165,6 +179,7 @@ class EffectiveContextSnapshot:
                 7,
                 PROJECT_INSTRUCTIONS_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 TOOL_SET_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+                LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError(
@@ -181,6 +196,7 @@ class EffectiveContextSnapshot:
                 8,
                 PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 TOOL_SET_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+                LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError("compacted effective context uses an unsupported representation")
@@ -246,7 +262,7 @@ class EffectiveContextSnapshot:
             )
         if self.representation_version >= TOOL_SET_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
             manifest["tool_set_id"] = self.tool_set_id
-        if self.representation_version >= EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+        if self.representation_version >= LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
             manifest["skill_inventory_id"] = self.skill_inventory_id
         if self.effective_summary is not None:
             manifest["effective_summary"] = {

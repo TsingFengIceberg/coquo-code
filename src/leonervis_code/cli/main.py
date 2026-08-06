@@ -1463,6 +1463,7 @@ def handle_skills_command(
                         "fingerprint": candidate.manifest.fingerprint,
                         "name": candidate.manifest.name,
                         "path": candidate.relative_path,
+                        "resources": len(candidate.resources),
                         "shadowed_by": (
                             None if candidate.shadowed_by is None else candidate.shadowed_by.value
                         ),
@@ -1490,6 +1491,15 @@ def handle_skills_command(
                     "instructions": manifest.instructions,
                     "name": manifest.name,
                     "path": candidate.relative_path,
+                    "resources": [
+                        {
+                            "bytes": resource.byte_count,
+                            "fingerprint": resource.fingerprint,
+                            "path": resource.path,
+                            "text_readable": resource.text_readable,
+                        }
+                        for resource in candidate.resources
+                    ],
                     "source": candidate.source.value,
                 },
                 ensure_ascii=False,

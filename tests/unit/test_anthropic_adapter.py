@@ -78,6 +78,7 @@ from leonervis_code.providers.anthropic import (
     tool_promote_tool_definition,
     tool_search_tool_definition,
     skill_load_tool_definition,
+    skill_read_resource_tool_definition,
     skill_search_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
@@ -1313,6 +1314,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 tool_promote_tool_definition(),
                 skill_search_tool_definition(),
                 skill_load_tool_definition(),
+                skill_read_resource_tool_definition(),
                 task_propose_plan_tool_definition(),
                 task_report_reflection_tool_definition(),
                 task_report_blocker_tool_definition(),

@@ -129,6 +129,7 @@ from leonervis_code.tools.tool_discovery import (
 from leonervis_code.tools.skill_discovery import (
     MAX_SKILL_SEARCH_RESULTS,
     SKILL_LOAD_TOOL_NAME,
+    SKILL_READ_RESOURCE_TOOL_NAME,
     SKILL_SEARCH_TOOL_NAME,
     skill_discovery_snapshots,
 )
@@ -189,8 +190,8 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *task_control_tool_snapshots(),
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 3
-TOOL_REGISTRY_GENERATION = 3
+BUILTIN_TOOL_SOURCE_GENERATION = 4
+TOOL_REGISTRY_GENERATION = 4
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "leonervis-code",
@@ -268,6 +269,7 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
     elif name in TOOL_DISCOVERY_TOOL_NAMES or name in {
         SKILL_SEARCH_TOOL_NAME,
         SKILL_LOAD_TOOL_NAME,
+        SKILL_READ_RESOURCE_TOOL_NAME,
     }:
         execution_kind = ToolExecutionKind.TOOL_DISCOVERY
         permission_actions = ()
@@ -461,6 +463,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"query", "max_results"}
     if name == SKILL_LOAD_TOOL_NAME:
         return {"name", "fingerprint"}
+    if name == SKILL_READ_RESOURCE_TOOL_NAME:
+        return {"name", "skill_fingerprint", "path", "resource_fingerprint"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -516,6 +520,52 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
             or any(character not in "0123456789abcdef" for character in fingerprint[9:])
         ):
             raise ValueError("skill_load fingerprint is invalid")
+        return
+    if name == SKILL_READ_RESOURCE_TOOL_NAME:
+        skill_name = tool_input["name"]
+        skill_fingerprint = tool_input["skill_fingerprint"]
+        path = tool_input["path"]
+        resource_fingerprint = tool_input["resource_fingerprint"]
+        _validate_input_string(
+            skill_name,
+            label="skill_read_resource name",
+            allow_whitespace=False,
+            max_characters=64,
+            max_bytes=64,
+        )
+        _validate_input_string(
+            skill_fingerprint,
+            label="skill_read_resource Skill fingerprint",
+            allow_whitespace=False,
+            max_characters=73,
+            max_bytes=73,
+        )
+        _validate_input_string(
+            path,
+            label="skill_read_resource path",
+            allow_whitespace=False,
+            max_characters=256,
+            max_bytes=1024,
+        )
+        _validate_input_string(
+            resource_fingerprint,
+            label="skill_read_resource resource fingerprint",
+            allow_whitespace=False,
+            max_characters=76,
+            max_bytes=76,
+        )
+        if (
+            not skill_fingerprint.startswith("skill-v1-")
+            or len(skill_fingerprint) != 73
+            or any(character not in "0123456789abcdef" for character in skill_fingerprint[9:])
+        ):
+            raise ValueError("skill_read_resource Skill fingerprint is invalid")
+        if (
+            not resource_fingerprint.startswith("resource-v1-")
+            or len(resource_fingerprint) != 76
+            or any(character not in "0123456789abcdef" for character in resource_fingerprint[12:])
+        ):
+            raise ValueError("skill_read_resource resource fingerprint is invalid")
         return
     if name == TOOL_SEARCH_TOOL_NAME:
         query = tool_input["query"]

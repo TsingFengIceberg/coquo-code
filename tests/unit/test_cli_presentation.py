@@ -925,7 +925,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
 
     assert kind == "warning"
     assert "Source: full committed history" in rendered
-    assert "Context ID: ctx-v11-" in rendered
+    assert "Context ID: ctx-v13-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
     assert "Effective history: 1 turn, 2 items" in rendered
     assert "Input: 80 tokens (estimated)" in rendered

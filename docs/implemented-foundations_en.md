@@ -1267,6 +1267,14 @@ Each ordinary Turn pins one SkillInventorySnapshot whose identity enters Effecti
 
 Optional `allowed-tools` only intersects existing Host or MCP action tools: omission inherits, an empty list removes every ordinary action, and a nonempty list still cannot add or promote a tool; Task, lifecycle, and discovery controls remain. Loading creates a later immutable ToolSet epoch and replacement lease. Cross-Turn restriction is reconstructed only from a complete successful Host `skill_load` pair still retained in Effective Context; once compaction removes that pair, Skill text in a summary cannot reactivate it. The system prompt is v38, provider adapter is v39, and full/compacted Effective Context advances to v11/v12 with `skill_inventory_id` while legacy versions remain valid. See [0121](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md).
 
+## Bounded Skill resources, composition budgets, and REPL observability
+
+Skill inventory v2 indexes bounded package regular files outside `SKILL.md`: at most 64 resources, 128 directories, 64 KiB per file, 256 KiB total, and 256 characters per relative path. Directory enumeration and file reads use no-follow descriptors; symlinks, non-regular files, escape, overflow, and read drift fail closed. The index contains only relative path, byte count, strict-UTF-8 readability, and a path-and-content fingerprint. Binary resources may be indexed but cannot enter model context.
+
+`skill_load` now returns complete instructions and the resource index. `skill_read_resource` requires the exact active Skill pair still retained in Effective Context and binds the Skill fingerprint, resource path, resource fingerprint, and Turn-pinned inventory identity. After reloading and verification, the Host returns only one complete bounded UTF-8 ToolResult; it does not execute resources, install dependencies, write Action Audit, or expand the ToolSet.
+
+At most four distinct Skills may be active, at most four `skill_load` attempts are accepted per Turn, and active instruction bodies total at most 65536 bytes; a duplicate active name is rejected. Multiple Skills compose in successful load-pair causal order, intersect `allowed-tools` sequentially, and replay only from complete Host results retained in Effective Context. `/skills|active|list|show|doctor` provides current activation and catalog inspection without provider, Session mutation, or Action Audit. Inventory advances to `skills-v2`, full/compacted Effective Context to v13/v14 while strictly validating legacy v11/v12, built-in Registry to generation 4, system prompt to v39, and provider adapter to v40. See [0122](./decisions/0122-bounded-skill-resources-composition-and-observability.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1390,3 +1398,4 @@ Optional `allowed-tools` only intersects existing Host or MCP action tools: omis
 119. [0119: Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)
 120. [0120: Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)
 121. [0121: Bounded Declarative Skills and ToolSet Restriction](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)
+122. [0122: Bounded Skill Resources, Composition, and Observability](./decisions/0122-bounded-skill-resources-composition-and-observability.md)

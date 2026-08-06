@@ -65,6 +65,7 @@ from leonervis_code.core.effective_context import (
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
     PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+    LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
     validate_complete_history,
 )
 from leonervis_code.providers.usage import (
@@ -2691,6 +2692,7 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
     if record.effective_context_representation_version not in {
         2,
         PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+        LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
         COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     }:
         raise SessionRecordError(

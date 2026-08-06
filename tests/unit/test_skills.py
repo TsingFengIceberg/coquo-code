@@ -56,6 +56,7 @@ def loop_for(
         initial_effective_summary=effective_summary,
         initial_effective_source=effective_source,
         skill_inventory_factory=loader.load,
+        skill_resource_reader=loader.read_resource,
     )
 
 
@@ -138,7 +139,13 @@ def test_skill_search_load_and_action_restriction_persist_through_effective_hist
     }
     assert "read_file" in final_names
     assert "run_command" not in final_names
-    assert {"skill_search", "skill_load", "tool_search", "tool_promote"} <= final_names
+    assert {
+        "skill_search",
+        "skill_load",
+        "skill_read_resource",
+        "tool_search",
+        "tool_promote",
+    } <= final_names
 
     next_provider = ScriptedFakeProvider([AssistantText("continued")])
     resumed = loop_for(tmp_path, next_provider, loader, history=loop.history)
@@ -232,3 +239,317 @@ def test_skill_load_stale_rejects_inventory_change_after_search(tmp_path) -> Non
     assert "run_command" in {
         definition.name for definition in provider.received_requests[-1].tool_definitions
     }
+
+
+def test_inventory_indexes_nested_text_and_binary_resources_without_following_symlinks(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".agents" / "skills"
+    write_skill(root, "resourceful")
+    package = root / "resourceful"
+    (package / "references").mkdir()
+    (package / "references" / "guide.md").write_text("Use this guide.\n", encoding="utf-8")
+    (package / "fixture.bin").write_bytes(b"\xff\x00")
+
+    inventory = SkillInventoryLoader(tmp_path, {}).load()
+    candidate = inventory.get("resourceful")
+
+    assert [resource.path for resource in candidate.resources] == [
+        "fixture.bin",
+        "references/guide.md",
+    ]
+    assert [resource.text_readable for resource in candidate.resources] == [False, True]
+    assert inventory.snapshot_id.startswith("skills-v2-")
+
+    (package / "linked.md").symlink_to(package / "references" / "guide.md")
+    rejected = SkillInventoryLoader(tmp_path, {}).load()
+    assert rejected.active == ()
+    assert [issue.code for issue in rejected.issues] == ["resource-symlink"]
+
+
+def test_active_skill_can_read_one_exact_text_resource_and_rejects_binary(tmp_path) -> None:
+    root = tmp_path / ".agents" / "skills"
+    write_skill(root, "resourceful", body="Read the selected reference.\n")
+    package = root / "resourceful"
+    (package / "references").mkdir()
+    (package / "references" / "guide.md").write_text("Checklist item.\n", encoding="utf-8")
+    (package / "fixture.bin").write_bytes(b"\xff")
+    loader = SkillInventoryLoader(tmp_path, {})
+    candidate = loader.load().get("resourceful")
+    manifest = candidate.manifest
+    text_resource = next(item for item in candidate.resources if item.text_readable)
+    binary_resource = next(item for item in candidate.resources if not item.text_readable)
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "search",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "resourceful", "max_results": 1}),
+            ),
+            ToolUse(
+                "load",
+                "skill_load",
+                ToolArguments.from_mapping(
+                    {"name": "resourceful", "fingerprint": manifest.fingerprint}
+                ),
+            ),
+            ToolUse(
+                "read-text",
+                "skill_read_resource",
+                ToolArguments.from_mapping(
+                    {
+                        "name": "resourceful",
+                        "skill_fingerprint": manifest.fingerprint,
+                        "path": text_resource.path,
+                        "resource_fingerprint": text_resource.fingerprint,
+                    }
+                ),
+            ),
+            ToolUse(
+                "read-binary",
+                "skill_read_resource",
+                ToolArguments.from_mapping(
+                    {
+                        "name": "resourceful",
+                        "skill_fingerprint": manifest.fingerprint,
+                        "path": binary_resource.path,
+                        "resource_fingerprint": binary_resource.fingerprint,
+                    }
+                ),
+            ),
+            AssistantText("done"),
+        ]
+    )
+    loop = loop_for(tmp_path, provider, loader)
+
+    assert loop.run("use the resource") == "done"
+    text_result = loop.history[-4]
+    binary_result = loop.history[-2]
+    assert isinstance(text_result, ToolResult)
+    assert json.loads(text_result.content)["content"] == "Checklist item.\n"
+    assert isinstance(binary_result, ToolResult)
+    assert binary_result.is_error
+    assert binary_result.content == "Skill resource is not UTF-8 text"
+
+
+def test_resource_read_rejects_inventory_drift_after_exact_load(tmp_path) -> None:
+    root = tmp_path / ".agents" / "skills"
+    write_skill(root, "resourceful")
+    package = root / "resourceful"
+    resource_path = package / "guide.md"
+    resource_path.write_text("Version one.\n", encoding="utf-8")
+    loader = SkillInventoryLoader(tmp_path, {})
+    candidate = loader.load().get("resourceful")
+    resource = candidate.resources[0]
+
+    class DriftingResourceProvider(ScriptedFakeProvider):
+        def respond(self, request):
+            response = super().respond(request)
+            if isinstance(response, ToolUse) and response.name == "skill_read_resource":
+                resource_path.write_text("Version two.\n", encoding="utf-8")
+            return response
+
+    provider = DriftingResourceProvider(
+        [
+            ToolUse(
+                "search",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "resourceful", "max_results": 1}),
+            ),
+            ToolUse(
+                "load",
+                "skill_load",
+                ToolArguments.from_mapping(
+                    {
+                        "name": "resourceful",
+                        "fingerprint": candidate.manifest.fingerprint,
+                    }
+                ),
+            ),
+            ToolUse(
+                "read",
+                "skill_read_resource",
+                ToolArguments.from_mapping(
+                    {
+                        "name": "resourceful",
+                        "skill_fingerprint": candidate.manifest.fingerprint,
+                        "path": resource.path,
+                        "resource_fingerprint": resource.fingerprint,
+                    }
+                ),
+            ),
+            AssistantText("drift observed"),
+        ]
+    )
+    loop = loop_for(tmp_path, provider, loader)
+
+    assert loop.run("read it") == "drift observed"
+    result = loop.history[-2]
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert result.content == "Skill inventory changed before resource reading"
+
+
+def test_multiple_skills_intersect_action_tools_and_reject_duplicate_activation(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".agents" / "skills"
+    write_skill(root, "reader", allowed="  - read_file\n  - glob\n")
+    write_skill(root, "reviewer", allowed="  - read_file\n  - grep\n")
+    loader = SkillInventoryLoader(tmp_path, {})
+    reader = loader.load().get("reader").manifest
+    reviewer = loader.load().get("reviewer").manifest
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "search-reader",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "reader", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-reader",
+                "skill_load",
+                ToolArguments.from_mapping({"name": "reader", "fingerprint": reader.fingerprint}),
+            ),
+            ToolUse(
+                "search-reviewer",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "reviewer", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-reviewer",
+                "skill_load",
+                ToolArguments.from_mapping(
+                    {"name": "reviewer", "fingerprint": reviewer.fingerprint}
+                ),
+            ),
+            ToolUse(
+                "search-reader-again",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "reader", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-reader-again",
+                "skill_load",
+                ToolArguments.from_mapping({"name": "reader", "fingerprint": reader.fingerprint}),
+            ),
+            AssistantText("composed"),
+        ]
+    )
+    loop = loop_for(tmp_path, provider, loader)
+
+    assert loop.run("compose workflows") == "composed"
+    final_names = {
+        definition.name for definition in provider.received_requests[-1].tool_definitions
+    }
+    assert "read_file" in final_names
+    assert "glob" not in final_names
+    assert "grep" not in final_names
+    duplicate = loop.history[-2]
+    assert isinstance(duplicate, ToolResult)
+    assert duplicate.is_error
+    assert duplicate.content == "Skill is already active in Effective Context"
+    loaded_payloads = [
+        json.loads(item.content)
+        for item in loop.history
+        if isinstance(item, ToolResult)
+        and not item.is_error
+        and '"kind":"skill_loaded"' in item.content
+    ]
+    assert [payload["activation"]["active_count"] for payload in loaded_payloads] == [1, 2]
+    assert loaded_payloads[-1]["activation"]["remaining_action_tools"] == ["read_file"]
+
+
+def test_skill_load_limits_bound_one_turn_and_retained_active_set(tmp_path) -> None:
+    root = tmp_path / ".agents" / "skills"
+    for index in range(1, 6):
+        write_skill(root, f"skill-{index}")
+    loader = SkillInventoryLoader(tmp_path, {})
+    manifests = [loader.load().get(f"skill-{index}").manifest for index in range(1, 6)]
+    responses = []
+    for index, manifest in enumerate(manifests, start=1):
+        responses.extend(
+            (
+                ToolUse(
+                    f"search-{index}",
+                    "skill_search",
+                    ToolArguments.from_mapping({"query": manifest.name, "max_results": 1}),
+                ),
+                ToolUse(
+                    f"load-{index}",
+                    "skill_load",
+                    ToolArguments.from_mapping(
+                        {"name": manifest.name, "fingerprint": manifest.fingerprint}
+                    ),
+                ),
+            )
+        )
+    provider = ScriptedFakeProvider([*responses, AssistantText("bounded")])
+    loop = loop_for(tmp_path, provider, loader)
+
+    assert loop.run("load all") == "bounded"
+    fifth_result = loop.history[-2]
+    assert isinstance(fifth_result, ToolResult)
+    assert fifth_result.is_error
+    assert fifth_result.content == "Skill load limit reached: at most 4 per Turn"
+
+    resumed_provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "search-fifth-again",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "skill-5", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-fifth-again",
+                "skill_load",
+                ToolArguments.from_mapping(
+                    {"name": "skill-5", "fingerprint": manifests[-1].fingerprint}
+                ),
+            ),
+            AssistantText("active limit observed"),
+        ]
+    )
+    resumed = loop_for(tmp_path, resumed_provider, loader, history=loop.history)
+
+    assert resumed.run("try another") == "active limit observed"
+    active_limit = resumed.history[-2]
+    assert isinstance(active_limit, ToolResult)
+    assert active_limit.is_error
+    assert active_limit.content == "Active Skill limit reached: at most 4"
+
+
+def test_skill_instruction_budget_rejects_cumulative_overflow(tmp_path) -> None:
+    root = tmp_path / ".agents" / "skills"
+    for name in ("large-one", "large-two", "large-three"):
+        write_skill(root, name, body="x" * 22_000 + "\n")
+    loader = SkillInventoryLoader(tmp_path, {})
+    manifests = [
+        loader.load().get(name).manifest for name in ("large-one", "large-two", "large-three")
+    ]
+    responses = []
+    for index, manifest in enumerate(manifests, start=1):
+        responses.extend(
+            (
+                ToolUse(
+                    f"search-large-{index}",
+                    "skill_search",
+                    ToolArguments.from_mapping({"query": manifest.name, "max_results": 1}),
+                ),
+                ToolUse(
+                    f"load-large-{index}",
+                    "skill_load",
+                    ToolArguments.from_mapping(
+                        {"name": manifest.name, "fingerprint": manifest.fingerprint}
+                    ),
+                ),
+            )
+        )
+    provider = ScriptedFakeProvider([*responses, AssistantText("bounded")])
+    loop = loop_for(tmp_path, provider, loader)
+
+    assert loop.run("load large workflows") == "bounded"
+    result = loop.history[-2]
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert result.content == "Active Skill instruction byte limit would be exceeded"

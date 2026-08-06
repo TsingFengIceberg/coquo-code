@@ -100,7 +100,13 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
 )
 from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
-from leonervis_code.skills import SkillInventoryLoader
+from leonervis_code.skills import (
+    SkillActivationInspection,
+    SkillInventoryLoader,
+    SkillInventorySnapshot,
+    SkillSourceKind,
+    active_skills_from_history,
+)
 from leonervis_code.mcp import (
     McpClient,
     McpCallPreparationError,
@@ -1121,6 +1127,7 @@ class ProjectSession:
                     project_instructions_factory=project_instructions_loader.load,
                     tool_registry_factory=resume_mcp_catalog.registry_snapshot,
                     skill_inventory_factory=skill_inventory_loader.load,
+                    skill_resource_reader=skill_inventory_loader.read_resource,
                 )
                 snapshot = loop.effective_context_snapshot()
                 with manager.provider_for_context_transition() as runtime:
@@ -2579,6 +2586,7 @@ class ProjectSession:
                     project_instructions_factory=self._project_instructions_loader.load,
                     tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
                     skill_inventory_factory=self._skill_inventory_loader.load,
+                    skill_resource_reader=self._skill_inventory_loader.read_resource,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
                 loop.install_task_control_dispatcher(
@@ -3379,6 +3387,40 @@ class ProjectSession:
             self._ensure_not_compacting()
             return self._project_instructions_loader.load()
 
+    def inspect_skills(self) -> SkillActivationInspection:
+        """Inspect retained Skill activations and their effective action intersection."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            snapshot = self._loop.effective_context_snapshot()
+            tool_set = self._loop.tool_set_snapshot_for_effective_history(
+                snapshot.effective_history
+            )
+            action_tools = tuple(
+                contract.name
+                for contract in tool_set.contracts
+                if contract.execution_kind
+                in {ToolExecutionKind.HOST_ACTION, ToolExecutionKind.MCP_REMOTE}
+            )
+            assert snapshot.skill_inventory_id is not None
+            return SkillActivationInspection(
+                inventory_id=snapshot.skill_inventory_id,
+                active=active_skills_from_history(snapshot.effective_history),
+                action_tools=action_tools,
+            )
+
+    def inspect_skill_inventory(
+        self,
+    ) -> tuple[
+        SkillInventorySnapshot,
+        tuple[tuple[SkillSourceKind, Path], ...],
+    ]:
+        """Return one current immutable inventory and its exact configured roots."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._skill_inventory_loader.load(), self._skill_inventory_loader.roots
+
     def status(self) -> RuntimeStatus:
         self._ensure_open()
         return self._manager.status()
@@ -3475,6 +3517,7 @@ class ProjectSession:
         project_instructions_factory,
         tool_registry_factory=None,
         skill_inventory_factory=None,
+        skill_resource_reader=None,
     ) -> AgentLoop:
         return AgentLoop(
             None,
@@ -3512,6 +3555,11 @@ class ProjectSession:
                 if skill_inventory_factory is None
                 else {"skill_inventory_factory": skill_inventory_factory}
             ),
+            **(
+                {}
+                if skill_resource_reader is None
+                else {"skill_resource_reader": skill_resource_reader}
+            ),
         )
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
@@ -3539,6 +3587,7 @@ class ProjectSession:
             project_instructions_factory=self._project_instructions_loader.load,
             tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
             skill_inventory_factory=self._skill_inventory_loader.load,
+            skill_resource_reader=self._skill_inventory_loader.read_resource,
         )
         loop.install_action_dispatcher(self._dispatch_action)
         loop.install_task_control_dispatcher(TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control)

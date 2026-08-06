@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v38-90f34a615348f179b2e7791c2d087a056056dcac6fab33fd2446ce8e98b24281"
+EXPECTED_FINGERPRINT = "v39-e018a0bb26efb08fa7c83a1fe651d6363332895d62a90e51f537f7547256aad5"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 38
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 39
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -51,7 +51,12 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "without one it is denied" in prompt.text
     assert "does not mutate the active ToolSet" in prompt.text
     assert "must not be retried automatically" in prompt.text
-    assert "additionally contains `skill_search` and `skill_load`" in prompt.text
+    assert (
+        "additionally contains `skill_search`, `skill_load`, and `skill_read_resource`"
+        in prompt.text
+    )
+    assert "At most four distinct Skills and 65536 cumulative instruction bytes" in prompt.text
+    assert "Binary resources cannot enter model context" in prompt.text
     assert "compact summary that merely mentions the Skill does not reactivate it" in prompt.text
     assert "can only intersect action tools already present" in prompt.text
     assert "never extracts entries" in prompt.text

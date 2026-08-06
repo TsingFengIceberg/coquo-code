@@ -57,6 +57,12 @@ from leonervis_code.task_runtime import TaskNextAction, TaskRunStopped
 from leonervis_code.session_records import SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
+from leonervis_code.skills import (
+    SkillActivationInspection,
+    SkillCandidate,
+    SkillInventorySnapshot,
+    SkillSourceKind,
+)
 from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.web_search import WebSearchBackend, WebSearchSourceConfiguration
 
@@ -104,6 +110,7 @@ HELP_TOPICS = (
     "provider",
     "search",
     "mcp",
+    "skills",
     "policy",
     "input",
 )
@@ -117,6 +124,7 @@ HELP_TEXT = (
     "  /help provider  Provider and model selection\n"
     "  /help search    Independent web search source selection\n"
     "  /help mcp       Configured MCP server inspection\n"
+    "  /help skills    Skill discovery, activation, and package diagnostics\n"
     "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
@@ -228,6 +236,15 @@ MCP_HELP = (
     "quarantine identities. The model initially sees only fixed discovery tools, and exact candidates "
     "can enter only a later Turn ToolSet epoch. Use standalone mcp commands to edit configuration."
 )
+SKILLS_HELP = (
+    "Skill inspection commands:\n"
+    "  /skills | /skills active\n"
+    "  /skills list\n"
+    "  /skills show <name>\n"
+    "  /skills doctor\n"
+    "These commands are Host-only and read-only. They do not call the provider, mutate the "
+    "Session, or write Action Audit records."
+)
 POLICY_HELP = (
     "Policy commands:\n"
     "  /status\n"
@@ -257,6 +274,7 @@ HELP_BY_TOPIC = {
     "provider": PROVIDER_HELP,
     "search": SEARCH_HELP,
     "mcp": MCP_HELP,
+    "skills": SKILLS_HELP,
     "policy": POLICY_HELP,
     "input": INPUT_HELP,
 }
@@ -1568,6 +1586,7 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "tool_promote": "Exact same-Turn discovered MCP names only; at most 8 names; creates one later immutable ToolSet epoch.",
     "skill_search": "Literal case-insensitive search over active metadata in the current Turn's frozen Skill inventory; at most 8 results.",
     "skill_load": "Exact same-Turn discovered Skill name and fingerprint; returns one complete bounded instruction body and may narrow action tools.",
+    "skill_read_resource": "Exact active Skill and resource fingerprints; returns one complete bounded UTF-8 package resource without execution.",
     "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
     "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
     "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",
@@ -1934,6 +1953,86 @@ def render_project_instructions_inspection(
             f"Fingerprint: {snapshot.fingerprint}",
         )
     )
+
+
+def render_skill_activation(inspection: SkillActivationInspection) -> str:
+    """Render Skills retained in the current Effective Context."""
+    lines = [
+        f"Active Skills: {len(inspection.active)}/{inspection.max_active}",
+        (f"Instruction bytes: {inspection.instruction_bytes}/{inspection.max_instruction_bytes}"),
+        f"Per-Turn load limit: {inspection.max_loads_per_turn}",
+        f"Inventory: {inspection.inventory_id}",
+        "Action tools: " + (", ".join(inspection.action_tools) or "none"),
+    ]
+    for skill in inspection.active:
+        lines.append(
+            f"- {skill.name} source={skill.source} bytes={skill.instruction_bytes} "
+            f"resources={skill.resource_count} fingerprint={skill.fingerprint}"
+        )
+    if not inspection.active:
+        lines.append("No Skill load pair is retained in Effective Context.")
+    return "\n".join(lines)
+
+
+def render_skill_inventory(inventory: SkillInventorySnapshot) -> str:
+    """Render bounded active and shadowed Skill package metadata."""
+    lines = [
+        f"Skill inventory: {inventory.snapshot_id}",
+        f"Candidates: {len(inventory.candidates)} · active={len(inventory.active)}",
+    ]
+    for candidate in inventory.candidates:
+        state = "active" if candidate.active else f"shadowed-by={candidate.shadowed_by.value}"
+        lines.append(
+            f"- {candidate.manifest.name} [{state}] source={candidate.source.value} "
+            f"resources={len(candidate.resources)} fingerprint={candidate.manifest.fingerprint}"
+        )
+        lines.append(f"  {candidate.manifest.description}")
+    if not inventory.candidates:
+        lines.append("No Skill packages were found.")
+    return "\n".join(lines)
+
+
+def render_skill_candidate(candidate: SkillCandidate) -> str:
+    """Render one complete bounded Skill package and resource index."""
+    manifest = candidate.manifest
+    lines = [
+        f"Skill: {manifest.name}",
+        f"Description: {manifest.description}",
+        f"Source: {candidate.source.value}",
+        f"Path: {candidate.relative_path}",
+        f"Fingerprint: {manifest.fingerprint}",
+        "Allowed tools: "
+        + (
+            "inherit"
+            if manifest.allowed_tools is None
+            else ", ".join(manifest.allowed_tools) or "none"
+        ),
+        f"Resources: {len(candidate.resources)}",
+    ]
+    for resource in candidate.resources:
+        lines.append(
+            f"- {resource.path} bytes={resource.byte_count} text={str(resource.text_readable).lower()} "
+            f"fingerprint={resource.fingerprint}"
+        )
+    lines.extend(("Instructions:", manifest.instructions))
+    return "\n".join(lines)
+
+
+def render_skill_doctor(
+    inventory: SkillInventorySnapshot,
+    roots: tuple[tuple[SkillSourceKind, Path], ...],
+) -> str:
+    """Render current source roots and bounded catalog issues."""
+    lines = [
+        f"Skill inventory: {inventory.snapshot_id}",
+        f"Candidates: {len(inventory.candidates)}",
+        f"Active: {len(inventory.active)}",
+        f"Issues: {len(inventory.issues)}",
+    ]
+    lines.extend(f"Root {source.value}: {path}" for source, path in roots)
+    for issue in inventory.issues:
+        lines.append(f"- {issue.source.value}:{issue.relative_path} [{issue.code}] {issue.message}")
+    return "\n".join(lines)
 
 
 def render_session_resume(result: object) -> tuple[str, MessageKind]:

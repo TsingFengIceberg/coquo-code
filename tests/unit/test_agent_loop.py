@@ -167,6 +167,7 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "tool_promote",
         "skill_search",
         "skill_load",
+        "skill_read_resource",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -1685,7 +1686,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v11-")
+    assert proposals[0].context_id.startswith("ctx-v13-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

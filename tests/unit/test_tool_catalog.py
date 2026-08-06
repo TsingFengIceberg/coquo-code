@@ -51,6 +51,7 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "tool_promote",
         "skill_search",
         "skill_load",
+        "skill_read_resource",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -143,6 +144,17 @@ def test_discovery_inputs_are_bounded_and_remote_mcp_arguments_remain_generic() 
     )
     assert tool_input_from_use(skill_search)["max_results"] == 3
     assert tool_input_from_use(skill_load)["name"] == "python-release"
+    resource = tool_use_from_input(
+        "skill-resource-1",
+        "skill_read_resource",
+        {
+            "name": "python-release",
+            "skill_fingerprint": "skill-v1-" + "a" * 64,
+            "path": "references/checklist.md",
+            "resource_fingerprint": "resource-v1-" + "b" * 64,
+        },
+    )
+    assert tool_input_from_use(resource)["path"] == "references/checklist.md"
     with pytest.raises(ValueError, match="skill_search max_results"):
         tool_use_from_input(
             "bad-skill-search",
@@ -154,6 +166,17 @@ def test_discovery_inputs_are_bounded_and_remote_mcp_arguments_remain_generic() 
             "bad-skill-load",
             "skill_load",
             {"name": "python-release", "fingerprint": "skill-v1-bad"},
+        )
+    with pytest.raises(ValueError, match="resource fingerprint"):
+        tool_use_from_input(
+            "bad-skill-resource",
+            "skill_read_resource",
+            {
+                "name": "python-release",
+                "skill_fingerprint": "skill-v1-" + "a" * 64,
+                "path": "references/checklist.md",
+                "resource_fingerprint": "resource-v1-bad",
+            },
         )
 
 

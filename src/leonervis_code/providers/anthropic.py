@@ -693,6 +693,10 @@ def skill_load_tool_definition() -> dict[str, object]:
     return _named_tool_definition("skill_load")
 
 
+def skill_read_resource_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("skill_read_resource")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
     return _named_tool_definition("task_propose_plan")
 

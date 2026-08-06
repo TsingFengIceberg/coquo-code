@@ -71,8 +71,19 @@ from leonervis_code.core.extensions import (
     ToolRegistrySnapshot,
     ToolSetSnapshot,
 )
-from leonervis_code.skills import SkillInventorySnapshot
-from leonervis_code.tools.skill_discovery import SKILL_LOAD_TOOL_NAME, SKILL_SEARCH_TOOL_NAME
+from leonervis_code.skills import (
+    MAX_ACTIVE_SKILLS,
+    MAX_ACTIVE_SKILL_INSTRUCTION_BYTES,
+    MAX_SKILL_LOADS_PER_TURN,
+    ActiveSkill,
+    SkillInventorySnapshot,
+    active_skills_from_history,
+)
+from leonervis_code.tools.skill_discovery import (
+    SKILL_LOAD_TOOL_NAME,
+    SKILL_READ_RESOURCE_TOOL_NAME,
+    SKILL_SEARCH_TOOL_NAME,
+)
 from leonervis_code.providers.streaming import (
     ProviderResponseOutcome,
     ProviderSearchActivity,
@@ -112,6 +123,7 @@ SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
 ToolRegistryFactory = Callable[[], ToolRegistrySnapshot]
 SkillInventoryFactory = Callable[[], SkillInventorySnapshot]
+SkillResourceReader = Callable[..., str]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
 ToolUsageSink = Callable[[ToolAttemptUsage], None]
@@ -148,6 +160,7 @@ class ToolDiscoveryDispatchResult:
     discovered_names: tuple[str, ...] = ()
     discovered_skills: tuple[tuple[str, str], ...] = ()
     promoted_snapshot: ToolSetSnapshot | None = None
+    activated_skill: ActiveSkill | None = None
 
 
 ToolSetTransitionDispatcher = Callable[["PreparedAgentTurn", ToolSetSnapshot], "PreparedAgentTurn"]
@@ -298,6 +311,7 @@ class AgentLoop:
         project_instructions_factory: ProjectInstructionsFactory = _no_project_instructions,
         tool_registry_factory: ToolRegistryFactory = _builtin_tool_registry,
         skill_inventory_factory: SkillInventoryFactory = _empty_skill_inventory,
+        skill_resource_reader: SkillResourceReader | None = None,
         action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
@@ -349,6 +363,7 @@ class AgentLoop:
         self._project_instructions_factory = project_instructions_factory
         self._tool_registry_factory = tool_registry_factory
         self._skill_inventory_factory = skill_inventory_factory
+        self._skill_resource_reader = skill_resource_reader
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
@@ -498,26 +513,10 @@ class AgentLoop:
     ) -> ToolSetSnapshot:
         """Replay only complete Host-produced skill_load results in the supplied history."""
         current = tool_set
-        for index, item in enumerate(history[:-1]):
-            if not isinstance(item, ToolUse) or item.name != SKILL_LOAD_TOOL_NAME:
+        for skill in active_skills_from_history(history):
+            if skill.allowed_tools is None:
                 continue
-            result = history[index + 1]
-            if not isinstance(result, ToolResult) or result.tool_use_id != item.tool_use_id:
-                continue
-            if result.is_error:
-                continue
-            try:
-                payload = json.loads(result.content)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict) or payload.get("kind") != "skill_loaded":
-                continue
-            allowed = payload.get("allowed_tools")
-            if allowed is None:
-                continue
-            if not isinstance(allowed, list) or not all(isinstance(name, str) for name in allowed):
-                continue
-            current = current.restrict_actions(tuple(allowed))
+            current = current.restrict_actions(skill.allowed_tools)
         return current
 
     def run(
@@ -579,6 +578,8 @@ class AgentLoop:
         pending_task_proposal: TaskProposal | None = None
         discovered_names: set[str] = set()
         discovered_skills: set[tuple[str, str]] = set()
+        active_skills = list(active_skills_from_history(context.effective_history))
+        skill_load_attempts = 0
         self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:
@@ -787,15 +788,21 @@ class AgentLoop:
                         pending_task_proposal = control.proposal
                         force_final = True
                     elif contract.execution_kind is ToolExecutionKind.TOOL_DISCOVERY:
+                        if request.name == SKILL_LOAD_TOOL_NAME:
+                            skill_load_attempts += 1
                         discovery = self._execute_tool_discovery(
                             request,
                             prepared,
                             frozenset(discovered_names),
                             frozenset(discovered_skills),
+                            tuple(active_skills),
+                            skill_load_attempts,
                         )
                         dispatch = discovery.dispatch
                         discovered_names.update(discovery.discovered_names)
                         discovered_skills.update(discovery.discovered_skills)
+                        if discovery.activated_skill is not None:
+                            active_skills.append(discovery.activated_skill)
                         if discovery.promoted_snapshot is not None:
                             prepared = self._transition_tool_set(
                                 prepared,
@@ -1078,6 +1085,8 @@ class AgentLoop:
         prepared: PreparedAgentTurn,
         discovered_names: frozenset[str],
         discovered_skills: frozenset[tuple[str, str]],
+        active_skills: tuple[ActiveSkill, ...],
+        skill_load_attempts: int,
     ) -> ToolDiscoveryDispatchResult:
         arguments = tool_input_from_use(request)
         if request.name == SKILL_SEARCH_TOOL_NAME:
@@ -1144,6 +1153,18 @@ class AgentLoop:
                         "skill_candidate_not_discovered",
                     )
                 )
+            if skill_load_attempts > MAX_SKILL_LOADS_PER_TURN:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            f"Skill load limit reached: at most {MAX_SKILL_LOADS_PER_TURN} per Turn",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_load_limit",
+                    )
+                )
             current_inventory = self._skill_inventory_factory()
             if current_inventory.snapshot_id != prepared.skill_inventory_snapshot.snapshot_id:
                 return ToolDiscoveryDispatchResult(
@@ -1169,20 +1190,90 @@ class AgentLoop:
                         "skill_fingerprint_stale",
                     )
                 )
+            if any(skill.name == name for skill in active_skills):
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "Skill is already active in Effective Context",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_already_active",
+                    )
+                )
+            if len(active_skills) >= MAX_ACTIVE_SKILLS:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            f"Active Skill limit reached: at most {MAX_ACTIVE_SKILLS}",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "active_skill_limit",
+                    )
+                )
+            instruction_bytes = len(manifest.instructions.encode("utf-8"))
+            active_instruction_bytes = sum(skill.instruction_bytes for skill in active_skills)
+            if active_instruction_bytes + instruction_bytes > MAX_ACTIVE_SKILL_INSTRUCTION_BYTES:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "Active Skill instruction byte limit would be exceeded",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "active_skill_instruction_limit",
+                    )
+                )
+            restricted = (
+                prepared.tool_set_snapshot
+                if manifest.allowed_tools is None
+                else prepared.tool_set_snapshot.restrict_actions(manifest.allowed_tools)
+            )
+            action_tools = tuple(
+                contract.name
+                for contract in restricted.contracts
+                if contract.execution_kind
+                in {ToolExecutionKind.HOST_ACTION, ToolExecutionKind.MCP_REMOTE}
+            )
             payload = {
                 "allowed_tools": (
                     None if manifest.allowed_tools is None else list(manifest.allowed_tools)
                 ),
                 "fingerprint": manifest.fingerprint,
                 "instructions": manifest.instructions,
+                "instruction_bytes": instruction_bytes,
                 "kind": "skill_loaded",
                 "name": manifest.name,
+                "resources": [
+                    {
+                        "bytes": resource.byte_count,
+                        "fingerprint": resource.fingerprint,
+                        "path": resource.path,
+                        "text_readable": resource.text_readable,
+                    }
+                    for resource in candidate.resources
+                ],
                 "source": candidate.source.value,
+                "activation": {
+                    "active_count": len(active_skills) + 1,
+                    "instruction_bytes": active_instruction_bytes + instruction_bytes,
+                    "max_active": MAX_ACTIVE_SKILLS,
+                    "max_instruction_bytes": MAX_ACTIVE_SKILL_INSTRUCTION_BYTES,
+                    "max_loads_per_turn": MAX_SKILL_LOADS_PER_TURN,
+                    "remaining_action_tools": list(action_tools),
+                },
             }
-            restricted = (
-                prepared.tool_set_snapshot
-                if manifest.allowed_tools is None
-                else prepared.tool_set_snapshot.restrict_actions(manifest.allowed_tools)
+            activated = ActiveSkill(
+                name=manifest.name,
+                fingerprint=manifest.fingerprint,
+                source=candidate.source.value,
+                instruction_bytes=instruction_bytes,
+                resource_count=len(candidate.resources),
+                allowed_tools=manifest.allowed_tools,
             )
             return ToolDiscoveryDispatchResult(
                 ToolDispatchResult(
@@ -1201,6 +1292,83 @@ class AgentLoop:
                 promoted_snapshot=(
                     None if restricted is prepared.tool_set_snapshot else restricted
                 ),
+                activated_skill=activated,
+            )
+        if request.name == SKILL_READ_RESOURCE_TOOL_NAME:
+            name = arguments["name"]
+            skill_fingerprint = arguments["skill_fingerprint"]
+            path = arguments["path"]
+            resource_fingerprint = arguments["resource_fingerprint"]
+            if not all(
+                isinstance(value, str)
+                for value in (name, skill_fingerprint, path, resource_fingerprint)
+            ):
+                raise ValueError("skill_read_resource input is malformed")
+            if not any(
+                skill.name == name and skill.fingerprint == skill_fingerprint
+                for skill in active_skills
+            ):
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "Skill resource reading requires the exact active Skill fingerprint",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_not_active",
+                    )
+                )
+            if self._skill_resource_reader is None:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "Skill resource reader is unavailable",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.ERROR,
+                        "skill_resource_boundary_unavailable",
+                    )
+                )
+            try:
+                content = self._skill_resource_reader(
+                    inventory_id=prepared.skill_inventory_snapshot.snapshot_id,
+                    name=name,
+                    skill_fingerprint=skill_fingerprint,
+                    path=path,
+                    resource_fingerprint=resource_fingerprint,
+                )
+            except ValueError as error:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(request.tool_use_id, str(error), is_error=True),
+                        ToolEventStatus.REJECTED,
+                        getattr(error, "code", "skill_resource_rejected"),
+                    )
+                )
+            payload = {
+                "content": content,
+                "kind": "skill_resource",
+                "name": name,
+                "path": path,
+                "resource_fingerprint": resource_fingerprint,
+                "skill_fingerprint": skill_fingerprint,
+            }
+            return ToolDiscoveryDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(
+                        request.tool_use_id,
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ),
+                    ToolEventStatus.SUCCEEDED,
+                    "skill_resource_read",
+                )
             )
         if request.name == TOOL_SEARCH_TOOL_NAME:
             query = arguments["query"]

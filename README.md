@@ -380,7 +380,7 @@ uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 
 MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact qualified name与schema fingerprint，再用`mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read`为精确的本地stdio版本声明只读策略；远程工具始终保持`dangerous`。`mcp catalog explain <reason-code>`解释隔离原因，`mcp policy stale`检查失效或暂时无法确认的策略，`mcp policy prune --dry-run`只预览带revision的清理命令。`mcp add-http`、`mcp oauth`、`mcp resources`、`mcp prompts`及`mcp doctor`分别用于远程配置、授权、非Tool capability检查和互操作诊断。
 
-声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills list`、`skills show <name>`及`skills doctor`进行只读检查。模型会按需发现并加载Skill，详细格式与权限边界见implemented-foundations。
+声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills list|show|doctor`检查包，或在REPL中用`/skills`检查当前激活与组合后的工具范围。模型会按需加载有界instructions与明确选择的文本资源，详细格式、预算与权限边界见implemented-foundations。
 
 ## 配置与本地状态
 
