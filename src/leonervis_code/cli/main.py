@@ -34,6 +34,8 @@ from leonervis_code.cli.presentation import (
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
     render_mcp_catalog,
+    render_mcp_catalog_reason,
+    render_mcp_policy_diagnostics,
     render_mcp_probe_result,
     render_mcp_server_status,
     render_mcp_server_statuses,
@@ -58,6 +60,7 @@ from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.mcp import (
+    MCP_CATALOG_REASON_CODES,
     McpClient,
     McpCatalogService,
     McpCapabilityClient,
@@ -73,6 +76,8 @@ from leonervis_code.mcp import (
     McpToolPolicyError,
     McpToolPolicyRule,
     McpToolPolicyStore,
+    explain_mcp_catalog_reason,
+    inspect_mcp_policy_diagnostics,
 )
 from leonervis_code.mcp.config import parse_environment_bindings
 from leonervis_code.evals import (
@@ -470,7 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", help="run bounded transport and capability interoperability checks"
     )
     mcp_doctor.add_argument("name")
-    mcp_commands.add_parser("catalog", help="refresh the normalized MCP quarantine catalog")
+    mcp_catalog = mcp_commands.add_parser(
+        "catalog", help="refresh or explain the normalized MCP quarantine catalog"
+    )
+    mcp_catalog_commands = mcp_catalog.add_subparsers(dest="mcp_catalog_command")
+    mcp_catalog_explain = mcp_catalog_commands.add_parser(
+        "explain", help="explain one sanitized quarantine reason code"
+    )
+    mcp_catalog_explain.add_argument("reason_code", choices=MCP_CATALOG_REASON_CODES)
     mcp_policy = mcp_commands.add_parser("policy", help="manage exact MCP tool trust policy")
     mcp_policy_commands = mcp_policy.add_subparsers(dest="mcp_policy_command", required=True)
     mcp_policy_commands.add_parser("list", help="list local MCP tool policies")
@@ -489,6 +501,13 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_policy_clear.add_argument("qualified_name")
     mcp_policy_clear.add_argument("--scope", choices=["user", "project"], default="project")
     mcp_policy_clear.add_argument("--if-revision", type=int)
+    mcp_policy_commands.add_parser(
+        "stale", help="inspect confirmed stale and unresolved MCP tool policies"
+    )
+    mcp_policy_prune = mcp_policy_commands.add_parser(
+        "prune", help="preview removal of confirmed stale MCP tool policies"
+    )
+    mcp_policy_prune.add_argument("--dry-run", action="store_true", required=True)
     mcp_oauth = mcp_commands.add_parser("oauth", help="manage remote MCP OAuth 2.1 credentials")
     mcp_oauth_commands = mcp_oauth.add_subparsers(dest="mcp_oauth_command", required=True)
     mcp_oauth_begin = mcp_oauth_commands.add_parser(
@@ -1134,9 +1153,14 @@ def handle_mcp_command(
             "Legacy HTTP/SSE: intentionally unsupported; use Streamable HTTP.\n"
         )
     elif command == "catalog":
-        stdout.write(
-            f"{render_mcp_catalog(McpCatalogService(store, client, policy_store).snapshot(refresh=True))}\n"
-        )
+        if arguments.mcp_catalog_command == "explain":
+            stdout.write(
+                f"{render_mcp_catalog_reason(explain_mcp_catalog_reason(arguments.reason_code))}\n"
+            )
+        else:
+            stdout.write(
+                f"{render_mcp_catalog(McpCatalogService(store, client, policy_store).snapshot(refresh=True))}\n"
+            )
     elif command == "policy":
         policy_command = arguments.mcp_policy_command
         if policy_command == "list":
@@ -1209,6 +1233,12 @@ def handle_mcp_command(
                 expected_revision=arguments.if_revision,
             )
             stdout.write(f"Removed {arguments.scope} MCP tool policy {arguments.qualified_name}.\n")
+        elif policy_command in {"stale", "prune"}:
+            catalog = McpCatalogService(store, client, policy_store).snapshot(refresh=True)
+            diagnostics = inspect_mcp_policy_diagnostics(policy_store, catalog)
+            stdout.write(
+                f"{render_mcp_policy_diagnostics(diagnostics, prune_dry_run=policy_command == 'prune')}\n"
+            )
     elif command == "oauth":
         oauth = McpOAuthManager.default(environment)
         entry = store.get_server(arguments.name)

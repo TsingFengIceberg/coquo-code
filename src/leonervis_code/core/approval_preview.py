@@ -8,7 +8,7 @@ from difflib import unified_diff
 from enum import StrEnum
 import re
 
-APPROVAL_PREVIEW_VERSION = 4
+APPROVAL_PREVIEW_VERSION = 5
 MAX_APPROVAL_DIFF_LINES = 160
 MAX_APPROVAL_DIFF_BYTES = 24 * 1024
 MAX_APPROVAL_DIFF_LINE_BYTES = 4096
@@ -42,6 +42,7 @@ class ApprovalPreview:
     byte_count: int | None = None
     body: str | None = None
     backend: str | None = None
+    transport: str | None = None
     truncated: bool = False
     version: int = APPROVAL_PREVIEW_VERSION
 
@@ -83,6 +84,11 @@ class ApprovalPreview:
                 raise ValueError("web-search approval preview backend is invalid")
         elif self.backend is not None:
             raise ValueError("approval preview backend does not match its kind")
+        if self.kind == ApprovalPreviewKind.MCP_TOOL:
+            if self.transport not in {"stdio", "streamable-http"}:
+                raise ValueError("MCP approval preview transport is invalid")
+        elif self.transport is not None:
+            raise ValueError("approval preview transport does not match its kind")
 
 
 def build_file_change_preview(
@@ -138,6 +144,7 @@ def build_metadata_preview(
     kind: ApprovalPreviewKind,
     byte_count: int | None = None,
     backend: str | None = None,
+    transport: str | None = None,
 ) -> ApprovalPreview:
     """Build a content-free preview for an already-prepared non-edit action."""
     if kind == ApprovalPreviewKind.FILE_CHANGE:
@@ -147,6 +154,7 @@ def build_metadata_preview(
         kind=kind,
         byte_count=byte_count,
         backend=backend,
+        transport=transport,
     )
 
 

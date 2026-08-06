@@ -11,10 +11,16 @@ from leonervis_code.core.extensions import (
     ToolExposure,
 )
 from leonervis_code.mcp.catalog import (
+    MCP_CATALOG_REASON_CODES,
     McpCandidateDisposition,
+    McpCatalogSourceIssue,
+    McpPolicyDiagnosticStatus,
+    McpQuarantineCatalog,
     build_mcp_quarantine_catalog,
+    explain_mcp_catalog_reason,
+    inspect_mcp_policy_diagnostics,
 )
-from leonervis_code.mcp.client import McpListedTool, McpProbeResult
+from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.mcp.policy import (
@@ -65,6 +71,11 @@ class CatalogClient:
             stderr_truncated=False,
             cleanup_complete=True,
         )
+
+
+class FailingCatalogClient:
+    def probe(self, entry: McpServerEntry) -> McpProbeResult:
+        raise McpClientError("mcp_timeout", "sanitized timeout")
 
 
 def test_catalog_normalizes_candidates_with_stable_content_id_and_no_annotation_authority() -> None:
@@ -337,3 +348,72 @@ def test_catalog_applies_only_an_exact_local_policy_and_binds_identity(tmp_path)
     assert stale.permission_action is PermissionAction.DANGEROUS
     assert stale.contract is not None
     assert stale.contract.permission_actions == (PermissionAction.DANGEROUS,)
+
+
+def test_catalog_reason_explanations_are_closed_static_operator_guidance() -> None:
+    assert "mcp_schema_keyword_unsupported" in MCP_CATALOG_REASON_CODES
+    explanation = explain_mcp_catalog_reason("mcp_schema_keyword_unsupported")
+
+    assert explanation.reason_code == "mcp_schema_keyword_unsupported"
+    assert "bounded supported subset" in explanation.meaning
+    assert "Remove or replace" in explanation.operator_action
+    with pytest.raises(ValueError, match="unknown MCP catalog reason code"):
+        explain_mcp_catalog_reason("server_supplied_secret_reason")
+
+
+def test_policy_diagnostics_separate_stale_identity_from_unresolved_probe(tmp_path) -> None:
+    tools = (_tool("read_widget", {"type": "object", "properties": {}}),)
+    entry = _entry()
+    baseline = build_mcp_quarantine_catalog((entry,), CatalogClient(tools))
+    candidate = baseline.accepted[0]
+    policy_store = McpToolPolicyStore(tmp_path / "user.json", tmp_path / "project.json")
+    policy_store.set_rule(
+        McpToolPolicyRule(
+            qualified_name=candidate.qualified_name,
+            configured_name=candidate.configured_name,
+            server_scope=candidate.scope,
+            configuration_revision=candidate.configuration_revision,
+            remote_name=candidate.remote_name,
+            protocol_version=candidate.protocol_version,
+            schema_fingerprint=candidate.schema_fingerprint,
+            action=PermissionAction.WORKSPACE_READ,
+        ),
+        policy_scope="project",
+    )
+
+    assert inspect_mcp_policy_diagnostics(policy_store, baseline) == ()
+
+    changed_entry = replace(entry, configuration=replace(entry.configuration, revision=4))
+    changed = build_mcp_quarantine_catalog((changed_entry,), CatalogClient(tools))
+    stale = inspect_mcp_policy_diagnostics(policy_store, changed)
+    assert len(stale) == 1
+    assert stale[0].status is McpPolicyDiagnosticStatus.STALE
+    assert stale[0].reason_code == "mcp_policy_identity_changed"
+
+    unresolved_catalog = build_mcp_quarantine_catalog(
+        (entry,), FailingCatalogClient(), policy_store=policy_store
+    )
+    unresolved = inspect_mcp_policy_diagnostics(policy_store, unresolved_catalog)
+    assert len(unresolved) == 1
+    assert unresolved[0].status is McpPolicyDiagnosticStatus.UNRESOLVED
+    assert unresolved[0].reason_code == "mcp_policy_source_unresolved"
+    assert unresolved[0].detail_code == "mcp_timeout"
+
+    rejected_catalog = build_mcp_quarantine_catalog(
+        (entry,), CatalogClient((_tool("read_widget", {"type": "string"}),))
+    )
+    rejected = inspect_mcp_policy_diagnostics(policy_store, rejected_catalog)
+    assert len(rejected) == 1
+    assert rejected[0].status is McpPolicyDiagnosticStatus.STALE
+    assert rejected[0].reason_code == "mcp_policy_candidate_rejected"
+    assert rejected[0].detail_code == "mcp_schema_root_not_object"
+
+    incomplete_catalog = McpQuarantineCatalog(
+        "test-incomplete-catalog",
+        (),
+        (McpCatalogSourceIssue("other", "project", 1, "mcp_catalog_candidate_limit"),),
+    )
+    incomplete = inspect_mcp_policy_diagnostics(policy_store, incomplete_catalog)
+    assert len(incomplete) == 1
+    assert incomplete[0].status is McpPolicyDiagnosticStatus.UNRESOLVED
+    assert incomplete[0].reason_code == "mcp_policy_catalog_incomplete"

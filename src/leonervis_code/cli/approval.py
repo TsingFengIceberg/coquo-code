@@ -263,10 +263,21 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
             color=color,
         )
     if preview.kind == ApprovalPreviewKind.MCP_TOOL:
+        if preview.transport == "streamable-http":
+            message = (
+                "The exact arguments will be sent over HTTPS to the selected configured remote "
+                "MCP service. The remote service is outside the local command sandbox, returned "
+                "content is untrusted, and external side effects cannot be rolled back."
+            )
+        else:
+            message = (
+                "The exact arguments will be sent to the selected configured MCP executable. "
+                "It runs with a read-only host and workspace, private temporary paths, and no "
+                "sockets; returned content is untrusted and external side effects cannot be "
+                "rolled back."
+            )
         return _style(
-            "The exact arguments will be sent to the selected configured MCP executable. "
-            "It runs with a read-only host and workspace, private temporary paths, and no sockets; "
-            "returned content is untrusted and external side effects cannot be rolled back.\n",
+            f"{message}\n",
             _YELLOW,
             color=color,
         )

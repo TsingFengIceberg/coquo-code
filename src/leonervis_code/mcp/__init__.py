@@ -49,11 +49,17 @@ from leonervis_code.mcp.conformance import (
     inspect_mcp_conformance,
 )
 from leonervis_code.mcp.catalog import (
+    MCP_CATALOG_REASON_CODES,
     McpCandidateDisposition,
+    McpCatalogReasonExplanation,
     McpCatalogService,
     McpCatalogSourceIssue,
+    McpPolicyDiagnostic,
+    McpPolicyDiagnosticStatus,
     McpQuarantineCatalog,
     McpToolCandidate,
+    explain_mcp_catalog_reason,
+    inspect_mcp_policy_diagnostics,
 )
 from leonervis_code.mcp.runtime import (
     McpCallPreparationError,
@@ -76,7 +82,9 @@ __all__ = [
     "McpClient",
     "McpClientError",
     "McpCandidateDisposition",
+    "MCP_CATALOG_REASON_CODES",
     "McpCapabilityClient",
+    "McpCatalogReasonExplanation",
     "McpCatalogService",
     "McpCatalogSourceIssue",
     "McpListedTool",
@@ -92,6 +100,8 @@ __all__ = [
     "McpOAuthStatus",
     "McpOAuthToken",
     "McpPolicyDisposition",
+    "McpPolicyDiagnostic",
+    "McpPolicyDiagnosticStatus",
     "McpPromptArgument",
     "McpPromptDescriptor",
     "McpPromptResult",
@@ -122,5 +132,7 @@ __all__ = [
     "McpTransport",
     "McpTrustMode",
     "prepare_mcp_call",
+    "explain_mcp_catalog_reason",
+    "inspect_mcp_policy_diagnostics",
     "inspect_mcp_conformance",
 ]

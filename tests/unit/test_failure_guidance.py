@@ -1,4 +1,6 @@
-from leonervis_code.cli.failure_guidance import render_turn_failure
+import pytest
+
+from leonervis_code.cli.failure_guidance import render_turn_failure, tool_result_guidance
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.errors import adapter_error, output_limit_error
 from leonervis_code.providers.request_context import (
@@ -72,3 +74,40 @@ def test_context_failure_guidance_distinguishes_output_and_context_limits() -> N
     assert "lower the output reserve with /output" in output
     assert "run /context" in context
     assert "/compact preview" in context
+
+
+@pytest.mark.parametrize(
+    ("result_code", "expected"),
+    [
+        ("mcp_result_limit", "narrower or paginated"),
+        ("mcp_result_truncated", "bounded result limit"),
+        ("mcp_configuration_stale", "refresh /mcp catalog"),
+        ("mcp_live_tool_missing", "old promoted contract"),
+        ("mcp_runtime_catalog_mismatch", "submit a new Turn"),
+        ("mcp_schema_invalid", "inspect the candidate again"),
+        ("mcp_session_changed", "refresh /mcp catalog"),
+        ("mcp_auth_required", "redacted MCP OAuth"),
+        ("mcp_credential_invalid", "run mcp doctor"),
+        ("mcp_environment_missing", "server status"),
+        ("mcp_cleanup_incomplete", "inspect /mcp status"),
+        ("mcp_cancelled", "do not automatically repeat"),
+        ("mcp_http_transport_failed", "side effects may be uncertain"),
+        ("mcp_timeout", "inspect /actions last"),
+        ("mcp_transport_closed", "/mcp status"),
+        ("mcp_transport_failed", "do not automatically repeat"),
+        ("mcp_tool_reported_error", "revise the MCP arguments"),
+    ],
+)
+def test_mcp_tool_result_guidance_is_specific_and_conservative(
+    result_code: str, expected: str
+) -> None:
+    guidance = tool_result_guidance("mcp_fixture_read_1234567890", result_code)
+
+    assert guidance is not None
+    assert expected in guidance
+
+
+def test_mcp_tool_result_guidance_ignores_unknown_codes_and_non_mcp_tools() -> None:
+    assert tool_result_guidance("mcp_fixture_read_1234567890", "unknown") is None
+    assert tool_result_guidance("read_file", "mcp_timeout") is None
+    assert tool_result_guidance("mcp_fixture_read_1234567890", None) is None

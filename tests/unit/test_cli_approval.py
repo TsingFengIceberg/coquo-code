@@ -671,3 +671,64 @@ def test_terminal_approval_renders_bound_diff_and_escapes_terminal_controls() ->
     assert "\x1b[31mafter" not in rendered
     assert "\u202e" not in rendered
     assert "Approve this exact action?" in rendered
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected", "forbidden"),
+    [
+        (
+            "stdio",
+            "selected configured MCP executable",
+            "sent over HTTPS",
+        ),
+        (
+            "streamable-http",
+            "sent over HTTPS to the selected configured remote MCP service",
+            "no sockets",
+        ),
+    ],
+)
+def test_terminal_mcp_approval_describes_the_exact_transport_boundary(
+    transport: str, expected: str, forbidden: str
+) -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="mcp-1",
+        tool_name="mcp_fixture_read_widget_1234567890",
+        arguments=ToolArguments.from_mapping(
+            {"query": "SECRET_ARGUMENT", "token": "SECRET_CREDENTIAL"}
+        ),
+        action=PermissionAction.DANGEROUS,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v1-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.none(),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_DANGEROUS,
+        ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.MCP_TOOL,
+            transport=transport,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert expected in rendered
+    assert forbidden not in rendered
+    assert "arguments=<redacted>" in rendered
+    assert "SECRET_ARGUMENT" not in rendered
+    assert "SECRET_CREDENTIAL" not in rendered
+    assert "mcp.example" not in rendered

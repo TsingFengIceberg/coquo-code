@@ -21,6 +21,7 @@ from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeRes
 from leonervis_code.mcp.config import McpServerEntry, McpServerStore, McpTransport
 from leonervis_code.mcp.policy import (
     McpPolicyDisposition,
+    McpToolPolicyRule,
     McpToolPolicyStore,
 )
 from leonervis_code.core.permissions import PermissionAction
@@ -78,6 +79,18 @@ class McpCandidateDisposition(StrEnum):
     REJECTED = "rejected"
 
 
+class McpPolicyDiagnosticStatus(StrEnum):
+    STALE = "stale"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class McpCatalogReasonExplanation:
+    reason_code: str
+    meaning: str
+    operator_action: str
+
+
 @dataclass(frozen=True)
 class McpCatalogSourceIssue:
     configured_name: str
@@ -131,6 +144,15 @@ class McpToolCandidate:
 
 
 @dataclass(frozen=True)
+class McpPolicyDiagnostic:
+    policy_scope: str
+    rule: McpToolPolicyRule
+    status: McpPolicyDiagnosticStatus
+    reason_code: str
+    detail_code: str | None = None
+
+
+@dataclass(frozen=True)
 class McpQuarantineCatalog:
     configuration_id: str
     candidates: tuple[McpToolCandidate, ...]
@@ -181,6 +203,167 @@ class McpQuarantineCatalog:
             generation=TOOL_REGISTRY_SNAPSHOT.generation + 1,
             contracts=contracts,
         )
+
+
+_CATALOG_REASON_EXPLANATIONS = {
+    "mcp_catalog_candidate_limit": McpCatalogReasonExplanation(
+        "mcp_catalog_candidate_limit",
+        "The bounded catalog reached its maximum candidate count before discovery completed.",
+        "Disable unrelated servers or reduce the advertised tool set, then refresh the catalog.",
+    ),
+    "mcp_schema_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_invalid",
+        "The tool input schema was not valid bounded JSON.",
+        "Fix the server to return one valid JSON Schema object for the tool input.",
+    ),
+    "mcp_schema_root_not_object": McpCatalogReasonExplanation(
+        "mcp_schema_root_not_object",
+        "The tool input schema root did not declare an object.",
+        "Declare a root object schema and place tool arguments in its properties.",
+    ),
+    "mcp_schema_node_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_node_invalid",
+        "A schema node was not represented by a JSON object.",
+        "Replace the invalid node with a supported JSON Schema object.",
+    ),
+    "mcp_schema_keyword_unsupported": McpCatalogReasonExplanation(
+        "mcp_schema_keyword_unsupported",
+        "The schema used a keyword outside Leonervis Code's bounded supported subset.",
+        "Remove or replace unsupported keywords with the documented supported subset.",
+    ),
+    "mcp_schema_declaration_unsupported": McpCatalogReasonExplanation(
+        "mcp_schema_declaration_unsupported",
+        "The schema declared an unsupported dialect or declared a dialect below the root.",
+        "Use the supported Draft 7 root declaration or omit the declaration.",
+    ),
+    "mcp_schema_header_hint_unsupported": McpCatalogReasonExplanation(
+        "mcp_schema_header_hint_unsupported",
+        "An x-mcp-header hint was malformed or used outside a direct root string property.",
+        "Keep each header hint on a direct root string property with a valid bounded name.",
+    ),
+    "mcp_schema_header_hint_duplicated": McpCatalogReasonExplanation(
+        "mcp_schema_header_hint_duplicated",
+        "More than one input property requested the same MCP parameter header.",
+        "Assign a unique valid header hint to each routed property.",
+    ),
+    "mcp_schema_header_hint_limit": McpCatalogReasonExplanation(
+        "mcp_schema_header_hint_limit",
+        "The schema declared more MCP parameter header hints than the bounded limit.",
+        "Reduce the number of routed header parameters and refresh the catalog.",
+    ),
+    "mcp_schema_type_unsupported": McpCatalogReasonExplanation(
+        "mcp_schema_type_unsupported",
+        "A schema node declared an unsupported or malformed JSON type.",
+        "Use one supported scalar, object, or array type per schema node.",
+    ),
+    "mcp_schema_properties_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_properties_invalid",
+        "The object properties declaration was not a valid bounded name-to-schema mapping.",
+        "Return an object properties map with valid property names and schema objects.",
+    ),
+    "mcp_schema_required_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_required_invalid",
+        "The required declaration was malformed, duplicated, or named an absent property.",
+        "List each existing property at most once in the required array.",
+    ),
+    "mcp_schema_additional_properties_unsupported": McpCatalogReasonExplanation(
+        "mcp_schema_additional_properties_unsupported",
+        "The schema used a non-boolean or otherwise unsupported additionalProperties value.",
+        "Use a supported boolean additionalProperties declaration or omit it.",
+    ),
+    "mcp_schema_composition_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_composition_invalid",
+        "A oneOf or anyOf composition was empty, malformed, or exceeded the bounded limit.",
+        "Use a small non-empty array of supported schema alternatives.",
+    ),
+    "mcp_schema_enum_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_enum_invalid",
+        "An enum was empty, duplicated, malformed, or exceeded the bounded limit.",
+        "Provide a small non-empty set of unique bounded JSON enum values.",
+    ),
+    "mcp_schema_bound_invalid": McpCatalogReasonExplanation(
+        "mcp_schema_bound_invalid",
+        "A numeric, string, or collection bound was malformed or internally inconsistent.",
+        "Correct the bound types and ordering, then refresh the catalog.",
+    ),
+}
+MCP_CATALOG_REASON_CODES = tuple(sorted(_CATALOG_REASON_EXPLANATIONS))
+
+
+def explain_mcp_catalog_reason(reason_code: str) -> McpCatalogReasonExplanation:
+    """Return one static explanation without exposing untrusted catalog content."""
+    try:
+        return _CATALOG_REASON_EXPLANATIONS[reason_code]
+    except KeyError:
+        raise ValueError(f"unknown MCP catalog reason code: {reason_code}") from None
+
+
+def inspect_mcp_policy_diagnostics(
+    policy_store: McpToolPolicyStore,
+    catalog: McpQuarantineCatalog,
+) -> tuple[McpPolicyDiagnostic, ...]:
+    """Classify only provably stale rules while preserving probe uncertainty."""
+    candidates = {candidate.qualified_name: candidate for candidate in catalog.candidates}
+    source_issues = {(issue.scope, issue.configured_name): issue for issue in catalog.source_issues}
+    catalog_incomplete = any(
+        issue.reason_code == "mcp_catalog_candidate_limit" for issue in catalog.source_issues
+    )
+    diagnostics: list[McpPolicyDiagnostic] = []
+    for policy_scope, rule in policy_store.list_rules():
+        source_issue = source_issues.get((rule.server_scope, rule.configured_name))
+        if source_issue is not None:
+            diagnostics.append(
+                McpPolicyDiagnostic(
+                    policy_scope,
+                    rule,
+                    McpPolicyDiagnosticStatus.UNRESOLVED,
+                    "mcp_policy_source_unresolved",
+                    source_issue.reason_code,
+                )
+            )
+            continue
+        candidate = candidates.get(rule.qualified_name)
+        if candidate is None:
+            status = (
+                McpPolicyDiagnosticStatus.UNRESOLVED
+                if catalog_incomplete
+                else McpPolicyDiagnosticStatus.STALE
+            )
+            reason = (
+                "mcp_policy_catalog_incomplete"
+                if catalog_incomplete
+                else "mcp_policy_candidate_missing"
+            )
+            diagnostics.append(McpPolicyDiagnostic(policy_scope, rule, status, reason))
+            continue
+        if candidate.disposition is McpCandidateDisposition.REJECTED:
+            diagnostics.append(
+                McpPolicyDiagnostic(
+                    policy_scope,
+                    rule,
+                    McpPolicyDiagnosticStatus.STALE,
+                    "mcp_policy_candidate_rejected",
+                    candidate.reason_code,
+                )
+            )
+            continue
+        if not rule.matches(
+            configured_name=candidate.configured_name,
+            server_scope=candidate.scope,
+            configuration_revision=candidate.configuration_revision,
+            remote_name=candidate.remote_name,
+            protocol_version=candidate.protocol_version,
+            schema_fingerprint=candidate.schema_fingerprint,
+        ):
+            diagnostics.append(
+                McpPolicyDiagnostic(
+                    policy_scope,
+                    rule,
+                    McpPolicyDiagnosticStatus.STALE,
+                    "mcp_policy_identity_changed",
+                )
+            )
+    return tuple(diagnostics)
 
 
 class McpCatalogService:

@@ -378,7 +378,7 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 
 `demo-read` is not a real model interface. It does not write files, execute shell commands, or access the network.
 
-MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
+MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp catalog explain <reason-code>` explains quarantine reasons, `mcp policy stale` inspects invalid or currently unresolved policies, and `mcp policy prune --dry-run` only previews revision-bound cleanup commands. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
 
 ## Configuration and local state
 

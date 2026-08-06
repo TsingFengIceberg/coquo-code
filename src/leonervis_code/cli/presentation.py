@@ -33,7 +33,13 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
 )
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
-from leonervis_code.mcp import McpCandidateDisposition, McpQuarantineCatalog
+from leonervis_code.mcp import (
+    McpCandidateDisposition,
+    McpCatalogReasonExplanation,
+    McpPolicyDiagnostic,
+    McpPolicyDiagnosticStatus,
+    McpQuarantineCatalog,
+)
 from leonervis_code.mcp.client import McpLiveProcessStatus, McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
@@ -394,6 +400,57 @@ def render_mcp_catalog(catalog: McpQuarantineCatalog) -> str:
         "Descriptions, schemas, annotations, server errors, stderr, arguments, and credentials are hidden."
     )
     lines.append("Accepted candidates remain deferred until exact in-Turn search and promotion.")
+    return "\n".join(lines)
+
+
+def render_mcp_catalog_reason(explanation: McpCatalogReasonExplanation) -> str:
+    """Render one Host-owned quarantine explanation without server content."""
+    return "\n".join(
+        (
+            f"MCP catalog reason: {_safe_inline(explanation.reason_code)}",
+            f"Meaning: {_safe_inline(explanation.meaning)}",
+            f"Operator action: {_safe_inline(explanation.operator_action)}",
+            "Source schema, server prose, errors, and credentials are not displayed.",
+        )
+    )
+
+
+def render_mcp_policy_diagnostics(
+    diagnostics: tuple[McpPolicyDiagnostic, ...],
+    *,
+    prune_dry_run: bool = False,
+) -> str:
+    """Render stale/unresolved policy facts or non-mutating clear commands."""
+    stale = tuple(item for item in diagnostics if item.status is McpPolicyDiagnosticStatus.STALE)
+    unresolved = tuple(
+        item for item in diagnostics if item.status is McpPolicyDiagnosticStatus.UNRESOLVED
+    )
+    if prune_dry_run:
+        lines = [
+            f"MCP policy prune dry-run: {len(stale)} stale; {len(unresolved)} unresolved excluded"
+        ]
+        lines.extend(
+            "  leonervis-code mcp policy clear "
+            f"{item.rule.qualified_name} --scope {item.policy_scope} "
+            f"--if-revision {item.rule.revision}"
+            for item in stale
+        )
+        if not stale:
+            lines.append("  No confirmed stale policy is eligible for removal.")
+        lines.append("No policy files were modified.")
+        return "\n".join(lines)
+    lines = [f"MCP tool policy diagnostics: {len(stale)} stale, {len(unresolved)} unresolved"]
+    for item in diagnostics:
+        detail = "" if item.detail_code is None else f"; detail {item.detail_code}"
+        lines.append(
+            f"  {item.status.value}: {item.rule.qualified_name} "
+            f"[{item.policy_scope}; policy r{item.rule.revision}; reason {item.reason_code}{detail}]"
+        )
+    if unresolved:
+        lines.append(
+            "Unresolved policies are excluded from pruning because current server identity could "
+            "not be proven."
+        )
     return "\n".join(lines)
 
 

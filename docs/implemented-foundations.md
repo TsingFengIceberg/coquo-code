@@ -1245,6 +1245,14 @@ Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制�
 
 `mcp doctor`执行一次脱敏live conformance probe，报告transport、protocol、known/unknown capability、tool数量和cleanup，不展示server正文、credential或session ID。初始化失败会尝试关闭remote session，status区分stdio与Streamable HTTP generation；legacy HTTP/SSE暂不支持。单个SSE `data:`行可承载一个完整的有界MCP message，不再受无关的64 KiB行限制；解码消息与完整HTTP响应仍分别限制为1 MiB，event及JSON结构边界不变。工具schema仅在根节点接受已知Draft 7 `$schema`声明；直接根字符串属性还可携带有界`x-mcp-header`路由提示，原始元数据继续进入schema指纹但在Provider投影前移除，live schema复核后仅把安全参数投影为对应`MCP-Param-*` header。未知dialect、嵌套或重复header提示及其他不支持关键字仍被隔离。System prompt为v37，fingerprint为`v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`，empty full-context ID为`ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`；provider adapter保持v38。详见[0118](./decisions/0118-mcp-interoperability-and-production-hardening.md)。
 
+## MCP审批与只读运维诊断
+
+MCP ask审批现在由已准备candidate的精确server scope/name解析当前配置transport。`stdio`只描述本地受限executable、只读Host/workspace、private temporary paths及socket禁止；`streamable-http`则明确参数经HTTPS发送到位于本地command sandbox之外的remote service，且外部副作用不能rollback。两类审批都继续隐藏arguments、endpoint、header和credential。ApprovalPreview升级v5，以必需的`stdio|streamable-http` transport字段避免错误边界说明；该对象仍是非持久Host UI表示。
+
+MCP ToolResult的已知失败码会生成保守的`Next:`建议，区分缩小/分页请求、刷新catalog并创建新Turn、检查redacted OAuth/server状态、检查cleanup/runtime、避免自动重放不确定transport调用及根据有界server error修订参数。`mcp catalog explain <reason-code>`只从闭合静态表解释Host拥有的quarantine code，不展示server schema、正文或错误。
+
+`mcp policy stale`把当前规则分为可由成功catalog明确证明的`stale`与因source probe失败或catalog不完整而无法证明的`unresolved`；完全匹配的active规则不列入结果。`mcp policy prune --dry-run`不获取mutation意图、不修改policy文件，只为confirmed stale规则输出包含scope和`--if-revision`的现有`clear`命令，并明确排除unresolved规则。System prompt、provider adapter、ToolSet、Effective Context及全部持久schema不变。详见[0120](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)。
+
 ## 提前Session命名与Terminal渲染安全
 
 未命名首轮现在在第一次普通provider响应完成后、任何tool派发前执行既有的有界无工具标题请求。标题调用继续计入同一Turn的24次provider总预算；候选名称先作为进程内TTY底栏状态展示，只有最终Turn成功时才与正文、来源、fallback原因及usage原子写入`turn_committed`。失败或取消会撤销临时名称，commit前仍会复核重名并使用稳定编号fallback。
@@ -1372,3 +1380,4 @@ Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制�
 117. [0117：Bounded MCP Sampling and Elicitation](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)
 118. [0118：MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)
 119. [0119：Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)
+120. [0120：Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)

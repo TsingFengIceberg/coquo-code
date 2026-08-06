@@ -4,8 +4,10 @@ import io
 import sys
 from pathlib import Path
 
+import pytest
+
 from leonervis_code.cli.main import main
-from leonervis_code.mcp.client import McpStdioClient
+from leonervis_code.mcp.client import McpClientError, McpStdioClient
 from leonervis_code.mcp.catalog import McpCatalogService
 from leonervis_code.mcp.config import McpServerStore
 from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
@@ -25,6 +27,15 @@ def client_factory(workspace, *, environment):
         environment=environment,
         command_sandbox=PassthroughSandbox(),
     )
+
+
+class FailingCatalogClient:
+    def probe(self, _entry):
+        raise McpClientError("mcp_timeout", "sanitized timeout")
+
+
+def failing_catalog_client_factory(workspace, *, environment):
+    return FailingCatalogClient()
 
 
 def test_mcp_cli_configures_disabled_server_then_enables_probes_and_removes(tmp_path) -> None:
@@ -101,6 +112,21 @@ def test_mcp_cli_configures_disabled_server_then_enables_probes_and_removes(tmp_
     assert "UNTRUSTED" not in catalog
     assert "secret-value" not in catalog
 
+    output = io.StringIO()
+    assert (
+        main(
+            ["mcp", "catalog", "explain", "mcp_schema_keyword_unsupported"],
+            stdout=output,
+            stderr=errors,
+            **common,
+        )
+        == 0
+    )
+    explanation = output.getvalue()
+    assert "MCP catalog reason: mcp_schema_keyword_unsupported" in explanation
+    assert "Operator action:" in explanation
+    assert "server prose, errors, and credentials are not displayed" in explanation
+
     assert main(["mcp", "remove", "fixture", "--if-revision", "2"], **common) == 0
     output = io.StringIO()
     assert main(["mcp", "list"], stdout=output, stderr=errors, **common) == 0
@@ -138,6 +164,14 @@ def test_mcp_cli_rejects_provider_selection_and_stale_revision(tmp_path) -> None
     errors = io.StringIO()
     assert main(["--model", "fake", "mcp", "list"], stderr=errors, **common) == 2
     assert "cannot be combined with MCP management" in errors.getvalue()
+
+
+def test_mcp_catalog_explain_rejects_unknown_reason_code(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["mcp", "catalog", "explain", "server_supplied_reason"])
+
+    assert raised.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_mcp_cli_adds_remote_server_without_persisting_bearer_value(tmp_path) -> None:
@@ -262,6 +296,47 @@ def test_mcp_cli_sets_inspects_and_clears_exact_tool_policy(tmp_path) -> None:
         == 2
     )
     assert "fingerprint is stale" in errors.getvalue()
+
+    assert main(["mcp", "disable", "fixture", "--if-revision", "1"], **common) == 0
+    output = io.StringIO()
+    assert main(["mcp", "policy", "stale"], stdout=output, **common) == 0
+    stale_output = output.getvalue()
+    assert "MCP tool policy diagnostics: 1 stale, 0 unresolved" in stale_output
+    assert "reason mcp_policy_candidate_missing" in stale_output
+
+    policy_before = project_policy_path.read_bytes()
+    output = io.StringIO()
+    assert main(["mcp", "policy", "prune", "--dry-run"], stdout=output, **common) == 0
+    prune_output = output.getvalue()
+    assert "MCP policy prune dry-run: 1 stale; 0 unresolved excluded" in prune_output
+    assert (
+        f"leonervis-code mcp policy clear {candidate.qualified_name} --scope project "
+        "--if-revision 1" in prune_output
+    )
+    assert "No policy files were modified." in prune_output
+    assert project_policy_path.read_bytes() == policy_before
+
+    assert main(["mcp", "enable", "fixture", "--if-revision", "2"], **common) == 0
+    unresolved_common = {**common, "mcp_client_factory": failing_catalog_client_factory}
+    output = io.StringIO()
+    assert main(["mcp", "policy", "stale"], stdout=output, **unresolved_common) == 0
+    unresolved_output = output.getvalue()
+    assert "MCP tool policy diagnostics: 0 stale, 1 unresolved" in unresolved_output
+    assert "reason mcp_policy_source_unresolved; detail mcp_timeout" in unresolved_output
+
+    output = io.StringIO()
+    assert (
+        main(
+            ["mcp", "policy", "prune", "--dry-run"],
+            stdout=output,
+            **unresolved_common,
+        )
+        == 0
+    )
+    unresolved_prune = output.getvalue()
+    assert "0 stale; 1 unresolved excluded" in unresolved_prune
+    assert "mcp policy clear" not in unresolved_prune
+    assert project_policy_path.read_bytes() == policy_before
 
     assert (
         main(

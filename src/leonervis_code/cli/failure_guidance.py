@@ -69,7 +69,11 @@ def command_failure_guidance(error: Exception) -> str | None:
 
 def tool_result_guidance(tool_name: str, result_code: str | None) -> str | None:
     """Return a conservative next step from one trusted tool result code."""
-    if tool_name != "run_command" or result_code is None:
+    if result_code is None:
+        return None
+    if tool_name.startswith("mcp_"):
+        return _mcp_result_guidance(result_code)
+    if tool_name != "run_command":
         return None
     if result_code == "command_sandbox_unavailable":
         return "Next: run /sandbox check; the requested command was not started."
@@ -94,6 +98,53 @@ def tool_result_guidance(tool_name: str, result_code: str | None) -> str | None:
         return (
             "Next: process cleanup is uncertain; inspect the Host and workspace before any retry."
         )
+    return None
+
+
+def _mcp_result_guidance(result_code: str) -> str | None:
+    if result_code in {"mcp_result_limit", "mcp_result_truncated"}:
+        return (
+            "Next: request a narrower or paginated MCP operation; repeating the same call will "
+            "hit the same bounded result limit."
+        )
+    if result_code in {
+        "mcp_configuration_stale",
+        "mcp_live_tool_missing",
+        "mcp_runtime_catalog_mismatch",
+        "mcp_schema_invalid",
+        "mcp_session_changed",
+    }:
+        return (
+            "Next: refresh /mcp catalog, inspect the candidate again, and submit a new Turn; the "
+            "old promoted contract must not be reused."
+        )
+    if result_code in {
+        "mcp_auth_required",
+        "mcp_credential_invalid",
+        "mcp_environment_missing",
+    }:
+        return (
+            "Next: inspect redacted MCP OAuth and server status outside the model transcript, then "
+            "run mcp doctor for the configured server."
+        )
+    if result_code == "mcp_cleanup_incomplete":
+        return (
+            "Next: inspect /mcp status before another call; process or remote-session cleanup is "
+            "not confirmed."
+        )
+    if result_code in {
+        "mcp_cancelled",
+        "mcp_http_transport_failed",
+        "mcp_timeout",
+        "mcp_transport_closed",
+        "mcp_transport_failed",
+    }:
+        return (
+            "Next: inspect /actions last and /mcp status; delivery or side effects may be "
+            "uncertain, so do not automatically repeat the call."
+        )
+    if result_code == "mcp_tool_reported_error":
+        return "Next: revise the MCP arguments from the returned bounded error before a new call."
     return None
 
 

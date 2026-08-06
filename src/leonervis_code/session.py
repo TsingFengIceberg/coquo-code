@@ -4079,9 +4079,14 @@ class ProjectSession:
                 kind=ApprovalPreviewKind.FILE_DOWNLOAD,
             )
         elif prepared_mcp is not None:
+            mcp_entry = self._mcp_store.get_server(
+                prepared_mcp.candidate.configured_name,
+                scope=prepared_mcp.candidate.scope,
+            )
             approval_preview = build_metadata_preview(
                 action_digest=identity.digest,
                 kind=ApprovalPreviewKind.MCP_TOOL,
+                transport=mcp_entry.configuration.transport.value,
             )
         coordinator = ActionCoordinator(
             writer=self._writer,
