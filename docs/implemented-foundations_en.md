@@ -1259,6 +1259,14 @@ An unnamed first turn now runs the existing bounded no-tools title request after
 
 The real TTY reserves the physical final column and caps automatically selected content width at 100 display cells, so a wide terminal emits real newlines with continuation prefixes instead of relying on a narrower IDE or copied-text viewport to soft-wrap again. Startup runtime/Session blocks, assistant Markdown, plain text, Host traces, slash blocks, and approval use that width. The renderer refreshes it before each visible activity event and final response while retaining an unfinished streaming suffix. Startup details use secondary Host indentation, and the banner switches to a vertical layout on narrow screens. Approval is safely wrapped as ANSI-free text before the outer trace applies warning color, preventing literal `\x1b[...]` leakage. System prompt, adapter, tool contracts, Effective Context, and every durable schema remain unchanged. See [0119](./decisions/0119-early-session-title-and-terminal-rendering-safety.md).
 
+## Bounded declarative Skills and ToolSet restriction
+
+Skill v1 uses one strict `<name>/SKILL.md` package whose frontmatter accepts only `manifest-version`, `name`, `description`, and optional `allowed-tools`; exact bounded metadata and body share one stable fingerprint. The Host scans only the workspace-local `.leonervis-code/skills`, project-shared `.agents/skills`, and XDG user `leonervis-code/skills` roots, in that priority order, while retaining shadowed and invalid diagnostics. Symlinks, non-UTF-8, CRLF, unknown fields, YAML errors, read drift, and all size bounds fail closed. `skills list|show|doctor` are read-only inspections with no provider, Session, or Action Audit effects.
+
+Each ordinary Turn pins one SkillInventorySnapshot whose identity enters Effective Context and ActionLease identity. The model first calls `skill_search` in an isolated response over frozen active metadata, then calls `skill_load` in another isolated response with the exact same-Turn name and fingerprint. The Host reloads inventory before returning the body and stale-rejects any change. A successful ToolResult contains complete bounded instructions without an absolute path; Skill guidance remains untrusted procedure, not system authority, permission, approval, tool implementation, or execution evidence.
+
+Optional `allowed-tools` only intersects existing Host or MCP action tools: omission inherits, an empty list removes every ordinary action, and a nonempty list still cannot add or promote a tool; Task, lifecycle, and discovery controls remain. Loading creates a later immutable ToolSet epoch and replacement lease. Cross-Turn restriction is reconstructed only from a complete successful Host `skill_load` pair still retained in Effective Context; once compaction removes that pair, Skill text in a summary cannot reactivate it. The system prompt is v38, provider adapter is v39, and full/compacted Effective Context advances to v11/v12 with `skill_inventory_id` while legacy versions remain valid. See [0121](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1381,3 +1389,4 @@ The real TTY reserves the physical final column and caps automatically selected 
 118. [0118: MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)
 119. [0119: Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)
 120. [0120: Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)
+121. [0121: Bounded Declarative Skills and ToolSet Restriction](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)

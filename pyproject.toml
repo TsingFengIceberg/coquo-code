@@ -13,6 +13,7 @@ dependencies = [
   "anthropic>=0.116.0",
   "openai>=2.15.0",
   "prompt-toolkit>=3.0.52",
+  "pyyaml>=6.0.2",
   "rich>=13.9.4",
 ]
 keywords = ["agent", "cli", "coding-agent", "harness", "llm"]

@@ -1592,7 +1592,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v10-")
+    assert session.inspect_context().context_id.startswith("ctx-v12-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     history = session.compaction_history(5)

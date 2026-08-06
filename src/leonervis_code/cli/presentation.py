@@ -1566,6 +1566,8 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "download_file": "Public HTTP(S) GET to one regular workspace file; 5 redirects, 30-second timeout, 16 MiB body, exact-state recheck, and atomic install.",
     "tool_search": "Literal case-insensitive search over only the current Turn's frozen deferred catalog; at most 8 results.",
     "tool_promote": "Exact same-Turn discovered MCP names only; at most 8 names; creates one later immutable ToolSet epoch.",
+    "skill_search": "Literal case-insensitive search over active metadata in the current Turn's frozen Skill inventory; at most 8 results.",
+    "skill_load": "Exact same-Turn discovered Skill name and fingerprint; returns one complete bounded instruction body and may narrow action tools.",
     "task_propose_plan": "Planning Stage only; 1-32 bounded objectives; proposal does not accept or execute the plan.",
     "task_report_reflection": "Reflection Stage only; bounded recommendation and summary; no ordinary execution tools are exposed.",
     "task_report_blocker": "Matching Task Stage only; bounded category and summary; never grants permission or completes the Task.",

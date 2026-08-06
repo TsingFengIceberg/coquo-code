@@ -685,6 +685,14 @@ def tool_promote_tool_definition() -> dict[str, object]:
     return _named_tool_definition("tool_promote")
 
 
+def skill_search_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("skill_search")
+
+
+def skill_load_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("skill_load")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
     return _named_tool_definition("task_propose_plan")
 

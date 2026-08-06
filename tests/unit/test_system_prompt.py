@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66"
+EXPECTED_FINGERPRINT = "v38-90f34a615348f179b2e7791c2d087a056056dcac6fab33fd2446ce8e98b24281"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 37
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 38
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -51,6 +51,9 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "without one it is denied" in prompt.text
     assert "does not mutate the active ToolSet" in prompt.text
     assert "must not be retried automatically" in prompt.text
+    assert "additionally contains `skill_search` and `skill_load`" in prompt.text
+    assert "compact summary that merely mentions the Skill does not reactivate it" in prompt.text
+    assert "can only intersect action tools already present" in prompt.text
     assert "never extracts entries" in prompt.text
     assert "abbreviated or arbitrary revisions" in prompt.text
     assert "does not support linked-worktree `.git` pointer files" in prompt.text

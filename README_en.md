@@ -15,7 +15,7 @@ English | [中文](./README.md)
 
 Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
 
-> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and 33 ordinary bounded tools are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, and audited MCP tool execution. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
+> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and 35 ordinary bounded tools are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP tool execution, and declarative Skill loading. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
 
 ## Contents
 
@@ -380,6 +380,8 @@ uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejec
 
 MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp catalog explain <reason-code>` explains quarantine reasons, `mcp policy stale` inspects invalid or currently unresolved policies, and `mcp policy prune --dry-run` only previews revision-bound cleanup commands. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
 
+Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills list`, `skills show <name>`, and `skills doctor` for read-only inspection. The model discovers and loads Skills on demand; implemented-foundations defines the exact format and authority boundary.
+
 ## Configuration and local state
 
 | Path | Contents |
@@ -510,6 +512,6 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 ## Current scope and next step
 
-Leonervis Code currently provides 33 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, and progressive MCP discovery, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
+Leonervis Code currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP now supports confined stdio and Streamable HTTP, progressive discovery, unified permission auditing, OAuth, Resources, Prompts, Subscriptions, explicit Roots, and a default-denied reverse-request boundary. Skills, browser automation, and background or parallel agents are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Executable Skills, a marketplace, browser automation, and background or parallel agents are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

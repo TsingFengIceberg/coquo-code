@@ -126,6 +126,12 @@ from leonervis_code.tools.tool_discovery import (
     TOOL_SEARCH_TOOL_NAME,
     tool_discovery_snapshots,
 )
+from leonervis_code.tools.skill_discovery import (
+    MAX_SKILL_SEARCH_RESULTS,
+    SKILL_LOAD_TOOL_NAME,
+    SKILL_SEARCH_TOOL_NAME,
+    skill_discovery_snapshots,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -168,6 +174,7 @@ ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     move_directory_tool_snapshot(),
     download_file_tool_snapshot(),
     *tool_discovery_snapshots(),
+    *skill_discovery_snapshots(),
 )
 ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
 ORDINARY_PROMPT_TOOL_NAMES = (
@@ -182,8 +189,8 @@ TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *task_control_tool_snapshots(),
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 2
-TOOL_REGISTRY_GENERATION = 2
+BUILTIN_TOOL_SOURCE_GENERATION = 3
+TOOL_REGISTRY_GENERATION = 3
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "leonervis-code",
@@ -258,7 +265,10 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
     elif name == TASK_PROPOSE_START_TOOL_NAME:
         execution_kind = ToolExecutionKind.TASK_ADMISSION
         permission_actions = ()
-    elif name in TOOL_DISCOVERY_TOOL_NAMES:
+    elif name in TOOL_DISCOVERY_TOOL_NAMES or name in {
+        SKILL_SEARCH_TOOL_NAME,
+        SKILL_LOAD_TOOL_NAME,
+    }:
         execution_kind = ToolExecutionKind.TOOL_DISCOVERY
         permission_actions = ()
     elif name in _TASK_LIFECYCLE_NAMES:
@@ -447,6 +457,10 @@ def _expected_keys(name: str) -> set[str]:
         return {"query", "max_results"}
     if name == TOOL_PROMOTE_TOOL_NAME:
         return {"names"}
+    if name == SKILL_SEARCH_TOOL_NAME:
+        return {"query", "max_results"}
+    if name == SKILL_LOAD_TOOL_NAME:
+        return {"name", "fingerprint"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -465,6 +479,44 @@ def _expected_keys(name: str) -> set[str]:
 
 
 def _validate_known_input(name: str, tool_input: dict[str, object], expected: set[str]) -> None:
+    if name == SKILL_SEARCH_TOOL_NAME:
+        query = tool_input["query"]
+        max_results = tool_input["max_results"]
+        _validate_input_string(
+            query,
+            label="skill_search query",
+            max_characters=256,
+            max_bytes=1024,
+        )
+        if type(max_results) is not int or not 1 <= max_results <= MAX_SKILL_SEARCH_RESULTS:
+            raise ValueError(
+                f"skill_search max_results must be an integer from 1 to {MAX_SKILL_SEARCH_RESULTS}"
+            )
+        return
+    if name == SKILL_LOAD_TOOL_NAME:
+        skill_name = tool_input["name"]
+        fingerprint = tool_input["fingerprint"]
+        _validate_input_string(
+            skill_name,
+            label="skill_load name",
+            allow_whitespace=False,
+            max_characters=64,
+            max_bytes=64,
+        )
+        _validate_input_string(
+            fingerprint,
+            label="skill_load fingerprint",
+            allow_whitespace=False,
+            max_characters=73,
+            max_bytes=73,
+        )
+        if (
+            not fingerprint.startswith("skill-v1-")
+            or len(fingerprint) != 73
+            or any(character not in "0123456789abcdef" for character in fingerprint[9:])
+        ):
+            raise ValueError("skill_load fingerprint is invalid")
+        return
     if name == TOOL_SEARCH_TOOL_NAME:
         query = tool_input["query"]
         max_results = tool_input["max_results"]

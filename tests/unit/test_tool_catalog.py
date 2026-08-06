@@ -49,6 +49,8 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "download_file",
         "tool_search",
         "tool_promote",
+        "skill_search",
+        "skill_load",
         "task_propose_plan",
         "task_report_reflection",
         "task_report_blocker",
@@ -128,6 +130,31 @@ def test_discovery_inputs_are_bounded_and_remote_mcp_arguments_remain_generic() 
         tool_use_from_input("bad-search", "tool_search", {"query": "x", "max_results": 9})
     with pytest.raises(ValueError, match="only MCP"):
         tool_use_from_input("bad-promote", "tool_promote", {"names": ["read_file"]})
+
+    skill_search = tool_use_from_input(
+        "skill-search-1",
+        "skill_search",
+        {"query": "python release", "max_results": 3},
+    )
+    skill_load = tool_use_from_input(
+        "skill-load-1",
+        "skill_load",
+        {"name": "python-release", "fingerprint": "skill-v1-" + "a" * 64},
+    )
+    assert tool_input_from_use(skill_search)["max_results"] == 3
+    assert tool_input_from_use(skill_load)["name"] == "python-release"
+    with pytest.raises(ValueError, match="skill_search max_results"):
+        tool_use_from_input(
+            "bad-skill-search",
+            "skill_search",
+            {"query": "x", "max_results": 9},
+        )
+    with pytest.raises(ValueError, match="fingerprint"):
+        tool_use_from_input(
+            "bad-skill-load",
+            "skill_load",
+            {"name": "python-release", "fingerprint": "skill-v1-bad"},
+        )
 
 
 def test_catalog_validates_closed_task_coordination_inputs() -> None:

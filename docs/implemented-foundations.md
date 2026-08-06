@@ -1259,6 +1259,14 @@ MCP ToolResult的已知失败码会生成保守的`Next:`建议，区分缩小/�
 
 真实TTY为持久输出预留最右一列，并把自动内容宽度封顶为100个显示单元，使宽终端也生成带续行前缀的真实换行，而不依赖更窄的IDE或复制视图二次软换行。启动runtime/Session块、assistant Markdown、普通文本、Host轨迹、slash及approval都使用该宽度；每个可见活动事件和最终回复写出前会刷新当前宽度，同时保留尚未完成的流式后缀。启动块也使用次要Host缩进，窄屏banner切换为纵向布局。Approval先以无ANSI纯文本完成安全包装，再由外层轨迹应用warning颜色，因此不会再显示字面量`\x1b[...]`。System prompt、adapter、tool contract、Effective Context与全部持久schema不变。详见[0119](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)。
 
+## 有界声明式Skills与ToolSet收窄
+
+Skill v1使用严格的`<name>/SKILL.md`包，frontmatter只接受`manifest-version`、`name`、`description`和可选`allowed-tools`，正文与元数据共同进入稳定fingerprint。Host只扫描workspace-local `.leonervis-code/skills`、project-shared `.agents/skills`及XDG user `leonervis-code/skills`三个精确根，按该顺序选择active候选并保留shadowed与invalid诊断；symlink、非UTF-8、CRLF、未知字段、YAML错误、读取漂移和全部大小边界均fail closed。`skills list|show|doctor`是无provider、无Session、无Action Audit的只读检查。
+
+每个普通Turn固定一个SkillInventorySnapshot，其identity进入Effective Context与ActionLease。模型先以独占回复调用`skill_search`查询冻结的active metadata，再用同Turn返回的精确name+fingerprint独占调用`skill_load`；Host在加载正文前重新读取inventory，任何变化都stale reject。成功ToolResult包含完整有界instructions但不含绝对路径，且Skill只是不受信任的流程指导，不是system authority、permission、approval、tool implementation或执行证据。
+
+可选`allowed-tools`只对当前已有Host/MCP action tools做交集：缺失表示继承，空列表移除全部普通action，非空列表也不能增加或promote工具；Task、lifecycle与discovery control保留。加载后的限制创建后续immutable ToolSet epoch与replacement lease，并只从Effective Context中仍完整保留的Host成功`skill_load` pair跨Turn恢复；compaction删除该pair后，summary中的Skill文字不会重新激活。System prompt为v38，provider adapter为v39，full/compacted Effective Context升级v11/v12并加入`skill_inventory_id`，旧版本继续可验证。详见[0121](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1381,3 +1389,4 @@ MCP ToolResult的已知失败码会生成保守的`Next:`建议，区分缩小/�
 118. [0118：MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)
 119. [0119：Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)
 120. [0120：Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)
+121. [0121：Bounded Declarative Skills and ToolSet Restriction](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)

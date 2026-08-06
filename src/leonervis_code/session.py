@@ -100,6 +100,7 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
 )
 from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
+from leonervis_code.skills import SkillInventoryLoader
 from leonervis_code.mcp import (
     McpClient,
     McpCallPreparationError,
@@ -800,6 +801,7 @@ class ProjectSession:
         action_uuid_factory: Callable[[], UUID | str] = uuid4,
         loop: AgentLoop | None = None,
         project_instructions_loader: ProjectInstructionsLoader | None = None,
+        skill_inventory_loader: SkillInventoryLoader | None = None,
         mcp_store: McpServerStore | None = None,
         mcp_client: object | None = None,
         mcp_policy_store: McpToolPolicyStore | None = None,
@@ -862,6 +864,7 @@ class ProjectSession:
         self._project_instructions_loader = (
             project_instructions_loader or ProjectInstructionsLoader(workspace)
         )
+        self._skill_inventory_loader = skill_inventory_loader or SkillInventoryLoader(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -1015,6 +1018,7 @@ class ProjectSession:
             move_directory = move_directory_factory(resolved_workspace)
             download_file = download_file_factory(resolved_workspace)
             project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
+            skill_inventory_loader = SkillInventoryLoader(resolved_workspace, resolved_environment)
             mcp_store = McpServerStore.for_workspace(
                 resolved_workspace,
                 environment=resolved_environment,
@@ -1077,6 +1081,7 @@ class ProjectSession:
                     approval_handler=approval_handler,
                     action_uuid_factory=action_uuid_factory,
                     project_instructions_loader=project_instructions_loader,
+                    skill_inventory_loader=skill_inventory_loader,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
@@ -1115,6 +1120,7 @@ class ProjectSession:
                     ),
                     project_instructions_factory=project_instructions_loader.load,
                     tool_registry_factory=resume_mcp_catalog.registry_snapshot,
+                    skill_inventory_factory=skill_inventory_loader.load,
                 )
                 snapshot = loop.effective_context_snapshot()
                 with manager.provider_for_context_transition() as runtime:
@@ -1176,6 +1182,7 @@ class ProjectSession:
                     action_uuid_factory=action_uuid_factory,
                     loop=loop,
                     project_instructions_loader=project_instructions_loader,
+                    skill_inventory_loader=skill_inventory_loader,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
@@ -2571,6 +2578,7 @@ class ProjectSession:
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                     project_instructions_factory=self._project_instructions_loader.load,
                     tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
+                    skill_inventory_factory=self._skill_inventory_loader.load,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
                 loop.install_task_control_dispatcher(
@@ -3123,13 +3131,17 @@ class ProjectSession:
         if cancellation is not None:
             cancellation.check()
         summary = EffectiveContextSummary(summary_response.text.strip())
+        candidate_tool_set = prepared.loop.tool_set_snapshot_for_effective_history(
+            prepared.plan.retained_history
+        )
         candidate = EffectiveContextSnapshot(
             representation_version=COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
             system_prompt=source.system_prompt,
             project_instructions=source.project_instructions,
-            tool_definitions=source.tool_definitions,
-            tool_set_id=source.tool_set_id,
+            tool_definitions=candidate_tool_set.definitions,
+            tool_set_id=candidate_tool_set.snapshot_id,
+            skill_inventory_id=source.skill_inventory_id,
             full_history=source.full_history,
             effective_history=prepared.plan.retained_history,
             effective_summary=summary,
@@ -3462,6 +3474,7 @@ class ProjectSession:
         commit_turn,
         project_instructions_factory,
         tool_registry_factory=None,
+        skill_inventory_factory=None,
     ) -> AgentLoop:
         return AgentLoop(
             None,
@@ -3494,6 +3507,11 @@ class ProjectSession:
                 if tool_registry_factory is None
                 else {"tool_registry_factory": tool_registry_factory}
             ),
+            **(
+                {}
+                if skill_inventory_factory is None
+                else {"skill_inventory_factory": skill_inventory_factory}
+            ),
         )
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
@@ -3520,6 +3538,7 @@ class ProjectSession:
             commit_turn=lambda turn: self._commit_turn(writer, turn),
             project_instructions_factory=self._project_instructions_loader.load,
             tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
+            skill_inventory_factory=self._skill_inventory_loader.load,
         )
         loop.install_action_dispatcher(self._dispatch_action)
         loop.install_task_control_dispatcher(TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control)

@@ -138,6 +138,7 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from leonervis_code.skills import SkillCatalogError, SkillInventoryLoader
 from leonervis_code.task_store import TaskStore, TaskStoreError
 from leonervis_code.task_records import TaskCompletionPolicy
 from leonervis_code.task_records import TaskBudget, TaskStatus
@@ -433,6 +434,13 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--native-search-manifest", type=Path)
     replace_parser.add_argument("--if-revision", type=int)
     provider_commands.add_parser("migrate", help="upgrade readable profile files to schema v5")
+
+    skills_parser = subcommands.add_parser("skills", help="inspect declarative Skill packages")
+    skills_commands = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_commands.add_parser("list", help="list active and shadowed Skill packages")
+    skills_show = skills_commands.add_parser("show", help="show one active Skill package")
+    skills_show.add_argument("name")
+    skills_commands.add_parser("doctor", help="diagnose all bounded Skill source roots")
 
     mcp_parser = subcommands.add_parser("mcp", help="configure and inspect MCP servers")
     mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)
@@ -1436,6 +1444,95 @@ def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdou
     return 0
 
 
+def handle_skills_command(
+    arguments: argparse.Namespace,
+    workspace: Path,
+    environment: Mapping[str, str],
+    stdout: TextIO,
+) -> int:
+    """Render one bounded Skill inventory without provider or Session effects."""
+    loader = SkillInventoryLoader(workspace, environment)
+    inventory = loader.load()
+    if arguments.skills_command == "list":
+        for candidate in inventory.candidates:
+            stdout.write(
+                json.dumps(
+                    {
+                        "active": candidate.active,
+                        "description": candidate.manifest.description,
+                        "fingerprint": candidate.manifest.fingerprint,
+                        "name": candidate.manifest.name,
+                        "path": candidate.relative_path,
+                        "shadowed_by": (
+                            None if candidate.shadowed_by is None else candidate.shadowed_by.value
+                        ),
+                        "source": candidate.source.value,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        if not inventory.candidates:
+            stdout.write('{"skills": 0}\n')
+        return 0
+    if arguments.skills_command == "show":
+        candidate = inventory.get(arguments.name)
+        manifest = candidate.manifest
+        stdout.write(
+            json.dumps(
+                {
+                    "allowed_tools": (
+                        None if manifest.allowed_tools is None else list(manifest.allowed_tools)
+                    ),
+                    "description": manifest.description,
+                    "fingerprint": manifest.fingerprint,
+                    "instructions": manifest.instructions,
+                    "name": manifest.name,
+                    "path": candidate.relative_path,
+                    "source": candidate.source.value,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.skills_command == "doctor":
+        stdout.write(
+            json.dumps(
+                {
+                    "active": len(inventory.active),
+                    "candidates": len(inventory.candidates),
+                    "inventory_id": inventory.snapshot_id,
+                    "issues": len(inventory.issues),
+                    "roots": [
+                        {"path": str(path), "source": source.value} for source, path in loader.roots
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        for issue in inventory.issues:
+            stdout.write(
+                json.dumps(
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                        "path": issue.relative_path,
+                        "source": issue.source.value,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        return 1 if inventory.issues else 0
+    raise ValueError(f"unsupported skills command: {arguments.skills_command}")
+
+
 def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
     """Create or inspect durable Tasks without invoking a provider."""
     store = TaskStore(workspace)
@@ -1750,6 +1847,17 @@ def main(
                 mcp_client_factory=mcp_client_factory,
                 stdout=output,
             )
+        if arguments.command == "skills":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_profile_id is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with Skill inspection"
+                )
+            return handle_skills_command(arguments, workspace, env, output)
         if arguments.command == "session":
             if (
                 arguments.profile is not None
@@ -1977,4 +2085,7 @@ def main(
     except McpClientError as error:
         cleanup = " cleanup incomplete" if not error.cleanup_complete else ""
         print(f"MCP client error [{error.code}]{cleanup}: {error}", file=errors)
+        return 2
+    except SkillCatalogError as error:
+        print(f"Skill catalog error [{error.code}]: {error}", file=errors)
         return 2

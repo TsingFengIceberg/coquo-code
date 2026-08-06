@@ -310,6 +310,29 @@ class ToolSetSnapshot:
             contracts=selected,
         )
 
+    def restrict_actions(self, allowed_names: tuple[str, ...]) -> ToolSetSnapshot:
+        """Create the next epoch by intersecting action tools while retaining controls."""
+        if not isinstance(allowed_names, tuple) or len(set(allowed_names)) != len(allowed_names):
+            raise ValueError("Skill allowed tool names are invalid")
+        if any(not isinstance(name, str) or not name for name in allowed_names):
+            raise ValueError("Skill allowed tool names are invalid")
+        allowed = frozenset(allowed_names)
+        selected = tuple(
+            contract
+            for contract in self.contracts
+            if contract.execution_kind
+            not in {ToolExecutionKind.HOST_ACTION, ToolExecutionKind.MCP_REMOTE}
+            or contract.name in allowed
+        )
+        if selected == self.contracts:
+            return self
+        return ToolSetSnapshot(
+            registry_id=self.registry_id,
+            registry_generation=self.registry_generation,
+            epoch=self.epoch + 1,
+            contracts=selected,
+        )
+
 
 def _validate_tool_names(names: object) -> None:
     if (

@@ -15,7 +15,7 @@
 
 Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
 
-> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及33个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输和受审计MCP工具执行。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及35个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行和声明式Skill加载。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ## 目录
 
@@ -380,6 +380,8 @@ uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 
 MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact qualified name与schema fingerprint，再用`mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read`为精确的本地stdio版本声明只读策略；远程工具始终保持`dangerous`。`mcp catalog explain <reason-code>`解释隔离原因，`mcp policy stale`检查失效或暂时无法确认的策略，`mcp policy prune --dry-run`只预览带revision的清理命令。`mcp add-http`、`mcp oauth`、`mcp resources`、`mcp prompts`及`mcp doctor`分别用于远程配置、授权、非Tool capability检查和互操作诊断。
 
+声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills list`、`skills show <name>`及`skills doctor`进行只读检查。模型会按需发现并加载Skill，详细格式与权限边界见implemented-foundations。
+
 ## 配置与本地状态
 
 | 路径 | 内容 |
@@ -510,6 +512,6 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-Leonervis Code目前提供33个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载及渐进式MCP发现，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
+Leonervis Code目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP、渐进发现、统一权限审计、OAuth、Resources、Prompts、Subscriptions、显式Roots及默认拒绝的反向请求边界。Skills、浏览器自动化及后台或并行智能体尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。可执行Skill、市场、浏览器自动化及后台或并行智能体尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

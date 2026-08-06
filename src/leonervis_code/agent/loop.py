@@ -71,6 +71,8 @@ from leonervis_code.core.extensions import (
     ToolRegistrySnapshot,
     ToolSetSnapshot,
 )
+from leonervis_code.skills import SkillInventorySnapshot
+from leonervis_code.tools.skill_discovery import SKILL_LOAD_TOOL_NAME, SKILL_SEARCH_TOOL_NAME
 from leonervis_code.providers.streaming import (
     ProviderResponseOutcome,
     ProviderSearchActivity,
@@ -109,6 +111,7 @@ from leonervis_code.tools.tool_discovery import TOOL_PROMOTE_TOOL_NAME, TOOL_SEA
 SystemPromptFactory = Callable[[], SystemPromptSnapshot]
 ProjectInstructionsFactory = Callable[[], ProjectInstructionsSnapshot | None]
 ToolRegistryFactory = Callable[[], ToolRegistrySnapshot]
+SkillInventoryFactory = Callable[[], SkillInventorySnapshot]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
 ToolUsageSink = Callable[[ToolAttemptUsage], None]
@@ -121,6 +124,10 @@ def _no_project_instructions() -> None:
 
 def _builtin_tool_registry() -> ToolRegistrySnapshot:
     return TOOL_REGISTRY_SNAPSHOT
+
+
+def _empty_skill_inventory() -> SkillInventorySnapshot:
+    return SkillInventorySnapshot((), ())
 
 
 class ToolLoopLimitError(RuntimeError):
@@ -139,6 +146,7 @@ class ToolDiscoveryProtocolError(RuntimeError):
 class ToolDiscoveryDispatchResult:
     dispatch: ToolDispatchResult
     discovered_names: tuple[str, ...] = ()
+    discovered_skills: tuple[tuple[str, str], ...] = ()
     promoted_snapshot: ToolSetSnapshot | None = None
 
 
@@ -154,6 +162,7 @@ class PreparedAgentTurn:
     pending_items: tuple[ConversationItem, ...]
     registry_snapshot: ToolRegistrySnapshot
     tool_set_snapshot: ToolSetSnapshot
+    skill_inventory_snapshot: SkillInventorySnapshot
     allow_tools: bool = True
     enabled_tool_names: tuple[str, ...] | None = None
     action_lease: ActionLease | None = None
@@ -167,6 +176,8 @@ class PreparedAgentTurn:
             raise ValueError("prepared turn tool set snapshot is invalid")
         if not isinstance(self.registry_snapshot, ToolRegistrySnapshot):
             raise ValueError("prepared turn registry snapshot is invalid")
+        if not isinstance(self.skill_inventory_snapshot, SkillInventorySnapshot):
+            raise ValueError("prepared turn Skill inventory snapshot is invalid")
         if (
             self.registry_snapshot.snapshot_id != self.tool_set_snapshot.registry_id
             or self.registry_snapshot.generation != self.tool_set_snapshot.registry_generation
@@ -175,6 +186,7 @@ class PreparedAgentTurn:
         if (
             self.context.tool_definitions != self.tool_set_snapshot.definitions
             or self.context.tool_set_id != self.tool_set_snapshot.snapshot_id
+            or self.context.skill_inventory_id != self.skill_inventory_snapshot.snapshot_id
         ):
             raise ValueError("prepared turn context does not match its tool set snapshot")
         if self.enabled_tool_names is not None:
@@ -219,9 +231,12 @@ class PreparedAgentTurn:
             snapshot.registry_id != self.tool_set_snapshot.registry_id
             or snapshot.registry_generation != self.tool_set_snapshot.registry_generation
             or snapshot.epoch <= self.tool_set_snapshot.epoch
-            or not set(self.tool_set_snapshot.names).issubset(snapshot.names)
         ):
             raise ValueError("advanced tool set is not a later compatible epoch")
+        old_names = set(self.tool_set_snapshot.names)
+        new_names = set(snapshot.names)
+        if not (old_names.issubset(new_names) or new_names.issubset(old_names)):
+            raise ValueError("advanced tool set must be a pure promotion or restriction")
         context = replace(
             self.context,
             tool_definitions=snapshot.definitions,
@@ -282,6 +297,7 @@ class AgentLoop:
         system_prompt_factory: SystemPromptFactory = build_system_prompt,
         project_instructions_factory: ProjectInstructionsFactory = _no_project_instructions,
         tool_registry_factory: ToolRegistryFactory = _builtin_tool_registry,
+        skill_inventory_factory: SkillInventoryFactory = _empty_skill_inventory,
         action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
@@ -332,6 +348,7 @@ class AgentLoop:
         self._system_prompt_factory = system_prompt_factory
         self._project_instructions_factory = project_instructions_factory
         self._tool_registry_factory = tool_registry_factory
+        self._skill_inventory_factory = skill_inventory_factory
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
@@ -367,9 +384,11 @@ class AgentLoop:
         registry = self._tool_registry_factory()
         if not isinstance(registry, ToolRegistrySnapshot):
             raise ValueError("tool registry factory returned an invalid snapshot")
+        inventory = self._skill_inventory_factory()
         return self._effective_context_snapshot(
             self._project_instructions_factory(),
-            registry.select(),
+            self._apply_skill_restrictions(self._effective_history, registry.select()),
+            inventory,
         )
 
     def effective_context_snapshot_with_project_instructions(
@@ -377,6 +396,7 @@ class AgentLoop:
         project_instructions: ProjectInstructionsSnapshot | None,
         *,
         tool_set_snapshot: ToolSetSnapshot | None = None,
+        skill_inventory_snapshot: SkillInventorySnapshot | None = None,
     ) -> EffectiveContextSnapshot:
         """Rebuild committed identity while retaining one already pinned instruction snapshot."""
         if project_instructions is not None and not isinstance(
@@ -387,16 +407,25 @@ class AgentLoop:
             registry = self._tool_registry_factory()
             if not isinstance(registry, ToolRegistrySnapshot):
                 raise ValueError("tool registry factory returned an invalid snapshot")
-            tool_set_snapshot = registry.select()
-        return self._effective_context_snapshot(project_instructions, tool_set_snapshot)
+            tool_set_snapshot = self._apply_skill_restrictions(
+                self._effective_history, registry.select()
+            )
+        if skill_inventory_snapshot is None:
+            skill_inventory_snapshot = self._skill_inventory_factory()
+        return self._effective_context_snapshot(
+            project_instructions, tool_set_snapshot, skill_inventory_snapshot
+        )
 
     def _effective_context_snapshot(
         self,
         project_instructions: ProjectInstructionsSnapshot | None,
         tool_set: ToolSetSnapshot,
+        skill_inventory: SkillInventorySnapshot,
     ) -> EffectiveContextSnapshot:
         if not isinstance(tool_set, ToolSetSnapshot):
             raise ValueError("effective context tool set snapshot is invalid")
+        if not isinstance(skill_inventory, SkillInventorySnapshot):
+            raise ValueError("effective context Skill inventory snapshot is invalid")
         representation_version = (
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
             if self._effective_summary is None
@@ -409,6 +438,7 @@ class AgentLoop:
             project_instructions=project_instructions,
             tool_definitions=tool_set.definitions,
             tool_set_id=tool_set.snapshot_id,
+            skill_inventory_id=skill_inventory.snapshot_id,
             full_history=self._full_history,
             effective_history=self._effective_history,
             effective_summary=self._effective_summary,
@@ -430,10 +460,16 @@ class AgentLoop:
         registry = self._tool_registry_factory()
         if not isinstance(registry, ToolRegistrySnapshot):
             raise ValueError("tool registry factory returned an invalid snapshot")
-        tool_set = registry.select(enabled_tool_names)
+        inventory = self._skill_inventory_factory()
+        if not isinstance(inventory, SkillInventorySnapshot):
+            raise ValueError("Skill inventory factory returned an invalid snapshot")
+        tool_set = self._apply_skill_restrictions(
+            self._effective_history, registry.select(enabled_tool_names)
+        )
         context = self._effective_context_snapshot(
             self._project_instructions_factory(),
             tool_set,
+            inventory,
         )
         return PreparedAgentTurn(
             user=user,
@@ -441,9 +477,48 @@ class AgentLoop:
             pending_items=(user,),
             registry_snapshot=registry,
             tool_set_snapshot=tool_set,
+            skill_inventory_snapshot=inventory,
             allow_tools=allow_tools,
             enabled_tool_names=(tool_set.names if enabled_tool_names is not None else None),
         )
+
+    def tool_set_snapshot_for_effective_history(
+        self, history: tuple[ConversationItem, ...]
+    ) -> ToolSetSnapshot:
+        """Derive the direct ToolSet for one validated hypothetical Effective Context."""
+        validate_complete_history(history)
+        registry = self._tool_registry_factory()
+        if not isinstance(registry, ToolRegistrySnapshot):
+            raise ValueError("tool registry factory returned an invalid snapshot")
+        return self._apply_skill_restrictions(history, registry.select())
+
+    @staticmethod
+    def _apply_skill_restrictions(
+        history: tuple[ConversationItem, ...], tool_set: ToolSetSnapshot
+    ) -> ToolSetSnapshot:
+        """Replay only complete Host-produced skill_load results in the supplied history."""
+        current = tool_set
+        for index, item in enumerate(history[:-1]):
+            if not isinstance(item, ToolUse) or item.name != SKILL_LOAD_TOOL_NAME:
+                continue
+            result = history[index + 1]
+            if not isinstance(result, ToolResult) or result.tool_use_id != item.tool_use_id:
+                continue
+            if result.is_error:
+                continue
+            try:
+                payload = json.loads(result.content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("kind") != "skill_loaded":
+                continue
+            allowed = payload.get("allowed_tools")
+            if allowed is None:
+                continue
+            if not isinstance(allowed, list) or not all(isinstance(name, str) for name in allowed):
+                continue
+            current = current.restrict_actions(tuple(allowed))
+        return current
 
     def run(
         self,
@@ -503,6 +578,7 @@ class AgentLoop:
         attempt_usage = ToolAttemptUsage()
         pending_task_proposal: TaskProposal | None = None
         discovered_names: set[str] = set()
+        discovered_skills: set[tuple[str, str]] = set()
         self._emit_tool_usage(tool_usage_sink, attempt_usage)
 
         while True:
@@ -715,9 +791,11 @@ class AgentLoop:
                             request,
                             prepared,
                             frozenset(discovered_names),
+                            frozenset(discovered_skills),
                         )
                         dispatch = discovery.dispatch
                         discovered_names.update(discovery.discovered_names)
+                        discovered_skills.update(discovery.discovered_skills)
                         if discovery.promoted_snapshot is not None:
                             prepared = self._transition_tool_set(
                                 prepared,
@@ -999,8 +1077,131 @@ class AgentLoop:
         request: ToolUse,
         prepared: PreparedAgentTurn,
         discovered_names: frozenset[str],
+        discovered_skills: frozenset[tuple[str, str]],
     ) -> ToolDiscoveryDispatchResult:
         arguments = tool_input_from_use(request)
+        if request.name == SKILL_SEARCH_TOOL_NAME:
+            query = arguments["query"]
+            limit = arguments["max_results"]
+            if not isinstance(query, str) or type(limit) is not int:
+                raise ValueError("skill_search input is malformed")
+            terms = tuple(part for part in query.casefold().split() if part)
+            matches: list[tuple[int, str, str, str, str]] = []
+            for candidate in prepared.skill_inventory_snapshot.active:
+                manifest = candidate.manifest
+                haystack = f"{manifest.name} {manifest.description}".casefold()
+                if terms and not all(term in haystack for term in terms):
+                    continue
+                score = sum(haystack.count(term) for term in terms)
+                matches.append(
+                    (
+                        score,
+                        manifest.name,
+                        candidate.source.value,
+                        manifest.description,
+                        manifest.fingerprint,
+                    )
+                )
+            selected = sorted(matches, key=lambda item: (-item[0], item[1]))[:limit]
+            content = "\n".join(
+                json.dumps(
+                    {
+                        "description": description,
+                        "fingerprint": fingerprint,
+                        "name": name,
+                        "source": source,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for _, name, source, description, fingerprint in selected
+            )
+            if not content:
+                content = json.dumps({"matches": 0}, separators=(",", ":"), sort_keys=True)
+            return ToolDiscoveryDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(request.tool_use_id, content),
+                    ToolEventStatus.SUCCEEDED,
+                    "skill_search_completed",
+                ),
+                discovered_skills=tuple((item[1], item[4]) for item in selected),
+            )
+        if request.name == SKILL_LOAD_TOOL_NAME:
+            name = arguments["name"]
+            fingerprint = arguments["fingerprint"]
+            if not isinstance(name, str) or not isinstance(fingerprint, str):
+                raise ValueError("skill_load input is malformed")
+            if (name, fingerprint) not in discovered_skills:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "skill_load requires an exact name and fingerprint returned by skill_search in this Turn",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_candidate_not_discovered",
+                    )
+                )
+            current_inventory = self._skill_inventory_factory()
+            if current_inventory.snapshot_id != prepared.skill_inventory_snapshot.snapshot_id:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id,
+                            "Skill inventory changed after this Turn was prepared",
+                            is_error=True,
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_inventory_stale",
+                    )
+                )
+            candidate = prepared.skill_inventory_snapshot.get(name)
+            manifest = candidate.manifest
+            if manifest.fingerprint != fingerprint:
+                return ToolDiscoveryDispatchResult(
+                    ToolDispatchResult(
+                        ToolResult(
+                            request.tool_use_id, "Skill fingerprint is stale", is_error=True
+                        ),
+                        ToolEventStatus.REJECTED,
+                        "skill_fingerprint_stale",
+                    )
+                )
+            payload = {
+                "allowed_tools": (
+                    None if manifest.allowed_tools is None else list(manifest.allowed_tools)
+                ),
+                "fingerprint": manifest.fingerprint,
+                "instructions": manifest.instructions,
+                "kind": "skill_loaded",
+                "name": manifest.name,
+                "source": candidate.source.value,
+            }
+            restricted = (
+                prepared.tool_set_snapshot
+                if manifest.allowed_tools is None
+                else prepared.tool_set_snapshot.restrict_actions(manifest.allowed_tools)
+            )
+            return ToolDiscoveryDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(
+                        request.tool_use_id,
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ),
+                    ToolEventStatus.SUCCEEDED,
+                    "skill_loaded",
+                ),
+                promoted_snapshot=(
+                    None if restricted is prepared.tool_set_snapshot else restricted
+                ),
+            )
         if request.name == TOOL_SEARCH_TOOL_NAME:
             query = arguments["query"]
             limit = arguments["max_results"]
