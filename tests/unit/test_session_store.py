@@ -165,6 +165,74 @@ def test_preview_replays_bounded_recent_turns_without_mutation(tmp_path: Path) -
     writer.release()
 
 
+def test_skill_load_audit_projects_identity_and_host_outcome_without_instructions(
+    tmp_path: Path,
+) -> None:
+    session_store = store(tmp_path)
+    binding = BindingSnapshot.fake()
+    writer = session_store.create(binding)
+    fingerprint = "skill-v1-" + "a" * 64
+    result = json.dumps(
+        {
+            "fingerprint": fingerprint,
+            "instructions": "secret workflow body",
+            "kind": "skill_loaded",
+            "name": "review",
+            "source": "project-shared",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    skill_record = writer.append_turn(
+        (
+            UserMessage("load review"),
+            ToolUse(
+                "load-1",
+                "skill_load",
+                ToolArguments.from_mapping({"name": "review", "fingerprint": fingerprint}),
+            ),
+            ToolResult("load-1", result),
+            AssistantText("loaded"),
+        ),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(
+            (
+                ToolOutcomeEntry(
+                    "load-1",
+                    "skill_load",
+                    1,
+                    ToolRequestOutcome.SUCCEEDED,
+                    "skill_loaded",
+                ),
+            )
+        ),
+    )
+    writer.append_turn(
+        (UserMessage("later"), AssistantText("done")),
+        binding=binding,
+        tool_ledger=ToolTurnLedger(),
+    )
+    transcript_before = writer.path.read_bytes()
+
+    audit = session_store.skill_load_audits(SESSION_ONE)
+    recent = session_store.skill_load_audits(SESSION_ONE, 1)
+    exact = session_store.skill_load_audits_for_records(SESSION_ONE, (skill_record.sequence,))
+
+    assert audit.total_turns == 2
+    assert len(audit.turns) == 1
+    load = audit.turns[0].loads[0]
+    assert load.name == "review"
+    assert load.requested_fingerprint == fingerprint
+    assert load.loaded_fingerprint == fingerprint
+    assert load.loaded_source == "project-shared"
+    assert load.outcome is ToolRequestOutcome.SUCCEEDED
+    assert recent.turns == ()
+    assert exact == audit.turns
+    assert "secret workflow body" not in repr(audit)
+    assert writer.path.read_bytes() == transcript_before
+    writer.release()
+
+
 def test_preview_derives_content_free_provider_search_summary(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     binding = BindingSnapshot.fake()

@@ -16,6 +16,9 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.task_admission import TaskAdmissionProposal
+from leonervis_code.core.skill_authoring import canonical_skill_candidate_id
+from leonervis_code.skill_candidates import SkillCandidateInfo
+from leonervis_code.skills.authoring import SkillImportResult
 from leonervis_code.mcp.client import McpNotificationKind
 from leonervis_code.providers.streaming import (
     ProviderSearchObservation,
@@ -308,6 +311,62 @@ class TaskLifecycleCommitted:
             raise ValueError("completed Task lifecycle event cannot request a foreground handoff")
 
 
+@dataclass(frozen=True)
+class SkillCandidateCommitted:
+    """Announce an inactive generated candidate after its Session Turn commits."""
+
+    candidate_id: str
+    name: str
+    fingerprint: str
+    scope: str
+
+    def __post_init__(self) -> None:
+        canonical_skill_candidate_id(self.candidate_id)
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("Skill candidate event name is invalid")
+        if not isinstance(self.fingerprint, str) or not self.fingerprint.startswith("skill-v1-"):
+            raise ValueError("Skill candidate event fingerprint is invalid")
+        if self.scope not in {"workspace", "project"}:
+            raise ValueError("Skill candidate event scope is invalid")
+
+    @classmethod
+    def from_candidate(cls, candidate: SkillCandidateInfo) -> SkillCandidateCommitted:
+        return cls(
+            candidate.candidate_id,
+            candidate.manifest.name,
+            candidate.manifest.fingerprint,
+            candidate.requested_scope or "project",
+        )
+
+
+@dataclass(frozen=True)
+class SkillCandidateInstalled:
+    """Announce installation after both Session and package durability boundaries."""
+
+    candidate_id: str
+    name: str
+    fingerprint: str
+    scope: str
+    lock_digest: str
+
+    def __post_init__(self) -> None:
+        canonical_skill_candidate_id(self.candidate_id)
+        if self.scope not in {"workspace", "project", "user"}:
+            raise ValueError("Skill installation event scope is invalid")
+        if not isinstance(self.lock_digest, str) or len(self.lock_digest) != 64:
+            raise ValueError("Skill installation event lock digest is invalid")
+
+    @classmethod
+    def from_result(cls, candidate_id: str, result: SkillImportResult) -> SkillCandidateInstalled:
+        return cls(
+            candidate_id,
+            result.candidate.manifest.name,
+            result.candidate.manifest.fingerprint,
+            result.lock.scope,
+            result.lock.digest,
+        )
+
+
 ToolPromptEvent = (
     ToolRequestStarted
     | ToolRequestFinished
@@ -331,6 +390,8 @@ AgentPromptEvent = (
     | McpNotificationActivityReceived
     | TaskAdmissionProposed
     | TaskLifecycleCommitted
+    | SkillCandidateCommitted
+    | SkillCandidateInstalled
 )
 
 

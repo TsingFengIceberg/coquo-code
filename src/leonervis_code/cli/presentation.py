@@ -16,6 +16,8 @@ from leonervis_code.agent.tool_events import (
     ProviderSearchSummaryReceived,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
+    SkillCandidateCommitted,
+    SkillCandidateInstalled,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestLimited,
@@ -61,8 +63,10 @@ from leonervis_code.skills import (
     SkillActivationInspection,
     SkillCandidate,
     SkillInventorySnapshot,
+    SkillSearchMatch,
     SkillSourceKind,
 )
+from leonervis_code.skill_candidates import SkillCandidateInfo
 from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.web_search import WebSearchBackend, WebSearchSourceConfiguration
 
@@ -241,6 +245,8 @@ SKILLS_HELP = (
     "  /skills | /skills active\n"
     "  /skills list\n"
     "  /skills show <name>\n"
+    "  /skills search <query>\n"
+    "  /skills conflicts\n"
     "  /skills doctor\n"
     "These commands are Host-only and read-only. They do not call the provider, mutate the "
     "Session, or write Action Audit records."
@@ -772,6 +778,10 @@ class CompactContextPreviewView(Protocol):
     reason: str | None
     summarized_turn_count: int
     retained_turn_count: int
+    active_skills_before: tuple
+    active_skills_after: tuple
+    removed_skills: tuple
+    action_tools_after: tuple[str, ...]
     fit_report: ContextFitReport | None
 
 
@@ -1595,6 +1605,8 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "task_accept_admission": "Ordinary Prompt only; exact current-Session pending admission and post-Turn stale revalidation required.",
     "task_accept_plan": "Ordinary Prompt only; exact owner-Session latest unaccepted plan and post-Turn stale revalidation required.",
     "task_confirm_completion": "Ordinary Prompt only; current completion proposal and all non-human criteria already verified.",
+    "skill_propose_create": "Ordinary Prompt only; explicit user request, isolated call, bounded declarative package, and post-Turn inactive candidate commit.",
+    "skill_accept_create": "Ordinary Prompt only; direct user approval, exact owner Session, pending candidate, fingerprint, scope, and post-Turn import-lock validation.",
 }
 
 
@@ -1702,6 +1714,12 @@ def _tool_policy_availability(
         return "available only in an ordinary Prompt; explicit user acceptance required"
     if policy == "task-lifecycle":
         return "available only in an ordinary Prompt for the current user's explicit decision"
+    if policy == "skill-authoring":
+        return "available only in an ordinary Prompt after an explicit user authoring request"
+    if policy == "skill-lifecycle":
+        if mode == "read-only":
+            return "denied by current permission mode"
+        return "available only after explicit approval of an exact pending candidate"
     if policy == "tool-discovery":
         return "available; discovery is isolated and does not execute candidates"
     if policy == "dangerous":
@@ -2018,6 +2036,75 @@ def render_skill_candidate(candidate: SkillCandidate) -> str:
     return "\n".join(lines)
 
 
+def render_quarantined_skill_candidate(candidate: SkillCandidateInfo) -> str:
+    """Render one inactive candidate with complete bounded instructions and resources."""
+    manifest = candidate.manifest
+    lines = [
+        f"Skill candidate: {candidate.candidate_id}",
+        f"Status: {candidate.status.value}",
+        f"Source: {candidate.source.value}",
+        f"Name: {manifest.name}",
+        f"Description: {manifest.description}",
+        f"Fingerprint: {manifest.fingerprint}",
+        f"Requested scope: {candidate.requested_scope or 'none'}",
+        f"Installed scope: {candidate.installed_scope or 'none'}",
+        "Allowed tools: "
+        + (
+            "inherit"
+            if manifest.allowed_tools is None
+            else ", ".join(manifest.allowed_tools) or "none"
+        ),
+        f"Resources: {len(candidate.resources)}",
+    ]
+    for resource in candidate.resources:
+        lines.append(
+            f"  {resource.path} bytes={resource.byte_count} "
+            f"text={str(resource.text_readable).lower()} fingerprint={resource.fingerprint}"
+        )
+    lines.extend(("Instructions:", manifest.instructions))
+    return "\n".join(lines)
+
+
+def render_skill_candidate_list(candidates: tuple[SkillCandidateInfo, ...]) -> str:
+    lines = [f"Skill candidates: {len(candidates)}"]
+    for candidate in candidates:
+        lines.append(
+            f"- {candidate.candidate_id} [{candidate.status.value}] "
+            f"{candidate.manifest.name} source={candidate.source.value} "
+            f"fingerprint={candidate.manifest.fingerprint}"
+        )
+    if not candidates:
+        lines.append("No quarantined Skill candidates were found.")
+    return "\n".join(lines)
+
+
+def render_skill_search(matches: tuple[SkillSearchMatch, ...], query: str) -> str:
+    """Render deterministic metadata matches without loading Skill instructions."""
+    lines = [f"Skill search: {query}", f"Matches: {len(matches)}"]
+    for match in matches:
+        candidate = match.candidate
+        state = "active" if candidate.active else f"shadowed-by={candidate.shadowed_by.value}"
+        lines.append(
+            f"- {candidate.manifest.name} [{state}] source={candidate.source.value} "
+            f"score={match.score} fingerprint={candidate.manifest.fingerprint}"
+        )
+        lines.append(f"  {candidate.manifest.description}")
+    return "\n".join(lines)
+
+
+def render_skill_conflicts(inventory: SkillInventorySnapshot) -> str:
+    """Render only valid packages shadowed by source precedence."""
+    conflicts = tuple(candidate for candidate in inventory.candidates if not candidate.active)
+    lines = [f"Skill conflicts: {len(conflicts)}"]
+    lines.extend(
+        f"- {candidate.manifest.name} source={candidate.source.value} "
+        f"shadowed-by={candidate.shadowed_by.value} "
+        f"fingerprint={candidate.manifest.fingerprint}"
+        for candidate in conflicts
+    )
+    return "\n".join(lines)
+
+
 def render_skill_doctor(
     inventory: SkillInventorySnapshot,
     roots: tuple[tuple[SkillSourceKind, Path], ...],
@@ -2230,6 +2317,26 @@ def render_prompt_event(
         else:
             message = "Task completion confirmation committed. The durable Task is complete."
         return f"{message}\nTask: {event.task_id}", "success"
+    if isinstance(event, SkillCandidateCommitted):
+        return (
+            "Skill candidate committed in inactive quarantine:\n"
+            f"Candidate: {event.candidate_id}\n"
+            f"Name: {event.name}\n"
+            f"Fingerprint: {event.fingerprint}\n"
+            f"Requested scope: {event.scope}\n"
+            "Inspect it before explicitly approving installation.",
+            "info",
+        )
+    if isinstance(event, SkillCandidateInstalled):
+        return (
+            "Skill candidate installed. It becomes model-visible on the next Turn.\n"
+            f"Candidate: {event.candidate_id}\n"
+            f"Name: {event.name}\n"
+            f"Fingerprint: {event.fingerprint}\n"
+            f"Scope: {event.scope}\n"
+            f"Lock digest: {event.lock_digest}",
+            "success",
+        )
     if isinstance(event, TurnUsageCompleted):
         return render_usage_summary(event.usage, compact=True), "info"
     if isinstance(event, TaskRunStopped):
@@ -2316,6 +2423,20 @@ def render_compact_preview(preview: CompactContextPreviewView) -> tuple[str, Mes
         lines.append(
             f"Selection: summarize {preview.summarized_turn_count} complete effective turns; "
             f"retain the latest {preview.retained_turn_count} turns verbatim."
+        )
+        lines.append(
+            f"Active Skills after compaction: {len(preview.active_skills_after)} "
+            f"(before {len(preview.active_skills_before)})."
+        )
+        if preview.removed_skills:
+            lines.append(
+                "Skills deactivated by selection: "
+                + ", ".join(skill.name for skill in preview.removed_skills)
+            )
+        else:
+            lines.append("Skills deactivated by selection: none")
+        lines.append(
+            "Action tools after compaction: " + (", ".join(preview.action_tools_after) or "none")
         )
     elif preview.reason is not None:
         lines.append(f"Reason: {preview.reason}")

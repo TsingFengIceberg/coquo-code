@@ -8,6 +8,8 @@ import pytest
 
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    SkillCandidateCommitted,
+    SkillCandidateInstalled,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -24,12 +26,17 @@ from leonervis_code.core.contracts import (
 from leonervis_code.core.compaction import CompactionCandidateError
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
 from leonervis_code.core.extensions import ToolRegistrySnapshot
-from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.core.permissions import PermissionAction, PermissionMode
+from leonervis_code.core.skill_authoring import (
+    SKILL_ACCEPT_CREATE_TOOL_NAME,
+    SKILL_PROPOSE_CREATE_TOOL_NAME,
+)
 from leonervis_code.providers.definitions import WireProtocol
 from leonervis_code.providers.manager import RuntimeSwitchAuditError
 from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
 from leonervis_code.providers.profile import ProviderProfileSpec
 from leonervis_code.providers.profile_store import ProviderProfileStore
+from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.providers.request_context import (
     ContextFitDecision,
     RequestTokenCount,
@@ -57,6 +64,8 @@ from leonervis_code.session_records import (
     TurnCommitted,
 )
 from leonervis_code.session_store import SessionStore, SessionStoreError
+from leonervis_code.skills import SkillInventoryLoader
+from leonervis_code.skill_candidates import SkillCandidateStatus
 from leonervis_code.system_prompt import build_system_prompt
 from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 
@@ -163,6 +172,106 @@ def test_project_session_projects_one_exact_private_tool_subset(tmp_path: Path) 
         "grep",
     )
     assert provider.requests[0].tool_set_id is not None
+    session.close()
+
+
+def test_explicit_skill_authoring_commits_candidate_then_installs_for_next_turn(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "skill-propose-1",
+                SKILL_PROPOSE_CREATE_TOOL_NAME,
+                ToolArguments.from_mapping(
+                    {
+                        "allowed_tools": ["read_file", "run_command"],
+                        "description": "Validate a Python release",
+                        "instructions": "Inspect metadata, run tests, and report evidence.",
+                        "name": "python-release",
+                        "scope": "project",
+                    }
+                ),
+            ),
+            AssistantText("The inactive Skill candidate is ready for review."),
+        ]
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    session.rename_session("Skill authoring test")
+    events = []
+
+    assert "ready for review" in session.prompt("Preserve this workflow", event_sink=events.append)
+    committed_event = next(event for event in events if isinstance(event, SkillCandidateCommitted))
+    candidate = session.inspect_skill_candidate(committed_event.candidate_id)
+    assert candidate.status is SkillCandidateStatus.PENDING
+    assert not (tmp_path / ".agents" / "skills" / "python-release").exists()
+    pre_install_inventory_id = session._loop.effective_context_snapshot().skill_inventory_id
+
+    provider.insert_next(
+        [
+            ToolUse(
+                "skill-accept-1",
+                SKILL_ACCEPT_CREATE_TOOL_NAME,
+                ToolArguments.from_mapping({"candidate_id": candidate.candidate_id}),
+            ),
+            AssistantText("The approved Skill was installed."),
+        ]
+    )
+    events.clear()
+    session.prompt("I approve that exact candidate", event_sink=events.append)
+    installed_event = next(event for event in events if isinstance(event, SkillCandidateInstalled))
+    assert installed_event.candidate_id == candidate.candidate_id
+    assert (
+        session.inspect_skill_candidate(candidate.candidate_id).status
+        is SkillCandidateStatus.INSTALLED
+    )
+    assert (tmp_path / ".agents" / "skills" / "python-release" / "SKILL.md").is_file()
+    installed_inventory_id = session._loop.effective_context_snapshot().skill_inventory_id
+    assert installed_inventory_id != pre_install_inventory_id
+
+    provider.insert_next([AssistantText("next turn")])
+    session.prompt("Use the next frozen inventory")
+    assert session._loop.effective_context_snapshot().skill_inventory_id == installed_inventory_id
+    session.close()
+
+
+def test_failed_skill_proposal_turn_creates_no_candidate(tmp_path: Path) -> None:
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "skill-propose-failed",
+                SKILL_PROPOSE_CREATE_TOOL_NAME,
+                ToolArguments.from_mapping(
+                    {
+                        "allowed_tools": None,
+                        "description": "Never committed",
+                        "instructions": "This candidate must not survive.",
+                        "name": "failed-skill",
+                        "scope": "project",
+                    }
+                ),
+            ),
+            RuntimeError("provider failed before final text"),
+        ]
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    session.rename_session("Failed Skill proposal")
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        session.prompt("Preserve this workflow")
+    assert session.list_skill_candidates() == ()
     session.close()
 
 
@@ -1592,7 +1701,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v14-")
+    assert session.inspect_context().context_id.startswith("ctx-v16-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     history = session.compaction_history(5)
@@ -1626,6 +1735,99 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     resumed.prompt("continue")
     assert resumed_provider.requests[-1].effective_summary is not None
     resumed.close()
+
+
+def test_compaction_preview_reports_skill_deactivation_when_load_pair_is_summarized(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / ".agents" / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nmanifest-version: 1\nname: review\ndescription: Review workflow\n"
+        "allowed-tools:\n  - read_file\n---\nInspect first.\n",
+        encoding="utf-8",
+    )
+    fingerprint = SkillInventoryLoader(tmp_path, {}).load().get("review").manifest.fingerprint
+    provider = ScriptedFakeProvider(
+        (
+            ToolUse(
+                "search-review",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "review", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-review",
+                "skill_load",
+                ToolArguments.from_mapping({"name": "review", "fingerprint": fingerprint}),
+            ),
+            AssistantText("loaded"),
+            AssistantText("second"),
+            AssistantText("third"),
+            AssistantText("fourth"),
+        )
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for prompt in ("load", "two", "three", "four"):
+        session.prompt(prompt)
+
+    preview = session.preview_compaction()
+
+    assert [skill.name for skill in preview.active_skills_before] == ["review"]
+    assert preview.active_skills_after == ()
+    assert [skill.name for skill in preview.removed_skills] == ["review"]
+    assert "run_command" in preview.action_tools_after
+    assert session.inspect_skills().action_tools == ("read_file",)
+    session.close()
+
+
+def test_compaction_preview_retains_skill_loaded_in_verbatim_turns(tmp_path: Path) -> None:
+    package = tmp_path / ".agents" / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nmanifest-version: 1\nname: review\ndescription: Review workflow\n"
+        "allowed-tools:\n  - read_file\n---\nInspect first.\n",
+        encoding="utf-8",
+    )
+    fingerprint = SkillInventoryLoader(tmp_path, {}).load().get("review").manifest.fingerprint
+    provider = ScriptedFakeProvider(
+        (
+            AssistantText("first"),
+            AssistantText("second"),
+            ToolUse(
+                "search-review",
+                "skill_search",
+                ToolArguments.from_mapping({"query": "review", "max_results": 1}),
+            ),
+            ToolUse(
+                "load-review",
+                "skill_load",
+                ToolArguments.from_mapping({"name": "review", "fingerprint": fingerprint}),
+            ),
+            AssistantText("loaded"),
+            AssistantText("fourth"),
+        )
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    for prompt in ("one", "two", "load", "four"):
+        session.prompt(prompt)
+
+    preview = session.preview_compaction()
+
+    assert [skill.name for skill in preview.active_skills_before] == ["review"]
+    assert [skill.name for skill in preview.active_skills_after] == ["review"]
+    assert preview.removed_skills == ()
+    assert preview.action_tools_after == ("read_file",)
+    session.close()
 
 
 def test_nonreducing_compaction_reports_comparable_token_evidence_without_commit(

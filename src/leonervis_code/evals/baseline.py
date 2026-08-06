@@ -34,7 +34,7 @@ from leonervis_code.tools.task_coordination import (
 )
 from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 
-DETERMINISTIC_BASELINE_ID = "host-baseline-v2"
+DETERMINISTIC_BASELINE_ID = "host-baseline-v3"
 _SESSION_STATE_DIRECTORY = ".leonervis-code"
 
 
@@ -219,6 +219,37 @@ def _tool(tool_use_id: str, name: str, arguments: dict[str, object]) -> ToolUse:
     return ToolUse(tool_use_id, name, ToolArguments.from_mapping(arguments))
 
 
+_EVAL_SKILL_CONTENT = (
+    "---\n"
+    "manifest-version: 1\n"
+    "name: eval-helper\n"
+    "description: Deterministic Task Eval helper\n"
+    "---\n"
+    "Inspect the bounded Task Stage and propose completion only after verification.\n"
+)
+_EVAL_SKILL_IDENTITY = {
+    "allowed_tools": None,
+    "description": "Deterministic Task Eval helper",
+    "instructions": (
+        "Inspect the bounded Task Stage and propose completion only after verification.\n"
+    ),
+    "name": "eval-helper",
+    "version": 1,
+}
+_EVAL_SKILL_FINGERPRINT = (
+    "skill-v1-"
+    + hashlib.sha256(
+        b"leonervis-code-skill-v1\0"
+        + json.dumps(
+            _EVAL_SKILL_IDENTITY,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+)
+
+
 _BUILTIN_CASES = (
     DeterministicEvalCase(
         case_id="read-file-success",
@@ -332,7 +363,9 @@ _BUILTIN_CASES = (
         prompt="Propose this bounded multi-stage work as a durable Task.",
         permission_mode=PermissionMode.READ_ONLY,
         approval_mode=ApprovalMode.AUTO,
-        initial_files=(),
+        initial_files=(
+            EvalWorkspaceFile(".agents/skills/eval-helper/SKILL.md", _EVAL_SKILL_CONTENT),
+        ),
         provider_script=(
             _tool(
                 "eval-admission-1",
@@ -351,6 +384,16 @@ _BUILTIN_CASES = (
             ),
             AssistantText("The bounded plan is ready for acceptance."),
             _tool(
+                "eval-skill-search-1",
+                "skill_search",
+                {"query": "Task Eval helper", "max_results": 1},
+            ),
+            _tool(
+                "eval-skill-load-1",
+                "skill_load",
+                {"name": "eval-helper", "fingerprint": _EVAL_SKILL_FINGERPRINT},
+            ),
+            _tool(
                 "eval-completion-1",
                 TASK_PROPOSE_COMPLETION_TOOL_NAME,
                 {},
@@ -358,7 +401,9 @@ _BUILTIN_CASES = (
             AssistantText("The admitted Task appears complete."),
         ),
         expected_final_text="A durable Task was proposed for user review.",
-        expected_files=(),
+        expected_files=(
+            EvalWorkspaceFile(".agents/skills/eval-helper/SKILL.md", _EVAL_SKILL_CONTENT),
+        ),
         expected_tool_outcomes=(
             EvalToolExpectation(
                 TASK_PROPOSE_START_TOOL_NAME,
@@ -380,6 +425,10 @@ _BUILTIN_CASES = (
                 ToolRequestOutcome.SUCCEEDED,
                 "task_lifecycle_requested",
             ),
+            EvalToolExpectation(
+                "skill_search", ToolRequestOutcome.SUCCEEDED, "skill_search_completed"
+            ),
+            EvalToolExpectation("skill_load", ToolRequestOutcome.SUCCEEDED, "skill_loaded"),
             EvalToolExpectation(
                 TASK_PROPOSE_COMPLETION_TOOL_NAME,
                 ToolRequestOutcome.SUCCEEDED,

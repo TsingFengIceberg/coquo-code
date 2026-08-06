@@ -80,6 +80,8 @@ from leonervis_code.providers.anthropic import (
     skill_load_tool_definition,
     skill_read_resource_tool_definition,
     skill_search_tool_definition,
+    skill_propose_create_tool_definition,
+    skill_accept_create_tool_definition,
 )
 from leonervis_code.providers.errors import ProviderAdapterError
 from leonervis_code.providers.request_context import RequestTokenCountMethod
@@ -1323,6 +1325,8 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 task_accept_admission_tool_definition(),
                 task_accept_plan_tool_definition(),
                 task_confirm_completion_tool_definition(),
+                skill_propose_create_tool_definition(),
+                skill_accept_create_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -1794,6 +1798,22 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
             task_confirm_completion_tool_definition,
             "task_confirm_completion",
             {"task_id": "12345678-1234-4234-9234-123456789abc"},
+        ),
+        (
+            skill_propose_create_tool_definition,
+            "skill_propose_create",
+            {
+                "allowed_tools": ["read_file"],
+                "description": "Reusable workflow",
+                "instructions": "Inspect and verify.",
+                "name": "reusable-workflow",
+                "scope": "project",
+            },
+        ),
+        (
+            skill_accept_create_tool_definition,
+            "skill_accept_create",
+            {"candidate_id": "skc-v1-" + "a" * 64},
         ),
     ],
 )

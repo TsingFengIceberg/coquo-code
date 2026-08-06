@@ -247,6 +247,10 @@ def _activity_status(event: object) -> str:
         return "Recording Task proposal"
     if name == "TaskLifecycleCommitted":
         return "Updating Task lifecycle"
+    if name == "SkillCandidateCommitted":
+        return "Recording Skill candidate"
+    if name == "SkillCandidateInstalled":
+        return "Installing Skill candidate"
     if name == "TaskRunStopped":
         return "Finishing Task run"
     return "Working"

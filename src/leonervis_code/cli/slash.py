@@ -68,8 +68,12 @@ from leonervis_code.cli.presentation import (
     render_session_turn_range,
     render_skill_activation,
     render_skill_candidate,
+    render_skill_conflicts,
     render_skill_doctor,
     render_skill_inventory,
+    render_quarantined_skill_candidate,
+    render_skill_candidate_list,
+    render_skill_search,
     render_task_info,
     render_task_admission_info,
     render_task_admission_acceptance_preview,
@@ -248,7 +252,14 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/skills active", "Show Skills retained in Effective Context"),
     SlashCompletionSpec("/skills list", "List active and shadowed Skill packages"),
     SlashCompletionSpec("/skills show", "Show one bounded Skill package"),
+    SlashCompletionSpec("/skills search", "Search active Skill metadata"),
+    SlashCompletionSpec("/skills conflicts", "Show shadowed Skill package identities"),
     SlashCompletionSpec("/skills doctor", "Show Skill roots and catalog issues"),
+    SlashCompletionSpec("/skills fetch", "Fetch a public Skill into quarantine"),
+    SlashCompletionSpec("/skills candidates", "List quarantined Skill candidates"),
+    SlashCompletionSpec("/skills candidate show", "Inspect one quarantined Skill candidate"),
+    SlashCompletionSpec("/skills candidate reject", "Reject one quarantined Skill candidate"),
+    SlashCompletionSpec("/skills install", "Install one quarantined Skill candidate"),
     SlashCompletionSpec("/session show", "Show current or selected Session metadata"),
     SlashCompletionSpec("/session preview", "Preview recent turns without switching"),
     SlashCompletionSpec("/session turns", "Show a specific complete-turn range"),
@@ -360,6 +371,16 @@ class ReplSession(Protocol):
     def inspect_context(self): ...
 
     def inspect_project_instructions(self): ...
+
+    def fetch_skill_candidate(self, url: str): ...
+
+    def list_skill_candidates(self): ...
+
+    def inspect_skill_candidate(self, candidate_id: str): ...
+
+    def reject_skill_candidate(self, candidate_id: str): ...
+
+    def install_skill_candidate(self, candidate_id: str, *, scope: str | None = None): ...
 
     def usage(self): ...
 
@@ -583,8 +604,83 @@ def dispatch_slash(
             kind="info",
             failure_prefix="Skill inspection failed",
         )
+    if command.startswith("/skills search "):
+        query = command.removeprefix("/skills search ").strip()
+        if not query:
+            return _usage("Usage: /skills search <query>")
+        return _call(
+            lambda: render_skill_search(
+                session.inspect_skill_inventory()[0].search(query, limit=8), query
+            ),
+            kind="info",
+            failure_prefix="Skill search failed",
+        )
+    if command == "/skills conflicts":
+        return _call(
+            lambda: render_skill_conflicts(session.inspect_skill_inventory()[0]),
+            kind="info",
+            failure_prefix="Skill conflict inspection failed",
+        )
+    if command.startswith("/skills fetch "):
+        url = command.removeprefix("/skills fetch ").strip()
+        if not url or any(character.isspace() for character in url):
+            return _usage("Usage: /skills fetch <https-url>")
+        return _call(
+            lambda: render_quarantined_skill_candidate(session.fetch_skill_candidate(url)),
+            kind="info",
+            failure_prefix="Skill fetch failed",
+        )
+    if command == "/skills candidates":
+        return _call(
+            lambda: render_skill_candidate_list(session.list_skill_candidates()),
+            kind="info",
+            failure_prefix="Skill candidate listing failed",
+        )
+    if command.startswith("/skills candidate show "):
+        candidate_id = command.removeprefix("/skills candidate show ").strip()
+        if not candidate_id or any(character.isspace() for character in candidate_id):
+            return _usage("Usage: /skills candidate show <candidate-id>")
+        return _call(
+            lambda: render_quarantined_skill_candidate(
+                session.inspect_skill_candidate(candidate_id)
+            ),
+            kind="info",
+            failure_prefix="Skill candidate inspection failed",
+        )
+    if command.startswith("/skills candidate reject "):
+        candidate_id = command.removeprefix("/skills candidate reject ").strip()
+        if not candidate_id or any(character.isspace() for character in candidate_id):
+            return _usage("Usage: /skills candidate reject <candidate-id>")
+        return _call(
+            lambda: render_quarantined_skill_candidate(
+                session.reject_skill_candidate(candidate_id)
+            ),
+            kind="info",
+            failure_prefix="Skill candidate rejection failed",
+        )
+    if command.startswith("/skills install "):
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return _usage("Usage: /skills install <candidate-id> [workspace|project|user]")
+        if len(parts) not in {3, 4} or (
+            len(parts) == 4 and parts[3] not in {"workspace", "project", "user"}
+        ):
+            return _usage("Usage: /skills install <candidate-id> [workspace|project|user]")
+        return _call(
+            lambda: render_quarantined_skill_candidate(
+                session.install_skill_candidate(
+                    parts[2], scope=None if len(parts) == 3 else parts[3]
+                )
+            ),
+            kind="success",
+            failure_prefix="Skill candidate installation failed",
+        )
     if command == "/skills show" or command.startswith("/skills "):
-        return _usage("Usage: /skills [active|list|show <name>|doctor]")
+        return _usage(
+            "Usage: /skills [active|list|show <name>|search <query>|conflicts|doctor|"
+            "fetch <url>|candidates|candidate show|candidate reject|install]"
+        )
     if command == "/status":
         return _call(lambda: render_project_status(session.project_status()), kind="info")
     if command.startswith("/status "):

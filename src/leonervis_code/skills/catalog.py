@@ -28,6 +28,8 @@ MAX_SKILL_RESOURCE_BYTES = 64 * 1024
 MAX_SKILL_RESOURCE_TOTAL_BYTES = 256 * 1024
 MAX_SKILL_RESOURCE_PATH_CHARACTERS = 256
 MAX_SKILL_RESOURCE_DIRECTORIES = 128
+MAX_SKILL_SEARCH_QUERY_CHARACTERS = 256
+MAX_SKILL_SEARCH_RESULTS = 32
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _FINGERPRINT_DOMAIN = b"leonervis-code-skill-v1\0"
@@ -146,6 +148,25 @@ class SkillCatalogIssue:
 
 
 @dataclass(frozen=True)
+class SkillSearchMatch:
+    """One deterministic metadata match with bounded explanation facts."""
+
+    candidate: SkillCandidate
+    score: int
+    terms: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate, SkillCandidate):
+            raise ValueError("Skill search candidate is invalid")
+        if type(self.score) is not int or self.score < 0:
+            raise ValueError("Skill search score is invalid")
+        if not isinstance(self.terms, tuple) or any(
+            not isinstance(term, str) or not term for term in self.terms
+        ):
+            raise ValueError("Skill search terms are invalid")
+
+
+@dataclass(frozen=True)
 class SkillInventorySnapshot:
     """One immutable view over all valid, invalid, active, and shadowed packages."""
 
@@ -222,6 +243,55 @@ class SkillInventorySnapshot:
             if resource.path == path:
                 return resource
         raise SkillCatalogError("unknown-resource", f"unknown Skill resource: {path}")
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        active_only: bool = True,
+    ) -> tuple[SkillSearchMatch, ...]:
+        """Search deterministic literal metadata and retain score/source diagnostics."""
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or len(query) > MAX_SKILL_SEARCH_QUERY_CHARACTERS
+        ):
+            raise SkillCatalogError(
+                "invalid-search", "Skill search query must contain 1 to 256 characters"
+            )
+        if type(limit) is not int or not 1 <= limit <= MAX_SKILL_SEARCH_RESULTS:
+            raise SkillCatalogError(
+                "invalid-search-limit",
+                f"Skill search limit must be between 1 and {MAX_SKILL_SEARCH_RESULTS}",
+            )
+        if type(active_only) is not bool:
+            raise ValueError("Skill search active-only flag is invalid")
+        terms = tuple(part for part in query.casefold().split() if part)
+        candidates = self.active if active_only else self.candidates
+        matches: list[SkillSearchMatch] = []
+        for candidate in candidates:
+            manifest = candidate.manifest
+            haystack = f"{manifest.name} {manifest.description}".casefold()
+            if not all(term in haystack for term in terms):
+                continue
+            matches.append(
+                SkillSearchMatch(
+                    candidate=candidate,
+                    score=sum(haystack.count(term) for term in terms),
+                    terms=terms,
+                )
+            )
+        return tuple(
+            sorted(
+                matches,
+                key=lambda match: (
+                    -match.score,
+                    match.candidate.manifest.name,
+                    match.candidate.source.value,
+                ),
+            )[:limit]
+        )
 
 
 class SkillInventoryLoader:
@@ -377,6 +447,32 @@ def _load_package(package: Path) -> tuple[SkillManifest, tuple[SkillResource, ..
         fingerprint=f"skill-v{SKILL_MANIFEST_VERSION}-{digest}",
     )
     return manifest, _load_resources(package)
+
+
+def load_skill_package(package: Path) -> tuple[SkillManifest, tuple[SkillResource, ...]]:
+    """Validate one explicit package directory using the canonical bounded loader."""
+    return _load_package(Path(package))
+
+
+def read_skill_package_file(package: Path, path: str) -> bytes:
+    """Read one canonical package file without following any package-internal symlink."""
+    package = Path(package)
+    if path == "SKILL.md":
+        return _read_skill_file(package)
+    _validate_resource_path(path)
+    return _read_package_file(
+        package,
+        tuple(path.split("/")),
+        max_bytes=MAX_SKILL_RESOURCE_BYTES,
+        label=f"Skill resource {path}",
+    )
+
+
+def canonical_skill_name(value: str) -> str:
+    """Validate one portable Skill package name without rewriting it."""
+    if not isinstance(value, str) or _NAME.fullmatch(value) is None:
+        raise SkillCatalogError("invalid-name", "Skill name is invalid")
+    return value
 
 
 def _read_skill_file(package: Path) -> bytes:

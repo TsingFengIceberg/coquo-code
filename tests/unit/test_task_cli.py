@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 from leonervis_code.cli.main import main
+from leonervis_code.core.contracts import (
+    AssistantText,
+    ToolArguments,
+    ToolOutcomeEntry,
+    ToolRequestOutcome,
+    ToolResult,
+    ToolTurnLedger,
+    ToolUse,
+    UserMessage,
+)
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore
 from leonervis_code.task_store import TaskStore
@@ -216,3 +227,62 @@ def test_task_cli_exposes_configuration_filters_parent_and_timeline(tmp_path: Pa
     assert status == 0 and errors == ""
     assert "Task timeline: Release Child" in timeline
     assert "#1 [execution] failed: Interrupted Stage -> interrupted" in timeline
+
+
+def test_task_cli_projects_skill_loads_from_exact_committed_stage_turn(tmp_path: Path) -> None:
+    binding = BindingSnapshot.fake()
+    session_writer = SessionStore(tmp_path).create(binding)
+    task = TaskStore(tmp_path).create("Use one Skill during execution")
+    fingerprint = "skill-v1-" + "a" * 64
+    with TaskStore(tmp_path).open(task.task_id) as task_writer:
+        task_writer.start_stage("Load the review workflow")
+        turn = session_writer.append_turn(
+            (
+                UserMessage("advance"),
+                ToolUse(
+                    "load-stage-skill",
+                    "skill_load",
+                    ToolArguments.from_mapping({"name": "review", "fingerprint": fingerprint}),
+                ),
+                ToolResult(
+                    "load-stage-skill",
+                    json.dumps(
+                        {
+                            "fingerprint": fingerprint,
+                            "kind": "skill_loaded",
+                            "name": "review",
+                            "source": "project-shared",
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+                AssistantText("loaded"),
+            ),
+            binding=binding,
+            tool_ledger=ToolTurnLedger(
+                (
+                    ToolOutcomeEntry(
+                        "load-stage-skill",
+                        "skill_load",
+                        1,
+                        ToolRequestOutcome.SUCCEEDED,
+                        "skill_loaded",
+                    ),
+                )
+            ),
+        )
+        task_writer.commit_stage(turn.sequence)
+    session_writer.release()
+
+    status, output, errors = invoke(tmp_path, ["task", "skills", task.task_id])
+
+    assert status == 0
+    assert errors == ""
+    audit = json.loads(output)
+    assert audit["task_id"] == task.task_id
+    assert audit["stage_number"] == 1
+    assert audit["stage_kind"] == "execution"
+    assert audit["name"] == "review"
+    assert audit["loaded_fingerprint"] == fingerprint
+    assert "instructions" not in audit

@@ -18,6 +18,7 @@ from leonervis_code.core.contracts import (
     ToolResult,
     ToolUse,
 )
+from leonervis_code.core.skill_authoring import SkillAuthoringControl
 from leonervis_code.core.task_admission import (
     TaskAdmissionProposal,
     canonical_task_admission_id,
@@ -142,7 +143,9 @@ class TaskControlDispatchResult:
             raise ValueError("Task proposal does not match its tool result")
 
 
-TaskProposal: TypeAlias = TaskControlProposal | TaskAdmissionProposal | TaskLifecycleRequest
+TaskProposal: TypeAlias = (
+    TaskControlProposal | TaskAdmissionProposal | TaskLifecycleRequest | SkillAuthoringControl
+)
 TaskControlDispatcher = Callable[[ToolUse, str], TaskControlDispatchResult]
 TaskProposalSink = Callable[[TaskProposal], None]
 

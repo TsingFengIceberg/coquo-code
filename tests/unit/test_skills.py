@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from leonervis_code.agent.loop import AgentLoop
 from leonervis_code.core.compaction import EffectiveContextSummary
 from leonervis_code.core.contracts import (
@@ -13,6 +15,11 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.providers.fake import ScriptedFakeProvider
 from leonervis_code.skills import SkillInventoryLoader, SkillSourceKind
+from leonervis_code.skills import import_skill, verify_skill_lock
+from leonervis_code.skills.catalog import MAX_SKILL_RESOURCE_BYTES, SkillCatalogError
+from leonervis_code.core.extensions import ToolExecutionKind
+from leonervis_code.core.permissions import PermissionAction
+from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.glob import GlobTool
 from leonervis_code.tools.grep import GrepTool
 from leonervis_code.tools.list_directory import ListDirectoryTool
@@ -105,6 +112,26 @@ def test_inventory_reports_invalid_yaml_symlink_and_crlf_without_loading_them(tm
         "invalid-package",
         "missing-manifest",
     }
+
+
+def test_malicious_yaml_tag_is_data_error_and_never_constructed(tmp_path) -> None:
+    package = tmp_path / ".agents" / "skills" / "unsafe"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\n"
+        "manifest-version: 1\n"
+        "name: unsafe\n"
+        "description: !!python/object/apply:os.system ['touch SHOULD_NOT_EXIST']\n"
+        "---\n"
+        "Never run this.\n",
+        encoding="utf-8",
+    )
+
+    inventory = SkillInventoryLoader(tmp_path, {}).load()
+
+    assert inventory.active == ()
+    assert [issue.code for issue in inventory.issues] == ["invalid-yaml"]
+    assert not (tmp_path / "SHOULD_NOT_EXIST").exists()
 
 
 def test_skill_search_load_and_action_restriction_persist_through_effective_history(
@@ -265,6 +292,98 @@ def test_inventory_indexes_nested_text_and_binary_resources_without_following_sy
     rejected = SkillInventoryLoader(tmp_path, {}).load()
     assert rejected.active == ()
     assert [issue.code for issue in rejected.issues] == ["resource-symlink"]
+
+
+def test_import_rejects_symlink_and_oversized_resource_without_target_or_lock(tmp_path) -> None:
+    source_root = tmp_path / "sources"
+    write_skill(source_root, "linked")
+    linked = source_root / "linked"
+    (linked / "target.txt").write_text("target\n", encoding="utf-8")
+    (linked / "link.txt").symlink_to(linked / "target.txt")
+
+    with pytest.raises(SkillCatalogError, match="symlinks"):
+        import_skill(tmp_path, linked, environment={})
+    assert not (tmp_path / ".agents" / "skills" / "linked").exists()
+    assert not (tmp_path / ".agents" / "skill-locks" / "linked.json").exists()
+
+    write_skill(source_root, "huge")
+    (source_root / "huge" / "large.bin").write_bytes(b"x" * (MAX_SKILL_RESOURCE_BYTES + 1))
+    with pytest.raises(SkillCatalogError, match="exceeds"):
+        import_skill(tmp_path, source_root / "huge", environment={})
+    assert not (tmp_path / ".agents" / "skills" / "huge").exists()
+
+
+def test_import_detects_source_drift_and_removes_its_new_target(tmp_path, monkeypatch) -> None:
+    from leonervis_code.skills import authoring
+
+    source_root = tmp_path / "sources"
+    write_skill(source_root, "drifting")
+    resource = source_root / "drifting" / "guide.md"
+    resource.write_text("before\n", encoding="utf-8")
+    original = authoring.read_skill_package_file
+    calls = 0
+
+    def drifting_read(package, path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            resource.write_text("after\n", encoding="utf-8")
+        return original(package, path)
+
+    monkeypatch.setattr(authoring, "read_skill_package_file", drifting_read)
+
+    with pytest.raises(SkillCatalogError, match="changed during import"):
+        import_skill(tmp_path, source_root / "drifting", environment={})
+    assert not (tmp_path / ".agents" / "skills" / "drifting").exists()
+    assert not (tmp_path / ".agents" / "skill-locks" / "drifting.json").exists()
+
+
+def test_import_detects_target_directory_replacement_without_deleting_replacement(
+    tmp_path, monkeypatch
+) -> None:
+    from leonervis_code.skills import authoring
+
+    source_root = tmp_path / "sources"
+    source = source_root / "replaced"
+    write_skill(source_root, "replaced")
+    original = authoring._copy_package_file
+
+    def replace_after_copy(source_package, target_package, relative):
+        created = original(source_package, target_package, relative)
+        orphan = target_package.with_name("replaced-original")
+        target_package.rename(orphan)
+        target_package.mkdir()
+        (target_package / "SKILL.md").write_bytes((orphan / "SKILL.md").read_bytes())
+        return created
+
+    monkeypatch.setattr(authoring, "_copy_package_file", replace_after_copy)
+
+    with pytest.raises(SkillCatalogError, match="target changed"):
+        import_skill(tmp_path, source, environment={})
+    replacement = tmp_path / ".agents" / "skills" / "replaced"
+    assert replacement.exists()
+    assert not (tmp_path / ".agents" / "skill-locks" / "replaced.json").exists()
+
+
+def test_import_lock_fails_closed_when_tampered(tmp_path) -> None:
+    source_root = tmp_path / "sources"
+    write_skill(source_root, "locked")
+    import_skill(tmp_path, source_root / "locked", environment={})
+    lock = tmp_path / ".agents" / "skill-locks" / "locked.json"
+    lock.write_text('{"lock-version":1}\n', encoding="utf-8")
+
+    with pytest.raises(SkillCatalogError, match="fields are invalid"):
+        verify_skill_lock(tmp_path, "locked", environment={})
+
+
+def test_skill_scripts_are_resources_and_have_no_direct_execution_contract() -> None:
+    contracts = {contract.name: contract for contract in TOOL_REGISTRY_SNAPSHOT.contracts}
+
+    assert "skill_run_script" not in contracts
+    assert contracts["skill_read_resource"].execution_kind is ToolExecutionKind.TOOL_DISCOVERY
+    assert contracts["skill_read_resource"].permission_actions == ()
+    assert contracts["run_command"].execution_kind is ToolExecutionKind.HOST_ACTION
+    assert contracts["run_command"].permission_actions == (PermissionAction.DANGEROUS,)
 
 
 def test_active_skill_can_read_one_exact_text_resource_and_rejects_binary(tmp_path) -> None:

@@ -31,11 +31,21 @@ from leonervis_code.core.task_admission import (
     canonical_task_admission_id,
     task_admission_receipt,
 )
+from leonervis_code.core.skill_authoring import (
+    SKILL_ACCEPT_CREATE_TOOL_NAME,
+    SKILL_AUTHORING_CONTROL_TOOL_NAMES,
+    SKILL_PROPOSE_CREATE_TOOL_NAME,
+    SkillCreationProposal,
+    SkillInstallRequest,
+    skill_proposal_receipt,
+)
 from leonervis_code.agent.tool_events import (
     AgentPromptEvent,
     McpNotificationActivityReceived,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
+    SkillCandidateCommitted,
+    SkillCandidateInstalled,
     ToolDispatchResult,
     ToolEventStatus,
     ToolResultDetails,
@@ -101,11 +111,16 @@ from leonervis_code.core.effective_context import (
 )
 from leonervis_code.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
 from leonervis_code.skills import (
+    ActiveSkill,
     SkillActivationInspection,
     SkillInventoryLoader,
     SkillInventorySnapshot,
     SkillSourceKind,
     active_skills_from_history,
+)
+from leonervis_code.skill_candidates import (
+    SkillCandidateInfo,
+    SkillCandidateStore,
 )
 from leonervis_code.mcp import (
     McpClient,
@@ -263,6 +278,7 @@ from leonervis_code.tools.task_coordination import (
     TASK_REPORT_BLOCKER_TOOL_NAME,
     TASK_REPORT_REFLECTION_TOOL_NAME,
 )
+
 from leonervis_code.tools.copy_file import (
     COPY_FILE_TOOL_NAME,
     CopyFileOutcome,
@@ -396,6 +412,7 @@ from leonervis_code.tools.catalog import (
     TOOL_CATALOG,
 )
 
+_COMMIT_CONTROL_TOOL_NAMES = TASK_CONTROL_TOOL_NAMES + SKILL_AUTHORING_CONTROL_TOOL_NAMES
 _TASK_PLANNING_READ_TOOL_NAMES = (
     READ_FILE_TOOL_NAME,
     GLOB_TOOL_NAME,
@@ -492,6 +509,10 @@ class CompactContextPreview:
     summarized_turn_count: int
     retained_turn_count: int
     target_assessment: CurrentTargetContextAssessment
+    active_skills_before: tuple[ActiveSkill, ...] = ()
+    active_skills_after: tuple[ActiveSkill, ...] = ()
+    removed_skills: tuple[ActiveSkill, ...] = ()
+    action_tools_after: tuple[str, ...] = ()
 
     @property
     def fit_report(self) -> ContextFitReport | None:
@@ -808,6 +829,7 @@ class ProjectSession:
         loop: AgentLoop | None = None,
         project_instructions_loader: ProjectInstructionsLoader | None = None,
         skill_inventory_loader: SkillInventoryLoader | None = None,
+        skill_candidate_store: SkillCandidateStore | None = None,
         mcp_store: McpServerStore | None = None,
         mcp_client: object | None = None,
         mcp_policy_store: McpToolPolicyStore | None = None,
@@ -871,6 +893,7 @@ class ProjectSession:
             project_instructions_loader or ProjectInstructionsLoader(workspace)
         )
         self._skill_inventory_loader = skill_inventory_loader or SkillInventoryLoader(workspace)
+        self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -897,7 +920,7 @@ class ProjectSession:
         if loop is not None:
             self._loop.install_action_dispatcher(self._dispatch_action)
             self._loop.install_task_control_dispatcher(
-                TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
+                _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
             )
             self._loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         self._startup_resume_result = startup_resume_result
@@ -1025,6 +1048,7 @@ class ProjectSession:
             download_file = download_file_factory(resolved_workspace)
             project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
             skill_inventory_loader = SkillInventoryLoader(resolved_workspace, resolved_environment)
+            skill_candidate_store = SkillCandidateStore(resolved_workspace, resolved_environment)
             mcp_store = McpServerStore.for_workspace(
                 resolved_workspace,
                 environment=resolved_environment,
@@ -1088,6 +1112,7 @@ class ProjectSession:
                     action_uuid_factory=action_uuid_factory,
                     project_instructions_loader=project_instructions_loader,
                     skill_inventory_loader=skill_inventory_loader,
+                    skill_candidate_store=skill_candidate_store,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
@@ -1190,6 +1215,7 @@ class ProjectSession:
                     loop=loop,
                     project_instructions_loader=project_instructions_loader,
                     skill_inventory_loader=skill_inventory_loader,
+                    skill_candidate_store=skill_candidate_store,
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
@@ -2590,7 +2616,7 @@ class ProjectSession:
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
                 loop.install_task_control_dispatcher(
-                    TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control
+                    _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
                 )
                 loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
                 snapshot = loop.effective_context_snapshot()
@@ -2998,6 +3024,11 @@ class ProjectSession:
             self._ensure_not_compacting()
             snapshot = self._loop.effective_context_snapshot()
             assessment = self._manager.assess_current_context(snapshot.to_conversation_request())
+            active_before = active_skills_from_history(snapshot.effective_history)
+            current_tool_set = self._loop.tool_set_snapshot_for_effective_history(
+                snapshot.effective_history
+            )
+            current_action_tools = _action_tool_names(current_tool_set)
             try:
                 plan = plan_compaction(
                     source_summary=self._loop.effective_summary,
@@ -3017,7 +3048,20 @@ class ProjectSession:
                         COMPACT_RETAINED_TURNS,
                     ),
                     target_assessment=assessment,
+                    active_skills_before=active_before,
+                    active_skills_after=active_before,
+                    action_tools_after=current_action_tools,
                 )
+            retained_turns = snapshot.effective_turns[-plan.retained_turn_count :]
+            retained_history = tuple(item for turn in retained_turns for item in turn.items)
+            active_after = active_skills_from_history(retained_history)
+            retained_identities = {(skill.name, skill.fingerprint) for skill in active_after}
+            removed = tuple(
+                skill
+                for skill in active_before
+                if (skill.name, skill.fingerprint) not in retained_identities
+            )
+            after_tool_set = self._loop.tool_set_snapshot_for_effective_history(retained_history)
             return CompactContextPreview(
                 source_context_id=snapshot.context_id,
                 full_turn_count=snapshot.full_turn_count,
@@ -3028,6 +3072,10 @@ class ProjectSession:
                 summarized_turn_count=plan.summarized_turn_count,
                 retained_turn_count=plan.retained_turn_count,
                 target_assessment=assessment,
+                active_skills_before=active_before,
+                active_skills_after=active_after,
+                removed_skills=removed,
+                action_tools_after=_action_tool_names(after_tool_set),
             )
 
     def compaction_history(self, limit: int) -> CompactionHistoryResult:
@@ -3421,6 +3469,45 @@ class ProjectSession:
             self._ensure_not_compacting()
             return self._skill_inventory_loader.load(), self._skill_inventory_loader.roots
 
+    def fetch_skill_candidate(self, url: str) -> SkillCandidateInfo:
+        """Fetch one public Skill package into inactive workspace quarantine."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if self._permission_mode is not PermissionMode.DANGER_FULL_ACCESS:
+                raise RuntimeError("Skill fetch requires danger-full-access mode")
+            return self._skill_candidate_store.fetch(url)
+
+    def list_skill_candidates(self) -> tuple[SkillCandidateInfo, ...]:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._skill_candidate_store.list()
+
+    def inspect_skill_candidate(self, candidate_id: str) -> SkillCandidateInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._skill_candidate_store.inspect(candidate_id)
+
+    def reject_skill_candidate(self, candidate_id: str) -> SkillCandidateInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._skill_candidate_store.reject(candidate_id)
+
+    def install_skill_candidate(
+        self, candidate_id: str, *, scope: str | None = None
+    ) -> SkillCandidateInfo:
+        """Install an explicitly selected candidate without changing this Turn's snapshot."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if self._permission_mode is PermissionMode.READ_ONLY:
+                raise RuntimeError("Skill installation is denied in read-only mode")
+            self._skill_candidate_store.install(candidate_id, scope=scope)
+            return self._skill_candidate_store.inspect(candidate_id)
+
     def status(self) -> RuntimeStatus:
         self._ensure_open()
         return self._manager.status()
@@ -3590,7 +3677,9 @@ class ProjectSession:
             skill_resource_reader=self._skill_inventory_loader.read_resource,
         )
         loop.install_action_dispatcher(self._dispatch_action)
-        loop.install_task_control_dispatcher(TASK_CONTROL_TOOL_NAMES, self._dispatch_task_control)
+        loop.install_task_control_dispatcher(
+            _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
+        )
         loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         return loop
 
@@ -3633,8 +3722,48 @@ class ProjectSession:
     def _dispatch_task_control(
         self, request: ToolUse, context_id: str
     ) -> TaskControlDispatchResult:
-        """Validate one proposal without mutating Task or permission state."""
+        """Validate one commit-coupled proposal without mutating durable state."""
         scope = self._active_task_control_scope
+        if request.name == SKILL_PROPOSE_CREATE_TOOL_NAME:
+            if scope is not None:
+                raise RuntimeError("Skill authoring is unavailable inside a Task Stage")
+            proposal = SkillCreationProposal.from_request(request, context_id)
+            return TaskControlDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(request.tool_use_id, skill_proposal_receipt(proposal)),
+                    ToolEventStatus.SUCCEEDED,
+                    "skill_candidate_proposed",
+                ),
+                proposal,
+            )
+        if request.name == SKILL_ACCEPT_CREATE_TOOL_NAME:
+            if scope is not None:
+                raise RuntimeError("Skill installation is unavailable inside a Task Stage")
+            if self._permission_mode is PermissionMode.READ_ONLY:
+                raise RuntimeError("Skill installation is denied in read-only mode")
+            values = request.arguments.as_mapping()
+            candidate_id = values.get("candidate_id")
+            if not isinstance(candidate_id, str):
+                raise RuntimeError("Skill candidate ID is invalid")
+            candidate = self._skill_candidate_store.inspect(candidate_id)
+            if candidate.owner_session_id != self._writer.session_id:
+                raise RuntimeError("Skill candidate belongs to another Session")
+            install = SkillInstallRequest.from_request(
+                request,
+                context_id,
+                expected_fingerprint=candidate.manifest.fingerprint,
+            )
+            return TaskControlDispatchResult(
+                ToolDispatchResult(
+                    ToolResult(
+                        request.tool_use_id,
+                        '{"skill_install":"accepted_for_turn_commit"}',
+                    ),
+                    ToolEventStatus.SUCCEEDED,
+                    "skill_install_requested",
+                ),
+                install,
+            )
         if request.name == TASK_PROPOSE_START_TOOL_NAME:
             if scope is not None:
                 raise RuntimeError("Task admission cannot be proposed from an active Task Stage")
@@ -3753,7 +3882,21 @@ class ProjectSession:
         )
 
     def _capture_task_admission_proposal(self, proposal: TaskProposal) -> None:
-        """Apply ordinary-Prompt Task requests only after the Session Turn commits."""
+        """Apply ordinary-Prompt coordination only after the Session Turn commits."""
+        if type(proposal) is SkillCreationProposal:
+            candidate = self._skill_candidate_store.create_generated(
+                proposal,
+                owner_session_id=self._writer.session_id,
+                turn_sequence=len(self._writer.state.turns),
+            )
+            self._emit_prompt_event(
+                self._active_event_sink,
+                SkillCandidateCommitted.from_candidate(candidate),
+            )
+            return
+        if type(proposal) is SkillInstallRequest:
+            self._commit_skill_install_request(proposal)
+            return
         if type(proposal) is TaskAdmissionProposal:
             self._emit_prompt_event(
                 self._active_event_sink,
@@ -3763,6 +3906,52 @@ class ProjectSession:
         if type(proposal) is not TaskLifecycleRequest:
             raise RuntimeError("ordinary Prompt produced a Stage-scoped Task proposal")
         self._commit_task_lifecycle_request(proposal)
+
+    def _commit_skill_install_request(self, request: SkillInstallRequest) -> None:
+        """Revalidate committed causality and install one exact generated candidate."""
+        committed = next(
+            (
+                record
+                for record in reversed(self._writer.state.records)
+                if isinstance(record, TurnCommitted)
+                and any(
+                    getattr(item, "tool_use_id", None) == request.tool_use_id
+                    or (
+                        isinstance(item, AssistantToolBatch)
+                        and any(tool.tool_use_id == request.tool_use_id for tool in item.tool_uses)
+                    )
+                    for item in record.items
+                )
+            ),
+            None,
+        )
+        if committed is None:
+            raise RuntimeError("Skill install request has no committed Session Turn")
+        recovered = recover_task_control_request(
+            CommittedTurn(
+                committed.items,
+                committed.items[0],
+                committed.items[-1],
+                committed.tool_ledger,
+            ),
+            tool_name=SKILL_ACCEPT_CREATE_TOOL_NAME,
+        )
+        if recovered.tool_use_id != request.tool_use_id:
+            raise RuntimeError("Skill install request does not match committed causality")
+        candidate = self._skill_candidate_store.inspect(request.candidate_id)
+        if (
+            candidate.owner_session_id != self._writer.session_id
+            or candidate.manifest.fingerprint != request.expected_fingerprint
+        ):
+            raise RuntimeError("Skill candidate changed before installation commit")
+        result = self._skill_candidate_store.install(
+            request.candidate_id,
+            expected_owner_session_id=self._writer.session_id,
+        )
+        self._emit_prompt_event(
+            self._active_event_sink,
+            SkillCandidateInstalled.from_result(request.candidate_id, result),
+        )
 
     def _commit_task_lifecycle_request(self, request: TaskLifecycleRequest) -> None:
         tool_name = {
@@ -5101,6 +5290,14 @@ def _task_stage_usage(
         tool_dispatched=tool_usage.dispatched,
         tool_succeeded=tool_usage.succeeded,
         tool_unsuccessful=tool_usage.unsuccessful,
+    )
+
+
+def _action_tool_names(snapshot: ToolSetSnapshot) -> tuple[str, ...]:
+    return tuple(
+        contract.name
+        for contract in snapshot.contracts
+        if contract.execution_kind in {ToolExecutionKind.HOST_ACTION, ToolExecutionKind.MCP_REMOTE}
     )
 
 

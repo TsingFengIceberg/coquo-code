@@ -179,6 +179,37 @@ class ToolLedgerQueryResult:
 
 
 @dataclass(frozen=True)
+class SkillLoadAudit:
+    """One replay-derived Skill load attempt without exposing instruction content."""
+
+    tool_use_id: str
+    name: str | None
+    requested_fingerprint: str | None
+    outcome: ToolRequestOutcome
+    result_code: str | None
+    loaded_source: str | None
+    loaded_fingerprint: str | None
+
+
+@dataclass(frozen=True)
+class TurnSkillAudit:
+    """Bounded Skill load attempts in one committed Session Turn."""
+
+    turn_number: int
+    record_sequence: int
+    committed_at: str
+    loads: tuple[SkillLoadAudit, ...]
+
+
+@dataclass(frozen=True)
+class SkillAuditQueryResult:
+    """Read-only Skill load projection over recent committed Turns."""
+
+    total_turns: int
+    turns: tuple[TurnSkillAudit, ...]
+
+
+@dataclass(frozen=True)
 class ProviderSearchTurnSummary:
     call_count: int
     failed_count: int
@@ -324,6 +355,80 @@ def query_tool_ledgers(state: ReplayState, limit: int) -> ToolLedgerQueryResult:
         for offset, record in enumerate(selected)
     )
     return ToolLedgerQueryResult(len(committed), turns)
+
+
+def _query_skill_load_audits(state: ReplayState, limit: int) -> SkillAuditQueryResult:
+    committed = tuple(record for record in state.records if isinstance(record, TurnCommitted))
+    first_turn_number = max(1, len(committed) - limit + 1)
+    turns: list[TurnSkillAudit] = []
+    for offset, record in enumerate(committed[-limit:]):
+        loads = _skill_loads_for_record(record)
+        if loads:
+            turns.append(
+                TurnSkillAudit(
+                    turn_number=first_turn_number + offset,
+                    record_sequence=record.sequence,
+                    committed_at=record.committed_at,
+                    loads=loads,
+                )
+            )
+    return SkillAuditQueryResult(len(committed), tuple(turns))
+
+
+def _skill_loads_for_record(record: TurnCommitted) -> tuple[SkillLoadAudit, ...]:
+    requests: list[ToolUse] = []
+    results: dict[str, ToolResult] = {}
+    for item in record.items:
+        if isinstance(item, ToolUse):
+            requests.append(item)
+        elif isinstance(item, AssistantToolBatch):
+            requests.extend(item.tool_uses)
+        elif isinstance(item, ToolResult):
+            results[item.tool_use_id] = item
+    outcomes = {entry.tool_use_id: entry for entry in _copied_tool_ledger(record).entries}
+    loads: list[SkillLoadAudit] = []
+    for request in requests:
+        if request.name != "skill_load":
+            continue
+        arguments = request.arguments.as_mapping()
+        name = arguments.get("name")
+        fingerprint = arguments.get("fingerprint")
+        entry = outcomes[request.tool_use_id]
+        loaded_source: str | None = None
+        loaded_fingerprint: str | None = None
+        result = results.get(request.tool_use_id)
+        if result is not None and not result.is_error:
+            try:
+                payload = json.loads(result.content)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if (
+                entry.outcome is ToolRequestOutcome.SUCCEEDED
+                and isinstance(name, str)
+                and isinstance(fingerprint, str)
+                and isinstance(payload, dict)
+                and payload.get("kind") == "skill_loaded"
+                and payload.get("name") == name
+                and payload.get("fingerprint") == fingerprint
+            ):
+                source = payload.get("source")
+                loaded = payload.get("fingerprint")
+                loaded_source = (
+                    source if source in {"workspace-local", "project-shared", "user"} else None
+                )
+                loaded_fingerprint = loaded if isinstance(loaded, str) else None
+        loads.append(
+            SkillLoadAudit(
+                tool_use_id=request.tool_use_id,
+                name=name if isinstance(name, str) else None,
+                requested_fingerprint=(fingerprint if isinstance(fingerprint, str) else None),
+                outcome=entry.outcome,
+                result_code=entry.result_code,
+                loaded_source=loaded_source,
+                loaded_fingerprint=loaded_fingerprint,
+            )
+        )
+    return tuple(loads)
 
 
 class SessionLockedError(SessionStoreError):
@@ -1083,6 +1188,55 @@ class SessionStore:
         _validate_existing_session_root(self.root, self.workspace)
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         return query_tool_ledgers(self._load_state(path, allow_repair=False), limit)
+
+    def skill_load_audits(self, selector: str | Path, limit: int = 100) -> SkillAuditQueryResult:
+        """Strictly replay recent committed Turns and project only Skill load identities."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise SessionStoreError("Skill audit limit must be between 1 and 100")
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        return _query_skill_load_audits(state, limit)
+
+    def skill_load_audit(self, selector: str | Path, record_sequence: int) -> TurnSkillAudit:
+        """Project Skill loads from one exact replay-validated committed Turn."""
+        return self.skill_load_audits_for_records(selector, (record_sequence,))[0]
+
+    def skill_load_audits_for_records(
+        self, selector: str | Path, record_sequences: tuple[int, ...]
+    ) -> tuple[TurnSkillAudit, ...]:
+        """Project exact committed Turn Skill loads through one strict Session replay."""
+        if (
+            not isinstance(record_sequences, tuple)
+            or len(record_sequences) > 100
+            or len(set(record_sequences)) != len(record_sequences)
+            or any(type(sequence) is not int or sequence < 1 for sequence in record_sequences)
+        ):
+            raise SessionStoreError(
+                "Skill audit record sequences must be up to 100 unique positive integers"
+            )
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        audits: list[TurnSkillAudit] = []
+        for record_sequence in record_sequences:
+            if record_sequence >= len(state.records):
+                raise SessionStoreError(
+                    f"Session Turn record sequence exceeds the {len(state.records) - 1} records"
+                )
+            record = state.records[record_sequence]
+            if not isinstance(record, TurnCommitted):
+                raise SessionStoreError("selected Session record is not a committed Turn")
+            audits.append(
+                TurnSkillAudit(
+                    turn_number=sum(
+                        isinstance(candidate, TurnCommitted)
+                        for candidate in state.records[: record_sequence + 1]
+                    ),
+                    record_sequence=record_sequence,
+                    committed_at=record.committed_at,
+                    loads=_skill_loads_for_record(record),
+                )
+            )
+        return tuple(audits)
 
     def task_admissions(self, selector: str | Path) -> tuple[TaskAdmissionInfo, ...]:
         """Strictly derive committed Task admission state without mutation or provider work."""

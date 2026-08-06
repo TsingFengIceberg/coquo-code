@@ -15,6 +15,11 @@ from leonervis_code.core.extensions import (
 )
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
+from leonervis_code.core.skill_authoring import (
+    SKILL_ACCEPT_CREATE_TOOL_NAME,
+    SKILL_AUTHORING_CONTROL_TOOL_NAMES,
+    SKILL_PROPOSE_CREATE_TOOL_NAME,
+)
 from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, archive_list_tool_snapshot
 from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, checksum_file_tool_snapshot
 from leonervis_code.tools.compare_files import COMPARE_FILES_TOOL_NAME, compare_files_tool_snapshot
@@ -133,6 +138,7 @@ from leonervis_code.tools.skill_discovery import (
     SKILL_SEARCH_TOOL_NAME,
     skill_discovery_snapshots,
 )
+from leonervis_code.tools.skill_authoring import skill_authoring_tool_snapshots
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -184,14 +190,16 @@ ORDINARY_PROMPT_TOOL_NAMES = (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
     TASK_CONFIRM_COMPLETION_TOOL_NAME,
+    *SKILL_AUTHORING_CONTROL_TOOL_NAMES,
 )
 TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *ORDINARY_TOOL_CATALOG,
     *task_control_tool_snapshots(),
+    *skill_authoring_tool_snapshots(),
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 4
-TOOL_REGISTRY_GENERATION = 4
+BUILTIN_TOOL_SOURCE_GENERATION = 5
+TOOL_REGISTRY_GENERATION = 5
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "leonervis-code",
@@ -275,6 +283,12 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
         permission_actions = ()
     elif name in _TASK_LIFECYCLE_NAMES:
         execution_kind = ToolExecutionKind.TASK_LIFECYCLE
+        permission_actions = ()
+    elif name == SKILL_PROPOSE_CREATE_TOOL_NAME:
+        execution_kind = ToolExecutionKind.SKILL_AUTHORING
+        permission_actions = ()
+    elif name == SKILL_ACCEPT_CREATE_TOOL_NAME:
+        execution_kind = ToolExecutionKind.SKILL_LIFECYCLE
         permission_actions = ()
     else:
         raise RuntimeError(f"canonical tool lacks an extension contract: {name}")
@@ -465,6 +479,10 @@ def _expected_keys(name: str) -> set[str]:
         return {"name", "fingerprint"}
     if name == SKILL_READ_RESOURCE_TOOL_NAME:
         return {"name", "skill_fingerprint", "path", "resource_fingerprint"}
+    if name == SKILL_PROPOSE_CREATE_TOOL_NAME:
+        return {"name", "description", "scope", "allowed_tools", "instructions"}
+    if name == SKILL_ACCEPT_CREATE_TOOL_NAME:
+        return {"candidate_id"}
     if name == TASK_PROPOSE_PLAN_TOOL_NAME:
         return {"steps"}
     if name == TASK_REPORT_REFLECTION_TOOL_NAME:
@@ -483,6 +501,19 @@ def _expected_keys(name: str) -> set[str]:
 
 
 def _validate_known_input(name: str, tool_input: dict[str, object], expected: set[str]) -> None:
+    if name == SKILL_PROPOSE_CREATE_TOOL_NAME:
+        from leonervis_code.core.skill_authoring import SkillCreationProposal
+
+        SkillCreationProposal.from_request(
+            ToolUse("validation", name, ToolArguments.from_mapping(tool_input)),
+            "ctx-v1-" + "0" * 64,
+        )
+        return
+    if name == SKILL_ACCEPT_CREATE_TOOL_NAME:
+        from leonervis_code.core.skill_authoring import canonical_skill_candidate_id
+
+        canonical_skill_candidate_id(tool_input["candidate_id"])
+        return
     if name == SKILL_SEARCH_TOOL_NAME:
         query = tool_input["query"]
         max_results = tool_input["max_results"]

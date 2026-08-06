@@ -138,7 +138,15 @@ from leonervis_code.session_store import (
     SessionStore,
     SessionStoreError,
 )
-from leonervis_code.skills import SkillCatalogError, SkillInventoryLoader
+from leonervis_code.skills import (
+    SkillCatalogError,
+    SkillInventoryLoader,
+    import_skill,
+    initialize_skill,
+    load_skill_lock,
+    verify_skill_lock,
+)
+from leonervis_code.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from leonervis_code.task_store import TaskStore, TaskStoreError
 from leonervis_code.task_records import TaskCompletionPolicy
 from leonervis_code.task_records import TaskBudget, TaskStatus
@@ -441,6 +449,50 @@ def build_parser() -> argparse.ArgumentParser:
     skills_show = skills_commands.add_parser("show", help="show one active Skill package")
     skills_show.add_argument("name")
     skills_commands.add_parser("doctor", help="diagnose all bounded Skill source roots")
+    skills_init = skills_commands.add_parser("init", help="create one minimal Skill package")
+    skills_init.add_argument("name")
+    skills_init.add_argument("--description", required=True)
+    skills_init.add_argument("--scope", choices=["workspace", "project", "user"], default="project")
+    skills_check = skills_commands.add_parser("check", help="validate the current Skill inventory")
+    skills_check.add_argument("name", nargs="?")
+    skills_search = skills_commands.add_parser("search", help="search Skill package metadata")
+    skills_search.add_argument("query")
+    skills_search.add_argument("--limit", type=int, default=8)
+    skills_search.add_argument("--all", action="store_true", dest="include_shadowed")
+    skills_commands.add_parser("conflicts", help="show shadowed Skill package identities")
+    skills_import = skills_commands.add_parser(
+        "import", help="copy one explicit local Skill package with an exact lock"
+    )
+    skills_import.add_argument("source")
+    skills_import.add_argument(
+        "--scope", choices=["workspace", "project", "user"], default="project"
+    )
+    skills_fetch = skills_commands.add_parser(
+        "fetch", help="download one public raw SKILL.md or ZIP into quarantine"
+    )
+    skills_fetch.add_argument("url")
+    skills_candidate = skills_commands.add_parser(
+        "candidate", help="inspect or reject quarantined Skill candidates"
+    )
+    skills_candidate_commands = skills_candidate.add_subparsers(
+        dest="skills_candidate_command", required=True
+    )
+    skills_candidate_commands.add_parser("list")
+    skills_candidate_show = skills_candidate_commands.add_parser("show")
+    skills_candidate_show.add_argument("candidate_id")
+    skills_candidate_reject = skills_candidate_commands.add_parser("reject")
+    skills_candidate_reject.add_argument("candidate_id")
+    skills_install = skills_commands.add_parser(
+        "install", help="install one exact pending quarantined candidate"
+    )
+    skills_install.add_argument("candidate_id")
+    skills_install.add_argument("--scope", choices=["workspace", "project", "user"], default=None)
+    skills_lock = skills_commands.add_parser("lock", help="inspect or verify an import lock")
+    skills_lock_commands = skills_lock.add_subparsers(dest="skills_lock_command", required=True)
+    for command_name in ("show", "verify"):
+        command = skills_lock_commands.add_parser(command_name)
+        command.add_argument("name")
+        command.add_argument("--scope", choices=["workspace", "project", "user"], default="project")
 
     mcp_parser = subcommands.add_parser("mcp", help="configure and inspect MCP servers")
     mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)
@@ -686,6 +738,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("task_id")
     task_timeline = task_commands.add_parser("timeline", help="show one Task Stage timeline")
     task_timeline.add_argument("task_id")
+    task_skills = task_commands.add_parser(
+        "skills", help="show Skill loads from committed Task Stage Turns"
+    )
+    task_skills.add_argument("task_id")
     return parser
 
 
@@ -1450,8 +1506,128 @@ def handle_skills_command(
     environment: Mapping[str, str],
     stdout: TextIO,
 ) -> int:
-    """Render one bounded Skill inventory without provider or Session effects."""
+    """Run one bounded standalone Skill command without provider or Session effects."""
     loader = SkillInventoryLoader(workspace, environment)
+    candidate_store = SkillCandidateStore(workspace, environment)
+    if arguments.skills_command == "fetch":
+        candidate = candidate_store.fetch(arguments.url)
+        stdout.write(
+            json.dumps(_skill_candidate_value(candidate), ensure_ascii=False, sort_keys=True) + "\n"
+        )
+        return 0
+    if arguments.skills_command == "candidate":
+        if arguments.skills_candidate_command == "list":
+            candidates = candidate_store.list()
+            for candidate in candidates:
+                stdout.write(
+                    json.dumps(
+                        _skill_candidate_value(candidate, include_instructions=False),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            if not candidates:
+                stdout.write('{"candidates": 0}\n')
+            return 0
+        candidate = candidate_store.inspect(arguments.candidate_id)
+        if arguments.skills_candidate_command == "reject":
+            candidate = candidate_store.reject(arguments.candidate_id)
+        stdout.write(
+            json.dumps(_skill_candidate_value(candidate), ensure_ascii=False, sort_keys=True) + "\n"
+        )
+        return 0
+    if arguments.skills_command == "install":
+        result = candidate_store.install(arguments.candidate_id, scope=arguments.scope)
+        candidate = candidate_store.inspect(arguments.candidate_id)
+        value = _skill_candidate_value(candidate, include_instructions=False)
+        value["lock_digest"] = result.lock.digest
+        stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if arguments.skills_command == "init":
+        result = initialize_skill(
+            workspace,
+            name=arguments.name,
+            description=arguments.description,
+            scope=arguments.scope,
+            environment=environment,
+        )
+        stdout.write(
+            json.dumps(
+                {
+                    "fingerprint": result.candidate.manifest.fingerprint,
+                    "name": result.candidate.manifest.name,
+                    "path": result.candidate.relative_path,
+                    "source": result.candidate.source.value,
+                    "template_version": result.template_version,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.skills_command == "import":
+        source = Path(arguments.source)
+        if not source.is_absolute():
+            source = workspace / source
+        result = import_skill(
+            workspace,
+            source,
+            scope=arguments.scope,
+            environment=environment,
+        )
+        stdout.write(
+            json.dumps(
+                {
+                    "fingerprint": result.candidate.manifest.fingerprint,
+                    "lock_digest": result.lock.digest,
+                    "name": result.candidate.manifest.name,
+                    "resources": len(result.candidate.resources),
+                    "scope": arguments.scope,
+                    "source": result.candidate.source.value,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.skills_command == "lock":
+        if arguments.skills_lock_command == "show":
+            lock, _ = load_skill_lock(
+                workspace,
+                arguments.name,
+                scope=arguments.scope,
+                environment=environment,
+            )
+            value = lock.as_mapping()
+            value["lock-digest"] = lock.digest
+            stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+            return 0
+        verification = verify_skill_lock(
+            workspace,
+            arguments.name,
+            scope=arguments.scope,
+            environment=environment,
+        )
+        stdout.write(
+            json.dumps(
+                {
+                    "current_fingerprint": verification.current_fingerprint,
+                    "locked_fingerprint": verification.lock.fingerprint,
+                    "name": verification.lock.name,
+                    "reason": verification.reason,
+                    "resources": len(verification.current_resources),
+                    "scope": verification.lock.scope,
+                    "valid": verification.valid,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0 if verification.valid else 1
     inventory = loader.load()
     if arguments.skills_command == "list":
         for candidate in inventory.candidates:
@@ -1540,7 +1716,157 @@ def handle_skills_command(
                 + "\n"
             )
         return 1 if inventory.issues else 0
+    if arguments.skills_command == "check":
+        if arguments.name is not None:
+            name = arguments.name
+            issues = tuple(
+                issue for issue in inventory.issues if issue.relative_path == f"{name}/SKILL.md"
+            )
+            candidate = next(
+                (item for item in inventory.active if item.manifest.name == name),
+                None,
+            )
+            if candidate is None and issues:
+                stdout.write(
+                    json.dumps(
+                        {
+                            "issue_codes": [issue.code for issue in issues],
+                            "issues": len(issues),
+                            "name": name,
+                            "valid": False,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                return 1
+            if candidate is None:
+                candidate = inventory.get(name)
+            stdout.write(
+                json.dumps(
+                    {
+                        "fingerprint": candidate.manifest.fingerprint,
+                        "issues": len(issues),
+                        "name": candidate.manifest.name,
+                        "resources": len(candidate.resources),
+                        "source": candidate.source.value,
+                        "valid": not issues,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            return 1 if issues else 0
+        stdout.write(
+            json.dumps(
+                {
+                    "active": len(inventory.active),
+                    "candidates": len(inventory.candidates),
+                    "inventory_id": inventory.snapshot_id,
+                    "issues": len(inventory.issues),
+                    "valid": not inventory.issues,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 1 if inventory.issues else 0
+    if arguments.skills_command == "search":
+        matches = inventory.search(
+            arguments.query,
+            limit=arguments.limit,
+            active_only=not arguments.include_shadowed,
+        )
+        for match in matches:
+            candidate = match.candidate
+            stdout.write(
+                json.dumps(
+                    {
+                        "active": candidate.active,
+                        "description": candidate.manifest.description,
+                        "fingerprint": candidate.manifest.fingerprint,
+                        "name": candidate.manifest.name,
+                        "score": match.score,
+                        "shadowed_by": (
+                            None if candidate.shadowed_by is None else candidate.shadowed_by.value
+                        ),
+                        "source": candidate.source.value,
+                        "terms": list(match.terms),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        if not matches:
+            stdout.write(
+                json.dumps(
+                    {
+                        "active_candidates": len(inventory.active),
+                        "matches": 0,
+                        "query": arguments.query,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        return 0
+    if arguments.skills_command == "conflicts":
+        conflicts = tuple(candidate for candidate in inventory.candidates if not candidate.active)
+        for candidate in conflicts:
+            stdout.write(
+                json.dumps(
+                    {
+                        "fingerprint": candidate.manifest.fingerprint,
+                        "name": candidate.manifest.name,
+                        "shadowed_by": candidate.shadowed_by.value,
+                        "source": candidate.source.value,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        if not conflicts:
+            stdout.write(json.dumps({"conflicts": 0}, sort_keys=True) + "\n")
+        return 0
     raise ValueError(f"unsupported skills command: {arguments.skills_command}")
+
+
+def _skill_candidate_value(
+    candidate: SkillCandidateInfo, *, include_instructions: bool = True
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "candidate_id": candidate.candidate_id,
+        "description": candidate.manifest.description,
+        "fingerprint": candidate.manifest.fingerprint,
+        "installed_lock_digest": candidate.installed_lock_digest,
+        "installed_scope": candidate.installed_scope,
+        "name": candidate.manifest.name,
+        "owner_session_id": candidate.owner_session_id,
+        "proposal_turn_sequence": candidate.proposal_turn_sequence,
+        "requested_scope": candidate.requested_scope,
+        "resources": [
+            {
+                "bytes": resource.byte_count,
+                "fingerprint": resource.fingerprint,
+                "path": resource.path,
+                "text_readable": resource.text_readable,
+            }
+            for resource in candidate.resources
+        ],
+        "source": candidate.source.value,
+        "source_sha256": candidate.source_sha256,
+        "source_url": candidate.source_url,
+        "status": candidate.status.value,
+    }
+    if include_instructions:
+        value["allowed_tools"] = candidate.manifest.allowed_tools
+        value["instructions"] = candidate.manifest.instructions
+    return value
 
 
 def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
@@ -1584,6 +1910,49 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
         return 0
     if arguments.task_command == "timeline":
         stdout.write(f"{render_task_timeline(store.inspect(arguments.task_id))}\n")
+        return 0
+    if arguments.task_command == "skills":
+        task = store.inspect(arguments.task_id)
+        committed_stages = tuple(
+            stage for stage in task.stages if stage.turn_record_sequence is not None
+        )
+        session_store = SessionStore(workspace)
+        audits = session_store.skill_load_audits_for_records(
+            task.owner_session_id,
+            tuple(stage.turn_record_sequence for stage in committed_stages),
+        )
+        matches = tuple(zip(audits, committed_stages, strict=True))
+        for turn, stage in matches:
+            for load in turn.loads:
+                stdout.write(
+                    json.dumps(
+                        {
+                            "loaded_fingerprint": load.loaded_fingerprint,
+                            "loaded_source": load.loaded_source,
+                            "name": load.name,
+                            "outcome": load.outcome.value,
+                            "requested_fingerprint": load.requested_fingerprint,
+                            "result_code": load.result_code,
+                            "stage_kind": stage.kind.value,
+                            "stage_number": stage.stage_number,
+                            "task_id": task.task_id,
+                            "tool_use_id": load.tool_use_id,
+                            "turn_number": turn.turn_number,
+                            "turn_record_sequence": turn.record_sequence,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+        if not any(turn.loads for turn, _ in matches):
+            stdout.write(
+                json.dumps(
+                    {"skill_loads": 0, "stages": len(task.stages), "task_id": task.task_id},
+                    sort_keys=True,
+                )
+                + "\n"
+            )
         return 0
     tasks = store.list()
     if arguments.status is not None:

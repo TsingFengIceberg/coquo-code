@@ -697,6 +697,14 @@ def skill_read_resource_tool_definition() -> dict[str, object]:
     return _named_tool_definition("skill_read_resource")
 
 
+def skill_propose_create_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("skill_propose_create")
+
+
+def skill_accept_create_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("skill_accept_create")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
     return _named_tool_definition("task_propose_plan")
 

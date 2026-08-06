@@ -43,6 +43,7 @@ from leonervis_code.core.task_admission import (
 )
 from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
 from leonervis_code.skills import SkillActivationInspection, SkillInventoryLoader
+from leonervis_code.skill_candidates import SkillCandidateStore
 from leonervis_code.session_store import (
     LatestUpdateStatus,
     SessionConversationExport,
@@ -217,6 +218,20 @@ class Session:
     def inspect_skill_inventory(self):
         loader = SkillInventoryLoader(self.tmp_path, {})
         return loader.load(), loader.roots
+
+    def list_skill_candidates(self):
+        return SkillCandidateStore(self.tmp_path, {}).list()
+
+    def inspect_skill_candidate(self, candidate_id):
+        return SkillCandidateStore(self.tmp_path, {}).inspect(candidate_id)
+
+    def reject_skill_candidate(self, candidate_id):
+        return SkillCandidateStore(self.tmp_path, {}).reject(candidate_id)
+
+    def install_skill_candidate(self, candidate_id, *, scope=None):
+        store = SkillCandidateStore(self.tmp_path, {})
+        store.install(candidate_id, scope=scope)
+        return store.inspect(candidate_id)
 
     def inspect_web_search_sources(self):
         return self.web_search.source_configuration()
@@ -873,7 +888,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v13-" in context.message
+    assert "Context ID: ctx-v15-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -945,7 +960,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert "Registry snapshot: registry-v1-" in catalog
-    assert " generation=4" in catalog
+    assert " generation=5" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert (
         "22. web_search: network-read; available "
@@ -954,7 +969,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "Contract: tool-v1-" in run_command
-    assert "Source: builtin:leonervis-code generation=4" in run_command
+    assert "Source: builtin:leonervis-code generation=5" in run_command
     assert "Exposure: direct" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
@@ -987,6 +1002,8 @@ def test_skills_slash_commands_are_read_only_bounded_inspections(tmp_path) -> No
     active = dispatch_slash("/skills", session)
     listed = dispatch_slash("/skills list", session)
     shown = dispatch_slash("/skills show demo", session)
+    searched = dispatch_slash("/skills search demo workflow", session)
+    conflicts = dispatch_slash("/skills conflicts", session)
     doctor = dispatch_slash("/skills doctor", session)
 
     assert "Active Skills: 0/4" in active.message
@@ -995,6 +1012,9 @@ def test_skills_slash_commands_are_read_only_bounded_inspections(tmp_path) -> No
     assert "Resources: 1" in shown.message
     assert "guide.md" in shown.message
     assert "Instructions:\nDo it.\n" in shown.message
+    assert "Matches: 1" in searched.message
+    assert "demo [active]" in searched.message
+    assert "Skill conflicts: 0" in conflicts.message
     assert "Issues: 0" in doctor.message
     assert dispatch_slash("/skills nope", session).kind == "warning"
 

@@ -455,7 +455,7 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 
 ## 确定性离线 Host Eval 基线
 
-`leonervis-code eval`当前提供版本化考试集`host-baseline-v2`。前四个内置案例覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作；第五个案例覆盖模型提议Task、用户精确确认、前台planning/execution、人工验收与完成。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
+`leonervis-code eval`当前提供版本化考试集`host-baseline-v3`。前四个内置案例覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作；第五个案例覆盖模型提议Task、用户精确确认、前台planning/execution、执行Stage中的普通`skill_search`与`skill_load`、人工验收与完成。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
 
 评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、跨全部相关Turn按时间排序的durable tool ledger和Action Audit lifecycle。Task案例还验证accepted admission、唯一且来源匹配的Task、最终状态及Stage kind/outcome。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
 
@@ -1275,6 +1275,24 @@ Skill inventory v2把`SKILL.md`之外的包内regular files作为有界资源索
 
 最多4个不同Skill可同时active，每Turn最多尝试4次`skill_load`，active instructions累计最多65536 bytes；重复active name拒绝。多个Skill按成功load pair的因果顺序组合，`allowed-tools`依次求交，并只从Effective Context仍完整保留的Host结果恢复。`/skills|active|list|show|doctor`提供无provider、无Session mutation、无Action Audit的当前激活与catalog检查。Inventory升级`skills-v2`，full/compacted Effective Context升级v13/v14且继续严格验证legacy v11/v12，built-in Registry升级generation 4，system prompt升级v39，provider adapter升级v40。详见[0122](./decisions/0122-bounded-skill-resources-composition-and-observability.md)。
 
+## Skill authoring、本地导入、Task审计与执行边界
+
+`/compact preview`现在从当前Effective Context和精确保留的verbatim turns分别投影active Skills，显示before/after、将失活的名称及压缩后的action tools；它不调用provider、不生成summary也不修改Session。只有完整成功`skill_load` pair仍被保留时Skill才继续active，summary文字不能恢复激活。
+
+Standalone `skills init|check|search|conflicts`提供无provider、无Session的模板创建、canonical校验、确定性metadata搜索及source shadow诊断；REPL增加只读`/skills search`与`/skills conflicts`。`skills import <local-directory>`只复制显式本地目录，不联网、不clone、不安装依赖：source先经过同一no-follow loader，destination与lock均独占创建，复制后重新加载并检查source drift、target inode replacement、shadowing及全部fingerprint。Lock v1位于对应scope的`skill-locks/`而不是被扫描的`skills/`内，只记录scope、name、manifest/resource fingerprint与必要资源元数据，不含source path、credential、正文或时间；`skills lock show|verify`提供检查。
+
+SessionStore可从严格replay的committed Turn只读投影`skill_load`请求身份、Host ledger outcome及安全source/fingerprint，不返回instructions。`task skills <task-id>`只选择Task Stage持久绑定的精确`turn_record_sequence`；普通Task读取仍不依赖Session健康。离线Eval升级`host-baseline-v3`，Task execution Stage会走普通Skill发现与加载路径。
+
+包内script始终只是resource，不存在`skill_run_script`、dynamic import或implicit subprocess。读取仍走`skill_read_resource`；执行必须由模型明确请求既有`run_command`，继续经过dangerous PermissionGate、approval、Action Audit、Linux sandbox、timeout、cancellation与output bounds。以上均为Host命令、只读投影或更强本地边界，因此registry generation 4、system prompt v39、provider adapter v40、Skill inventory v2、Effective Context v13/v14及全部Session/Task schema不变。详见[0123](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)。
+
+## 显式Skill内化与远程隔离安装
+
+普通Prompt新增两个必须独占回复的commit-coupled协调工具。只有当前用户明确要求把流程保存为Skill时，模型才可调用`skill_propose_create`提交完整有界声明；Host在最终assistant正文与Session Turn成功落盘后，才把它写为inactive候选。只有用户直接批准该精确候选后，模型才可调用`skill_accept_create`；Host再次从committed Turn恢复成功ToolUse/ToolResult/ledger因果，核对owner Session、pending状态、fingerprint、固定scope与非只读模式，再复用`import_skill()`及lock完成安装。系统不会从偶然成功、重复行为或经验中自动学习Skill。
+
+生成或下载的候选位于不参与inventory扫描的`.leonervis-code/skill-candidates/v1/`，保存private immutable package、闭合metadata及只允许`created -> installed|rejected`的append-only事件。`skills fetch`与`/skills fetch`复用PinnedWebGetTransport，只接受无query的public HTTPS raw `SKILL.md`或有界ZIP；每次redirect继续校验public address，ZIP拒绝路径逃逸、重复/case-fold冲突、多package root、symlink/special/encrypted entry及count、size、expanded size与compression ratio越界。下载不会安装或激活，必须先用candidate list/show检查完整instructions与resource，再显式install或reject；安装仍生成精确import lock。
+
+每个prepared Turn继续冻结SkillInventorySnapshot，新安装不会热改当前Turn的ToolSet，只在后续Turn可发现。Registry升级generation 5，system prompt升级v40，provider adapter升级v41，full/compacted Effective Context升级v15/v16并继续读取legacy v13/v14；Skill inventory v2及Session、Task、Action Audit、import lock schema不变。详见[0124](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1399,3 +1417,5 @@ Skill inventory v2把`SKILL.md`之外的包内regular files作为有界资源索
 120. [0120：Transport-aware MCP Approval and Policy Diagnostics](./decisions/0120-transport-aware-mcp-approval-and-policy-diagnostics.md)
 121. [0121：Bounded Declarative Skills and ToolSet Restriction](./decisions/0121-bounded-declarative-skills-and-toolset-restriction.md)
 122. [0122：Bounded Skill Resources, Composition, and Observability](./decisions/0122-bounded-skill-resources-composition-and-observability.md)
+123. [0123：Skill Authoring, Local Import, Task Audit, and Execution Boundary](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)
+124. [0124：Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)

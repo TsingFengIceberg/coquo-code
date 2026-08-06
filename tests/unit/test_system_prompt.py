@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v39-e018a0bb26efb08fa7c83a1fe651d6363332895d62a90e51f537f7547256aad5"
+EXPECTED_FINGERPRINT = "v40-c467f0cd6adfd881f341a1cfb2e4c2dd50817c68b3cae4f279f9f6cc4516fcda"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 39
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 40
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text

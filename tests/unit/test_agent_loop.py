@@ -176,6 +176,8 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "task_accept_admission",
         "task_accept_plan",
         "task_confirm_completion",
+        "skill_propose_create",
+        "skill_accept_create",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)
@@ -1686,7 +1688,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v13-")
+    assert proposals[0].context_id.startswith("ctx-v15-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

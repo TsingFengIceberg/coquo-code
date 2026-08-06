@@ -60,6 +60,8 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "task_accept_admission",
         "task_accept_plan",
         "task_confirm_completion",
+        "skill_propose_create",
+        "skill_accept_create",
     ]
     request = tool_use_from_input(
         "edit-1",

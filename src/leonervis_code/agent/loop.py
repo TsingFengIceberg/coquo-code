@@ -147,7 +147,7 @@ class ToolLoopLimitError(RuntimeError):
 
 
 class TaskControlProtocolError(RuntimeError):
-    """Raised when a provider violates the terminal Task-control call contract."""
+    """Raised when a provider violates the isolated coordination-call contract."""
 
 
 class ToolDiscoveryProtocolError(RuntimeError):
@@ -559,7 +559,7 @@ class AgentLoop:
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
         if task_proposal_sink is not None and not callable(task_proposal_sink):
-            raise ValueError("Task proposal sink is invalid")
+            raise ValueError("coordination proposal sink is invalid")
         if first_provider_response_hook is not None and not callable(first_provider_response_hook):
             raise ValueError("first provider response hook is invalid")
         turn_provider = provider or self._provider
@@ -664,10 +664,10 @@ class AgentLoop:
             )
             if control_requests and len(requests) != 1:
                 raise TaskControlProtocolError(
-                    "Task control tool must be the only call in its assistant response"
+                    "coordination control tool must be the only call in its assistant response"
                 )
             if control_requests and task_proposal_sink is None:
-                raise TaskControlProtocolError("Task control tool requires a proposal sink")
+                raise TaskControlProtocolError("coordination control tool requires a proposal sink")
             discovery_requests = tuple(
                 request
                 for request in requests
@@ -958,9 +958,9 @@ class AgentLoop:
         tool_names: tuple[str, ...],
         dispatcher: TaskControlDispatcher,
     ) -> None:
-        """Install one proposal-only Task coordination boundary exactly once."""
+        """Install one commit-coupled coordination boundary exactly once."""
         if self._task_control_dispatcher is not None or self._task_control_names:
-            raise ValueError("Task control dispatcher is already installed")
+            raise ValueError("coordination control dispatcher is already installed")
         registry = self._tool_registry_factory()
         if not isinstance(registry, ToolRegistrySnapshot):
             raise ValueError("tool registry factory returned an invalid snapshot")
@@ -971,9 +971,9 @@ class AgentLoop:
             or len(set(tool_names)) != len(tool_names)
             or any(name not in available for name in tool_names)
         ):
-            raise ValueError("Task control tool names are invalid")
+            raise ValueError("coordination control tool names are invalid")
         if not callable(dispatcher):
-            raise ValueError("Task control dispatcher is invalid")
+            raise ValueError("coordination control dispatcher is invalid")
         self._task_control_names = frozenset(tool_names)
         self._task_control_dispatcher = dispatcher
 
@@ -1094,37 +1094,22 @@ class AgentLoop:
             limit = arguments["max_results"]
             if not isinstance(query, str) or type(limit) is not int:
                 raise ValueError("skill_search input is malformed")
-            terms = tuple(part for part in query.casefold().split() if part)
-            matches: list[tuple[int, str, str, str, str]] = []
-            for candidate in prepared.skill_inventory_snapshot.active:
-                manifest = candidate.manifest
-                haystack = f"{manifest.name} {manifest.description}".casefold()
-                if terms and not all(term in haystack for term in terms):
-                    continue
-                score = sum(haystack.count(term) for term in terms)
-                matches.append(
-                    (
-                        score,
-                        manifest.name,
-                        candidate.source.value,
-                        manifest.description,
-                        manifest.fingerprint,
-                    )
-                )
-            selected = sorted(matches, key=lambda item: (-item[0], item[1]))[:limit]
+            selected = prepared.skill_inventory_snapshot.search(
+                query, limit=limit, active_only=True
+            )
             content = "\n".join(
                 json.dumps(
                     {
-                        "description": description,
-                        "fingerprint": fingerprint,
-                        "name": name,
-                        "source": source,
+                        "description": match.candidate.manifest.description,
+                        "fingerprint": match.candidate.manifest.fingerprint,
+                        "name": match.candidate.manifest.name,
+                        "source": match.candidate.source.value,
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=True,
                 )
-                for _, name, source, description, fingerprint in selected
+                for match in selected
             )
             if not content:
                 content = json.dumps({"matches": 0}, separators=(",", ":"), sort_keys=True)
@@ -1134,7 +1119,13 @@ class AgentLoop:
                     ToolEventStatus.SUCCEEDED,
                     "skill_search_completed",
                 ),
-                discovered_skills=tuple((item[1], item[4]) for item in selected),
+                discovered_skills=tuple(
+                    (
+                        match.candidate.manifest.name,
+                        match.candidate.manifest.fingerprint,
+                    )
+                    for match in selected
+                ),
             )
         if request.name == SKILL_LOAD_TOOL_NAME:
             name = arguments["name"]
@@ -1473,15 +1464,15 @@ class AgentLoop:
         request: ToolUse,
         context_id: str,
     ) -> TaskControlDispatchResult:
-        """Dispatch proposal-only coordination without entering the Action boundary."""
+        """Dispatch commit-coupled coordination without entering the Action boundary."""
         dispatcher = self._task_control_dispatcher
         if dispatcher is None:
-            raise RuntimeError("Task control dispatcher is not installed")
+            raise RuntimeError("coordination control dispatcher is not installed")
         result = dispatcher(request, context_id)
         if type(result) is not TaskControlDispatchResult:
-            raise ValueError("Task control dispatcher returned an invalid result")
+            raise ValueError("coordination control dispatcher returned an invalid result")
         if result.proposal is not None and result.proposal.context_id != context_id:
-            raise ValueError("Task control proposal context does not match prepared turn")
+            raise ValueError("coordination proposal context does not match prepared turn")
         return result
 
     @staticmethod
