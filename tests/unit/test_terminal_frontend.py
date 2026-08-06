@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 import io
 from pathlib import Path
+import re
 from threading import Event, Thread
 import time
 from types import SimpleNamespace
@@ -9,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.base import Size
+from rich.cells import cell_len
 
 from leonervis_code.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
@@ -28,6 +33,7 @@ from leonervis_code.cli.frontend import (
     TerminalPhase,
     TerminalViewState,
     TurnFinished,
+    TurnFailed,
     TurnSubmitted,
     reduce_terminal_state,
 )
@@ -53,7 +59,25 @@ from leonervis_code.providers.request_context import (
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.session import TurnCommitStarted
+from leonervis_code.session import SessionTitlePrepared, TurnCommitStarted
+from leonervis_code.session_records import SessionNameSource
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class _SizedDummyOutput(DummyOutput):
+    def __init__(self, columns: int) -> None:
+        self._columns = columns
+
+    def get_size(self) -> Size:
+        return Size(rows=24, columns=self._columns)
+
+
+@dataclass(frozen=True)
+class _TitleInfo:
+    name: str
+    name_source: SessionNameSource
+    title_fallback_reason: object | None = None
 
 
 def test_terminal_reducer_accepts_only_one_matching_active_turn() -> None:
@@ -187,6 +211,138 @@ def test_queued_renderer_fallback_keeps_assistant_hanging_indent(
     assert any(line.startswith("• A corrected") for line in lines)
     assert "Second logical line." in " ".join(line.strip() for line in lines)
     assert all(line.startswith(("• ", "  ")) for line in lines if line)
+
+
+def test_persistent_application_reserves_the_terminal_final_column(tmp_path: Path) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=_SizedDummyOutput(80),
+        )
+
+    assert terminal._current_width() == 79
+
+
+def test_persistent_application_hard_wraps_wide_viewports_at_readable_width(
+    tmp_path: Path,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=_SizedDummyOutput(240),
+        )
+
+    assert terminal._current_width() == 100
+
+
+def test_persistent_application_refreshes_renderer_width_for_each_activity(
+    tmp_path: Path,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    output = _SizedDummyOutput(80)
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=output,
+        )
+        terminal._state = reduce_terminal_state(terminal._state, TurnSubmitted(1))
+        asyncio.run(
+            terminal._handle_event(
+                PromptActivity(
+                    1,
+                    AssistantResponseTextDeltaReceived(
+                        "尚未完成的流式段落会在窗口缩小以后继续使用新的宽度进行包装"
+                    ),
+                )
+            )
+        )
+        output._columns = 41
+        asyncio.run(
+            terminal._handle_event(
+                PromptActivity(
+                    1,
+                    AssistantFinalTextStreamCommitted(
+                        "尚未完成的流式段落会在窗口缩小以后继续使用新的宽度进行包装"
+                    ),
+                )
+            )
+        )
+
+    rendered = terminal._stdout.getvalue()
+    lines = [line for line in rendered.splitlines() if line]
+    assert len(lines) >= 2
+    assert lines[0].startswith("• ")
+    assert all(line.startswith(("• ", "  ")) for line in lines)
+    assert all(cell_len(ANSI_ESCAPE.sub("", line)) <= 40 for line in lines)
+
+
+def test_persistent_application_reverts_transient_title_when_first_turn_fails(
+    tmp_path: Path,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=io.StringIO(),
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        original = _TitleInfo("New session 1", SessionNameSource.DEFAULT)
+        terminal._session_info = original
+        terminal._state = reduce_terminal_state(terminal._state, TurnSubmitted(1))
+        asyncio.run(
+            terminal._handle_event(
+                PromptActivity(
+                    1,
+                    SessionTitlePrepared("Immediate title", SessionNameSource.MODEL),
+                )
+            )
+        )
+        assert terminal._session_info.name == "Immediate title"
+
+        asyncio.run(terminal._handle_event(TurnFailed(1, "provider failed")))
+
+    assert terminal._session_info == original
 
 
 def test_turn_cancellation_is_idempotent_and_checked() -> None:
@@ -855,8 +1011,9 @@ class _ApprovalSession:
         return "approval complete"
 
 
+@pytest.mark.parametrize("color", [False, True])
 def test_persistent_application_approval_temporarily_owns_input_and_restores_draft(
-    tmp_path: Path,
+    tmp_path: Path, color: bool
 ) -> None:
     session = _ApprovalSession()
     queue = FrontendEventQueue()
@@ -870,7 +1027,7 @@ def test_persistent_application_approval_temporarily_owns_input_and_restores_dra
             session,
             stdout=stdout,
             cwd=tmp_path,
-            color=False,
+            color=color,
             render_markdown=False,
             queue=queue,
             approval_broker=broker,
@@ -896,16 +1053,18 @@ def test_persistent_application_approval_temporarily_owns_input_and_restores_dra
 
     assert not thread.is_alive()
     rendered = stdout.getvalue()
-    assert "\n› do work\n\n  │ [tool 1/32] write_file" in rendered
-    assert "  │ [tool 1/32] write_file path='note.txt' content_bytes=6" in rendered
-    assert "  │ Approval required" in rendered
-    assert "  │ Prepared candidate (6 bytes):" in rendered
-    assert "  │ --- a/note.txt" in rendered
-    assert "  │ [tool 1/32] succeeded code=overwritten" in rendered
-    assert "\n• approval complete\n" in rendered
-    assert rendered.count(f"  {'─' * 24}") == 1
-    assert rendered.index("[tool 1/32] write_file") < rendered.index("• approval complete")
-    assert rendered.index("• approval complete") < rendered.index(f"  {'─' * 24}")
+    assert r"\x1b" not in rendered
+    plain = ANSI_ESCAPE.sub("", rendered)
+    assert "\n› do work\n\n  │ [tool 1/32] write_file" in plain
+    assert "  │ [tool 1/32] write_file path='note.txt' content_bytes=6" in plain
+    assert "  │ Approval required" in plain
+    assert "  │ Prepared candidate (6 bytes):" in plain
+    assert "  │ --- a/note.txt" in plain
+    assert "  │ [tool 1/32] succeeded code=overwritten" in plain
+    assert "\n• approval complete\n" in plain
+    assert plain.count(f"  {'─' * 24}") == 1
+    assert plain.index("[tool 1/32] write_file") < plain.index("• approval complete")
+    assert plain.index("• approval complete") < plain.index(f"  {'─' * 24}")
 
 
 def _approval_request() -> HumanApprovalRequest:

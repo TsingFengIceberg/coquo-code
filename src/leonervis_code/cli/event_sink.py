@@ -12,6 +12,8 @@ from leonervis_code.agent.tool_events import (
 )
 from leonervis_code.cli.markdown_renderer import (
     DEFAULT_TERMINAL_WIDTH,
+    MAX_TERMINAL_WIDTH,
+    MIN_TERMINAL_WIDTH,
     TerminalMarkdownRenderer,
     escape_terminal_controls,
     render_plain_document,
@@ -79,6 +81,14 @@ class TerminalEventSink:
     @property
     def final_text_was_streamed(self) -> bool:
         return self._final_text_was_streamed
+
+    def resize(self, width: int) -> None:
+        """Use the latest TTY width for subsequent assistant and Host output."""
+        if type(width) is not int or not MIN_TERMINAL_WIDTH <= width <= MAX_TERMINAL_WIDTH:
+            raise ValueError("terminal event width is out of range")
+        self._markdown_width = width
+        if self._markdown is not None:
+            self._markdown.resize(width)
 
     def start_waiting(self) -> None:
         """Show one ephemeral pre-event status without changing runtime behavior."""

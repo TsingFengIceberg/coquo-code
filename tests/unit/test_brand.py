@@ -41,6 +41,22 @@ def test_banner_has_version_status_and_display_path(tmp_path) -> None:
     assert "\x1b[" not in banner
 
 
+def test_banner_uses_vertical_hanging_layout_when_terminal_is_narrow(tmp_path) -> None:
+    banner = render_banner(version="0.1.0", cwd=tmp_path, color=False, width=40)
+
+    lines = banner.splitlines()
+    assert lines[:5] == [
+        "  █    █████  ███",
+        "  █    █     █   █",
+        "  █    █████ █   █",
+        "  █    █     █   █",
+        "  ██████████  ███",
+    ]
+    assert "  LEONERVIS CODE v0.1.0" in lines
+    assert all(line.startswith("  ") for line in lines if line)
+    assert all(len(line) <= 40 for line in lines)
+
+
 class InteractiveStream(io.StringIO):
     def isatty(self) -> bool:
         return True

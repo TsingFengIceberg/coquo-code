@@ -7,6 +7,7 @@ from typing import TextIO
 
 from leonervis_code.cli.brand import render_banner
 from leonervis_code.cli.event_sink import TerminalEventSink
+from leonervis_code.cli.markdown_renderer import terminal_stream_content_width
 from leonervis_code.cli.prompt_editor import (
     MAX_PROMPT_BYTES,
     MAX_PROMPT_CHARACTERS,
@@ -23,6 +24,7 @@ from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
     ToolDetailMode,
     render_message,
+    render_host_message,
     render_prompt,
     render_prompt_toolbar,
     render_runtime_status,
@@ -66,21 +68,39 @@ def run_repl(
     """Read input, dispatch local commands, and route ordinary text to the model."""
     editor = prompt_editor or create_prompt_editor(stdin, stdout)
     terminal_ui = isinstance(editor, TerminalPromptEditor)
-    stdout.write(f"\n{render_banner(version=version, cwd=cwd, color=color)}\n")
-    status = _snapshot(session, "status")
-    if status is not None:
-        stdout.write(f"\n{render_runtime_status(status)}\n")
-    session_info = _snapshot(session, "session_info")
-    if session_info is not None:
-        stdout.write(f"\n{render_session_info(session_info)}\nAuto-save: enabled\n")
-    stdout.write("\n")
-    stdout.flush()
-    if (
+    persistent_ui = (
         prompt_editor is None
         and frontend_queue is not None
         and approval_broker is not None
         and supports_terminal_application(stdin, stdout)
-    ):
+    )
+    startup_width = terminal_stream_content_width(stdout) if persistent_ui else None
+    stdout.write(f"\n{render_banner(version=version, cwd=cwd, color=color, width=startup_width)}\n")
+    status = _snapshot(session, "status")
+    if status is not None:
+        rendered_status = render_runtime_status(status)
+        if persistent_ui:
+            rendered_status = render_host_message(
+                rendered_status,
+                "info",
+                color=color,
+                width=startup_width,
+            )
+        stdout.write(f"\n{rendered_status}\n")
+    session_info = _snapshot(session, "session_info")
+    if session_info is not None:
+        rendered_session = f"{render_session_info(session_info)}\nAuto-save: enabled"
+        if persistent_ui:
+            rendered_session = render_host_message(
+                rendered_session,
+                "info",
+                color=color,
+                width=startup_width,
+            )
+        stdout.write(f"\n{rendered_session}\n")
+    stdout.write("\n")
+    stdout.flush()
+    if persistent_ui:
         return TerminalApplication(
             session,
             stdout=stdout,

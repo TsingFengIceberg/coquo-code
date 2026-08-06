@@ -334,6 +334,49 @@ def test_twenty_fourth_provider_invocation_is_text_only(tmp_path) -> None:
     assert "error=23" in final_result.content
 
 
+def test_first_provider_response_hook_runs_before_tools_and_consumes_shared_budget(
+    tmp_path,
+) -> None:
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "read-1",
+                "read_file",
+                ToolArguments.from_mapping({"path": "missing.txt"}),
+            ),
+            AssistantText("done"),
+        ]
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    timeline: list[object] = []
+
+    def prepare_title() -> int:
+        timeline.append("title")
+        return 22
+
+    assert (
+        loop.run(
+            "inspect",
+            event_sink=timeline.append,
+            first_provider_response_hook=prepare_title,
+        )
+        == "done"
+    )
+
+    title_index = timeline.index("title")
+    tool_index = next(
+        index for index, event in enumerate(timeline) if isinstance(event, ToolRequestStarted)
+    )
+    assert title_index < tool_index
+    assert provider.received_requests[-1].allow_tools is False
+
+
 def test_loop_counts_glob_and_read_against_one_shared_budget(tmp_path) -> None:
     (tmp_path / "a.py").write_text("a", encoding="utf-8")
     provider = ScriptedFakeProvider(

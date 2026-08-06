@@ -112,6 +112,7 @@ ToolRegistryFactory = Callable[[], ToolRegistrySnapshot]
 ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchResult]
 AgentEventSink = Callable[[AgentPromptEvent], None]
 ToolUsageSink = Callable[[ToolAttemptUsage], None]
+FirstProviderResponseHook = Callable[[], int]
 
 
 def _no_project_instructions() -> None:
@@ -454,6 +455,7 @@ class AgentLoop:
         cancellation: TurnCancellation | None = None,
         tool_usage_sink: ToolUsageSink | None = None,
         task_proposal_sink: TaskProposalSink | None = None,
+        first_provider_response_hook: FirstProviderResponseHook | None = None,
     ) -> str:
         """Prepare then run one bounded tool loop for compatibility callers."""
         return self.run_prepared(
@@ -464,6 +466,7 @@ class AgentLoop:
             cancellation=cancellation,
             tool_usage_sink=tool_usage_sink,
             task_proposal_sink=task_proposal_sink,
+            first_provider_response_hook=first_provider_response_hook,
         )
 
     def run_prepared(
@@ -476,12 +479,15 @@ class AgentLoop:
         cancellation: TurnCancellation | None = None,
         tool_usage_sink: ToolUsageSink | None = None,
         task_proposal_sink: TaskProposalSink | None = None,
+        first_provider_response_hook: FirstProviderResponseHook | None = None,
     ) -> str:
         """Run one prebuilt pending turn against its pinned committed context."""
         if type(include_tool_details) is not bool:
             raise ValueError("tool detail event option is invalid")
         if task_proposal_sink is not None and not callable(task_proposal_sink):
             raise ValueError("Task proposal sink is invalid")
+        if first_provider_response_hook is not None and not callable(first_provider_response_hook):
+            raise ValueError("first provider response hook is invalid")
         turn_provider = provider or self._provider
         if turn_provider is None:
             raise RuntimeError("conversation provider is required for this turn")
@@ -525,6 +531,19 @@ class AgentLoop:
                 cancellation,
             )
             provider_invocations += 1
+            response_invocation_index = provider_invocations
+            if response_invocation_index == 1 and first_provider_response_hook is not None:
+                additional_invocations = first_provider_response_hook()
+                if (
+                    type(additional_invocations) is not int
+                    or additional_invocations < 0
+                    or provider_invocations + additional_invocations
+                    > MAX_PROVIDER_INVOCATIONS_PER_TURN
+                ):
+                    raise ValueError(
+                        "first provider response hook returned an invalid invocation count"
+                    )
+                provider_invocations += additional_invocations
             response = outcome.response
             if isinstance(response, ProviderResponseEnvelope):
                 pending += response.provider_items
@@ -543,7 +562,7 @@ class AgentLoop:
                         AssistantFinalTextStreamCommitted(response.text),
                     )
                 self._emit_search_observation(event_sink, outcome)
-                self._emit_invocation_usage(event_sink, provider_invocations, outcome)
+                self._emit_invocation_usage(event_sink, response_invocation_index, outcome)
                 if ledger.entries:
                     self._emit_prompt_event(event_sink, ToolTurnSummaryCommitted(ledger))
                 return response.text
@@ -591,7 +610,7 @@ class AgentLoop:
                 )
                 self._emit_prompt_event(event_sink, companion_event)
             self._emit_search_observation(event_sink, outcome)
-            self._emit_invocation_usage(event_sink, provider_invocations, outcome)
+            self._emit_invocation_usage(event_sink, response_invocation_index, outcome)
             pending += (response,)
             if tool_requests + len(requests) > MAX_TOOL_REQUESTS_PER_TURN:
                 attempt_usage = ToolAttemptUsage(

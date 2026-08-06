@@ -43,11 +43,10 @@ from leonervis_code.cli.frontend import (
 )
 from leonervis_code.cli.markdown_renderer import (
     DEFAULT_TERMINAL_WIDTH,
-    MAX_TERMINAL_WIDTH,
-    MIN_TERMINAL_WIDTH,
     escape_terminal_controls,
     render_markdown_document,
     render_plain_document,
+    terminal_content_width,
 )
 from leonervis_code.cli.presentation import (
     CLEAR_SCREEN,
@@ -72,7 +71,11 @@ from leonervis_code.cli.prompt_editor import (
 from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from leonervis_code.cli.turn_runner import TaskTurnRequest, TurnRunner
 from leonervis_code.core.action_coordinator import ApprovalResolution
-from leonervis_code.session import SessionTitleGenerationStarted, TurnCommitStarted
+from leonervis_code.session import (
+    SessionTitleGenerationStarted,
+    SessionTitlePrepared,
+    TurnCommitStarted,
+)
 
 
 def supports_terminal_application(stdin: TextIO, stdout: TextIO) -> bool:
@@ -129,6 +132,11 @@ class _QueuedPromptRenderer:
                 )
             )
         return self._take_output()
+
+    def resize(self, width: int) -> None:
+        """Update wrapping width while preserving the current response stream."""
+        self._width = width
+        self._sink.resize(width)
 
     def abort(self) -> tuple[bool, str]:
         partial = self._sink.abort_stream()
@@ -197,6 +205,7 @@ class TerminalApplication:
         self._renderer = _QueuedPromptRenderer(color=color, render_markdown=render_markdown)
         self._status = _snapshot(session, "status")
         self._session_info = _snapshot(session, "session_info")
+        self._session_info_before_prepared_title: object | None = None
         self._usage = _snapshot(session, "usage")
         self._approval_draft: tuple[str, int] | None = None
         self._turn_starting = False
@@ -298,19 +307,34 @@ class TerminalApplication:
             self._buffer.set_document(self._buffer.document.__class__("", 0), bypass_readonly=True)
             await self._write_turn_output(
                 render_turn_trace(
-                    render_approval_request(event.request, color=self._color),
-                    "plain",
+                    render_approval_request(event.request, color=False),
+                    "warning",
                     color=self._color,
+                    width=self._current_width(),
                 )
                 + "\n"
             )
         elif isinstance(event, PromptActivity):
+            if isinstance(event.event, SessionTitlePrepared):
+                if self._session_info_before_prepared_title is None:
+                    self._session_info_before_prepared_title = self._session_info
+                self._session_info = replace(
+                    self._session_info,
+                    name=event.event.name,
+                    name_source=event.event.source,
+                    title_fallback_reason=None,
+                )
+                return
             if isinstance(event.event, (SessionTitleGenerationStarted, TurnCommitStarted)):
                 return
+            self._renderer.resize(self._current_width())
             rendered = self._renderer.render(event.event)
             if rendered:
                 await self._write_turn_output(rendered)
         elif isinstance(event, TurnFailed):
+            if self._session_info_before_prepared_title is not None:
+                self._session_info = self._session_info_before_prepared_title
+                self._session_info_before_prepared_title = None
             _, trailing = self._renderer.abort()
             if trailing:
                 await self._write_turn_output(trailing)
@@ -325,6 +349,7 @@ class TerminalApplication:
             )
         elif isinstance(event, TurnFinished):
             if event.response and not self._renderer.final_text_was_streamed:
+                self._renderer.resize(self._current_width())
                 await self._write_turn_output(self._renderer.render_final(event.response))
             await self._write(
                 f"\n{render_message_separator(self._current_width(), color=self._color)}\n"
@@ -333,6 +358,7 @@ class TerminalApplication:
             self._renderer.reset()
             self._turn_output_started = False
             self._refresh_snapshots()
+            self._session_info_before_prepared_title = None
             if should_exit:
                 self._application.exit(result=None)
             elif event.task_handoff is not None:
@@ -638,10 +664,10 @@ class TerminalApplication:
 
     def _current_width(self) -> int:
         try:
-            width = self._application.output.get_size().columns
+            columns = self._application.output.get_size().columns
         except Exception:
-            width = DEFAULT_TERMINAL_WIDTH
-        return max(MIN_TERMINAL_WIDTH, min(width, MAX_TERMINAL_WIDTH))
+            columns = DEFAULT_TERMINAL_WIDTH + 1
+        return terminal_content_width(columns)
 
     async def _write(self, text: str) -> None:
         if not text:

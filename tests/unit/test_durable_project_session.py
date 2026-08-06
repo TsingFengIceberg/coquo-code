@@ -45,6 +45,7 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeContextError,
     SessionTitleFallbackApplied,
+    SessionTitlePrepared,
     TurnCommitStarted,
 )
 from leonervis_code.session_records import (
@@ -623,7 +624,7 @@ def test_project_session_does_not_exceed_24_provider_invocations_for_title(
         def respond(self, request):
             self.requests.append(request)
             index = len(self.requests)
-            if index < 24:
+            if index < 23:
                 return ToolUse(
                     f"read-{index}",
                     "read_file",
@@ -633,7 +634,11 @@ def test_project_session_does_not_exceed_24_provider_invocations_for_title(
 
         def generate_session_title_outcome(self, request):
             self.title_requests.append(request)
-            raise AssertionError("title request exceeded the provider invocation budget")
+            return ProviderResponseOutcome(
+                AssistantText("Repeated file reads"),
+                False,
+                ProviderTokenUsage(20, 4),
+            )
 
     provider = BudgetProvider("budget-model")
     session = ProjectSession.open(
@@ -648,17 +653,75 @@ def test_project_session_does_not_exceed_24_provider_invocations_for_title(
 
     session.prompt("Read repeatedly")
 
-    assert len(provider.requests) == 24
-    assert provider.title_requests == []
-    assert session.session_info().name == "Read repeatedly"
-    assert session.session_info().name_source == SessionNameSource.FALLBACK
-    assert (
-        session.session_info().title_fallback_reason == SessionTitleFallbackReason.INVOCATION_BUDGET
-    )
+    assert len(provider.requests) == 23
+    assert len(provider.title_requests) == 1
+    assert session.session_info().name == "Repeated file reads"
+    assert session.session_info().name_source == SessionNameSource.MODEL
+    assert session.session_info().title_fallback_reason is None
     committed = next(
         record for record in session._writer.state.records if isinstance(record, TurnCommitted)
     )
     assert len(committed.provider_usage) == 24
+    session.close()
+
+
+def test_project_session_prepares_title_after_first_response_before_tool_dispatch(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+
+    class EarlyTitleProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_requests = []
+
+        def respond(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ToolUse(
+                    "read-1",
+                    "read_file",
+                    ToolArguments.from_mapping({"path": "seed.txt"}),
+                )
+            return AssistantText("done")
+
+        def generate_session_title_outcome(self, request):
+            self.title_requests.append(request)
+            return ProviderResponseOutcome(
+                AssistantText("Early MCP title"),
+                False,
+                ProviderTokenUsage(20, 4),
+            )
+
+    provider = EarlyTitleProvider("title-model")
+    events = []
+    session = ProjectSession.open(
+        tmp_path,
+        model="custom/title-model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    session.prompt("Inspect through tools", event_sink=events.append)
+
+    prepared_index = next(
+        index for index, event in enumerate(events) if isinstance(event, SessionTitlePrepared)
+    )
+    tool_index = next(
+        index for index, event in enumerate(events) if isinstance(event, ToolRequestStarted)
+    )
+    assert prepared_index < tool_index
+    assert events[prepared_index] == SessionTitlePrepared(
+        "Early MCP title", SessionNameSource.MODEL
+    )
+    assert session.session_info().name == "Early MCP title"
+    committed = next(
+        record for record in session._writer.state.records if isinstance(record, TurnCommitted)
+    )
+    assert len(committed.provider_usage) == 3
     session.close()
 
 

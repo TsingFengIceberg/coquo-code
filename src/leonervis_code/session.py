@@ -79,7 +79,6 @@ from leonervis_code.core.session_title import (
     parse_session_title_response,
 )
 from leonervis_code.core.contracts import (
-    AssistantText,
     AssistantToolBatch,
     CommittedTurn,
     ConversationItem,
@@ -157,6 +156,7 @@ from leonervis_code.session_records import (
     ContextCompacted,
     CONTEXT_COMPACTED_SCHEMA_VERSION,
     MAX_RECORDS,
+    canonical_session_name,
     SessionNameSource,
     SessionTitleFallbackReason,
     SessionRecord,
@@ -588,6 +588,19 @@ class SessionTitleFallbackApplied:
 
 
 @dataclass(frozen=True)
+class SessionTitlePrepared:
+    """Expose one transient first-turn title without claiming durable commit."""
+
+    name: str
+    source: SessionNameSource
+
+    def __post_init__(self) -> None:
+        canonical_session_name(self.name)
+        if self.source not in {SessionNameSource.MODEL, SessionNameSource.FALLBACK}:
+            raise ValueError("prepared Session title source is invalid")
+
+
+@dataclass(frozen=True)
 class DurableUsageOperation:
     record_sequence: int
     occurred_at: str
@@ -619,6 +632,7 @@ PromptEvent = (
     | AutoCompactionCommitted
     | AutoCompactionNotApplied
     | SessionTitleGenerationStarted
+    | SessionTitlePrepared
     | SessionTitleFallbackApplied
     | TurnCommitStarted
     | TurnUsageCompleted
@@ -642,6 +656,13 @@ class _PreparedCompaction:
     captured_source: str
     retained_from_full_turn: int
     trigger: CompactionTrigger
+
+
+@dataclass(frozen=True)
+class _PreparedSessionTitle:
+    name: str
+    source: SessionNameSource
+    fallback_reason: SessionTitleFallbackReason | None = None
 
 
 @dataclass(frozen=True)
@@ -858,6 +879,7 @@ class ProjectSession:
         self._active_cancellation: TurnCancellation | None = None
         self._active_event_sink: PromptEventSink | None = None
         self._active_session_title_source_text: str | None = None
+        self._active_prepared_session_title: _PreparedSessionTitle | None = None
         self._active_task_control_scope: _TaskControlScope | None = None
         self._lock = RLock()
         self._closed = False
@@ -2646,6 +2668,7 @@ class ProjectSession:
             self._active_cancellation = cancellation
             self._active_event_sink = event_sink
             self._active_session_title_source_text = session_title_source_text
+            self._active_prepared_session_title = None
             try:
                 if cancellation is not None:
                     cancellation.check()
@@ -2698,6 +2721,15 @@ class ProjectSession:
                             if _task_proposal_sink is not None
                             else self._capture_task_admission_proposal
                         ),
+                        first_provider_response_hook=(
+                            lambda: self._prepare_first_turn_session_title(
+                                runtime,
+                                usage_cursor,
+                                session_title_source_text or text,
+                            )
+                        )
+                        if not self._writer.state.turns and self._writer.state.latest_name is None
+                        else None,
                     )
                 usage = self._manager.finish_turn_usage(usage_cursor)
                 if usage.latest_invocation is not None:
@@ -2730,6 +2762,7 @@ class ProjectSession:
                 self._active_cancellation = None
                 self._active_event_sink = None
                 self._active_session_title_source_text = None
+                self._active_prepared_session_title = None
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -4479,16 +4512,53 @@ class ProjectSession:
         runtime: TurnRuntimeSnapshot,
         usage_cursor: int,
     ) -> None:
-        title_source_text = self._active_session_title_source_text or turn.user.text
+        del runtime
+        prepared = self._active_prepared_session_title
+        if prepared is None:
+            prepared = _PreparedSessionTitle(
+                fallback_session_title(self._active_session_title_source_text or turn.user.text),
+                SessionNameSource.FALLBACK,
+                SessionTitleFallbackReason.INVOCATION_BUDGET,
+            )
+        fallback_base = prepared.name
+        for _ in range(MAX_RECORDS + 1):
+            try:
+                self._append_committed_turn(
+                    writer,
+                    turn,
+                    usage_cursor,
+                    session_name=prepared.name,
+                    session_name_source=prepared.source,
+                    session_title_fallback_reason=prepared.fallback_reason,
+                )
+                if prepared.fallback_reason is not None:
+                    self._emit_prompt_event(
+                        self._active_event_sink,
+                        SessionTitleFallbackApplied(prepared.fallback_reason),
+                    )
+                return
+            except SessionNameConflictError:
+                prepared = _PreparedSessionTitle(
+                    self._available_session_title(fallback_base, force_number=True),
+                    SessionNameSource.FALLBACK,
+                    SessionTitleFallbackReason.DUPLICATE_TITLE,
+                )
+        raise SessionStoreError("could not commit a unique Session name")
+
+    def _prepare_first_turn_session_title(
+        self,
+        runtime: TurnRuntimeSnapshot,
+        usage_cursor: int,
+        title_source_text: str,
+    ) -> int:
+        if self._active_prepared_session_title is not None:
+            return 0
         rejected: list[str] = []
         fallback_base: str | None = None
         fallback_reason = SessionTitleFallbackReason.INVOCATION_BUDGET
-        completed_invocations = _committed_turn_provider_invocations(turn)
+        attempts = 0
         for attempt in range(1, SESSION_TITLE_MAX_ATTEMPTS + 1):
-            accounted_invocations = len(
-                self._manager.usage_since(usage_cursor, kind=ProviderInvocationKind.TURN)
-            )
-            used = max(completed_invocations + attempt - 1, accounted_invocations)
+            used = len(self._manager.usage_since(usage_cursor, kind=ProviderInvocationKind.TURN))
             if used >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
                 break
             if self._active_cancellation is not None:
@@ -4497,6 +4567,7 @@ class ProjectSession:
                 self._active_event_sink,
                 SessionTitleGenerationStarted(attempt, SESSION_TITLE_MAX_ATTEMPTS),
             )
+            attempts += 1
             try:
                 response = runtime.generate_session_title(
                     build_session_title_request(
@@ -4522,39 +4593,45 @@ class ProjectSession:
                 fallback_reason = SessionTitleFallbackReason.INVALID_CANDIDATE
                 continue
             fallback_base = candidate
-            try:
-                self._append_committed_turn(
-                    writer,
-                    turn,
-                    usage_cursor,
-                    session_name=candidate,
-                    session_name_source=SessionNameSource.MODEL,
-                )
-                return
-            except SessionNameConflictError:
+            if self._session_title_exists(candidate):
                 fallback_reason = SessionTitleFallbackReason.DUPLICATE_TITLE
                 if candidate not in rejected:
                     rejected.append(candidate)
+                continue
+            prepared = _PreparedSessionTitle(candidate, SessionNameSource.MODEL)
+            self._install_prepared_session_title(prepared)
+            return attempts
 
         base = fallback_base or fallback_session_title(title_source_text)
+        prepared = _PreparedSessionTitle(
+            self._available_session_title(base),
+            SessionNameSource.FALLBACK,
+            fallback_reason,
+        )
+        self._install_prepared_session_title(prepared)
+        return attempts
+
+    def _install_prepared_session_title(self, prepared: _PreparedSessionTitle) -> None:
+        self._active_prepared_session_title = prepared
+        self._emit_prompt_event(
+            self._active_event_sink,
+            SessionTitlePrepared(prepared.name, prepared.source),
+        )
+
+    def _session_title_exists(self, name: str) -> bool:
+        key = name.casefold()
+        return any(
+            info.session_id != self._writer.session_id and info.name.casefold() == key
+            for info in self._session_store.list()
+        )
+
+    def _available_session_title(self, base: str, *, force_number: bool = False) -> str:
         for number in range(1, MAX_RECORDS + 2):
             candidate = base if number == 1 else numbered_session_title(base, number)
-            try:
-                self._append_committed_turn(
-                    writer,
-                    turn,
-                    usage_cursor,
-                    session_name=candidate,
-                    session_name_source=SessionNameSource.FALLBACK,
-                    session_title_fallback_reason=fallback_reason,
-                )
-                self._emit_prompt_event(
-                    self._active_event_sink,
-                    SessionTitleFallbackApplied(fallback_reason),
-                )
-                return
-            except SessionNameConflictError:
+            if force_number and number == 1:
                 continue
+            if not self._session_title_exists(candidate):
+                return candidate
         raise SessionStoreError("could not allocate a unique Session name")
 
     def _append_committed_turn(
@@ -5059,13 +5136,6 @@ def _invalid_tool_request(request: ToolUse, error: Exception) -> ToolDispatchRes
         ToolResult(request.tool_use_id, str(error), is_error=True),
         ToolEventStatus.ERROR,
         "invalid_request",
-    )
-
-
-def _committed_turn_provider_invocations(turn: CommittedTurn) -> int:
-    """Count provider responses represented by one complete neutral turn."""
-    return sum(
-        isinstance(item, (AssistantText, AssistantToolBatch, ToolUse)) for item in turn.items
     )
 
 

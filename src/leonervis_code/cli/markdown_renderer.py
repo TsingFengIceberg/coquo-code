@@ -15,6 +15,8 @@ from rich.text import Text
 DEFAULT_TERMINAL_WIDTH = 100
 MIN_TERMINAL_WIDTH = 40
 MAX_TERMINAL_WIDTH = 240
+MAX_AUTOMATIC_CONTENT_WIDTH = 100
+TERMINAL_RIGHT_MARGIN = 1
 _TRAILING_RENDER_PADDING = re.compile(r"[ \t]+((?:\x1b\[[0-?]*[ -/]*[@-~])*)(\r?\n)")
 
 
@@ -33,7 +35,9 @@ class TerminalMarkdownRenderer:
     ) -> None:
         self._stream = stream
         self._color = color
-        self._width = _terminal_width(stream) if width is None else _validate_width(width)
+        self._width = (
+            terminal_stream_content_width(stream) if width is None else _validate_width(width)
+        )
         self._first_prefix, self._continuation_prefix, self._prefix_width = _validate_prefixes(
             first_prefix,
             continuation_prefix,
@@ -66,6 +70,17 @@ class TerminalMarkdownRenderer:
         if self._pending:
             raise ValueError("cannot render a complete document while a stream is pending")
         return self._render(markdown)
+
+    def resize(self, width: int) -> None:
+        """Apply the latest terminal width without discarding buffered stream text."""
+        selected_width = _validate_width(width)
+        _validate_prefixes(
+            self._first_prefix,
+            self._continuation_prefix,
+            self._prefix_width,
+            selected_width,
+        )
+        self._width = selected_width
 
     def abort(self) -> None:
         """Discard an incomplete suffix without presenting it as completed Markdown."""
@@ -108,7 +123,9 @@ def write_markdown_document(
     prefix_width: int = 0,
 ) -> None:
     """Render one complete Markdown document and terminate its terminal line."""
-    selected_width = _terminal_width(stream) if width is None else _validate_width(width)
+    selected_width = (
+        terminal_stream_content_width(stream) if width is None else _validate_width(width)
+    )
     stream.write(
         render_markdown_document(
             markdown,
@@ -227,12 +244,23 @@ def _render_to_ansi(markdown: str, *, color: bool, width: int) -> str:
     return _TRAILING_RENDER_PADDING.sub(r"\1\2", output.getvalue())
 
 
-def _terminal_width(stream: TextIO) -> int:
+def terminal_stream_content_width(stream: TextIO) -> int:
+    """Return the bounded persistent-output width for one terminal stream."""
     try:
-        width = os.get_terminal_size(stream.fileno()).columns
+        columns = os.get_terminal_size(stream.fileno()).columns
     except (AttributeError, OSError, ValueError):
-        width = DEFAULT_TERMINAL_WIDTH
-    return max(MIN_TERMINAL_WIDTH, min(width, MAX_TERMINAL_WIDTH))
+        columns = DEFAULT_TERMINAL_WIDTH + TERMINAL_RIGHT_MARGIN
+    return terminal_content_width(columns)
+
+
+def terminal_content_width(columns: int) -> int:
+    """Choose a readable hard-wrap width below the physical terminal edge."""
+    if type(columns) is not int or columns <= 0:
+        raise ValueError("physical terminal width is invalid")
+    return max(
+        MIN_TERMINAL_WIDTH,
+        min(columns - TERMINAL_RIGHT_MARGIN, MAX_AUTOMATIC_CONTENT_WIDTH),
+    )
 
 
 def _validate_width(width: int) -> int:

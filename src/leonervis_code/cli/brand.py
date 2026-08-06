@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import TextIO
 
+from leonervis_code.cli.markdown_renderer import render_plain_document
+
 RESET = "\x1b[0m"
 TAIL = (166, 90, 24)
 BODY = (230, 154, 43)
@@ -59,14 +61,24 @@ def display_path(path: Path) -> str:
     return str(resolved_path)
 
 
-def render_banner(*, version: str, cwd: Path, color: bool) -> str:
-    """Render the compact Foundation 3D terminal banner."""
+def render_banner(*, version: str, cwd: Path, color: bool, width: int | None = None) -> str:
+    """Render the Foundation 3D banner with a bounded narrow-terminal fallback."""
     mark = render_mark(color=color)
     details = (
         f"LEONERVIS CODE v{version}",
         "Foundation 3D · durable workspace Sessions",
         display_path(cwd),
     )
+    plain_mark_width = 2 + len(L_GLYPH[0]) + len(E_GLYPH[0]) + 1 + len(O_GLYPH[0])
+    if width is not None and any(plain_mark_width + 4 + len(detail) > width for detail in details):
+        detail_block = render_plain_document(
+            "\n".join(details),
+            width=width,
+            first_prefix="  ",
+            continuation_prefix="  ",
+            prefix_width=2,
+        ).removesuffix("\n")
+        return "\n".join((*[f"  {row}".rstrip() for row in mark], "", detail_block))
     lines = [f"  {mark[row]}    {details[row]}".rstrip() for row in range(len(details))]
     lines.extend(f"  {row}".rstrip() for row in mark[len(details) :])
     return "\n".join(lines)

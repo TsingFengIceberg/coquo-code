@@ -1245,6 +1245,12 @@ Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制�
 
 `mcp doctor`执行一次脱敏live conformance probe，报告transport、protocol、known/unknown capability、tool数量和cleanup，不展示server正文、credential或session ID。初始化失败会尝试关闭remote session，status区分stdio与Streamable HTTP generation；legacy HTTP/SSE暂不支持。单个SSE `data:`行可承载一个完整的有界MCP message，不再受无关的64 KiB行限制；解码消息与完整HTTP响应仍分别限制为1 MiB，event及JSON结构边界不变。工具schema仅在根节点接受已知Draft 7 `$schema`声明；直接根字符串属性还可携带有界`x-mcp-header`路由提示，原始元数据继续进入schema指纹但在Provider投影前移除，live schema复核后仅把安全参数投影为对应`MCP-Param-*` header。未知dialect、嵌套或重复header提示及其他不支持关键字仍被隔离。System prompt为v37，fingerprint为`v37-d7ad600e357ae981d083683cbe35580475da88854a0edbe933ce4106bae11c66`，empty full-context ID为`ctx-v9-febbf229c7b658d6fd2b4f31dc6129cfd7a91487e5f723ef6bf9aafa5969a7b4`；provider adapter保持v38。详见[0118](./decisions/0118-mcp-interoperability-and-production-hardening.md)。
 
+## 提前Session命名与Terminal渲染安全
+
+未命名首轮现在在第一次普通provider响应完成后、任何tool派发前执行既有的有界无工具标题请求。标题调用继续计入同一Turn的24次provider总预算；候选名称先作为进程内TTY底栏状态展示，只有最终Turn成功时才与正文、来源、fallback原因及usage原子写入`turn_committed`。失败或取消会撤销临时名称，commit前仍会复核重名并使用稳定编号fallback。
+
+真实TTY为持久输出预留最右一列，并把自动内容宽度封顶为100个显示单元，使宽终端也生成带续行前缀的真实换行，而不依赖更窄的IDE或复制视图二次软换行。启动runtime/Session块、assistant Markdown、普通文本、Host轨迹、slash及approval都使用该宽度；每个可见活动事件和最终回复写出前会刷新当前宽度，同时保留尚未完成的流式后缀。启动块也使用次要Host缩进，窄屏banner切换为纵向布局。Approval先以无ANSI纯文本完成安全包装，再由外层轨迹应用warning颜色，因此不会再显示字面量`\x1b[...]`。System prompt、adapter、tool contract、Effective Context与全部持久schema不变。详见[0119](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1365,3 +1371,4 @@ Sampling与Elicitation通过独立`McpReverseRequestCoordinator`处理，限制�
 116. [0116：Bounded MCP Resources, Prompts, Subscriptions, and Roots](./decisions/0116-bounded-mcp-resources-prompts-subscriptions-and-roots.md)
 117. [0117：Bounded MCP Sampling and Elicitation](./decisions/0117-bounded-mcp-sampling-and-elicitation.md)
 118. [0118：MCP Interoperability and Production Hardening](./decisions/0118-mcp-interoperability-and-production-hardening.md)
+119. [0119：Early Session Title Preparation and Terminal Rendering Safety](./decisions/0119-early-session-title-and-terminal-rendering-safety.md)

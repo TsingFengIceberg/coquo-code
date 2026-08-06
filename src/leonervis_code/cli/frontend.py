@@ -237,6 +237,8 @@ def _activity_status(event: object) -> str:
         return "Recording provider usage"
     if name == "SessionTitleGenerationStarted":
         return "Naming Session"
+    if name == "SessionTitlePrepared":
+        return "Session title prepared"
     if name == "SessionTitleFallbackApplied":
         return "Session named with Host fallback"
     if name == "TurnCommitStarted":
