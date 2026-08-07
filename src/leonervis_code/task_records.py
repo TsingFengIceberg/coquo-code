@@ -11,6 +11,12 @@ import re
 from typing import TypeAlias
 from uuid import UUID
 
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookEvent,
+    hook_audit_ledger_from_mapping,
+    hook_audit_ledger_to_mapping,
+)
 from leonervis_code.core.task_admission import canonical_task_admission_id
 from leonervis_code.session_records import (
     SessionRecordError,
@@ -21,19 +27,19 @@ from leonervis_code.session_records import (
 TASK_HEADER_SCHEMA_VERSION = 1
 TASK_CONFIGURATION_SCHEMA_VERSION = 1
 TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION = 1
-STAGE_STARTED_SCHEMA_VERSION = 2
-STAGE_COMMITTED_SCHEMA_VERSION = 2
-STAGE_FAILED_SCHEMA_VERSION = 2
+STAGE_STARTED_SCHEMA_VERSION = 3
+STAGE_COMMITTED_SCHEMA_VERSION = 3
+STAGE_FAILED_SCHEMA_VERSION = 3
 TASK_PLAN_PROPOSED_SCHEMA_VERSION = 3
 TASK_PLAN_ACCEPTED_SCHEMA_VERSION = 1
 TASK_COMPLETION_PROPOSED_SCHEMA_VERSION = 2
 TASK_ACCEPTANCE_VERIFIED_SCHEMA_VERSION = 1
 TASK_ACCEPTANCE_CHECKED_SCHEMA_VERSION = 1
-TASK_TERMINATED_SCHEMA_VERSION = 1
+TASK_TERMINATED_SCHEMA_VERSION = 2
 TASK_RENAMED_SCHEMA_VERSION = 1
 TASK_ARCHIVED_SCHEMA_VERSION = 1
 TASK_REFLECTION_RECORDED_SCHEMA_VERSION = 2
-TASK_BLOCKER_RECORDED_SCHEMA_VERSION = 1
+TASK_BLOCKER_RECORDED_SCHEMA_VERSION = 2
 TASK_PAUSE_CHANGED_SCHEMA_VERSION = 1
 TASK_CONTEXT_CHECKPOINT_SCHEMA_VERSION = 1
 TASK_ADMISSION_ORIGIN_SCHEMA_VERSION = 1
@@ -257,6 +263,7 @@ class StageStarted:
     session_record_sequence_before: int | None = None
     session_turn_count_before: int | None = None
     prompt_sha256: str | None = None
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "stage_started"
     schema_version: int = STAGE_STARTED_SCHEMA_VERSION
 
@@ -272,6 +279,7 @@ class StageCommitted:
     turn_record_sha256: str
     committed_at: str
     usage: StageUsage | None = None
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "stage_committed"
     schema_version: int = STAGE_COMMITTED_SCHEMA_VERSION
 
@@ -284,6 +292,7 @@ class StageFailed:
     reason: StageFailureReason
     failed_at: str
     usage: StageUsage | None = None
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "stage_failed"
     schema_version: int = STAGE_FAILED_SCHEMA_VERSION
 
@@ -356,6 +365,7 @@ class TaskTerminated:
     outcome: TaskTerminalOutcome
     reason: str | None
     terminated_at: str
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "task_terminated"
     schema_version: int = TASK_TERMINATED_SCHEMA_VERSION
 
@@ -402,6 +412,7 @@ class TaskBlockerRecorded:
     summary: str
     proposal_tool_use_id: str
     recorded_at: str
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "task_blocker_recorded"
     schema_version: int = TASK_BLOCKER_RECORDED_SCHEMA_VERSION
 
@@ -1352,6 +1363,8 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
                     "session_turn_count_before": record.session_turn_count_before,
                 }
             )
+        if record.schema_version >= 3:
+            common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "stage_started")
         return common
     if isinstance(record, StageCommitted):
         common = {
@@ -1368,6 +1381,8 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
         }
         if record.schema_version >= 2:
             common["usage"] = _usage_to_dict(record.usage) if record.usage is not None else None
+        if record.schema_version >= 3:
+            common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "stage_committed")
         return common
     if isinstance(record, StageFailed):
         common = {
@@ -1381,6 +1396,8 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
         }
         if record.schema_version >= 2:
             common["usage"] = _usage_to_dict(record.usage) if record.usage is not None else None
+        if record.schema_version >= 3:
+            common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "stage_failed")
         return common
     if isinstance(record, TaskPlanProposed):
         common = {
@@ -1437,12 +1454,15 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             source=record.source.value,
         )
     if isinstance(record, TaskTerminated):
-        return _simple_record(
+        common = _simple_record(
             record,
             outcome=record.outcome.value,
             reason=record.reason,
             terminated_at=record.terminated_at,
         )
+        if record.schema_version >= 2:
+            common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "task_terminated")
+        return common
     if isinstance(record, TaskRenamed):
         return _simple_record(record, name=record.name, renamed_at=record.renamed_at)
     if isinstance(record, TaskArchived):
@@ -1462,7 +1482,7 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             common["proposal_tool_use_id"] = record.proposal_tool_use_id
         return common
     if isinstance(record, TaskBlockerRecorded):
-        return _simple_record(
+        common = _simple_record(
             record,
             category=record.category.value,
             proposal_tool_use_id=record.proposal_tool_use_id,
@@ -1471,6 +1491,9 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
             stage_number=record.stage_number,
             summary=record.summary,
         )
+        if record.schema_version >= 2:
+            common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "task_blocker_recorded")
+        return common
     if isinstance(record, TaskPauseChanged):
         return _simple_record(
             record,
@@ -1630,7 +1653,7 @@ def _decode_stage_started(value: dict[str, object]) -> StageStarted:
             started_at=value.get("started_at"),
             schema_version=1,
         )
-    elif version == 2:
+    elif version in {2, 3}:
         _fields(
             value,
             "stage_started",
@@ -1639,6 +1662,7 @@ def _decode_stage_started(value: dict[str, object]) -> StageStarted:
             "prompt_sha256",
             "session_record_sequence_before",
             "session_turn_count_before",
+            *(("hook_audit",) if version >= 3 else ()),
         )
         try:
             kind = StageKind(value.get("kind"))
@@ -1655,6 +1679,12 @@ def _decode_stage_started(value: dict[str, object]) -> StageStarted:
             session_record_sequence_before=value.get("session_record_sequence_before"),
             session_turn_count_before=value.get("session_turn_count_before"),
             prompt_sha256=value.get("prompt_sha256"),
+            hook_audit=(
+                _hook_audit_from_value(value.get("hook_audit"), "stage_started")
+                if version >= 3
+                else HookAuditLedger()
+            ),
+            schema_version=version,
         )
     else:
         raise TaskRecordError("unsupported stage_started schema version")
@@ -1676,8 +1706,14 @@ def _decode_stage_committed(value: dict[str, object]) -> StageCommitted:
     if version == 1:
         _fields(value, "stage_committed", *base)
         usage = None
-    elif version == 2:
-        _fields(value, "stage_committed", *base, "usage")
+    elif version in {2, 3}:
+        _fields(
+            value,
+            "stage_committed",
+            *base,
+            "usage",
+            *(("hook_audit",) if version >= 3 else ()),
+        )
         usage = None if value.get("usage") is None else _usage_from_value(value.get("usage"))
     else:
         raise TaskRecordError("unsupported stage_committed schema version")
@@ -1691,6 +1727,11 @@ def _decode_stage_committed(value: dict[str, object]) -> StageCommitted:
         turn_record_sha256=value.get("turn_record_sha256"),
         committed_at=value.get("committed_at"),
         usage=usage,
+        hook_audit=(
+            _hook_audit_from_value(value.get("hook_audit"), "stage_committed")
+            if version >= 3
+            else HookAuditLedger()
+        ),
         schema_version=version,
     )
     _validate_stage_committed(record)
@@ -1703,8 +1744,14 @@ def _decode_stage_failed(value: dict[str, object]) -> StageFailed:
     if version == 1:
         _fields(value, "stage_failed", *fields)
         usage = None
-    elif version == 2:
-        _fields(value, "stage_failed", *fields, "usage")
+    elif version in {2, 3}:
+        _fields(
+            value,
+            "stage_failed",
+            *fields,
+            "usage",
+            *(("hook_audit",) if version >= 3 else ()),
+        )
         usage = None if value.get("usage") is None else _usage_from_value(value.get("usage"))
     else:
         raise TaskRecordError("unsupported stage_failed schema version")
@@ -1719,6 +1766,11 @@ def _decode_stage_failed(value: dict[str, object]) -> StageFailed:
         reason=reason,
         failed_at=value.get("failed_at"),
         usage=usage,
+        hook_audit=(
+            _hook_audit_from_value(value.get("hook_audit"), "stage_failed")
+            if version >= 3
+            else HookAuditLedger()
+        ),
         schema_version=version,
     )
     _validate_stage_failed(record)
@@ -1864,14 +1916,32 @@ def _decode_acceptance_checked(value: dict[str, object]) -> TaskAcceptanceChecke
 
 
 def _decode_terminated(value: dict[str, object]) -> TaskTerminated:
-    _fields(value, "task_terminated", "outcome", "reason", "terminated_at")
-    _version(value, TASK_TERMINATED_SCHEMA_VERSION, "task_terminated")
+    version = value.get("schema_version")
+    if version not in {1, TASK_TERMINATED_SCHEMA_VERSION}:
+        raise TaskRecordError("unsupported task_terminated schema version")
+    _fields(
+        value,
+        "task_terminated",
+        "outcome",
+        "reason",
+        "terminated_at",
+        *(("hook_audit",) if version >= 2 else ()),
+    )
     try:
         outcome = TaskTerminalOutcome(value.get("outcome"))
     except (TypeError, ValueError):
         raise TaskRecordError("unsupported Task terminal outcome") from None
     record = TaskTerminated(
-        value.get("sequence"), outcome, value.get("reason"), value.get("terminated_at")
+        value.get("sequence"),
+        outcome,
+        value.get("reason"),
+        value.get("terminated_at"),
+        hook_audit=(
+            _hook_audit_from_value(value.get("hook_audit"), "task_terminated")
+            if version >= 2
+            else HookAuditLedger()
+        ),
+        schema_version=version,
     )
     _validate_terminated(record)
     return record
@@ -1930,6 +2000,9 @@ def _decode_reflection_recorded(value: dict[str, object]) -> TaskReflectionRecor
 
 
 def _decode_blocker_recorded(value: dict[str, object]) -> TaskBlockerRecorded:
+    version = value.get("schema_version")
+    if version not in {1, TASK_BLOCKER_RECORDED_SCHEMA_VERSION}:
+        raise TaskRecordError("unsupported task_blocker_recorded schema version")
     _fields(
         value,
         "task_blocker_recorded",
@@ -1939,8 +2012,8 @@ def _decode_blocker_recorded(value: dict[str, object]) -> TaskBlockerRecorded:
         "stage_id",
         "stage_number",
         "summary",
+        *(("hook_audit",) if version >= 2 else ()),
     )
-    _version(value, TASK_BLOCKER_RECORDED_SCHEMA_VERSION, "task_blocker_recorded")
     try:
         category = TaskBlockerCategory(value.get("category"))
     except (TypeError, ValueError):
@@ -1953,6 +2026,12 @@ def _decode_blocker_recorded(value: dict[str, object]) -> TaskBlockerRecorded:
         summary=value.get("summary"),
         proposal_tool_use_id=value.get("proposal_tool_use_id"),
         recorded_at=value.get("recorded_at"),
+        hook_audit=(
+            _hook_audit_from_value(value.get("hook_audit"), "task_blocker_recorded")
+            if version >= 2
+            else HookAuditLedger()
+        ),
+        schema_version=version,
     )
     _validate_blocker_recorded(record)
     return record
@@ -2144,7 +2223,7 @@ def _validate_stage_started(record: object) -> None:
     if not isinstance(record, StageStarted):
         raise TaskRecordError("unsupported stage_started record")
     _positive_sequence(record.sequence, "stage_started sequence")
-    if record.record_type != "stage_started" or record.schema_version not in {1, 2}:
+    if record.record_type != "stage_started" or record.schema_version not in {1, 2, 3}:
         raise TaskRecordError("unsupported stage_started schema or record type")
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "Stage number")
@@ -2157,6 +2236,7 @@ def _validate_stage_started(record: object) -> None:
             or record.session_record_sequence_before is not None
             or record.session_turn_count_before is not None
             or record.prompt_sha256 is not None
+            or record.hook_audit.entries
         ):
             raise TaskRecordError("stage_started v1 cannot contain recovery metadata")
         return
@@ -2173,13 +2253,19 @@ def _validate_stage_started(record: object) -> None:
     ):
         raise TaskRecordError("Stage recovery baselines must be provided together")
     _optional_sha256(record.prompt_sha256, "Stage prompt SHA-256")
+    _validate_hook_audit(
+        record.hook_audit,
+        supported=record.schema_version >= 3,
+        label="stage_started",
+        expected_event=HookEvent.TASK_STAGE_STARTED,
+    )
 
 
 def _validate_stage_committed(record: object) -> None:
     if not isinstance(record, StageCommitted):
         raise TaskRecordError("unsupported stage_committed record")
     _positive_sequence(record.sequence, "stage_committed sequence")
-    if record.record_type != "stage_committed" or record.schema_version not in {1, 2}:
+    if record.record_type != "stage_committed" or record.schema_version not in {1, 2, 3}:
         raise TaskRecordError("unsupported stage_committed schema or record type")
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "Stage number")
@@ -2192,13 +2278,19 @@ def _validate_stage_committed(record: object) -> None:
         raise TaskRecordError("stage_committed v1 cannot contain usage")
     if record.usage is not None:
         _validate_stage_usage(record.usage)
+    _validate_hook_audit(
+        record.hook_audit,
+        supported=record.schema_version >= 3,
+        label="stage_committed",
+        expected_event=HookEvent.TASK_STAGE_COMMITTED,
+    )
 
 
 def _validate_stage_failed(record: object) -> None:
     if not isinstance(record, StageFailed):
         raise TaskRecordError("unsupported stage_failed record")
     _positive_sequence(record.sequence, "stage_failed sequence")
-    if record.record_type != "stage_failed" or record.schema_version not in {1, 2}:
+    if record.record_type != "stage_failed" or record.schema_version not in {1, 2, 3}:
         raise TaskRecordError("unsupported stage_failed schema or record type")
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "Stage number")
@@ -2209,6 +2301,12 @@ def _validate_stage_failed(record: object) -> None:
         raise TaskRecordError("stage_failed v1 cannot contain usage")
     if record.usage is not None:
         _validate_stage_usage(record.usage)
+    _validate_hook_audit(
+        record.hook_audit,
+        supported=record.schema_version >= 3,
+        label="stage_failed",
+        expected_event=HookEvent.TASK_STAGE_FAILED,
+    )
 
 
 def _validate_plan_proposed(record: object) -> None:
@@ -2313,7 +2411,8 @@ def _validate_terminated(record: object) -> None:
     if not isinstance(record, TaskTerminated):
         raise TaskRecordError("unsupported task_terminated record")
     _positive_sequence(record.sequence, "task_terminated sequence")
-    _record_identity(record, "task_terminated", TASK_TERMINATED_SCHEMA_VERSION)
+    if record.record_type != "task_terminated" or record.schema_version not in {1, 2}:
+        raise TaskRecordError("unsupported task_terminated schema or record type")
     if type(record.outcome) is not TaskTerminalOutcome:
         raise TaskRecordError("unsupported Task terminal outcome")
     if record.outcome is TaskTerminalOutcome.COMPLETED:
@@ -2322,6 +2421,12 @@ def _validate_terminated(record: object) -> None:
     else:
         _bounded_text(record.reason, "Task terminal reason", max_characters=1024, max_bytes=4096)
     _validate_timestamp(record.terminated_at, "Task terminated_at")
+    _validate_hook_audit(
+        record.hook_audit,
+        supported=record.schema_version >= 2,
+        label="task_terminated",
+        expected_event=HookEvent.TASK_TERMINATED,
+    )
 
 
 def _validate_renamed(record: object) -> None:
@@ -2378,7 +2483,8 @@ def _validate_blocker_recorded(record: object) -> None:
     if not isinstance(record, TaskBlockerRecorded):
         raise TaskRecordError("unsupported task_blocker_recorded record")
     _positive_sequence(record.sequence, "task_blocker_recorded sequence")
-    _record_identity(record, "task_blocker_recorded", TASK_BLOCKER_RECORDED_SCHEMA_VERSION)
+    if record.record_type != "task_blocker_recorded" or record.schema_version not in {1, 2}:
+        raise TaskRecordError("unsupported task_blocker_recorded schema or record type")
     canonical_stage_id(record.stage_id)
     _positive(record.stage_number, "blocker Stage number")
     if type(record.category) is not TaskBlockerCategory:
@@ -2386,6 +2492,12 @@ def _validate_blocker_recorded(record: object) -> None:
     _bounded_text(record.summary, "Task blocker summary", max_characters=1024, max_bytes=4096)
     canonical_task_proposal_tool_use_id(record.proposal_tool_use_id)
     _validate_timestamp(record.recorded_at, "Task blocker recorded_at")
+    _validate_hook_audit(
+        record.hook_audit,
+        supported=record.schema_version >= 2,
+        label="task_blocker_recorded",
+        expected_event=HookEvent.TASK_BLOCKED,
+    )
 
 
 def _validate_pause_changed(record: object) -> None:
@@ -2595,6 +2707,39 @@ def _budget_from_value(value: object) -> TaskBudget:
 def _usage_to_dict(usage: StageUsage) -> dict[str, int]:
     _validate_stage_usage(usage)
     return dict(usage.__dict__)
+
+
+def _hook_audit_to_value(ledger: HookAuditLedger, label: str) -> dict[str, object]:
+    try:
+        return hook_audit_ledger_to_mapping(ledger)
+    except ValueError as error:
+        raise TaskRecordError(f"invalid {label} Hook audit: {error}") from None
+
+
+def _hook_audit_from_value(value: object, label: str) -> HookAuditLedger:
+    try:
+        return hook_audit_ledger_from_mapping(value)
+    except ValueError as error:
+        raise TaskRecordError(f"invalid {label} Hook audit: {error}") from None
+
+
+def _validate_hook_audit(
+    ledger: HookAuditLedger,
+    *,
+    supported: bool,
+    label: str,
+    expected_event: HookEvent,
+) -> None:
+    if type(ledger) is not HookAuditLedger:
+        raise TaskRecordError(f"{label} Hook audit is invalid")
+    try:
+        ledger.__post_init__()
+    except ValueError as error:
+        raise TaskRecordError(f"invalid {label} Hook audit: {error}") from None
+    if not supported and ledger.entries:
+        raise TaskRecordError(f"legacy {label} cannot contain Hook audit")
+    if supported and any(entry.event is not expected_event for entry in ledger.entries):
+        raise TaskRecordError(f"{label} Hook audit event is invalid")
 
 
 def _usage_from_value(value: object) -> StageUsage:

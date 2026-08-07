@@ -13,7 +13,9 @@ from leonervis_code.agent.tool_events import (
     AssistantToolTextStreamCompleted,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
+    HookLifecycleObserved,
 )
+from leonervis_code.core.hook_contracts import HookEvent
 from leonervis_code.core.contracts import (
     AssistantText,
     ToolArguments,
@@ -33,6 +35,7 @@ from leonervis_code.providers.request_context import (
 from leonervis_code.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
 from leonervis_code.providers.usage import ProviderTokenUsage
 from leonervis_code.session import ProjectSession
+from leonervis_code.hooks import HookEffect, HookRule, HookStore
 from leonervis_code.session_records import BindingSnapshot
 from leonervis_code.session_store import SessionStore, SessionStoreError, SessionWriter
 from leonervis_code.task_records import (
@@ -139,8 +142,54 @@ def open_task_session(
         custom_base_url="http://127.0.0.1:11434/v1",
         environment={},
         provider_factory=lambda route, *, environment: provider,
+        user_hooks_path=workspace / "user-hooks.json",
+        project_hooks_path=workspace / ".leonervis-code" / "hooks.json",
         session_store_factory=session_store_factory(session_id),
     )
+
+
+def test_task_stage_lifecycle_hooks_are_durable_observations(tmp_path: Path) -> None:
+    registry = HookStore(
+        tmp_path / "user-hooks.json",
+        tmp_path / ".leonervis-code" / "hooks.json",
+    )
+    for hook_id, event in (
+        ("stage-started", HookEvent.TASK_STAGE_STARTED),
+        ("stage-committed", HookEvent.TASK_STAGE_COMMITTED),
+        ("task-terminated", HookEvent.TASK_TERMINATED),
+    ):
+        registry.add_hook(
+            HookRule(
+                hook_id,
+                HookEffect.ADVISORY,
+                message=f"Observed {event.value}.",
+                event=event,
+            ),
+            scope="project",
+        )
+        registry.set_enabled(hook_id, scope="project", enabled=True, expected_revision=1)
+
+    provider = ScriptedTaskProvider([AssistantText("Stage work is complete.")])
+    session = open_task_session(tmp_path, provider)
+    events = []
+    try:
+        task = session.create_task("Observe Task lifecycle")
+        session.continue_task(task.task_id, "Run one bounded Stage", event_sink=events.append)
+        session.cancel_task(task.task_id, "Observation complete")
+
+        observations = session.task_hook_evaluations(task.task_id, 10)
+        assert tuple(item.entry.event for item in observations) == (
+            HookEvent.TASK_STAGE_STARTED,
+            HookEvent.TASK_STAGE_COMMITTED,
+            HookEvent.TASK_TERMINATED,
+        )
+        visible = [event for event in events if isinstance(event, HookLifecycleObserved)]
+        assert tuple(event.event for event in visible) == (
+            HookEvent.TASK_STAGE_STARTED,
+            HookEvent.TASK_STAGE_COMMITTED,
+        )
+    finally:
+        session.close()
 
 
 def test_ordinary_prompt_can_propose_and_user_can_idempotently_accept_task(

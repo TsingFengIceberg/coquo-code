@@ -37,6 +37,11 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookAuditObservation,
+    bounded_hook_audit_limit,
+)
 from leonervis_code.core.permissions import (
     ApprovalMode,
     PermissionMode,
@@ -822,7 +827,33 @@ class SessionStore:
         assistant = record.items[-1]
         if not isinstance(user, UserMessage) or not isinstance(assistant, AssistantText):
             raise SessionStoreError("committed Session Turn boundary is invalid")
-        return CommittedTurn(record.items, user, assistant, record.tool_ledger)
+        return CommittedTurn(
+            record.items,
+            user,
+            assistant,
+            record.tool_ledger,
+            record.hook_audit,
+        )
+
+    def hook_evaluations(
+        self,
+        selector: str | Path,
+        limit: int = 20,
+    ) -> tuple[HookAuditObservation, ...]:
+        """Project recent content-free Hook evaluations from one strict Session replay."""
+        try:
+            bounded_hook_audit_limit(limit)
+        except ValueError as error:
+            raise SessionStoreError(str(error)) from None
+        path = self._resolve_existing_path(selector)
+        state = self._load_state(path, allow_repair=False)
+        observations = tuple(
+            HookAuditObservation(record.record_type, record.sequence, entry)
+            for record in state.records
+            if isinstance(record, (TurnCommitted, TurnFailed))
+            for entry in record.hook_audit.entries
+        )
+        return observations[-limit:]
 
     def find_turn_evidence(
         self,
@@ -990,6 +1021,7 @@ class SessionStore:
                             binding=source_record.binding,
                             items=source_record.items,
                             tool_ledger=_copied_tool_ledger(source_record),
+                            hook_audit=source_record.hook_audit,
                             provider_usage=(),
                             session_name=None,
                             session_name_source=None,
@@ -1700,6 +1732,7 @@ class SessionWriter:
         *,
         binding: BindingSnapshot,
         tool_ledger: ToolTurnLedger,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
         provider_usage: tuple[ProviderInvocationUsage, ...] = (),
         session_name: str | None = None,
         session_name_source: SessionNameSource | None = None,
@@ -1714,6 +1747,7 @@ class SessionWriter:
             binding=binding,
             items=tuple(items),
             tool_ledger=tool_ledger,
+            hook_audit=hook_audit,
             provider_usage=provider_usage,
             session_name=session_name,
             session_name_source=session_name_source,
@@ -1875,6 +1909,7 @@ class SessionWriter:
         failure_kind: str,
         message: str,
         provider_usage: tuple[ProviderInvocationUsage, ...] = (),
+        hook_audit: HookAuditLedger = HookAuditLedger(),
         occurred_at: str | None = None,
     ) -> TurnFailed:
         """Convenience API for a typed turn_failed audit event."""
@@ -1885,6 +1920,7 @@ class SessionWriter:
             failure_kind=failure_kind,
             message=message,
             provider_usage=provider_usage,
+            hook_audit=hook_audit,
         )
         self.append_audit(record)
         return record

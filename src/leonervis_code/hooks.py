@@ -17,6 +17,14 @@ from threading import RLock
 
 from leonervis_code.core.contracts import ToolArguments
 from leonervis_code.core.extensions import ExtensionSourceKind
+from leonervis_code.core.hook_contracts import (
+    HookActionOutcome,
+    HookAuditEntry,
+    HookAuditMatch,
+    HookEffect,
+    HookEvent,
+    aggregate_hook_effect,
+)
 from leonervis_code.core.permissions import PermissionAction
 
 if os.name == "nt":
@@ -25,8 +33,9 @@ else:
     import fcntl
 
 
-HOOK_CONFIGURATION_SCHEMA_VERSION = 1
-HOOK_SET_SNAPSHOT_VERSION = 1
+LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION = 1
+HOOK_CONFIGURATION_SCHEMA_VERSION = 2
+HOOK_SET_SNAPSHOT_VERSION = 2
 MAX_HOOK_CONFIGURATION_BYTES = 256 * 1024
 MAX_HOOKS_PER_SCOPE = 64
 MAX_HOOK_MATCHER_VALUES = 32
@@ -35,27 +44,12 @@ MAX_HOOK_MESSAGE_BYTES = 4096
 MAX_HOOK_PATH_CHARACTERS = 4096
 MAX_HOOK_ADVISORY_CHARACTERS = 2048
 _HOOK_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
-_HOOK_SET_ID_DOMAIN = b"leonervis-code-hook-set-snapshot-v1\0"
+_HOOK_SET_ID_DOMAIN = b"leonervis-code-hook-set-snapshot-v2\0"
 _PATH_ARGUMENT_KEYS = frozenset({"path", "source", "destination", "cwd"})
 
 
 class HookConfigurationError(ValueError):
     """One Hook configuration is malformed, unsafe, stale, or unavailable."""
-
-
-class HookEvent(StrEnum):
-    """Closed lifecycle events supported by the current declarative engine."""
-
-    BEFORE_ACTION_AUTHORIZATION = "before_action_authorization"
-
-
-class HookEffect(StrEnum):
-    """Authority-nonexpanding outcomes supported by the first Hook batch."""
-
-    CONTINUE = "continue"
-    DENY = "deny"
-    REQUIRE_ASK = "require_ask"
-    ADVISORY = "advisory"
 
 
 class HookSource(StrEnum):
@@ -75,6 +69,7 @@ class HookRule:
     tool_names: tuple[str, ...] = ()
     permission_actions: tuple[PermissionAction, ...] = ()
     path_prefixes: tuple[str, ...] = ()
+    action_outcomes: tuple[HookActionOutcome, ...] = ()
     sources: tuple[HookSource, ...] = ()
     enabled: bool = False
     event: HookEvent = HookEvent.BEFORE_ACTION_AUTHORIZATION
@@ -100,6 +95,11 @@ class HookRule:
             raise HookConfigurationError("Hook cannot match the unknown permission action")
         _validate_canonical_tuple(self.path_prefixes, "path prefixes", _validate_path_prefix)
         _validate_canonical_tuple(
+            self.action_outcomes,
+            "action outcomes",
+            lambda value: _validate_enum(value, HookActionOutcome, "action outcome"),
+        )
+        _validate_canonical_tuple(
             self.sources,
             "sources",
             lambda value: _validate_enum(value, HookSource, "source"),
@@ -113,6 +113,25 @@ class HookRule:
             raise HookConfigurationError("Hook message exceeds the supported size")
         if self.effect is not HookEffect.CONTINUE and not self.message.strip():
             raise HookConfigurationError(f"Hook {self.effect.value} effect requires a message")
+        if self.event is not HookEvent.BEFORE_ACTION_AUTHORIZATION and self.effect in {
+            HookEffect.DENY,
+            HookEffect.REQUIRE_ASK,
+        }:
+            raise HookConfigurationError(
+                "observational Hook events support only continue or advisory"
+            )
+        if self.event is HookEvent.BEFORE_ACTION_AUTHORIZATION and self.action_outcomes:
+            raise HookConfigurationError("preauthorization Hook cannot match action outcomes")
+        if not self.event.is_action_event and any(
+            (
+                self.tool_names,
+                self.permission_actions,
+                self.path_prefixes,
+                self.action_outcomes,
+                self.sources,
+            )
+        ):
+            raise HookConfigurationError("lifecycle Hook events cannot contain action matchers")
 
     @classmethod
     def from_mapping(cls, value: object) -> HookRule:
@@ -124,6 +143,7 @@ class HookRule:
             "event",
             "hook_id",
             "message",
+            "action_outcomes",
             "path_prefixes",
             "permission_actions",
             "revision",
@@ -141,6 +161,10 @@ class HookRule:
             event=_parse_enum(value["event"], HookEvent, "Hook event"),
             effect=_parse_enum(value["effect"], HookEffect, "Hook effect"),
             message=_required_text(value["message"], "Hook message", allow_empty=True),
+            action_outcomes=tuple(
+                _parse_enum(item, HookActionOutcome, "Hook action outcome")
+                for item in _array(value["action_outcomes"], "Hook action outcomes")
+            ),
             tool_names=_text_tuple(value["tool_names"], "Hook tool names"),
             permission_actions=tuple(
                 _parse_enum(item, PermissionAction, "Hook permission action")
@@ -157,6 +181,7 @@ class HookRule:
 
     def as_mapping(self) -> dict[str, object]:
         return {
+            "action_outcomes": [outcome.value for outcome in self.action_outcomes],
             "effect": self.effect.value,
             "enabled": self.enabled,
             "event": self.event.value,
@@ -246,6 +271,7 @@ class HookEvaluation:
     deny_message: str | None = None
     require_ask_by: tuple[str, ...] = ()
     advisories: tuple[tuple[str, str], ...] = ()
+    matches: tuple[HookAuditMatch, ...] = ()
 
     @property
     def requires_ask(self) -> bool:
@@ -259,6 +285,29 @@ class HookEvaluation:
             f"Hook advisory [{hook_id}]: {message}" for hook_id, message in self.advisories
         )
         return text[:MAX_HOOK_ADVISORY_CHARACTERS]
+
+    def audit_entry(
+        self,
+        *,
+        event: HookEvent,
+        hook_set_id: str,
+        subject_id: str,
+        tool_name: str | None = None,
+        permission_action: str | None = None,
+        source: str | None = None,
+        action_outcome: HookActionOutcome | None = None,
+    ) -> HookAuditEntry:
+        return HookAuditEntry(
+            event=event,
+            hook_set_id=hook_set_id,
+            subject_id=subject_id,
+            matches=self.matches,
+            result=aggregate_hook_effect(self.matches),
+            tool_name=tool_name,
+            permission_action=permission_action,
+            source=source,
+            action_outcome=action_outcome,
+        )
 
 
 class HookStore:
@@ -453,7 +502,11 @@ class HookStore:
             )
         if set(data) != fields:
             raise HookConfigurationError(f"{scope} Hook configuration is missing a required field")
-        if data["schema_version"] != HOOK_CONFIGURATION_SCHEMA_VERSION:
+        schema_version = data["schema_version"]
+        if schema_version not in {
+            LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION,
+            HOOK_CONFIGURATION_SCHEMA_VERSION,
+        }:
             raise HookConfigurationError(f"unsupported {scope} Hook configuration schema version")
         raw_hooks = data["hooks"]
         if not isinstance(raw_hooks, dict):
@@ -466,6 +519,10 @@ class HookStore:
         for hook_id, value in raw_hooks.items():
             if not isinstance(hook_id, str):
                 raise HookConfigurationError(f"{scope} Hook key must be text")
+            if schema_version == LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION:
+                if not isinstance(value, dict):
+                    raise HookConfigurationError("Hook entry must be a JSON object")
+                value = {**value, "action_outcomes": []}
             rule = HookRule.from_mapping(value)
             if rule.hook_id != hook_id:
                 raise HookConfigurationError(f"{scope} Hook key/ID mismatch: {hook_id}")
@@ -503,18 +560,91 @@ def evaluate_before_action_authorization(
     source_kind: ExtensionSourceKind,
 ) -> HookEvaluation:
     """Evaluate one action against an immutable Hook set without side effects."""
+    return _evaluate_action(
+        snapshot,
+        event=HookEvent.BEFORE_ACTION_AUTHORIZATION,
+        tool_name=tool_name,
+        action=action,
+        arguments=arguments,
+        source_kind=source_kind,
+        outcome=None,
+    )
+
+
+def evaluate_after_action(
+    snapshot: HookSetSnapshot,
+    *,
+    tool_name: str,
+    action: PermissionAction,
+    arguments: ToolArguments,
+    source_kind: ExtensionSourceKind,
+    outcome: HookActionOutcome,
+) -> HookEvaluation:
+    """Observe one terminal action result without changing its authoritative outcome."""
+    if type(outcome) is not HookActionOutcome:
+        raise ValueError("after-action Hook outcome is invalid")
+    return _evaluate_action(
+        snapshot,
+        event=HookEvent.AFTER_ACTION,
+        tool_name=tool_name,
+        action=action,
+        arguments=arguments,
+        source_kind=source_kind,
+        outcome=outcome,
+    )
+
+
+def evaluate_lifecycle_event(
+    snapshot: HookSetSnapshot,
+    *,
+    event: HookEvent,
+) -> HookEvaluation:
+    """Evaluate one side-effect-free Turn or Task lifecycle observation."""
     if not isinstance(snapshot, HookSetSnapshot):
         raise ValueError("Hook set snapshot is invalid")
+    if type(event) is not HookEvent or event.is_action_event:
+        raise ValueError("lifecycle Hook event is invalid")
+    matched = tuple(entry for entry in snapshot.active_entries if entry.rule.event is event)
+    return _evaluation_from_matches(matched)
+
+
+def _evaluate_action(
+    snapshot: HookSetSnapshot,
+    *,
+    event: HookEvent,
+    tool_name: str,
+    action: PermissionAction,
+    arguments: ToolArguments,
+    source_kind: ExtensionSourceKind,
+    outcome: HookActionOutcome | None,
+) -> HookEvaluation:
+    if not isinstance(snapshot, HookSetSnapshot):
+        raise ValueError("Hook set snapshot is invalid")
+    if event not in {
+        HookEvent.BEFORE_ACTION_AUTHORIZATION,
+        HookEvent.AFTER_ACTION,
+    }:
+        raise ValueError("action Hook event is invalid")
     source = HookSource.MCP if source_kind is ExtensionSourceKind.MCP else HookSource.BUILTIN
     paths = _extract_workspace_paths(arguments)
     matched = tuple(
         entry
         for entry in snapshot.active_entries
-        if _matches(entry.rule, tool_name=tool_name, action=action, paths=paths, source=source)
+        if _matches(
+            entry.rule,
+            event=event,
+            tool_name=tool_name,
+            action=action,
+            paths=paths,
+            source=source,
+            outcome=outcome,
+        )
     )
+    return _evaluation_from_matches(matched)
+
+
+def _evaluation_from_matches(matched: tuple[HookEntry, ...]) -> HookEvaluation:
     denied = next((entry for entry in matched if entry.rule.effect is HookEffect.DENY), None)
-    if denied is not None:
-        return HookEvaluation(denied.rule.hook_id, denied.rule.message)
     required = tuple(
         entry.rule.hook_id for entry in matched if entry.rule.effect is HookEffect.REQUIRE_ASK
     )
@@ -523,18 +653,27 @@ def evaluate_before_action_authorization(
         for entry in matched
         if entry.rule.effect is HookEffect.ADVISORY
     )
-    return HookEvaluation(require_ask_by=required, advisories=advisories)
+    matches = tuple(HookAuditMatch(entry.rule.hook_id, entry.rule.effect) for entry in matched)
+    return HookEvaluation(
+        denied_by=denied.rule.hook_id if denied is not None else None,
+        deny_message=denied.rule.message if denied is not None else None,
+        require_ask_by=(() if denied is not None else required),
+        advisories=(() if denied is not None else advisories),
+        matches=matches,
+    )
 
 
 def _matches(
     rule: HookRule,
     *,
+    event: HookEvent,
     tool_name: str,
     action: PermissionAction,
     paths: tuple[str, ...],
     source: HookSource,
+    outcome: HookActionOutcome | None,
 ) -> bool:
-    if rule.event is not HookEvent.BEFORE_ACTION_AUTHORIZATION:
+    if rule.event is not event:
         return False
     if rule.tool_names and tool_name not in rule.tool_names:
         return False
@@ -545,6 +684,8 @@ def _matches(
     if rule.path_prefixes and not any(
         _path_has_prefix(path, prefix) for path in paths for prefix in rule.path_prefixes
     ):
+        return False
+    if rule.action_outcomes and outcome not in rule.action_outcomes:
         return False
     return True
 

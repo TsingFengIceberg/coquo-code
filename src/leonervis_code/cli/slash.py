@@ -47,6 +47,7 @@ from leonervis_code.cli.presentation import (
     render_mcp_server_statuses,
     render_hook_doctor,
     render_hook_entry,
+    render_hook_evaluations,
     render_hook_set,
     render_provider_adapter_error,
     render_project_status,
@@ -265,6 +266,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/hooks list", "List configured Hooks"),
     SlashCompletionSpec("/hooks show", "Show one configured Hook"),
     SlashCompletionSpec("/hooks doctor", "Validate current Hook configuration"),
+    SlashCompletionSpec("/hooks evaluations", "Show durable Session Hook evaluations"),
+    SlashCompletionSpec("/hooks task", "Show durable Task Hook evaluations"),
     SlashCompletionSpec("/skills fetch", "Fetch a public Skill into quarantine"),
     SlashCompletionSpec("/skills candidates", "List quarantined Skill candidates"),
     SlashCompletionSpec("/skills candidate show", "Inspect one quarantined Skill candidate"),
@@ -435,6 +438,10 @@ class ReplSession(Protocol):
     def list_tasks(self): ...
 
     def inspect_task(self, task_id: str): ...
+
+    def hook_evaluations(self, limit: int = 20): ...
+
+    def task_hook_evaluations(self, task_id: str, limit: int = 20): ...
 
     def list_task_admissions(self): ...
 
@@ -607,6 +614,30 @@ def dispatch_slash(
             kind="info",
             failure_prefix="Hook diagnosis failed",
         )
+    if command == "/hooks evaluations" or command.startswith("/hooks evaluations "):
+        parts = command.split()
+        if len(parts) not in {2, 3} or (len(parts) == 3 and not _positive_ascii_integer(parts[2])):
+            return _usage("Usage: /hooks evaluations [1-100]")
+        limit = 20 if len(parts) == 2 else int(parts[2])
+        if limit > 100:
+            return _usage("Usage: /hooks evaluations [1-100]")
+        return _call(
+            lambda: render_hook_evaluations(session.hook_evaluations(limit)),
+            kind="info",
+            failure_prefix="Hook evaluation inspection failed",
+        )
+    if command == "/hooks task" or command.startswith("/hooks task "):
+        parts = command.split()
+        if len(parts) not in {3, 4} or (len(parts) == 4 and not _positive_ascii_integer(parts[3])):
+            return _usage("Usage: /hooks task <task-id> [1-100]")
+        limit = 20 if len(parts) == 3 else int(parts[3])
+        if limit > 100:
+            return _usage("Usage: /hooks task <task-id> [1-100]")
+        return _call(
+            lambda: render_hook_evaluations(session.task_hook_evaluations(parts[2], limit)),
+            kind="info",
+            failure_prefix="Task Hook evaluation inspection failed",
+        )
     if command == "/hooks show" or command.startswith("/hooks show "):
         parts = command.split()
         if len(parts) != 3:
@@ -618,10 +649,12 @@ def dispatch_slash(
         )
     if command.startswith("/hooks "):
         subcommand = command.split(maxsplit=2)[1]
-        suggestion = _suggest_token(subcommand, ("active", "list", "show", "doctor"))
+        suggestion = _suggest_token(
+            subcommand, ("active", "list", "show", "doctor", "evaluations", "task")
+        )
         return _usage(
             f"Unknown Hook command: {subcommand}{_suggestion_line(suggestion)}\n"
-            "Usage: /hooks <active|list|show|doctor>"
+            "Usage: /hooks <active|list|show|doctor|evaluations|task>"
         )
     if command == "/skills":
         return _call(lambda: render_skill_activation(session.inspect_skills()), kind="info")

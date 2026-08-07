@@ -798,13 +798,11 @@ def test_loop_persists_complete_turn_before_memory_commit(tmp_path) -> None:
     )
 
     assert loop.run("persist") == "saved"
-    assert committed == [
-        CommittedTurn(
-            items=(UserMessage("persist"), AssistantText("saved")),
-            user=UserMessage("persist"),
-            assistant=AssistantText("saved"),
-        )
-    ]
+    assert len(committed) == 1
+    assert committed[0].items == (UserMessage("persist"), AssistantText("saved"))
+    assert committed[0].user == UserMessage("persist")
+    assert committed[0].assistant == AssistantText("saved")
+    assert committed[0].hook_audit.entries[-1].event.value == "turn_committed"
     assert loop.history == committed[0].items
 
 
@@ -1688,7 +1686,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v17-")
+    assert proposals[0].context_id.startswith("ctx-v19-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

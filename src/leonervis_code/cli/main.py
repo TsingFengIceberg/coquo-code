@@ -33,6 +33,7 @@ from leonervis_code.cli.presentation import (
     MAX_SESSION_PREVIEW_TURNS,
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
+    render_hook_evaluations,
     render_mcp_catalog,
     render_mcp_catalog_reason,
     render_mcp_policy_diagnostics,
@@ -58,6 +59,7 @@ from leonervis_code.cli.repl import run_repl
 from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
+from leonervis_code.core.hook_contracts import HookActionOutcome, HookEvent
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.hooks import (
     HookConfigurationError,
@@ -503,9 +505,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     hooks_parser = subcommands.add_parser("hooks", help="manage declarative lifecycle Hooks")
     hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
-    hooks_add = hooks_commands.add_parser("add", help="add one disabled preauthorization Hook")
+    hooks_add = hooks_commands.add_parser("add", help="add one disabled declarative Hook")
     hooks_add.add_argument("hook_id")
     hooks_add.add_argument("--scope", choices=["user", "project"], default="project")
+    hooks_add.add_argument(
+        "--event",
+        choices=[event.value for event in HookEvent],
+        default=HookEvent.BEFORE_ACTION_AUTHORIZATION.value,
+    )
     hooks_add.add_argument(
         "--effect",
         choices=[effect.value.replace("_", "-") for effect in HookEffect],
@@ -520,6 +527,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_add.add_argument("--path-prefix", action="append", default=[])
     hooks_add.add_argument(
+        "--outcome",
+        action="append",
+        choices=[outcome.value for outcome in HookActionOutcome],
+        default=[],
+    )
+    hooks_add.add_argument(
         "--source", action="append", choices=[source.value for source in HookSource], default=[]
     )
     hooks_add.add_argument("--message", default="")
@@ -529,6 +542,14 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_show = hooks_commands.add_parser("show", help="show one configured Hook")
     hooks_show.add_argument("hook_id")
     hooks_commands.add_parser("doctor", help="validate both Hook configuration scopes")
+    hooks_evaluations = hooks_commands.add_parser(
+        "evaluations", help="inspect durable Session Hook evaluations"
+    )
+    hooks_evaluations.add_argument("selector", nargs="?", default="latest")
+    hooks_evaluations.add_argument("--limit", type=task_list_limit, default=20)
+    hooks_task = hooks_commands.add_parser("task", help="inspect durable Task Hook evaluations")
+    hooks_task.add_argument("task_id")
+    hooks_task.add_argument("--limit", type=task_list_limit, default=20)
     for action in ("enable", "disable", "remove"):
         command = hooks_commands.add_parser(action, help=f"{action} one Hook")
         command.add_argument("hook_id")
@@ -1478,10 +1499,25 @@ def handle_hooks_command(
         project_path=project_hooks_path,
     )
     command = arguments.hooks_command
+    if command == "evaluations":
+        observations = SessionStore(workspace).hook_evaluations(
+            arguments.selector,
+            arguments.limit,
+        )
+        stdout.write(f"{render_hook_evaluations(observations)}\n")
+        return 0
+    if command == "task":
+        observations = TaskStore(workspace).hook_evaluations(
+            arguments.task_id,
+            arguments.limit,
+        )
+        stdout.write(f"{render_hook_evaluations(observations)}\n")
+        return 0
     if command == "add":
         entry = store.add_hook(
             HookRule(
                 hook_id=arguments.hook_id,
+                event=HookEvent(arguments.event),
                 effect=HookEffect(arguments.effect.replace("-", "_")),
                 message=arguments.message,
                 tool_names=tuple(sorted(set(arguments.tool))),
@@ -1492,6 +1528,12 @@ def handle_hooks_command(
                     )
                 ),
                 path_prefixes=tuple(sorted(set(arguments.path_prefix))),
+                action_outcomes=tuple(
+                    sorted(
+                        {HookActionOutcome(value) for value in arguments.outcome},
+                        key=lambda value: value.value,
+                    )
+                ),
                 sources=tuple(
                     sorted(
                         {HookSource(value) for value in arguments.source},
@@ -1513,7 +1555,8 @@ def handle_hooks_command(
             stdout.write("No Hooks configured.\n")
         for entry in entries:
             stdout.write(
-                f"{entry.rule.hook_id}: {entry.scope}, {entry.rule.effect.value}, "
+                f"{entry.rule.hook_id}: {entry.scope}, {entry.rule.event.value}, "
+                f"{entry.rule.effect.value}, "
                 f"{'enabled' if entry.rule.enabled else 'disabled'}, r{entry.rule.revision}\n"
             )
     elif command == "show":
@@ -1562,6 +1605,7 @@ def _render_hook_entry(entry) -> str:
         f"Tools: {', '.join(rule.tool_names) or 'any'}\n"
         f"Actions: {', '.join(action.value for action in rule.permission_actions) or 'any'}\n"
         f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
+        f"Outcomes: {', '.join(outcome.value for outcome in rule.action_outcomes) or 'any'}\n"
         f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
         f"Message: {rule.message or 'none'}"
     )

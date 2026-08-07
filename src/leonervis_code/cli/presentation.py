@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 from leonervis_code.agent.tool_events import (
     AssistantToolTextReceived,
+    HookLifecycleObserved,
     McpNotificationActivityReceived,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
@@ -43,6 +44,7 @@ from leonervis_code.mcp import (
     McpQuarantineCatalog,
 )
 from leonervis_code.hooks import HookEntry, HookSetSnapshot
+from leonervis_code.core.hook_contracts import HookAuditObservation
 from leonervis_code.mcp.client import McpLiveProcessStatus, McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
@@ -260,6 +262,8 @@ HOOKS_HELP = (
     "  /hooks list\n"
     "  /hooks show <hook-id>\n"
     "  /hooks doctor\n"
+    "  /hooks evaluations [1-100]\n"
+    "  /hooks task <task-id> [1-100]\n"
     "These commands are Host-only and read-only. Use standalone hooks commands to edit "
     "configuration; changes become effective from the next prepared Turn."
 )
@@ -312,6 +316,7 @@ def render_hook_entry(entry: HookEntry) -> str:
         f"Tools: {', '.join(rule.tool_names) or 'any'}\n"
         f"Actions: {', '.join(action.value for action in rule.permission_actions) or 'any'}\n"
         f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
+        f"Outcomes: {', '.join(outcome.value for outcome in rule.action_outcomes) or 'any'}\n"
         f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
         f"Message: {rule.message or 'none'}"
     )
@@ -326,7 +331,8 @@ def render_hook_set(snapshot: HookSetSnapshot, *, active_only: bool = False) -> 
         f"Hook snapshot: {snapshot.snapshot_id}",
     ]
     lines.extend(
-        f"  {entry.rule.hook_id}: {entry.scope}, {entry.rule.effect.value}, "
+        f"  {entry.rule.hook_id}: {entry.scope}, {entry.rule.event.value}, "
+        f"{entry.rule.effect.value}, "
         f"{'enabled' if entry.rule.enabled else 'disabled'}, r{entry.rule.revision}"
         for entry in entries
     )
@@ -342,6 +348,36 @@ def render_hook_doctor(snapshot: HookSetSnapshot) -> str:
         f"Snapshot: {snapshot.snapshot_id}\n"
         "Side-effect handlers: disabled by contract"
     )
+
+
+def render_hook_evaluations(observations: tuple[HookAuditObservation, ...]) -> str:
+    """Render only content-free durable Hook evaluation facts."""
+    if not observations:
+        return "No durable Hook evaluations found."
+    lines = [f"Hook evaluations: {len(observations)}"]
+    for observation in observations:
+        entry = observation.entry
+        matches = ",".join(match.hook_id for match in entry.matches) or "none"
+        detail = [
+            f"record #{observation.record_sequence} {observation.record_type}",
+            entry.event.value,
+            f"result={entry.result.value}",
+            f"subject={entry.subject_id}",
+            f"matches={matches}",
+            f"hook-set={entry.hook_set_id}",
+        ]
+        if entry.tool_name is not None:
+            detail.extend(
+                (
+                    f"tool={entry.tool_name}",
+                    f"action={entry.permission_action}",
+                    f"source={entry.source}",
+                )
+            )
+        if entry.action_outcome is not None:
+            detail.append(f"outcome={entry.action_outcome.value}")
+        lines.append("  " + " · ".join(detail))
+    return "\n".join(lines)
 
 
 def render_mcp_server_status(status: McpServerStatus) -> str:
@@ -2375,6 +2411,12 @@ def render_prompt_event(
         else:
             message = "Task completion confirmation committed. The durable Task is complete."
         return f"{message}\nTask: {event.task_id}", "success"
+    if isinstance(event, HookLifecycleObserved):
+        matched = ", ".join(event.matched_hook_ids)
+        message = f"Hook observation: {event.event.value} -> {event.result.value} ({matched})"
+        if event.advisory is not None:
+            message += f"\n{event.advisory}"
+        return message, "info"
     if isinstance(event, SkillCandidateCommitted):
         return (
             "Skill candidate committed in inactive quarantine:\n"

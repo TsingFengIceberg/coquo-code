@@ -20,6 +20,11 @@ else:
     import fcntl
 
 from leonervis_code.core.contracts import ToolArguments
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookAuditObservation,
+    bounded_hook_audit_limit,
+)
 from leonervis_code.core.task_admission import TaskAdmissionProposal, canonical_task_admission_id
 from leonervis_code.session_records import workspace_fingerprint
 from leonervis_code.session_store import SessionStore, SessionStoreError, SessionTurnEvidence
@@ -709,6 +714,36 @@ class TaskStore:
             active_stage=state.active_stage is not None and _task_writer_is_active(path),
         )
 
+    def hook_evaluations(
+        self,
+        task_id: str,
+        limit: int = 20,
+    ) -> tuple[HookAuditObservation, ...]:
+        """Project recent content-free Hook evaluations from one strict Task replay."""
+        try:
+            bounded_hook_audit_limit(limit)
+        except ValueError as error:
+            raise TaskStoreError(str(error)) from None
+        canonical = _store_task_id(task_id)
+        self._validate_existing_root()
+        state = self._load_state(self.root / f"{canonical}.jsonl")
+        observations = tuple(
+            HookAuditObservation(record.record_type, record.sequence, entry)
+            for record in state.records
+            if isinstance(
+                record,
+                (
+                    StageStarted,
+                    StageCommitted,
+                    StageFailed,
+                    TaskBlockerRecorded,
+                    TaskTerminated,
+                ),
+            )
+            for entry in record.hook_audit.entries
+        )
+        return observations[-limit:]
+
     def open(self, task_id: str) -> TaskWriter:
         """Take one exclusive foreground writer lease for a durable Task."""
         canonical = _store_task_id(task_id)
@@ -847,6 +882,7 @@ class TaskWriter:
         session_record_sequence_before: int | None = None,
         session_turn_count_before: int | None = None,
         prompt_sha256: str | None = None,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
     ) -> StageStarted:
         """Durably start one bounded Stage before any provider work begins."""
         self._ensure_writable()
@@ -873,11 +909,17 @@ class TaskWriter:
             session_record_sequence_before=session_record_sequence_before,
             session_turn_count_before=session_turn_count_before,
             prompt_sha256=prompt_sha256,
+            hook_audit=hook_audit,
         )
         self._append(record)
         return record
 
-    def commit_stage(self, turn_record_sequence: int) -> StageCommitted:
+    def commit_stage(
+        self,
+        turn_record_sequence: int,
+        *,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
+    ) -> StageCommitted:
         """Link the active Stage to one independently verified committed Session Turn."""
         self._ensure_writable()
         active = self._require_active_stage()
@@ -893,16 +935,26 @@ class TaskWriter:
             active,
             evidence,
             self._store._clock(),
+            hook_audit,
         )
         self._append(record)
         return record
 
-    def recover_stage(self) -> StageCommitted | StageFailed:
+    def recover_stage(
+        self,
+        *,
+        committed_hook_audit: HookAuditLedger = HookAuditLedger(),
+        failed_hook_audit: HookAuditLedger = HookAuditLedger(),
+    ) -> StageCommitted | StageFailed:
         """Reconcile one interrupted Stage from exact Session baseline and prompt evidence."""
         self._ensure_writable()
         active = self._require_active_stage()
         if active.session_record_sequence_before is None or active.prompt_sha256 is None:
-            return self.fail_stage(StageFailureReason.INTERRUPTED, usage=None)
+            return self.fail_stage(
+                StageFailureReason.INTERRUPTED,
+                usage=None,
+                hook_audit=failed_hook_audit,
+            )
         try:
             matches = SessionStore(self._store.workspace).find_turn_evidence(
                 active.session_id,
@@ -912,16 +964,24 @@ class TaskWriter:
         except SessionStoreError as error:
             raise TaskStoreError(f"Session Turn recovery evidence is invalid: {error}") from None
         if not matches:
-            return self.fail_stage(StageFailureReason.INTERRUPTED, usage=None)
+            return self.fail_stage(
+                StageFailureReason.INTERRUPTED,
+                usage=None,
+                hook_audit=failed_hook_audit,
+            )
         if len(matches) != 1:
             raise TaskStoreError("interrupted Stage has ambiguous committed Turn evidence")
-        return self.commit_stage(matches[0].record_sequence)
+        return self.commit_stage(
+            matches[0].record_sequence,
+            hook_audit=committed_hook_audit,
+        )
 
     def fail_stage(
         self,
         reason: StageFailureReason,
         *,
         usage: StageUsage | None = _EMPTY_STAGE_USAGE,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
     ) -> StageFailed:
         """Durably terminate the active Stage without claiming a committed Turn."""
         self._ensure_writable()
@@ -935,6 +995,7 @@ class TaskWriter:
             reason=reason,
             failed_at=self._store._clock(),
             usage=usage,
+            hook_audit=hook_audit,
         )
         self._append(record)
         return record
@@ -1111,6 +1172,7 @@ class TaskWriter:
         summary: str,
         *,
         proposal_tool_use_id: str,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
     ) -> TaskBlockerRecorded:
         """Persist one model blocker after its owning Stage committed."""
         self._ensure_writable()
@@ -1134,6 +1196,7 @@ class TaskWriter:
             summary=summary,
             proposal_tool_use_id=proposal_tool_use_id,
             recorded_at=self._store._clock(),
+            hook_audit=hook_audit,
         )
         self._append(record)
         return record
@@ -1261,13 +1324,28 @@ class TaskWriter:
         self._append(record)
         return record
 
-    def terminate(self, outcome: TaskTerminalOutcome, reason: str | None = None) -> TaskTerminated:
+    def terminate(
+        self,
+        outcome: TaskTerminalOutcome,
+        reason: str | None = None,
+        *,
+        hook_audit: HookAuditLedger = HookAuditLedger(),
+        active_stage_hook_audit: HookAuditLedger = HookAuditLedger(),
+    ) -> TaskTerminated:
         self._ensure_writable()
         if self._state.active_stage is not None:
             if outcome is TaskTerminalOutcome.CANCELLED:
-                self.fail_stage(StageFailureReason.CANCELLED, usage=None)
+                self.fail_stage(
+                    StageFailureReason.CANCELLED,
+                    usage=None,
+                    hook_audit=active_stage_hook_audit,
+                )
             elif outcome is TaskTerminalOutcome.FAILED:
-                self.fail_stage(StageFailureReason.INTERRUPTED, usage=None)
+                self.fail_stage(
+                    StageFailureReason.INTERRUPTED,
+                    usage=None,
+                    hook_audit=active_stage_hook_audit,
+                )
             else:
                 raise TaskStoreError("active Stage must terminate before the Task")
         record = TaskTerminated(
@@ -1275,6 +1353,7 @@ class TaskWriter:
             outcome=outcome,
             reason=reason,
             terminated_at=self._store._clock(),
+            hook_audit=hook_audit,
         )
         self._append(record)
         return record
@@ -1853,6 +1932,7 @@ def _committed_stage_record(
     active: StageStarted,
     evidence: SessionTurnEvidence,
     committed_at: str,
+    hook_audit: HookAuditLedger = HookAuditLedger(),
 ) -> StageCommitted:
     if evidence.session_id != active.session_id:
         raise TaskStoreError("Session Turn evidence belongs to a different Session")
@@ -1896,6 +1976,7 @@ def _committed_stage_record(
         turn_record_sha256=evidence.record_sha256,
         committed_at=committed_at,
         usage=usage,
+        hook_audit=hook_audit,
     )
 
 

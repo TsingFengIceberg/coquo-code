@@ -9,13 +9,13 @@ from leonervis_code.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v41-0965f2a75ae09c66ae6f24e7c61a1573e56a18d98f740a589daeea1adc99da9b"
+EXPECTED_FINGERPRINT = "v42-f7adf27d5504adf0cfd7de2475b3489506b9252fc1a584993194d4ec8c19d74f"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 41
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 42
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -92,8 +92,8 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "Host completes a Task only after a current completion proposal" in prompt.text
     assert "Do not request the four Stage coordination tools" in prompt.text
     assert "Declarative Host Hooks" in prompt.text
-    assert "It can never grant authority" in prompt.text
-    assert "current Turn keeps its frozen Hook snapshot" in prompt.text
+    assert "A Hook can never grant authority" in prompt.text
+    assert "each evaluation records the exact Hook snapshot it used" in prompt.text
     assert "does not provide an OS filesystem" not in prompt.text
     assert build_system_prompt() == prompt
 

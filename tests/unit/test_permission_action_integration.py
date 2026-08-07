@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 from uuid import UUID
 
 import pytest
 
 from leonervis_code.agent.tool_events import (
+    HookLifecycleObserved,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
@@ -23,6 +25,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.core.hook_contracts import HookActionOutcome, HookEvent
 from leonervis_code.hooks import HookConfigurationError, HookEffect, HookRule, HookStore
 from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
 from leonervis_code.session import ProjectSession
@@ -30,6 +33,8 @@ from leonervis_code.session_records import (
     ActionAuditStatus,
     ActionExecutionFinished,
     ActionExecutionOutcome,
+    TurnCommitted,
+    TurnFailed,
 )
 from leonervis_code.session_store import (
     ActionOutcomeAuditError,
@@ -247,6 +252,84 @@ def test_hook_advisory_is_appended_to_normal_model_visible_result(tmp_path: Path
             "hello\n\nHook advisory [read-advice]: Treat this file as generated output."
         )
         assert session.action_audits()[0].status is ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_after_action_advisory_and_turn_audit_are_durable_and_content_free(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "read-complete",
+            HookEffect.ADVISORY,
+            message="Read observation completed.",
+            event=HookEvent.AFTER_ACTION,
+            tool_names=("read_file",),
+            action_outcomes=(HookActionOutcome.SUCCEEDED,),
+        ),
+    )
+    call = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "note.txt"}))
+    provider = ToolProvider([call, AssistantText("read")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("read note") == "read"
+        assert (
+            provider.requests[1]
+            .history[-1]
+            .content.endswith("Hook advisory [read-complete]: Read observation completed.")
+        )
+        record = next(
+            item
+            for item in reversed(session._writer.state.records)
+            if isinstance(item, TurnCommitted)
+        )
+        assert tuple(entry.event for entry in record.hook_audit.entries) == (
+            HookEvent.BEFORE_ACTION_AUTHORIZATION,
+            HookEvent.AFTER_ACTION,
+            HookEvent.TURN_COMMITTED,
+        )
+        assert record.hook_audit.entries[1].action_outcome is HookActionOutcome.SUCCEEDED
+        persisted = json.loads(session.transcript_path.read_text(encoding="utf-8").splitlines()[-1])
+        assert "Read observation completed." not in json.dumps(persisted["hook_audit"])
+    finally:
+        session.close()
+
+
+def test_failed_turn_retains_prior_action_and_lifecycle_hook_audit(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "failure-note",
+            HookEffect.ADVISORY,
+            message="Turn failed after observation.",
+            event=HookEvent.TURN_FAILED,
+        ),
+    )
+    call = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "note.txt"}))
+    provider = ToolProvider([call, RuntimeError("provider stopped")])
+    events = []
+    session = open_session(tmp_path, provider)
+    try:
+        with pytest.raises(RuntimeError, match="provider stopped"):
+            session.prompt("read then fail", event_sink=events.append)
+        record = next(
+            item for item in reversed(session._writer.state.records) if isinstance(item, TurnFailed)
+        )
+        assert tuple(entry.event for entry in record.hook_audit.entries) == (
+            HookEvent.BEFORE_ACTION_AUTHORIZATION,
+            HookEvent.AFTER_ACTION,
+            HookEvent.TURN_FAILED,
+        )
+        observed = [event for event in events if isinstance(event, HookLifecycleObserved)]
+        assert len(observed) == 1
+        assert observed[0].event is HookEvent.TURN_FAILED
+        assert (
+            observed[0].advisory == "Hook advisory [failure-note]: Turn failed after observation."
+        )
     finally:
         session.close()
 

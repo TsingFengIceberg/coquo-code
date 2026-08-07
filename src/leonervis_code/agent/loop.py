@@ -12,6 +12,7 @@ from leonervis_code.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
+    HookLifecycleObserved,
     ProviderInvocationPreflighted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
@@ -79,7 +80,8 @@ from leonervis_code.skills import (
     SkillInventorySnapshot,
     active_skills_from_history,
 )
-from leonervis_code.hooks import HookSetSnapshot
+from leonervis_code.hooks import HookSetSnapshot, evaluate_lifecycle_event
+from leonervis_code.core.hook_contracts import HookAuditLedger, HookEvent
 from leonervis_code.tools.skill_discovery import (
     SKILL_LOAD_TOOL_NAME,
     SKILL_READ_RESOURCE_TOOL_NAME,
@@ -597,6 +599,7 @@ class AgentLoop:
         provider_invocations = 0
         force_final = False
         ledger_entries: list[ToolOutcomeEntry] = []
+        hook_audit_entries = []
         ledger_summary_attached = False
         seen_tool_ids = set(validate_complete_history(context.full_history).tool_use_ids)
         attempt_usage = ToolAttemptUsage()
@@ -654,7 +657,34 @@ class AgentLoop:
                 if cancellation is not None:
                     cancellation.check()
                 ledger = ToolTurnLedger(tuple(ledger_entries))
-                self._commit(pending + (response,), user, response, ledger)
+                turn_hook_evaluation = evaluate_lifecycle_event(
+                    prepared.hook_set_snapshot,
+                    event=HookEvent.TURN_COMMITTED,
+                )
+                hook_audit = HookAuditLedger(
+                    (
+                        *hook_audit_entries,
+                        turn_hook_evaluation.audit_entry(
+                            event=HookEvent.TURN_COMMITTED,
+                            hook_set_id=prepared.hook_set_snapshot.snapshot_id,
+                            subject_id=context.context_id,
+                        ),
+                    )
+                )
+                self._commit(pending + (response,), user, response, ledger, hook_audit)
+                if turn_hook_evaluation.matches:
+                    self._emit_prompt_event(
+                        event_sink,
+                        HookLifecycleObserved(
+                            event=HookEvent.TURN_COMMITTED,
+                            hook_set_id=prepared.hook_set_snapshot.snapshot_id,
+                            result=hook_audit.entries[-1].result,
+                            matched_hook_ids=tuple(
+                                match.hook_id for match in turn_hook_evaluation.matches
+                            ),
+                            advisory=turn_hook_evaluation.advisory_text,
+                        ),
+                    )
                 if pending_task_proposal is not None:
                     assert task_proposal_sink is not None
                     task_proposal_sink(pending_task_proposal)
@@ -869,6 +899,7 @@ class AgentLoop:
                     )
                     raise
                 succeeded = dispatch.status == ToolEventStatus.SUCCEEDED
+                hook_audit_entries.extend(dispatch.hook_audit.entries)
                 attempt_usage = ToolAttemptUsage(
                     requested=attempt_usage.requested,
                     admitted=attempt_usage.admitted,
@@ -1030,6 +1061,7 @@ class AgentLoop:
         user: UserMessage,
         assistant: AssistantText,
         tool_ledger: ToolTurnLedger,
+        hook_audit: HookAuditLedger,
     ) -> None:
         """Persist one complete turn before exposing it through in-memory state."""
         turn = CommittedTurn(
@@ -1037,6 +1069,7 @@ class AgentLoop:
             user=user,
             assistant=assistant,
             tool_ledger=tool_ledger,
+            hook_audit=hook_audit,
         )
         full_validated = validate_complete_history(self._full_history)
         validate_complete_history(

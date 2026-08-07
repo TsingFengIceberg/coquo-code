@@ -34,15 +34,18 @@ LEGACY_SKILL_V2_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 13
 LEGACY_SKILL_V2_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 14
 LEGACY_SKILL_V3_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 15
 LEGACY_SKILL_V3_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 16
-EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 17
-COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 18
+LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 17
+LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 18
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 19
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 20
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"leonervis-code-effective-context-id\0"
 _TOOL_SET_ID = re.compile(r"toolset-v1-[0-9a-f]{64}\Z")
 _SKILL_INVENTORY_V1_ID = re.compile(r"skills-v1-[0-9a-f]{64}\Z")
 _SKILL_INVENTORY_V2_ID = re.compile(r"skills-v2-[0-9a-f]{64}\Z")
-_HOOK_SET_ID = re.compile(r"hooks-v1-[0-9a-f]{64}\Z")
+_HOOK_SET_V1_ID = re.compile(r"hooks-v1-[0-9a-f]{64}\Z")
+_HOOK_SET_V2_ID = re.compile(r"hooks-v2-[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,8 @@ class EffectiveContextSnapshot:
             LEGACY_SKILL_V2_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             LEGACY_SKILL_V3_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             LEGACY_SKILL_V3_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }
@@ -164,6 +169,8 @@ class EffectiveContextSnapshot:
             LEGACY_SKILL_V2_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             LEGACY_SKILL_V3_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             LEGACY_SKILL_V3_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }:
@@ -175,14 +182,23 @@ class EffectiveContextSnapshot:
         elif self.skill_inventory_id is not None:
             raise ValueError("legacy effective context cannot contain a Skill inventory identity")
         if self.representation_version in {
+            LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+            LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+        }:
+            if (
+                not isinstance(self.hook_set_id, str)
+                or _HOOK_SET_V1_ID.fullmatch(self.hook_set_id) is None
+            ):
+                raise ValueError("legacy Hook context requires a v1 Hook set identity")
+        elif self.representation_version in {
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
         }:
             if (
                 not isinstance(self.hook_set_id, str)
-                or _HOOK_SET_ID.fullmatch(self.hook_set_id) is None
+                or _HOOK_SET_V2_ID.fullmatch(self.hook_set_id) is None
             ):
-                raise ValueError("current effective context requires a Hook set identity")
+                raise ValueError("current effective context requires a v2 Hook set identity")
         elif self.hook_set_id is not None:
             raise ValueError("legacy effective context cannot contain a Hook set identity")
         if not isinstance(self.tool_definitions, tuple) or not self.tool_definitions:
@@ -207,6 +223,7 @@ class EffectiveContextSnapshot:
                 LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 LEGACY_SKILL_V2_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 LEGACY_SKILL_V3_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
+                LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
                 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError(
@@ -226,6 +243,7 @@ class EffectiveContextSnapshot:
                 LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 LEGACY_SKILL_V2_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 LEGACY_SKILL_V3_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+                LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
                 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
             }:
                 raise ValueError("compacted effective context uses an unsupported representation")
@@ -293,7 +311,7 @@ class EffectiveContextSnapshot:
             manifest["tool_set_id"] = self.tool_set_id
         if self.representation_version >= LEGACY_SKILL_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
             manifest["skill_inventory_id"] = self.skill_inventory_id
-        if self.representation_version >= EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+        if self.representation_version >= LEGACY_HOOK_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
             manifest["hook_set_id"] = self.hook_set_id
         if self.effective_summary is not None:
             manifest["effective_summary"] = {

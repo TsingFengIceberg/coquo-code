@@ -86,6 +86,7 @@
 - [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
+- [Durable Hook Observation and Audit](#durable-hook-observation-and-audit)
 - [ADR index](#adr-index)
 
 ## Canonical model system prompt
@@ -1302,6 +1303,14 @@ Every Turn freezes the complete `HookSetSnapshot`, including disabled rules, and
 
 The system prompt advances to v41, provider adapter to v42, and full/compacted Effective Context to v17/v18 while retaining v15/v16 as legacy Skill-v3 representations. Hooks add no model-visible Tool schema, so the Registry remains generation 5; Session, Task, Action Audit, ToolSet, and Skill inventory schemas do not change. See [0125](./decisions/0125-frozen-declarative-preauthorization-hooks.md).
 
+## Durable Hook Observation and Audit
+
+Hook configuration and HookSetSnapshot advance to v2 while retaining strict v1 configuration reads. In addition to `before_action_authorization`, the runtime supports `after_action`, Turn committed/failed, and Task Stage started/committed/failed, blocked, and terminated events. Only preauthorization may use `deny|require_ask`; all other events permit only `continue|advisory`. Lifecycle events reject action matchers, while `after_action` may match a closed terminal outcome. Shell, HTTP, model, background, and other executable handlers remain unsupported.
+
+Each evaluation creates one bounded content-free `HookAuditEntry` containing only the event, exact HookSet ID, subject, matched Hook IDs/effects, aggregate result, and safe action metadata. Hook messages, Tool arguments, file content, and credentials are excluded. Action and Turn-terminal evaluations are atomically persisted in `turn_committed` v10 or `turn_failed` v3. Task evaluations are persisted in `stage_started|committed|failed` v3 and `task_blocker_recorded|task_terminated` v2. Older records remain readable and cannot carry the new ledger. If a Turn fails after actions ran, the earlier action Hook evaluations are retained in the failed record.
+
+Lifecycle advisories use typed transient terminal events and are not copied into the audit ledger. An after-action advisory may enter the normal ToolResult without changing the actual Tool or Action Audit outcome. Standalone `hooks evaluations [session]` and `hooks task <task-id>`, plus REPL `/hooks evaluations [count]` and `/hooks task <task-id> [count]`, perform only strict replay and bounded content-free projection without a Provider call or state mutation. The system prompt is v42, provider adapter v43, HookSet identity `hooks-v2`, and Effective Context v19/v20 with v17/v18 retained as legacy Hook-v1 representations; Registry remains generation 5. See [0126](./decisions/0126-durable-hook-observation-and-audit.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1429,3 +1438,4 @@ The system prompt advances to v41, provider adapter to v42, and full/compacted E
 123. [0123: Skill Authoring, Local Import, Task Audit, and Execution Boundary](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)
 124. [0124: Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
 125. [0125: Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
+126. [0126: Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)

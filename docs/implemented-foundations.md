@@ -86,6 +86,7 @@
 - [Target-specific request counting 与 per-invocation preflight](#target-specific-request-counting-与-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
+- [Durable Hook Observation 与 Audit](#durable-hook-observation-与-audit)
 - [ADR 索引](#adr-索引)
 
 ## Canonical model system prompt
@@ -1302,6 +1303,14 @@ Hook schema v1只支持`before_action_authorization`事件与`continue|deny|requ
 
 system prompt提升到v41，provider adapter提升到v42，full/compacted Effective Context提升到v17/v18并将v15/v16保留为legacy Skill-v3表示。Hook没有新增model-visible Tool schema，因此Registry仍为generation 5，Session、Task、Action Audit、ToolSet与Skill inventory schema不变。见[0125](./decisions/0125-frozen-declarative-preauthorization-hooks.md)。
 
+## Durable Hook Observation 与 Audit
+
+Hook配置与HookSetSnapshot升级为v2，并继续严格读取v1配置。除原有`before_action_authorization`外，新增`after_action`、Turn committed/failed及Task Stage started/committed/failed、blocked、terminated事件。只有preauthorization可使用`deny|require_ask`；其余事件只允许`continue|advisory`，lifecycle事件不接受action matcher，`after_action`可按闭合terminal outcome匹配。仍不支持shell、HTTP、模型、后台或其他可执行handler。
+
+每次求值生成有界content-free `HookAuditEntry`，只含event、exact HookSet ID、subject、匹配Hook ID/effect、aggregate result及安全action元数据，不保存Hook message、Tool argument、文件内容或credential。Action求值和Turn终局随`turn_committed` v10或`turn_failed` v3原子持久化；Task求值随`stage_started|committed|failed` v3及`task_blocker_recorded|task_terminated` v2持久化。旧record继续读取且不能携带新ledger。Turn在action后失败时，已发生的action Hook求值也会进入失败record。
+
+Lifecycle advisory通过typed transient terminal event展示但不复制到audit ledger；after-action advisory可进入普通ToolResult，但不能改变真实Tool或Action Audit outcome。Standalone `hooks evaluations [session]`、`hooks task <task-id>`及REPL `/hooks evaluations [count]`、`/hooks task <task-id> [count]`只做strict replay和有界content-free投影，不调用Provider或修改状态。system prompt为v42，provider adapter为v43，HookSet为`hooks-v2`，Effective Context为v19/v20并保留v17/v18 legacy Hook-v1表示；Registry保持generation 5。见[0126](./decisions/0126-durable-hook-observation-and-audit.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1429,3 +1438,4 @@ system prompt提升到v41，provider adapter提升到v42，full/compacted Effect
 123. [0123：Skill Authoring, Local Import, Task Audit, and Execution Boundary](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)
 124. [0124：Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
 125. [0125：Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
+126. [0126：Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)

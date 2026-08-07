@@ -15,6 +15,11 @@ from leonervis_code.core.contracts import (
     ToolTurnLedger,
     ToolUse,
 )
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookEffect,
+    HookEvent,
+)
 from leonervis_code.core.task_admission import TaskAdmissionProposal
 from leonervis_code.core.skill_authoring import canonical_skill_candidate_id
 from leonervis_code.skill_candidates import SkillCandidateInfo
@@ -367,6 +372,35 @@ class SkillCandidateInstalled:
         )
 
 
+@dataclass(frozen=True)
+class HookLifecycleObserved:
+    """Expose one transient lifecycle Hook result without persisting its message."""
+
+    event: HookEvent
+    hook_set_id: str
+    result: HookEffect
+    matched_hook_ids: tuple[str, ...]
+    advisory: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.event) is not HookEvent or self.event.is_action_event:
+            raise ValueError("Hook lifecycle observation event is invalid")
+        if not isinstance(self.hook_set_id, str) or not self.hook_set_id:
+            raise ValueError("Hook lifecycle observation snapshot is invalid")
+        if type(self.result) is not HookEffect:
+            raise ValueError("Hook lifecycle observation result is invalid")
+        if (
+            not isinstance(self.matched_hook_ids, tuple)
+            or tuple(sorted(self.matched_hook_ids)) != self.matched_hook_ids
+            or len(set(self.matched_hook_ids)) != len(self.matched_hook_ids)
+        ):
+            raise ValueError("Hook lifecycle observation matches are invalid")
+        if self.advisory is not None and (
+            not isinstance(self.advisory, str) or not self.advisory.strip()
+        ):
+            raise ValueError("Hook lifecycle observation advisory is invalid")
+
+
 ToolPromptEvent = (
     ToolRequestStarted
     | ToolRequestFinished
@@ -392,6 +426,7 @@ AgentPromptEvent = (
     | TaskLifecycleCommitted
     | SkillCandidateCommitted
     | SkillCandidateInstalled
+    | HookLifecycleObserved
 )
 
 
@@ -408,6 +443,7 @@ class ToolDispatchResult:
     status: ToolEventStatus
     result_code: str | None = None
     result_details: ToolResultDetails | None = None
+    hook_audit: HookAuditLedger = HookAuditLedger()
 
     def __post_init__(self) -> None:
         if type(self.tool_result) is not ToolResult:
@@ -424,6 +460,8 @@ class ToolDispatchResult:
             raise ValueError("tool dispatch result code is invalid")
         if self.result_details is not None and type(self.result_details) is not ToolResultDetails:
             raise ValueError("tool dispatch result details are invalid")
+        if type(self.hook_audit) is not HookAuditLedger:
+            raise ValueError("tool dispatch Hook audit is invalid")
 
 
 def infer_tool_dispatch_result(result: ToolResult) -> ToolDispatchResult:

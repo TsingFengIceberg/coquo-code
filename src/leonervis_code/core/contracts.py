@@ -9,6 +9,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Callable, Protocol, TypeAlias
 
+from leonervis_code.core.hook_contracts import HookAuditLedger
 from leonervis_code.core.project_instructions import ProjectInstructionsSnapshot
 
 if TYPE_CHECKING:
@@ -392,6 +393,7 @@ class CommittedTurn:
     user: UserMessage
     assistant: AssistantText
     tool_ledger: ToolTurnLedger = ToolTurnLedger()
+    hook_audit: HookAuditLedger = HookAuditLedger()
 
 
 ConversationItem: TypeAlias = (

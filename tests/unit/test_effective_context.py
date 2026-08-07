@@ -57,7 +57,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v17-8c42dbb3f73bece0aae935d62639070798bf1f1a8396813647de66457279eab2"
+        == "ctx-v19-3ffef74825991f05c9f8416e5756b6e855636b6ea01315342268670c9c2a3b55"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -308,7 +308,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v18-")
+    assert context.context_id.startswith("ctx-v20-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

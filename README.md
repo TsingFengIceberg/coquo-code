@@ -281,7 +281,7 @@ Task用于管理可恢复的前台多阶段工作，既可由自然语言交互�
 | `/search domains <domain> [domain...]`、`/search domains reset` | 设置或清除Provider adapter支持的域名限制 |
 | `/search context <low\|medium\|high\|reset>` | 设置或恢复Provider adapter支持的搜索context大小 |
 | `/search reset` | 清除REPL覆盖；Provider原生搜索可用时恢复Provider，否则关闭全部来源 |
-| `/hooks [active\|list\|show <id>\|doctor]` | 不调用模型，只读检查当前声明式Hook配置；使用独立`hooks`命令修改配置 |
+| `/hooks [active\|list\|show <id>\|doctor\|evaluations [count]\|task <task-id> [count]]` | 不调用模型，只读检查当前声明式Hook配置及持久化求值记录；使用独立`hooks`命令修改配置 |
 | `/session show [latest\|id]` | 显示当前或指定Session的严格回放元数据，不执行切换 |
 | `/session preview <latest\|id> [1-10]` | 只读显示指定Session最近的完整user/final-assistant回合，默认3轮、最多10轮 |
 | `/session turns <latest\|id> <start> [1-10]` | 从指定的1-based完整turn开始只读显示，默认3轮 |
@@ -383,7 +383,7 @@ MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact quali
 
 声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills init|check|search|import|lock`维护本地包，使用`skills fetch|candidate|install`隔离检查和安装公开raw/ZIP包，或在REPL中用`/skills`检查当前激活与候选。模型只会在用户明确要求时提议保存流程，不会自动从经验学习；详细格式、预算与权限边界见implemented-foundations。
 
-声明式Hook用于在普通PermissionGate之前增加本地约束。使用`hooks add|list|show|doctor|enable|disable|remove`管理user或project规则；新规则默认disabled，REPL中的`/hooks`只读检查当前生效状态。详细匹配与冻结边界见implemented-foundations和ADR 0125。
+声明式Hook可在普通PermissionGate之前增加本地约束，并对action终局及选定Turn/Task生命周期做无副作用观察。使用`hooks add|list|show|doctor|enable|disable|remove`管理默认disabled的user或project规则；REPL中的`/hooks`只读检查当前状态和content-free持久审计。详细边界见implemented-foundations及ADR 0125/0126。
 
 ## 配置与本地状态
 

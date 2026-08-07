@@ -45,6 +45,12 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookEvent,
+    hook_audit_ledger_from_mapping,
+    hook_audit_ledger_to_mapping,
+)
 from leonervis_code.core.task_admission import (
     TaskAdmissionOutcome,
     TaskAdmissionProposal,
@@ -66,6 +72,7 @@ from leonervis_code.core.effective_context import (
     EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
     PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
     LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+    LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
     validate_complete_history,
 )
 from leonervis_code.providers.usage import (
@@ -84,9 +91,11 @@ TURN_COMMITTED_LEDGER_SCHEMA_VERSION = 5
 TURN_COMMITTED_USAGE_SCHEMA_VERSION = 6
 TURN_COMMITTED_NAMING_SCHEMA_VERSION = 7
 TURN_COMMITTED_TITLE_SCHEMA_VERSION = 8
-TURN_COMMITTED_SCHEMA_VERSION = 9
+TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION = 9
+TURN_COMMITTED_SCHEMA_VERSION = 10
 TURN_FAILED_LEGACY_SCHEMA_VERSION = 1
-TURN_FAILED_SCHEMA_VERSION = 2
+TURN_FAILED_USAGE_SCHEMA_VERSION = 2
+TURN_FAILED_SCHEMA_VERSION = 3
 SESSION_RESUMED_LEGACY_SCHEMA_VERSION = 1
 SESSION_RESUMED_SCHEMA_VERSION = 2
 CONTEXT_COMPACTED_LEGACY_SCHEMA_VERSION = 2
@@ -248,6 +257,7 @@ class TurnCommitted:
     binding: BindingSnapshot
     items: tuple[ConversationItem, ...]
     tool_ledger: ToolTurnLedger = ToolTurnLedger()
+    hook_audit: HookAuditLedger = HookAuditLedger()
     provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
     session_name: str | None = None
     session_name_source: SessionNameSource | None = None
@@ -315,6 +325,7 @@ class TurnFailed:
     failure_kind: str
     message: str
     provider_usage: tuple[ProviderInvocationUsage, ...] | None = ()
+    hook_audit: HookAuditLedger = HookAuditLedger()
     record_type: str = "turn_failed"
     schema_version: int = TURN_FAILED_SCHEMA_VERSION
 
@@ -747,12 +758,19 @@ def replay_records(
             _validate_timestamp(record.committed_at, "turn committed_at")
             _validate_turn(record.items, seen_tool_ids)
             _validate_turn_ledger(record)
+            _validate_hook_audit(
+                record.hook_audit,
+                supported=record.schema_version >= TURN_COMMITTED_SCHEMA_VERSION,
+                label="turn_committed",
+                terminal_event=HookEvent.TURN_COMMITTED,
+            )
             _validate_turn_session_name(record)
             committed = CommittedTurn(
                 record.items,
                 record.items[0],  # type: ignore[arg-type]
                 record.items[-1],  # type: ignore[arg-type]
                 record.tool_ledger,
+                record.hook_audit,
             )
             try:
                 admission = recover_task_admission_proposal(committed)
@@ -820,7 +838,7 @@ def replay_records(
             _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
             _required_text(record.failure_kind, "turn_failed failure_kind")
             _required_text(record.message, "turn_failed message", allow_empty=True)
-            if record.schema_version == TURN_FAILED_SCHEMA_VERSION:
+            if record.schema_version >= TURN_FAILED_USAGE_SCHEMA_VERSION:
                 _validate_provider_usage(
                     record.provider_usage,
                     expected_kind=ProviderInvocationKind.TURN,
@@ -828,6 +846,12 @@ def replay_records(
                 )
             elif record.provider_usage not in (None, ()):
                 raise SessionRecordError("legacy turn_failed cannot contain provider usage")
+            _validate_hook_audit(
+                record.hook_audit,
+                supported=record.schema_version >= TURN_FAILED_SCHEMA_VERSION,
+                label="turn_failed",
+                terminal_event=HookEvent.TURN_FAILED,
+            )
             _interrupt_live_action(action_states, live_action_request_id, record.sequence)
             live_action_request_id = None
             binding = record.binding
@@ -1170,6 +1194,12 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
         _validate_turn_ledger(record)
+        _validate_hook_audit(
+            record.hook_audit,
+            supported=record.schema_version >= TURN_COMMITTED_SCHEMA_VERSION,
+            label="turn_committed",
+            terminal_event=HookEvent.TURN_COMMITTED,
+        )
         _validate_turn_session_name(record)
         common.update(
             committed_at=record.committed_at,
@@ -1180,6 +1210,8 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         )
         if record.schema_version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION:
             common["tool_ledger"] = _tool_ledger_to_dict(record.tool_ledger)
+        if record.schema_version >= TURN_COMMITTED_SCHEMA_VERSION:
+            common["hook_audit"] = _hook_audit_to_dict(record.hook_audit, "turn_committed")
         if record.schema_version >= TURN_COMMITTED_USAGE_SCHEMA_VERSION:
             common["provider_usage"] = _provider_usage_to_value(
                 record.provider_usage,
@@ -1248,18 +1280,26 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
         _validate_timestamp(record.occurred_at, "turn_failed occurred_at")
         _required_text(record.failure_kind, "turn_failed failure_kind")
         _required_text(record.message, "turn_failed message", allow_empty=True)
+        _validate_hook_audit(
+            record.hook_audit,
+            supported=record.schema_version >= TURN_FAILED_SCHEMA_VERSION,
+            label="turn_failed",
+            terminal_event=HookEvent.TURN_FAILED,
+        )
         common.update(
             occurred_at=record.occurred_at,
             binding=_binding_to_dict(record.binding),
             failure_kind=record.failure_kind,
             message=record.message,
         )
-        if record.schema_version == TURN_FAILED_SCHEMA_VERSION:
+        if record.schema_version >= TURN_FAILED_USAGE_SCHEMA_VERSION:
             common["provider_usage"] = _provider_usage_to_value(
                 record.provider_usage,
                 expected_kind=ProviderInvocationKind.TURN,
                 label="turn_failed",
             )
+        if record.schema_version >= TURN_FAILED_SCHEMA_VERSION:
+            common["hook_audit"] = _hook_audit_to_dict(record.hook_audit, "turn_failed")
     elif isinstance(record, ActionRequested):
         _validate_action_requested_fields(record)
         common.update(
@@ -1400,10 +1440,15 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_TITLE_SCHEMA_VERSION,
+            TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }
     elif record_type == "turn_failed":
-        allowed_versions = {TURN_FAILED_LEGACY_SCHEMA_VERSION, TURN_FAILED_SCHEMA_VERSION}
+        allowed_versions = {
+            TURN_FAILED_LEGACY_SCHEMA_VERSION,
+            TURN_FAILED_USAGE_SCHEMA_VERSION,
+            TURN_FAILED_SCHEMA_VERSION,
+        }
     elif record_type == "session_resumed":
         allowed_versions = {
             SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
@@ -1468,6 +1513,8 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             fields.update({"session_name", "session_name_source"})
         if version >= TURN_COMMITTED_TITLE_SCHEMA_VERSION:
             fields.add("session_title_fallback_reason")
+        if version >= TURN_COMMITTED_SCHEMA_VERSION:
+            fields.add("hook_audit")
         _closed_fields(
             value,
             fields,
@@ -1486,6 +1533,11 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
                 _tool_ledger_from_value(value.get("tool_ledger"))
                 if version >= TURN_COMMITTED_LEDGER_SCHEMA_VERSION
                 else ToolTurnLedger()
+            ),
+            hook_audit=(
+                _hook_audit_from_value(value.get("hook_audit"), "turn_committed")
+                if version >= TURN_COMMITTED_SCHEMA_VERSION
+                else HookAuditLedger()
             ),
             provider_usage=(
                 _provider_usage_from_value(
@@ -1518,6 +1570,12 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
         _validate_timestamp(record.committed_at, "turn committed_at")
         _validate_turn(record.items, set())
         _validate_turn_ledger(record)
+        _validate_hook_audit(
+            record.hook_audit,
+            supported=version >= TURN_COMMITTED_SCHEMA_VERSION,
+            label="turn_committed",
+            terminal_event=HookEvent.TURN_COMMITTED,
+        )
         _validate_turn_session_name(record)
         return record
     if record_type == "runtime_changed":
@@ -1631,10 +1689,12 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "failure_kind",
             "message",
         }
-        if version == TURN_FAILED_SCHEMA_VERSION:
+        if version >= TURN_FAILED_USAGE_SCHEMA_VERSION:
             fields.add("provider_usage")
+        if version >= TURN_FAILED_SCHEMA_VERSION:
+            fields.add("hook_audit")
         _closed_fields(value, fields, record_type)
-        return TurnFailed(
+        record = TurnFailed(
             sequence=sequence,
             occurred_at=_required_field_text(value, "occurred_at", record_type),
             binding=_binding_from_value(value.get("binding")),
@@ -1646,11 +1706,23 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
                     expected_kind=ProviderInvocationKind.TURN,
                     label=record_type,
                 )
-                if version == TURN_FAILED_SCHEMA_VERSION
+                if version >= TURN_FAILED_USAGE_SCHEMA_VERSION
                 else ()
+            ),
+            hook_audit=(
+                _hook_audit_from_value(value.get("hook_audit"), "turn_failed")
+                if version >= TURN_FAILED_SCHEMA_VERSION
+                else HookAuditLedger()
             ),
             schema_version=version,
         )
+        _validate_hook_audit(
+            record.hook_audit,
+            supported=version >= TURN_FAILED_SCHEMA_VERSION,
+            label="turn_failed",
+            terminal_event=HookEvent.TURN_FAILED,
+        )
+        return record
     if record_type == "action_requested":
         fields = {
             "record_type",
@@ -2013,6 +2085,7 @@ def _item_to_dict(
         TURN_COMMITTED_USAGE_SCHEMA_VERSION,
         TURN_COMMITTED_NAMING_SCHEMA_VERSION,
         TURN_COMMITTED_TITLE_SCHEMA_VERSION,
+        TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION,
         TURN_COMMITTED_SCHEMA_VERSION,
     }:
         raise SessionRecordError("unsupported turn_committed schema version")
@@ -2023,7 +2096,7 @@ def _item_to_dict(
         _text_payload(item.text, "assistant text")
         return {"item_type": "assistant_text", "text": item.text}
     if isinstance(item, ProviderOwnedItem):
-        if schema_version < TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version < TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION:
             raise SessionRecordError(
                 "provider-owned item requires a newer turn_committed schema version"
             )
@@ -2132,7 +2205,7 @@ def _item_from_value(value: object, *, schema_version: int) -> ConversationItem:
         text = _required_field_payload_text(value, "text", item_type)
         return UserMessage(text) if item_type == "user_message" else AssistantText(text)
     if item_type == "provider_owned_item":
-        if schema_version < TURN_COMMITTED_SCHEMA_VERSION:
+        if schema_version < TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION:
             raise SessionRecordError(
                 "provider-owned item requires a newer turn_committed schema version"
             )
@@ -2350,6 +2423,20 @@ def _tool_ledger_from_value(value: object) -> ToolTurnLedger:
         raise SessionRecordError(str(error)) from None
 
 
+def _hook_audit_to_dict(ledger: HookAuditLedger, label: str) -> dict[str, object]:
+    try:
+        return hook_audit_ledger_to_mapping(ledger)
+    except ValueError as error:
+        raise SessionRecordError(f"{label} {error}") from None
+
+
+def _hook_audit_from_value(value: object, label: str) -> HookAuditLedger:
+    try:
+        return hook_audit_ledger_from_mapping(value)
+    except ValueError as error:
+        raise SessionRecordError(f"{label} {error}") from None
+
+
 def _provider_usage_to_value(
     records: tuple[ProviderInvocationUsage, ...] | None,
     *,
@@ -2466,6 +2553,30 @@ def _validate_turn_ledger(record: TurnCommitted) -> None:
         raise SessionRecordError("legacy turn_committed cannot contain provider usage")
 
 
+def _validate_hook_audit(
+    ledger: HookAuditLedger,
+    *,
+    supported: bool,
+    label: str,
+    terminal_event: HookEvent,
+) -> None:
+    if type(ledger) is not HookAuditLedger:
+        raise SessionRecordError(f"{label} Hook audit ledger is invalid")
+    if not supported:
+        if ledger.entries:
+            raise SessionRecordError(f"legacy {label} cannot contain Hook audit")
+        return
+    try:
+        ledger.__post_init__()
+    except ValueError as error:
+        raise SessionRecordError(str(error)) from None
+    if ledger.entries:
+        if ledger.entries[-1].event is not terminal_event:
+            raise SessionRecordError(f"{label} Hook audit terminal event is invalid")
+        if any(not entry.event.is_action_event for entry in ledger.entries[:-1]):
+            raise SessionRecordError(f"{label} Hook audit contains misplaced lifecycle events")
+
+
 def _validate_turn_session_name(record: TurnCommitted) -> None:
     if record.schema_version < TURN_COMMITTED_NAMING_SCHEMA_VERSION:
         if (
@@ -2572,6 +2683,7 @@ def _validate_record_version(record: SessionRecord) -> None:
             TURN_COMMITTED_USAGE_SCHEMA_VERSION,
             TURN_COMMITTED_NAMING_SCHEMA_VERSION,
             TURN_COMMITTED_TITLE_SCHEMA_VERSION,
+            TURN_COMMITTED_PROVIDER_HISTORY_SCHEMA_VERSION,
             TURN_COMMITTED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -2588,6 +2700,7 @@ def _validate_record_version(record: SessionRecord) -> None:
     if isinstance(record, TurnFailed):
         if record.schema_version not in {
             TURN_FAILED_LEGACY_SCHEMA_VERSION,
+            TURN_FAILED_USAGE_SCHEMA_VERSION,
             TURN_FAILED_SCHEMA_VERSION,
         }:
             raise SessionRecordError("unsupported session record schema version")
@@ -2693,6 +2806,7 @@ def _validate_context_compacted_fields(record: ContextCompacted) -> None:
         2,
         PROJECT_INSTRUCTIONS_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
         LEGACY_SKILL_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
+        LEGACY_HOOK_COMPACTED_CONTEXT_REPRESENTATION_VERSION,
         COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     }:
         raise SessionRecordError(

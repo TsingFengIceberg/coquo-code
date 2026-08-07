@@ -587,6 +587,12 @@ class Session:
                 return info
         raise SessionStoreError(f"task transcript does not exist: {task_id}")
 
+    def hook_evaluations(self, limit=20):
+        return ()
+
+    def task_hook_evaluations(self, task_id, limit=20):
+        return ()
+
     def list_task_admissions(self):
         return tuple(self.admissions)
 
@@ -907,7 +913,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v17-" in context.message
+    assert "Context ID: ctx-v19-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -1602,15 +1608,30 @@ def test_hook_commands_are_host_only_read_only_inspections(tmp_path) -> None:
     assert active.handled and active.kind == "info"
     assert "Active Hooks: 1" in active.message
     listed = dispatch_slash("/hooks list", session)
-    assert "protect-config: project, deny, enabled, r1" in listed.message
+    assert (
+        "protect-config: project, before_action_authorization, deny, enabled, r1" in listed.message
+    )
     shown = dispatch_slash("/hooks show protect-config", session)
     assert "Message: Configuration requires review." in shown.message
     doctor = dispatch_slash("/hooks doctor", session)
     assert "Side-effect handlers: disabled by contract" in doctor.message
+    assert dispatch_slash("/hooks evaluations 5", session).message == (
+        "No durable Hook evaluations found."
+    )
+    assert (
+        dispatch_slash(
+            "/hooks task 12345678-1234-4234-9234-123456789abc 5",
+            session,
+        ).message
+        == "No durable Hook evaluations found."
+    )
     assert session.turns == original_turns
     assert session.prompts == []
 
     assert dispatch_slash("/hooks show", session).message == "Usage: /hooks show <hook-id>"
+    assert dispatch_slash("/hooks evaluations 0", session).message == (
+        "Usage: /hooks evaluations [1-100]"
+    )
     assert "Did you mean doctor?" in dispatch_slash("/hooks doctro", session).message
 
 

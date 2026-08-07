@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from leonervis_code.core.hook_contracts import (
+    HookAuditEntry,
+    HookAuditLedger,
+    HookEffect,
+    HookEvent,
+)
 from leonervis_code.session_records import workspace_fingerprint
 from leonervis_code.task_records import (
     MAX_ACCEPTANCE_CRITERIA,
@@ -21,6 +27,8 @@ from leonervis_code.task_records import (
     StageStarted,
     StageUsage,
     TaskArchived,
+    TaskBlockerCategory,
+    TaskBlockerRecorded,
     TaskAcceptanceContract,
     TaskAcceptanceCriterion,
     TaskAdmissionOrigin,
@@ -33,6 +41,8 @@ from leonervis_code.task_records import (
     TaskRecordError,
     TaskRenamed,
     TaskStatus,
+    TaskTerminalOutcome,
+    TaskTerminated,
     canonical_acceptance_criteria,
     canonical_task_id,
     canonical_task_objective,
@@ -246,6 +256,20 @@ def started(sequence: int = 1, stage_number: int = 1) -> StageStarted:
     )
 
 
+def hook_audit(event: HookEvent) -> HookAuditLedger:
+    return HookAuditLedger(
+        (
+            HookAuditEntry(
+                event=event,
+                hook_set_id="hooks-v2-" + "a" * 64,
+                subject_id=TASK_ID,
+                matches=(),
+                result=HookEffect.CONTINUE,
+            ),
+        )
+    )
+
+
 def committed(sequence: int = 2, stage_number: int = 1) -> StageCommitted:
     return StageCommitted(
         sequence=sequence,
@@ -289,6 +313,51 @@ def test_stage_records_round_trip_and_derive_interrupted_paused_and_blocked(
     assert replay(tmp_path, [header(tmp_path), start]).status is TaskStatus.INTERRUPTED
     assert replay(tmp_path, [header(tmp_path), start, commit]).status is TaskStatus.PAUSED
     assert replay(tmp_path, [header(tmp_path), start, failure]).status is TaskStatus.BLOCKED
+
+
+def test_current_stage_records_round_trip_strict_hook_audit_and_legacy_is_empty() -> None:
+    start = replace(started(), hook_audit=hook_audit(HookEvent.TASK_STAGE_STARTED))
+    commit = replace(committed(), hook_audit=hook_audit(HookEvent.TASK_STAGE_COMMITTED))
+    failure = StageFailed(
+        sequence=2,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        reason=StageFailureReason.PROVIDER_ERROR,
+        failed_at="2026-07-31T01:04:00.000000Z",
+        hook_audit=hook_audit(HookEvent.TASK_STAGE_FAILED),
+    )
+
+    for record in (start, commit, failure):
+        assert decode_task_record(encode_task_record(record).rstrip(b"\n")) == record
+    with pytest.raises(TaskRecordError, match="Hook audit event"):
+        encode_task_record(replace(start, hook_audit=hook_audit(HookEvent.TASK_STAGE_FAILED)))
+    with pytest.raises(TaskRecordError, match="legacy stage_started"):
+        encode_task_record(replace(start, schema_version=2))
+
+
+def test_current_blocker_and_terminal_records_round_trip_strict_hook_audit() -> None:
+    blocker = TaskBlockerRecorded(
+        sequence=3,
+        stage_id=STAGE_ID,
+        stage_number=1,
+        category=TaskBlockerCategory.INFORMATION,
+        summary="Need input",
+        proposal_tool_use_id="tool-1",
+        recorded_at="2026-07-31T01:05:00.000000Z",
+        hook_audit=hook_audit(HookEvent.TASK_BLOCKED),
+    )
+    terminal = TaskTerminated(
+        sequence=4,
+        outcome=TaskTerminalOutcome.FAILED,
+        reason="Cannot continue",
+        terminated_at="2026-07-31T01:06:00.000000Z",
+        hook_audit=hook_audit(HookEvent.TASK_TERMINATED),
+    )
+
+    assert decode_task_record(encode_task_record(blocker).rstrip(b"\n")) == blocker
+    assert decode_task_record(encode_task_record(terminal).rstrip(b"\n")) == terminal
+    with pytest.raises(TaskRecordError, match="Hook audit event"):
+        encode_task_record(replace(blocker, hook_audit=hook_audit(HookEvent.TASK_TERMINATED)))
 
 
 def test_legacy_stage_v1_records_replay_without_transcript_rewrite(tmp_path: Path) -> None:

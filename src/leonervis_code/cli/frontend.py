@@ -247,6 +247,8 @@ def _activity_status(event: object) -> str:
         return "Recording Task proposal"
     if name == "TaskLifecycleCommitted":
         return "Updating Task lifecycle"
+    if name == "HookLifecycleObserved":
+        return "Observing Hook lifecycle"
     if name == "SkillCandidateCommitted":
         return "Recording Skill candidate"
     if name == "SkillCandidateInstalled":

@@ -7,15 +7,24 @@ import pytest
 
 from leonervis_code.core.contracts import ToolArguments
 from leonervis_code.core.extensions import ExtensionSourceKind
+from leonervis_code.core.hook_contracts import (
+    HookActionOutcome,
+    HookEffect,
+    HookEvent,
+    hook_audit_ledger_from_mapping,
+    hook_audit_ledger_to_mapping,
+    HookAuditLedger,
+)
 from leonervis_code.core.permissions import PermissionAction
 from leonervis_code.hooks import (
     HOOK_CONFIGURATION_SCHEMA_VERSION,
     HookConfigurationError,
-    HookEffect,
     HookRule,
     HookSource,
     HookStore,
+    evaluate_after_action,
     evaluate_before_action_authorization,
+    evaluate_lifecycle_event,
 )
 
 
@@ -171,3 +180,76 @@ def test_deny_precedes_require_ask_and_advisories_are_bounded(tmp_path) -> None:
     assert result.denied_by == "c-deny"
     assert not result.requires_ask
     assert result.advisory_text is None
+
+
+def test_after_action_matches_terminal_outcome_and_cannot_change_authority(tmp_path) -> None:
+    registry = store(tmp_path)
+    registry.add_hook(
+        rule(
+            "failed-write",
+            event=HookEvent.AFTER_ACTION,
+            effect=HookEffect.ADVISORY,
+            action_outcomes=(HookActionOutcome.FAILED,),
+            enabled=True,
+        ),
+        scope="project",
+    )
+    snapshot = registry.snapshot()
+
+    matched = evaluate_after_action(
+        snapshot,
+        tool_name="write_file",
+        action=PermissionAction.WORKSPACE_OVERWRITE,
+        arguments=ToolArguments.from_mapping({"path": "config/app.json"}),
+        source_kind=ExtensionSourceKind.BUILTIN,
+        outcome=HookActionOutcome.FAILED,
+    )
+    succeeded = evaluate_after_action(
+        snapshot,
+        tool_name="write_file",
+        action=PermissionAction.WORKSPACE_OVERWRITE,
+        arguments=ToolArguments.from_mapping({"path": "config/app.json"}),
+        source_kind=ExtensionSourceKind.BUILTIN,
+        outcome=HookActionOutcome.SUCCEEDED,
+    )
+
+    assert matched.advisory_text is not None
+    assert matched.matches[0].hook_id == "failed-write"
+    assert succeeded.matches == ()
+    with pytest.raises(HookConfigurationError, match="only continue or advisory"):
+        rule("invalid-deny", event=HookEvent.AFTER_ACTION)
+
+
+def test_lifecycle_hooks_reject_action_matchers_and_emit_content_free_audit(tmp_path) -> None:
+    registry = store(tmp_path)
+    lifecycle = HookRule(
+        "turn-note",
+        HookEffect.ADVISORY,
+        message="Review the committed turn.",
+        event=HookEvent.TURN_COMMITTED,
+        enabled=True,
+    )
+    registry.add_hook(lifecycle, scope="project")
+    snapshot = registry.snapshot()
+    evaluation = evaluate_lifecycle_event(snapshot, event=HookEvent.TURN_COMMITTED)
+    ledger = HookAuditLedger(
+        (
+            evaluation.audit_entry(
+                event=HookEvent.TURN_COMMITTED,
+                hook_set_id=snapshot.snapshot_id,
+                subject_id="ctx-v19-" + "a" * 64,
+            ),
+        )
+    )
+    encoded = hook_audit_ledger_to_mapping(ledger)
+
+    assert hook_audit_ledger_from_mapping(encoded) == ledger
+    assert "Review the committed turn." not in json.dumps(encoded)
+    with pytest.raises(HookConfigurationError, match="cannot contain action matchers"):
+        HookRule(
+            "invalid-lifecycle",
+            HookEffect.ADVISORY,
+            message="invalid",
+            event=HookEvent.TURN_FAILED,
+            tool_names=("read_file",),
+        )

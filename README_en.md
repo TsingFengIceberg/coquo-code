@@ -281,7 +281,7 @@ Tasks manage recoverable foreground multi-stage work. They can begin through nat
 | `/search domains <domain> [domain...]`, `/search domains reset` | Set or clear adapter-supported Provider domain restrictions |
 | `/search context <low\|medium\|high\|reset>` | Set or restore adapter-supported Provider search context size |
 | `/search reset` | Clear the REPL override; restore Provider-native search when available, otherwise disable every source |
-| `/hooks [active\|list\|show <id>\|doctor]` | Inspect current declarative Hook configuration read-only without a model call; use standalone `hooks` commands to edit it |
+| `/hooks [active\|list\|show <id>\|doctor\|evaluations [count]\|task <task-id> [count]]` | Inspect current declarative Hook configuration and durable evaluations read-only without a model call; use standalone `hooks` commands to edit it |
 | `/session show [latest\|id]` | Show strictly replayed metadata for the current or selected Session without switching |
 | `/session preview <latest\|id> [1-10]` | Read the selected Session's recent complete user/final-assistant turns, default 3 and maximum 10 |
 | `/session turns <latest\|id> <start> [1-10]` | Read from one explicit 1-based complete turn, default count 3 |
@@ -383,7 +383,7 @@ MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qual
 
 Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills init|check|search|import|lock` for local packages, `skills fetch|candidate|install` to quarantine, inspect, and install public raw or ZIP packages, or `/skills` in the REPL for current activation and candidates. The model proposes preserving a workflow only after an explicit user request and does not learn automatically from experience. Implemented-foundations defines the exact format, budgets, and authority boundary.
 
-Declarative Hooks add local restrictions before the normal PermissionGate. Use `hooks add|list|show|doctor|enable|disable|remove` to manage user or project rules; new rules are disabled by default, and `/hooks` only inspects current state read-only. Implemented-foundations and ADR 0125 define matching and Turn-freezing boundaries.
+Declarative Hooks can add local restrictions before the normal PermissionGate and observe terminal actions plus selected Turn or Task lifecycle events without side effects. Use `hooks add|list|show|doctor|enable|disable|remove` to manage disabled-by-default user or project rules; `/hooks` inspects current state and content-free durable audit read-only. Implemented-foundations and ADRs 0125/0126 define the detailed boundaries.
 
 ## Configuration and local state
 

@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from leonervis_code.core.hook_contracts import (
+    HookAuditEntry,
+    HookAuditLedger,
+    HookEffect,
+    HookEvent,
+)
 from leonervis_code.core.compaction import (
     CompactionTrigger,
     EffectiveContextSummary,
@@ -74,6 +80,20 @@ from leonervis_code.providers.usage import (
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-17T12:00:00.000000Z"
+
+
+def hook_audit(event: HookEvent) -> HookAuditLedger:
+    return HookAuditLedger(
+        (
+            HookAuditEntry(
+                event=event,
+                hook_set_id="hooks-v2-" + "a" * 64,
+                subject_id=SESSION_ID,
+                matches=(),
+                result=HookEffect.CONTINUE,
+            ),
+        )
+    )
 
 
 def successful_ledger(*requests: ToolUse) -> ToolTurnLedger:
@@ -351,7 +371,7 @@ def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Pat
     decoded_legacy = decode_record(encode_record(legacy))
     assert decoded_legacy.schema_version == TURN_FAILED_LEGACY_SCHEMA_VERSION
     assert decoded_legacy.provider_usage == ()
-    assert TURN_FAILED_SCHEMA_VERSION == 2
+    assert TURN_FAILED_SCHEMA_VERSION == 3
 
     with pytest.raises(SessionRecordError, match="contiguous"):
         encode_record(
@@ -366,6 +386,31 @@ def test_current_terminal_records_round_trip_strict_provider_usage(tmp_path: Pat
                 ),
             )
         )
+
+
+def test_current_turn_records_round_trip_strict_hook_audit_and_legacy_is_empty() -> None:
+    committed = TurnCommitted(
+        sequence=1,
+        committed_at=NOW,
+        binding=BindingSnapshot.fake(),
+        items=(UserMessage("hello"), AssistantText("done")),
+        hook_audit=hook_audit(HookEvent.TURN_COMMITTED),
+    )
+    failed = TurnFailed(
+        sequence=2,
+        occurred_at=NOW,
+        binding=BindingSnapshot.fake(),
+        failure_kind="ProviderError",
+        message="failed",
+        hook_audit=hook_audit(HookEvent.TURN_FAILED),
+    )
+
+    assert decode_record(encode_record(committed)) == committed
+    assert decode_record(encode_record(failed)) == failed
+    with pytest.raises(SessionRecordError, match="terminal event"):
+        encode_record(replace(committed, hook_audit=hook_audit(HookEvent.TURN_FAILED)))
+    with pytest.raises(SessionRecordError, match="legacy turn_committed"):
+        encode_record(replace(committed, schema_version=9))
 
 
 def test_turn_v8_round_trips_first_turn_model_name_and_v6_remains_readable(
