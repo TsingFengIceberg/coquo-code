@@ -99,6 +99,11 @@ from leonervis_code.core.contracts import (
     ToolUse,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.hooks import (
+    HookSetSnapshot,
+    HookStore,
+    evaluate_before_action_authorization,
+)
 from leonervis_code.core.project_instructions import (
     ProjectInstructionsLoader,
     ProjectInstructionsSnapshot,
@@ -834,6 +839,7 @@ class ProjectSession:
         mcp_client: object | None = None,
         mcp_policy_store: McpToolPolicyStore | None = None,
         mcp_process_manager: McpProcessManager | None = None,
+        hook_store: HookStore | None = None,
         startup_resume_result: SessionResumeResult | None = None,
     ) -> None:
         self.workspace = workspace
@@ -894,6 +900,7 @@ class ProjectSession:
         )
         self._skill_inventory_loader = skill_inventory_loader or SkillInventoryLoader(workspace)
         self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(workspace)
+        self._hook_store = hook_store or HookStore.for_workspace(workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -906,6 +913,7 @@ class ProjectSession:
         self._active_turn_context: EffectiveContextSnapshot | None = None
         self._active_action_binding: BindingSnapshot | None = None
         self._active_tool_set_snapshot: ToolSetSnapshot | None = None
+        self._active_hook_set_snapshot: HookSetSnapshot | None = None
         self._active_usage_cursor: int | None = None
         self._active_turn_runtime: TurnRuntimeSnapshot | None = None
         self._active_cancellation: TurnCancellation | None = None
@@ -945,6 +953,8 @@ class ProjectSession:
         project_mcp_path: Path | None = None,
         user_mcp_policy_path: Path | None = None,
         project_mcp_policy_path: Path | None = None,
+        user_hooks_path: Path | None = None,
+        project_hooks_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
         fake_provider_factory: Callable[[], ConversationProvider] | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
@@ -1065,6 +1075,12 @@ class ProjectSession:
                 user_path=user_mcp_policy_path,
                 project_path=project_mcp_policy_path,
             )
+            hook_store = HookStore.for_workspace(
+                resolved_workspace,
+                environment=resolved_environment,
+                user_path=user_hooks_path,
+                project_path=project_hooks_path,
+            )
             session_store = session_store_factory(resolved_workspace)
             binding = binding_from_status(manager.status())
             if resume is None:
@@ -1116,6 +1132,7 @@ class ProjectSession:
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
+                    hook_store=hook_store,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -1152,6 +1169,7 @@ class ProjectSession:
                     project_instructions_factory=project_instructions_loader.load,
                     tool_registry_factory=resume_mcp_catalog.registry_snapshot,
                     skill_inventory_factory=skill_inventory_loader.load,
+                    hook_set_factory=hook_store.snapshot,
                     skill_resource_reader=skill_inventory_loader.read_resource,
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -1219,6 +1237,7 @@ class ProjectSession:
                     mcp_store=mcp_store,
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
+                    hook_store=hook_store,
                     startup_resume_result=result,
                 )
                 session_holder["session"] = session
@@ -1330,6 +1349,13 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._mcp_process_manager.statuses()
+
+    def inspect_hooks(self) -> HookSetSnapshot:
+        """Return the current strict Hook configuration without provider or Session effects."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._hook_store.snapshot()
 
     def tool_ledgers(self, limit: int) -> ToolLedgerQueryResult:
         """Return bounded recent tool ledgers from the current replayed Session."""
@@ -2612,6 +2638,7 @@ class ProjectSession:
                     project_instructions_factory=self._project_instructions_loader.load,
                     tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
                     skill_inventory_factory=self._skill_inventory_loader.load,
+                    hook_set_factory=self._hook_store.snapshot,
                     skill_resource_reader=self._skill_inventory_loader.read_resource,
                 )
                 loop.install_action_dispatcher(self._dispatch_action)
@@ -2749,6 +2776,7 @@ class ProjectSession:
                     self._active_turn_context = prepared.context
                     self._active_action_binding = binding
                     self._active_tool_set_snapshot = prepared.tool_set_snapshot
+                    self._active_hook_set_snapshot = prepared.hook_set_snapshot
                     response = loop.run_prepared(
                         prepared,
                         provider=runtime,
@@ -2799,6 +2827,7 @@ class ProjectSession:
                 self._active_turn_context = None
                 self._active_action_binding = None
                 self._active_tool_set_snapshot = None
+                self._active_hook_set_snapshot = None
                 self._active_usage_cursor = None
                 self._active_turn_runtime = None
                 self._active_cancellation = None
@@ -3198,6 +3227,7 @@ class ProjectSession:
             tool_definitions=candidate_tool_set.definitions,
             tool_set_id=candidate_tool_set.snapshot_id,
             skill_inventory_id=source.skill_inventory_id,
+            hook_set_id=source.hook_set_id,
             full_history=source.full_history,
             effective_history=prepared.plan.retained_history,
             effective_summary=summary,
@@ -3604,6 +3634,7 @@ class ProjectSession:
         project_instructions_factory,
         tool_registry_factory=None,
         skill_inventory_factory=None,
+        hook_set_factory=None,
         skill_resource_reader=None,
     ) -> AgentLoop:
         return AgentLoop(
@@ -3642,6 +3673,7 @@ class ProjectSession:
                 if skill_inventory_factory is None
                 else {"skill_inventory_factory": skill_inventory_factory}
             ),
+            **({} if hook_set_factory is None else {"hook_set_factory": hook_set_factory}),
             **(
                 {}
                 if skill_resource_reader is None
@@ -3674,6 +3706,7 @@ class ProjectSession:
             project_instructions_factory=self._project_instructions_loader.load,
             tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
             skill_inventory_factory=self._skill_inventory_loader.load,
+            hook_set_factory=self._hook_store.snapshot,
             skill_resource_reader=self._skill_inventory_loader.read_resource,
         )
         loop.install_action_dispatcher(self._dispatch_action)
@@ -4259,6 +4292,27 @@ class ProjectSession:
             lease=lease,
             precondition=precondition,
         )
+        hook_set = self._active_hook_set_snapshot
+        if hook_set is None:
+            raise RuntimeError("prepared Hook set snapshot is unavailable")
+        hook_evaluation = evaluate_before_action_authorization(
+            hook_set,
+            tool_name=request.name,
+            action=action,
+            arguments=request.arguments,
+            source_kind=contract.source.kind,
+        )
+        if hook_evaluation.denied_by is not None:
+            return ToolDispatchResult(
+                ToolResult(
+                    request.tool_use_id,
+                    f"Hook denied action [{hook_evaluation.denied_by}]: "
+                    f"{hook_evaluation.deny_message}",
+                    is_error=True,
+                ),
+                ToolEventStatus.DENIED,
+                "hook_denied",
+            )
         approval_preview: ApprovalPreview | None = None
         if prepared_write is not None:
             approval_preview = build_file_change_preview(
@@ -4692,7 +4746,9 @@ class ProjectSession:
             identity=identity,
             binding=binding,
             permission_mode=self._permission_mode,
-            approval_mode=self._approval_mode,
+            approval_mode=(
+                ApprovalMode.ASK if hook_evaluation.requires_ask else self._approval_mode
+            ),
             revalidate=revalidate,
             execute=execute,
             approval_preview=approval_preview,
@@ -4725,8 +4781,15 @@ class ProjectSession:
                 else None
             )
         )
+        tool_result = coordinated.tool_result
+        advisory = hook_evaluation.advisory_text
+        if advisory is not None:
+            tool_result = replace(
+                tool_result,
+                content=f"{tool_result.content.rstrip(chr(10))}\n\n{advisory}",
+            )
         return ToolDispatchResult(
-            coordinated.tool_result,
+            tool_result,
             status,
             result_code,
             result_details,
@@ -4736,17 +4799,21 @@ class ProjectSession:
         active = self._active_action_lease
         context = self._active_turn_context
         tool_set = self._active_tool_set_snapshot
+        hook_set = self._active_hook_set_snapshot
         if (
             active != lease
             or context is None
             or tool_set is None
+            or hook_set is None
             or context.context_id != lease.context_id
             or context.tool_set_id != tool_set.snapshot_id
+            or context.hook_set_id != hook_set.snapshot_id
         ):
             raise RuntimeError("prepared action lease is stale")
         current_context = self._loop.effective_context_snapshot_with_project_instructions(
             context.project_instructions,
             tool_set_snapshot=tool_set,
+            hook_set_snapshot=hook_set,
         )
         if (
             self._writer.session_id != lease.session_id

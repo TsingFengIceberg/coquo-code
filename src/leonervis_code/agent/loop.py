@@ -79,6 +79,7 @@ from leonervis_code.skills import (
     SkillInventorySnapshot,
     active_skills_from_history,
 )
+from leonervis_code.hooks import HookSetSnapshot
 from leonervis_code.tools.skill_discovery import (
     SKILL_LOAD_TOOL_NAME,
     SKILL_READ_RESOURCE_TOOL_NAME,
@@ -142,6 +143,10 @@ def _empty_skill_inventory() -> SkillInventorySnapshot:
     return SkillInventorySnapshot((), ())
 
 
+def _empty_hook_set() -> HookSetSnapshot:
+    return HookSetSnapshot(())
+
+
 class ToolLoopLimitError(RuntimeError):
     """Raised when a provider does not finish after its tool-call budget is exhausted."""
 
@@ -176,6 +181,7 @@ class PreparedAgentTurn:
     registry_snapshot: ToolRegistrySnapshot
     tool_set_snapshot: ToolSetSnapshot
     skill_inventory_snapshot: SkillInventorySnapshot
+    hook_set_snapshot: HookSetSnapshot
     allow_tools: bool = True
     enabled_tool_names: tuple[str, ...] | None = None
     action_lease: ActionLease | None = None
@@ -191,6 +197,8 @@ class PreparedAgentTurn:
             raise ValueError("prepared turn registry snapshot is invalid")
         if not isinstance(self.skill_inventory_snapshot, SkillInventorySnapshot):
             raise ValueError("prepared turn Skill inventory snapshot is invalid")
+        if not isinstance(self.hook_set_snapshot, HookSetSnapshot):
+            raise ValueError("prepared turn Hook set snapshot is invalid")
         if (
             self.registry_snapshot.snapshot_id != self.tool_set_snapshot.registry_id
             or self.registry_snapshot.generation != self.tool_set_snapshot.registry_generation
@@ -200,6 +208,7 @@ class PreparedAgentTurn:
             self.context.tool_definitions != self.tool_set_snapshot.definitions
             or self.context.tool_set_id != self.tool_set_snapshot.snapshot_id
             or self.context.skill_inventory_id != self.skill_inventory_snapshot.snapshot_id
+            or self.context.hook_set_id != self.hook_set_snapshot.snapshot_id
         ):
             raise ValueError("prepared turn context does not match its tool set snapshot")
         if self.enabled_tool_names is not None:
@@ -311,6 +320,7 @@ class AgentLoop:
         project_instructions_factory: ProjectInstructionsFactory = _no_project_instructions,
         tool_registry_factory: ToolRegistryFactory = _builtin_tool_registry,
         skill_inventory_factory: SkillInventoryFactory = _empty_skill_inventory,
+        hook_set_factory: Callable[[], HookSetSnapshot] = _empty_hook_set,
         skill_resource_reader: SkillResourceReader | None = None,
         action_dispatcher: ActionDispatcher | None = None,
     ) -> None:
@@ -363,6 +373,7 @@ class AgentLoop:
         self._project_instructions_factory = project_instructions_factory
         self._tool_registry_factory = tool_registry_factory
         self._skill_inventory_factory = skill_inventory_factory
+        self._hook_set_factory = hook_set_factory
         self._skill_resource_reader = skill_resource_reader
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
@@ -400,10 +411,12 @@ class AgentLoop:
         if not isinstance(registry, ToolRegistrySnapshot):
             raise ValueError("tool registry factory returned an invalid snapshot")
         inventory = self._skill_inventory_factory()
+        hooks = self._hook_set_factory()
         return self._effective_context_snapshot(
             self._project_instructions_factory(),
             self._apply_skill_restrictions(self._effective_history, registry.select()),
             inventory,
+            hooks,
         )
 
     def effective_context_snapshot_with_project_instructions(
@@ -412,6 +425,7 @@ class AgentLoop:
         *,
         tool_set_snapshot: ToolSetSnapshot | None = None,
         skill_inventory_snapshot: SkillInventorySnapshot | None = None,
+        hook_set_snapshot: HookSetSnapshot | None = None,
     ) -> EffectiveContextSnapshot:
         """Rebuild committed identity while retaining one already pinned instruction snapshot."""
         if project_instructions is not None and not isinstance(
@@ -427,8 +441,10 @@ class AgentLoop:
             )
         if skill_inventory_snapshot is None:
             skill_inventory_snapshot = self._skill_inventory_factory()
+        if hook_set_snapshot is None:
+            hook_set_snapshot = self._hook_set_factory()
         return self._effective_context_snapshot(
-            project_instructions, tool_set_snapshot, skill_inventory_snapshot
+            project_instructions, tool_set_snapshot, skill_inventory_snapshot, hook_set_snapshot
         )
 
     def _effective_context_snapshot(
@@ -436,11 +452,14 @@ class AgentLoop:
         project_instructions: ProjectInstructionsSnapshot | None,
         tool_set: ToolSetSnapshot,
         skill_inventory: SkillInventorySnapshot,
+        hook_set: HookSetSnapshot,
     ) -> EffectiveContextSnapshot:
         if not isinstance(tool_set, ToolSetSnapshot):
             raise ValueError("effective context tool set snapshot is invalid")
         if not isinstance(skill_inventory, SkillInventorySnapshot):
             raise ValueError("effective context Skill inventory snapshot is invalid")
+        if not isinstance(hook_set, HookSetSnapshot):
+            raise ValueError("effective context Hook set snapshot is invalid")
         representation_version = (
             EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
             if self._effective_summary is None
@@ -454,6 +473,7 @@ class AgentLoop:
             tool_definitions=tool_set.definitions,
             tool_set_id=tool_set.snapshot_id,
             skill_inventory_id=skill_inventory.snapshot_id,
+            hook_set_id=hook_set.snapshot_id,
             full_history=self._full_history,
             effective_history=self._effective_history,
             effective_summary=self._effective_summary,
@@ -478,6 +498,9 @@ class AgentLoop:
         inventory = self._skill_inventory_factory()
         if not isinstance(inventory, SkillInventorySnapshot):
             raise ValueError("Skill inventory factory returned an invalid snapshot")
+        hooks = self._hook_set_factory()
+        if not isinstance(hooks, HookSetSnapshot):
+            raise ValueError("Hook set factory returned an invalid snapshot")
         tool_set = self._apply_skill_restrictions(
             self._effective_history, registry.select(enabled_tool_names)
         )
@@ -485,6 +508,7 @@ class AgentLoop:
             self._project_instructions_factory(),
             tool_set,
             inventory,
+            hooks,
         )
         return PreparedAgentTurn(
             user=user,
@@ -493,6 +517,7 @@ class AgentLoop:
             registry_snapshot=registry,
             tool_set_snapshot=tool_set,
             skill_inventory_snapshot=inventory,
+            hook_set_snapshot=hooks,
             allow_tools=allow_tools,
             enabled_tool_names=(tool_set.names if enabled_tool_names is not None else None),
         )

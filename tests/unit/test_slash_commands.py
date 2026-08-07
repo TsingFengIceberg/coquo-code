@@ -36,6 +36,7 @@ from leonervis_code.mcp.client import (
 )
 from leonervis_code.mcp.catalog import build_mcp_quarantine_catalog
 from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
+from leonervis_code.hooks import HookEffect, HookEntry, HookRule, HookSetSnapshot
 from leonervis_code.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionOutcome,
@@ -130,6 +131,20 @@ class Session:
                 enabled=True,
             ),
         )
+        self.hooks = HookSetSnapshot(
+            (
+                HookEntry(
+                    "project",
+                    HookRule(
+                        "protect-config",
+                        HookEffect.DENY,
+                        message="Configuration requires review.",
+                        tool_names=("write_file",),
+                        enabled=True,
+                    ),
+                ),
+            )
+        )
         proposal = TaskAdmissionProposal.from_request(
             ToolUse(
                 "admission-1",
@@ -169,6 +184,9 @@ class Session:
             credential_required=False,
             credential_present=False,
         )
+
+    def inspect_hooks(self):
+        return self.hooks
 
     def project_status(self):
         return ProjectStatus(
@@ -815,8 +833,9 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Search source commands:" in dispatch_slash("/help search", session).message
     assert "MCP inspection commands:" in dispatch_slash("/help mcp", session).message
     assert "Skill inspection commands:" in dispatch_slash("/help skills", session).message
+    assert "Hook inspection commands:" in dispatch_slash("/help hooks", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|task|tools|git|context|provider|search|mcp|skills|policy|input]"
+        "Usage: /help [session|task|tools|git|context|provider|search|mcp|skills|hooks|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"
@@ -888,7 +907,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v15-" in context.message
+    assert "Context ID: ctx-v17-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -1573,6 +1592,26 @@ def test_mcp_commands_are_host_only_and_probe_does_not_expose_tools(tmp_path) ->
         "Usage: /mcp probe <server-name>"
     )
     assert "Did you mean probe?" in dispatch_slash("/mcp proeb", session).message
+
+
+def test_hook_commands_are_host_only_read_only_inspections(tmp_path) -> None:
+    session = Session(tmp_path)
+    original_turns = session.turns
+
+    active = dispatch_slash("/hooks", session)
+    assert active.handled and active.kind == "info"
+    assert "Active Hooks: 1" in active.message
+    listed = dispatch_slash("/hooks list", session)
+    assert "protect-config: project, deny, enabled, r1" in listed.message
+    shown = dispatch_slash("/hooks show protect-config", session)
+    assert "Message: Configuration requires review." in shown.message
+    doctor = dispatch_slash("/hooks doctor", session)
+    assert "Side-effect handlers: disabled by contract" in doctor.message
+    assert session.turns == original_turns
+    assert session.prompts == []
+
+    assert dispatch_slash("/hooks show", session).message == "Usage: /hooks show <hook-id>"
+    assert "Did you mean doctor?" in dispatch_slash("/hooks doctro", session).message
 
 
 def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_write_session(

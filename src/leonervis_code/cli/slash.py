@@ -45,6 +45,9 @@ from leonervis_code.cli.presentation import (
     render_mcp_runtime_statuses,
     render_mcp_server_status,
     render_mcp_server_statuses,
+    render_hook_doctor,
+    render_hook_entry,
+    render_hook_set,
     render_provider_adapter_error,
     render_project_status,
     render_project_instructions_inspection,
@@ -140,6 +143,7 @@ TOP_LEVEL_COMMANDS = (
     "/search",
     "/mcp",
     "/skills",
+    "/hooks",
     "/model",
     "/session",
     "/task",
@@ -168,6 +172,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/help search", "Independent web search sources"),
     SlashCompletionSpec("/help mcp", "Configured MCP server inspection"),
     SlashCompletionSpec("/help skills", "Skill activation and package diagnostics"),
+    SlashCompletionSpec("/help hooks", "Declarative Hook inspection"),
     SlashCompletionSpec("/help policy", "Permission, approval, and command sandbox"),
     SlashCompletionSpec("/help input", "Prompt editor controls"),
     SlashCompletionSpec("/history", "Show recent Session turns", True),
@@ -211,6 +216,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/search", "Web search source commands", True),
     SlashCompletionSpec("/mcp", "MCP server inspection", True),
     SlashCompletionSpec("/skills", "Skill activation and package diagnostics", True),
+    SlashCompletionSpec("/hooks", "Declarative Hook inspection", True),
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
@@ -255,6 +261,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/skills search", "Search active Skill metadata"),
     SlashCompletionSpec("/skills conflicts", "Show shadowed Skill package identities"),
     SlashCompletionSpec("/skills doctor", "Show Skill roots and catalog issues"),
+    SlashCompletionSpec("/hooks active", "Show enabled Hooks in the current configuration"),
+    SlashCompletionSpec("/hooks list", "List configured Hooks"),
+    SlashCompletionSpec("/hooks show", "Show one configured Hook"),
+    SlashCompletionSpec("/hooks doctor", "Validate current Hook configuration"),
     SlashCompletionSpec("/skills fetch", "Fetch a public Skill into quarantine"),
     SlashCompletionSpec("/skills candidates", "List quarantined Skill candidates"),
     SlashCompletionSpec("/skills candidate show", "Inspect one quarantined Skill candidate"),
@@ -361,6 +371,8 @@ class ReplSession(Protocol):
     def inspect_mcp_catalog(self): ...
 
     def inspect_mcp_runtime(self): ...
+
+    def inspect_hooks(self): ...
 
     def status(self): ...
 
@@ -579,6 +591,38 @@ def dispatch_slash(
         return _info(SEARCH_HELP)
     if command == "/mcp":
         return _info(MCP_HELP)
+    if command == "/hooks":
+        return _call(
+            lambda: render_hook_set(session.inspect_hooks(), active_only=True), kind="info"
+        )
+    if command == "/hooks active":
+        return _call(
+            lambda: render_hook_set(session.inspect_hooks(), active_only=True), kind="info"
+        )
+    if command == "/hooks list":
+        return _call(lambda: render_hook_set(session.inspect_hooks()), kind="info")
+    if command == "/hooks doctor":
+        return _call(
+            lambda: render_hook_doctor(session.inspect_hooks()),
+            kind="info",
+            failure_prefix="Hook diagnosis failed",
+        )
+    if command == "/hooks show" or command.startswith("/hooks show "):
+        parts = command.split()
+        if len(parts) != 3:
+            return _usage("Usage: /hooks show <hook-id>")
+        return _call(
+            lambda: render_hook_entry(session.inspect_hooks().get(parts[2])),
+            kind="info",
+            failure_prefix="Hook inspection failed",
+        )
+    if command.startswith("/hooks "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("active", "list", "show", "doctor"))
+        return _usage(
+            f"Unknown Hook command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Usage: /hooks <active|list|show|doctor>"
+        )
     if command == "/skills":
         return _call(lambda: render_skill_activation(session.inspect_skills()), kind="info")
     if command == "/skills active":

@@ -59,6 +59,13 @@ from leonervis_code.core.action_coordinator import ActionIdentityChangedError
 from leonervis_code.core.approvals import ApprovalGrantError
 from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from leonervis_code.hooks import (
+    HookConfigurationError,
+    HookEffect,
+    HookRule,
+    HookSource,
+    HookStore,
+)
 from leonervis_code.mcp import (
     MCP_CATALOG_REASON_CODES,
     McpClient,
@@ -493,6 +500,40 @@ def build_parser() -> argparse.ArgumentParser:
         command = skills_lock_commands.add_parser(command_name)
         command.add_argument("name")
         command.add_argument("--scope", choices=["workspace", "project", "user"], default="project")
+
+    hooks_parser = subcommands.add_parser("hooks", help="manage declarative lifecycle Hooks")
+    hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
+    hooks_add = hooks_commands.add_parser("add", help="add one disabled preauthorization Hook")
+    hooks_add.add_argument("hook_id")
+    hooks_add.add_argument("--scope", choices=["user", "project"], default="project")
+    hooks_add.add_argument(
+        "--effect",
+        choices=[effect.value.replace("_", "-") for effect in HookEffect],
+        required=True,
+    )
+    hooks_add.add_argument("--tool", action="append", default=[])
+    hooks_add.add_argument(
+        "--action",
+        action="append",
+        choices=[action.value for action in PermissionAction],
+        default=[],
+    )
+    hooks_add.add_argument("--path-prefix", action="append", default=[])
+    hooks_add.add_argument(
+        "--source", action="append", choices=[source.value for source in HookSource], default=[]
+    )
+    hooks_add.add_argument("--message", default="")
+    hooks_add.add_argument("--replace", action="store_true")
+    hooks_add.add_argument("--if-revision", type=int)
+    hooks_commands.add_parser("list", help="list configured Hooks")
+    hooks_show = hooks_commands.add_parser("show", help="show one configured Hook")
+    hooks_show.add_argument("hook_id")
+    hooks_commands.add_parser("doctor", help="validate both Hook configuration scopes")
+    for action in ("enable", "disable", "remove"):
+        command = hooks_commands.add_parser(action, help=f"{action} one Hook")
+        command.add_argument("hook_id")
+        command.add_argument("--scope", choices=["user", "project"], default="project")
+        command.add_argument("--if-revision", type=int)
 
     mcp_parser = subcommands.add_parser("mcp", help="configure and inspect MCP servers")
     mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)
@@ -1420,6 +1461,112 @@ def handle_mcp_command(
     return 0
 
 
+def handle_hooks_command(
+    arguments: argparse.Namespace,
+    *,
+    workspace: Path,
+    environment: Mapping[str, str],
+    user_hooks_path: Path | None,
+    project_hooks_path: Path | None,
+    stdout: TextIO,
+) -> int:
+    """Manage strict declarative Hooks without invoking a provider or creating a Session."""
+    store = HookStore.for_workspace(
+        workspace,
+        environment=environment,
+        user_path=user_hooks_path,
+        project_path=project_hooks_path,
+    )
+    command = arguments.hooks_command
+    if command == "add":
+        entry = store.add_hook(
+            HookRule(
+                hook_id=arguments.hook_id,
+                effect=HookEffect(arguments.effect.replace("-", "_")),
+                message=arguments.message,
+                tool_names=tuple(sorted(set(arguments.tool))),
+                permission_actions=tuple(
+                    sorted(
+                        {PermissionAction(value) for value in arguments.action},
+                        key=lambda value: value.value,
+                    )
+                ),
+                path_prefixes=tuple(sorted(set(arguments.path_prefix))),
+                sources=tuple(
+                    sorted(
+                        {HookSource(value) for value in arguments.source},
+                        key=lambda value: value.value,
+                    )
+                ),
+            ),
+            scope=arguments.scope,
+            replace_existing=arguments.replace,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Saved {entry.scope} Hook {entry.rule.hook_id} at revision "
+            f"{entry.rule.revision} (disabled).\n"
+        )
+    elif command == "list":
+        entries = store.list_hooks()
+        if not entries:
+            stdout.write("No Hooks configured.\n")
+        for entry in entries:
+            stdout.write(
+                f"{entry.rule.hook_id}: {entry.scope}, {entry.rule.effect.value}, "
+                f"{'enabled' if entry.rule.enabled else 'disabled'}, r{entry.rule.revision}\n"
+            )
+    elif command == "show":
+        stdout.write(f"{_render_hook_entry(store.get_hook(arguments.hook_id))}\n")
+    elif command == "doctor":
+        snapshot = store.snapshot()
+        stdout.write(
+            "Hook configuration: valid\n"
+            f"User path: {store.user_path}\n"
+            f"Project path: {store.project_path}\n"
+            f"Configured: {len(snapshot.entries)}\n"
+            f"Active: {len(snapshot.active_entries)}\n"
+            f"Snapshot: {snapshot.snapshot_id}\n"
+        )
+    elif command in {"enable", "disable"}:
+        entry = store.set_enabled(
+            arguments.hook_id,
+            scope=arguments.scope,
+            enabled=command == "enable",
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Hook {entry.rule.hook_id} is now "
+            f"{'enabled' if entry.rule.enabled else 'disabled'} at revision "
+            f"{entry.rule.revision}.\n"
+        )
+    elif command == "remove":
+        store.remove_hook(
+            arguments.hook_id,
+            scope=arguments.scope,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(f"Removed {arguments.scope} Hook {arguments.hook_id}.\n")
+    return 0
+
+
+def _render_hook_entry(entry) -> str:
+    rule = entry.rule
+    return (
+        f"Hook: {rule.hook_id}\n"
+        f"Scope: {entry.scope}\n"
+        f"Event: {rule.event.value}\n"
+        f"Effect: {rule.effect.value}\n"
+        f"Enabled: {'yes' if rule.enabled else 'no'}\n"
+        f"Revision: {rule.revision}\n"
+        f"Tools: {', '.join(rule.tool_names) or 'any'}\n"
+        f"Actions: {', '.join(action.value for action in rule.permission_actions) or 'any'}\n"
+        f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
+        f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
+        f"Message: {rule.message or 'none'}"
+    )
+
+
 def render_session_info(info, stdout: TextIO) -> None:
     """Render durable Session metadata without transcript content."""
     stdout.write(f"session name: {info.name}\n")
@@ -2093,6 +2240,8 @@ def main(
     project_mcp_path: Path | None = None,
     user_mcp_policy_path: Path | None = None,
     project_mcp_policy_path: Path | None = None,
+    user_hooks_path: Path | None = None,
+    project_hooks_path: Path | None = None,
     mcp_client_factory=None,
     provider_factory=None,
 ) -> int:
@@ -2226,6 +2375,24 @@ def main(
                 mcp_client_factory=mcp_client_factory,
                 stdout=output,
             )
+        if arguments.command == "hooks":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_profile_id is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with Hook management"
+                )
+            return handle_hooks_command(
+                arguments,
+                workspace=workspace,
+                environment=env,
+                user_hooks_path=user_hooks_path,
+                project_hooks_path=project_hooks_path,
+                stdout=output,
+            )
         if arguments.command == "skills":
             if (
                 arguments.profile is not None
@@ -2356,6 +2523,8 @@ def main(
             project_mcp_path=project_mcp_path,
             user_mcp_policy_path=user_mcp_policy_path,
             project_mcp_policy_path=project_mcp_policy_path,
+            user_hooks_path=user_hooks_path,
+            project_hooks_path=project_hooks_path,
             provider_factory=factory,
             read_file_factory=ReadFileTool,
             glob_factory=GlobTool,
@@ -2454,6 +2623,9 @@ def main(
         return 2
     except McpConfigurationError as error:
         print(f"MCP configuration error: {error}", file=errors)
+        return 2
+    except HookConfigurationError as error:
+        print(f"Hook configuration error: {error}", file=errors)
         return 2
     except McpToolPolicyError as error:
         print(f"MCP tool policy error: {error}", file=errors)

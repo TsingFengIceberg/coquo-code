@@ -126,10 +126,11 @@ def test_slash_completion_is_single_line_and_end_of_buffer_only() -> None:
     event = CompleteEvent(completion_requested=True)
 
     top_level = list(completer.get_completions(Document("/h", 2), event))
-    assert [completion.text for completion in top_level] == ["/help", "/history"]
+    assert [completion.text for completion in top_level] == ["/help", "/history", "/hooks"]
     assert [fragment_list_to_text(completion.display_meta) for completion in top_level] == [
         "Show Host commands",
         "Show recent Session turns",
+        "Declarative Hook inspection",
     ]
     assert [
         completion.text for completion in completer.get_completions(Document("/session "), event)

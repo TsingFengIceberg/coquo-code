@@ -42,6 +42,7 @@ from leonervis_code.mcp import (
     McpPolicyDiagnosticStatus,
     McpQuarantineCatalog,
 )
+from leonervis_code.hooks import HookEntry, HookSetSnapshot
 from leonervis_code.mcp.client import McpLiveProcessStatus, McpProbeResult, McpServerStatus
 from leonervis_code.cli.failure_guidance import tool_result_guidance
 from leonervis_code.cli.markdown_renderer import render_plain_document
@@ -115,6 +116,7 @@ HELP_TOPICS = (
     "search",
     "mcp",
     "skills",
+    "hooks",
     "policy",
     "input",
 )
@@ -129,6 +131,7 @@ HELP_TEXT = (
     "  /help search    Independent web search source selection\n"
     "  /help mcp       Configured MCP server inspection\n"
     "  /help skills    Skill discovery, activation, and package diagnostics\n"
+    "  /help hooks     Declarative Hook inspection\n"
     "  /help policy    Permission, approval, and command sandbox\n"
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
@@ -251,6 +254,15 @@ SKILLS_HELP = (
     "These commands are Host-only and read-only. They do not call the provider, mutate the "
     "Session, or write Action Audit records."
 )
+HOOKS_HELP = (
+    "Hook inspection commands:\n"
+    "  /hooks | /hooks active\n"
+    "  /hooks list\n"
+    "  /hooks show <hook-id>\n"
+    "  /hooks doctor\n"
+    "These commands are Host-only and read-only. Use standalone hooks commands to edit "
+    "configuration; changes become effective from the next prepared Turn."
+)
 POLICY_HELP = (
     "Policy commands:\n"
     "  /status\n"
@@ -281,9 +293,55 @@ HELP_BY_TOPIC = {
     "search": SEARCH_HELP,
     "mcp": MCP_HELP,
     "skills": SKILLS_HELP,
+    "hooks": HOOKS_HELP,
     "policy": POLICY_HELP,
     "input": INPUT_HELP,
 }
+
+
+def render_hook_entry(entry: HookEntry) -> str:
+    """Render one declarative Hook without executable or secret content."""
+    rule = entry.rule
+    return (
+        f"Hook: {rule.hook_id}\n"
+        f"Scope: {entry.scope}\n"
+        f"Event: {rule.event.value}\n"
+        f"Effect: {rule.effect.value}\n"
+        f"Enabled: {'yes' if rule.enabled else 'no'}\n"
+        f"Revision: {rule.revision}\n"
+        f"Tools: {', '.join(rule.tool_names) or 'any'}\n"
+        f"Actions: {', '.join(action.value for action in rule.permission_actions) or 'any'}\n"
+        f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
+        f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
+        f"Message: {rule.message or 'none'}"
+    )
+
+
+def render_hook_set(snapshot: HookSetSnapshot, *, active_only: bool = False) -> str:
+    """Render one current Hook snapshot with deterministic ordering."""
+    entries = snapshot.active_entries if active_only else snapshot.entries
+    heading = "Active Hooks" if active_only else "Configured Hooks"
+    lines = [
+        f"{heading}: {len(entries)}",
+        f"Hook snapshot: {snapshot.snapshot_id}",
+    ]
+    lines.extend(
+        f"  {entry.rule.hook_id}: {entry.scope}, {entry.rule.effect.value}, "
+        f"{'enabled' if entry.rule.enabled else 'disabled'}, r{entry.rule.revision}"
+        for entry in entries
+    )
+    return "\n".join(lines)
+
+
+def render_hook_doctor(snapshot: HookSetSnapshot) -> str:
+    """Render strict parse and identity facts for current Hook configuration."""
+    return (
+        "Hook configuration: valid\n"
+        f"Configured: {len(snapshot.entries)}\n"
+        f"Active: {len(snapshot.active_entries)}\n"
+        f"Snapshot: {snapshot.snapshot_id}\n"
+        "Side-effect handlers: disabled by contract"
+    )
 
 
 def render_mcp_server_status(status: McpServerStatus) -> str:

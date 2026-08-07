@@ -23,6 +23,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
+from leonervis_code.hooks import HookConfigurationError, HookEffect, HookRule, HookStore
 from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
 from leonervis_code.session import ProjectSession
 from leonervis_code.session_records import (
@@ -112,6 +113,8 @@ def open_session(
         provider_factory=lambda route, *, environment: provider,
         user_profile_path=workspace / "user.json",
         project_profile_path=workspace / "project.json",
+        user_hooks_path=workspace / "user-hooks.json",
+        project_hooks_path=workspace / ".leonervis-code" / "hooks.json",
         session_store_factory=session_store_factory,
         permission_mode=permission_mode,
         approval_mode=approval_mode,
@@ -120,6 +123,191 @@ def open_session(
         web_search_factory=web_search_factory,
         **tool_factories,
     )
+
+
+def hook_store(workspace: Path) -> HookStore:
+    return HookStore(
+        workspace / "user-hooks.json",
+        workspace / ".leonervis-code" / "hooks.json",
+    )
+
+
+def enable_hook(workspace: Path, rule: HookRule) -> None:
+    registry = hook_store(workspace)
+    registry.add_hook(rule, scope="project")
+    registry.set_enabled(rule.hook_id, scope="project", enabled=True, expected_revision=1)
+
+
+def test_hook_deny_is_model_visible_and_precedes_action_audit(tmp_path: Path) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "protect-note",
+            HookEffect.DENY,
+            message="note.txt is protected",
+            tool_names=("write_file",),
+            path_prefixes=("note.txt",),
+        ),
+    )
+    call = write_call()
+    provider = ToolProvider([call, AssistantText("blocked")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("write note") == "blocked"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "write-1",
+            "Hook denied action [protect-note]: note.txt is protected",
+            is_error=True,
+        )
+        assert not (tmp_path / "note.txt").exists()
+        assert session.action_audits() == ()
+    finally:
+        session.close()
+
+
+def test_hook_require_ask_tightens_auto_but_cannot_override_read_only(tmp_path: Path) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "ask-writes",
+            HookEffect.REQUIRE_ASK,
+            message="confirm writes",
+            tool_names=("write_file",),
+        ),
+    )
+    approvals = []
+    provider = ToolProvider([write_call(), AssistantText("created")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+        approval_handler=lambda request: approvals.append(request) or ApprovalResolution.ACCEPT,
+    )
+    try:
+        assert session.prompt("write") == "created"
+        assert len(approvals) == 1
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello\n"
+    finally:
+        session.close()
+
+    readonly_workspace = tmp_path / "readonly"
+    readonly_workspace.mkdir()
+    enable_hook(
+        readonly_workspace,
+        HookRule(
+            "ask-writes",
+            HookEffect.REQUIRE_ASK,
+            message="confirm writes",
+            tool_names=("write_file",),
+        ),
+    )
+    denied_approvals = []
+    provider = ToolProvider([write_call(tool_use_id="write-2"), AssistantText("denied")])
+    session = open_session(
+        readonly_workspace,
+        provider,
+        permission_mode=PermissionMode.READ_ONLY,
+        approval_mode=ApprovalMode.AUTO,
+        approval_handler=lambda request: denied_approvals.append(request),
+    )
+    try:
+        assert session.prompt("overwrite") == "denied"
+        assert denied_approvals == []
+        assert provider.requests[1].history[-1].content == (
+            "permission denied: denied_read_only_mode"
+        )
+    finally:
+        session.close()
+
+
+def test_hook_advisory_is_appended_to_normal_model_visible_result(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "read-advice",
+            HookEffect.ADVISORY,
+            message="Treat this file as generated output.",
+            tool_names=("read_file",),
+        ),
+    )
+    call = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "note.txt"}))
+    provider = ToolProvider([call, AssistantText("read")])
+    session = open_session(tmp_path, provider)
+    try:
+        assert session.prompt("read note") == "read"
+        result = provider.requests[1].history[-1]
+        assert result.content == (
+            "hello\n\nHook advisory [read-advice]: Treat this file as generated output."
+        )
+        assert session.action_audits()[0].status is ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_hook_configuration_change_is_frozen_until_next_turn(tmp_path: Path) -> None:
+    registry = hook_store(tmp_path)
+    registry.add_hook(
+        HookRule(
+            "future-deny",
+            HookEffect.DENY,
+            message="later writes are blocked",
+            tool_names=("write_file",),
+        ),
+        scope="project",
+    )
+    provider = ToolProvider(
+        [
+            write_call("first.txt", tool_use_id="write-first"),
+            AssistantText("first done"),
+            write_call("second.txt", tool_use_id="write-second"),
+            AssistantText("second blocked"),
+        ]
+    )
+
+    def approve_and_enable(_request):
+        registry.set_enabled("future-deny", scope="project", enabled=True, expected_revision=1)
+        return ApprovalResolution.ACCEPT
+
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=approve_and_enable,
+    )
+    try:
+        assert session.prompt("first") == "first done"
+        assert (tmp_path / "first.txt").exists()
+        assert session.prompt("second") == "second blocked"
+        assert not (tmp_path / "second.txt").exists()
+        assert "Hook denied action [future-deny]" in provider.requests[3].history[-1].content
+    finally:
+        session.close()
+
+
+def test_malformed_hook_configuration_fails_turn_preparation_before_provider(
+    tmp_path: Path,
+) -> None:
+    provider = ToolProvider([AssistantText("must not run")])
+    session = open_session(tmp_path, provider)
+    hook_store(tmp_path).project_path.write_text(
+        '{"schema_version":1,"hooks":{},"unexpected":true}',
+        encoding="utf-8",
+    )
+    try:
+        with pytest.raises(HookConfigurationError, match="unknown field"):
+            session.prompt("do nothing")
+        assert provider.requests == []
+        assert session.action_audits() == ()
+    finally:
+        session.close()
 
 
 class SearchTransport:

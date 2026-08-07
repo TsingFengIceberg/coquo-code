@@ -85,6 +85,7 @@
 - [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
 - [Target-specific request counting and per-invocation preflight](#target-specific-request-counting-and-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
+- [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [ADR index](#adr-index)
 
 ## Canonical model system prompt
@@ -1293,6 +1294,14 @@ Generated and downloaded candidates live under `.leonervis-code/skill-candidates
 
 Each prepared Turn still freezes its SkillInventorySnapshot. Installation cannot hot-mutate that Turn's ToolSet and becomes discoverable only in a later Turn. The Registry advances to generation 5, system prompt to v40, provider adapter to v41, and full/compacted Effective Context to v15/v16 while retaining legacy v13/v14 reads. Skill inventory remains v2, and Session, Task, Action Audit, and import-lock schemas do not change. See [0124](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md).
 
+## Frozen Declarative Preauthorization Hooks
+
+Hook schema v1 supports only the `before_action_authorization` event and the side-effect-free `continue|deny|require_ask|advisory` effects. Rules use bounded deterministic matching over exact Tool names, PermissionAction values, canonical workspace-relative path prefixes, and `builtin|mcp` sources; they accept no regex, shell, HTTP, model call, argument mutation, credential, or arbitrary expression. User and project configuration uses strict revisioned JSON, cross-scope unique IDs, disabled-by-default rules, revision CAS, and private atomic writes. Standalone `hooks ...` commands manage configuration, while `/hooks` commands inspect current state read-only.
+
+Every Turn freezes the complete `HookSetSnapshot`, including disabled rules, and includes its `hooks-v1` identity in Effective Context and ActionLease validation; configuration changes during execution affect only a later Turn. Evaluation occurs after Tool hard preparation, PermissionAction classification, Extension Contract validation, and ActionIdentity construction, but before ActionCoordinator and Action Audit admission. `deny` returns a bounded model-visible error, `require_ask` can only tighten `auto` to `ask`, and `advisory` only appends to a normal ToolResult. No effect can turn a PermissionGate denial into an allow, promote MCP policy, or bypass sandboxing or Tool hard constraints. Damaged configuration fails closed before a provider call.
+
+The system prompt advances to v41, provider adapter to v42, and full/compacted Effective Context to v17/v18 while retaining v15/v16 as legacy Skill-v3 representations. Hooks add no model-visible Tool schema, so the Registry remains generation 5; Session, Task, Action Audit, ToolSet, and Skill inventory schemas do not change. See [0125](./decisions/0125-frozen-declarative-preauthorization-hooks.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1419,3 +1428,4 @@ Each prepared Turn still freezes its SkillInventorySnapshot. Installation cannot
 122. [0122: Bounded Skill Resources, Composition, and Observability](./decisions/0122-bounded-skill-resources-composition-and-observability.md)
 123. [0123: Skill Authoring, Local Import, Task Audit, and Execution Boundary](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)
 124. [0124: Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
+125. [0125: Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)

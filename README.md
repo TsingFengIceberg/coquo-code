@@ -247,7 +247,7 @@ Task用于管理可恢复的前台多阶段工作，既可由自然语言交互�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help [session\|task\|tools\|git\|context\|provider\|search\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`search`显示搜索源控制 |
+| `/help [session\|task\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`hooks`显示声明式策略检查入口 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
 | `/tools catalog [tool-name]` | 显示39个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
@@ -281,6 +281,7 @@ Task用于管理可恢复的前台多阶段工作，既可由自然语言交互�
 | `/search domains <domain> [domain...]`、`/search domains reset` | 设置或清除Provider adapter支持的域名限制 |
 | `/search context <low\|medium\|high\|reset>` | 设置或恢复Provider adapter支持的搜索context大小 |
 | `/search reset` | 清除REPL覆盖；Provider原生搜索可用时恢复Provider，否则关闭全部来源 |
+| `/hooks [active\|list\|show <id>\|doctor]` | 不调用模型，只读检查当前声明式Hook配置；使用独立`hooks`命令修改配置 |
 | `/session show [latest\|id]` | 显示当前或指定Session的严格回放元数据，不执行切换 |
 | `/session preview <latest\|id> [1-10]` | 只读显示指定Session最近的完整user/final-assistant回合，默认3轮、最多10轮 |
 | `/session turns <latest\|id> <start> [1-10]` | 从指定的1-based完整turn开始只读显示，默认3轮 |
@@ -382,6 +383,8 @@ MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact quali
 
 声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills init|check|search|import|lock`维护本地包，使用`skills fetch|candidate|install`隔离检查和安装公开raw/ZIP包，或在REPL中用`/skills`检查当前激活与候选。模型只会在用户明确要求时提议保存流程，不会自动从经验学习；详细格式、预算与权限边界见implemented-foundations。
 
+声明式Hook用于在普通PermissionGate之前增加本地约束。使用`hooks add|list|show|doctor|enable|disable|remove`管理user或project规则；新规则默认disabled，REPL中的`/hooks`只读检查当前生效状态。详细匹配与冻结边界见implemented-foundations和ADR 0125。
+
 ## 配置与本地状态
 
 | 路径 | 内容 |
@@ -392,6 +395,8 @@ MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact quali
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | user MCP tool精确权限策略 |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-oauth.json` | user remote MCP OAuth pending state与token；私有`0600`文件 |
 | `<workspace>/.leonervis-code/mcp-tool-policies.json` | project MCP tool精确权限策略 |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/hooks.json` | user声明式Hook配置；新规则默认disabled |
+| `<workspace>/.leonervis-code/hooks.json` | project声明式Hook配置；按Turn冻结后生效 |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcript |
 | `<workspace>/.leonervis-code/tasks/.../*.jsonl` | 独立的Task transcript |

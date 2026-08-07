@@ -28,9 +28,11 @@ from leonervis_code.core.project_instructions import ProjectInstructionsLoader
 from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 from leonervis_code.tools.read_file import read_file_model_definition
 from leonervis_code.skills import SkillInventorySnapshot
+from leonervis_code.hooks import HookSetSnapshot
 
 
 SKILL_INVENTORY_ID = SkillInventorySnapshot((), ()).snapshot_id
+HOOK_SET_ID = HookSetSnapshot(()).snapshot_id
 
 
 def snapshot(*history) -> EffectiveContextSnapshot:
@@ -42,6 +44,7 @@ def snapshot(*history) -> EffectiveContextSnapshot:
         tool_definitions=TOOL_CATALOG,
         tool_set_id=TOOL_REGISTRY_SNAPSHOT.select().snapshot_id,
         skill_inventory_id=SKILL_INVENTORY_ID,
+        hook_set_id=HOOK_SET_ID,
         full_history=items,
         effective_history=items,
     )
@@ -54,7 +57,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v15-68df2061964672a130db26f31002944a2c9ca63b8a892cca26872c454411b179"
+        == "ctx-v17-8c42dbb3f73bece0aae935d62639070798bf1f1a8396813647de66457279eab2"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -299,12 +302,13 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         tool_definitions=TOOL_CATALOG,
         tool_set_id=TOOL_REGISTRY_SNAPSHOT.select().snapshot_id,
         skill_inventory_id=SKILL_INVENTORY_ID,
+        hook_set_id=HOOK_SET_ID,
         full_history=full,
         effective_history=full[-4:],
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v16-")
+    assert context.context_id.startswith("ctx-v18-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

@@ -247,7 +247,7 @@ Tasks manage recoverable foreground multi-stage work. They can begin through nat
 
 | Command | Purpose |
 | --- | --- |
-| `/help [session\|task\|tools\|git\|context\|provider\|search\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points and `search` shows source controls |
+| `/help [session\|task\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points and `hooks` shows declarative policy inspection |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 39 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -281,6 +281,7 @@ Tasks manage recoverable foreground multi-stage work. They can begin through nat
 | `/search domains <domain> [domain...]`, `/search domains reset` | Set or clear adapter-supported Provider domain restrictions |
 | `/search context <low\|medium\|high\|reset>` | Set or restore adapter-supported Provider search context size |
 | `/search reset` | Clear the REPL override; restore Provider-native search when available, otherwise disable every source |
+| `/hooks [active\|list\|show <id>\|doctor]` | Inspect current declarative Hook configuration read-only without a model call; use standalone `hooks` commands to edit it |
 | `/session show [latest\|id]` | Show strictly replayed metadata for the current or selected Session without switching |
 | `/session preview <latest\|id> [1-10]` | Read the selected Session's recent complete user/final-assistant turns, default 3 and maximum 10 |
 | `/session turns <latest\|id> <start> [1-10]` | Read from one explicit 1-based complete turn, default count 3 |
@@ -382,6 +383,8 @@ MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qual
 
 Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills init|check|search|import|lock` for local packages, `skills fetch|candidate|install` to quarantine, inspect, and install public raw or ZIP packages, or `/skills` in the REPL for current activation and candidates. The model proposes preserving a workflow only after an explicit user request and does not learn automatically from experience. Implemented-foundations defines the exact format, budgets, and authority boundary.
 
+Declarative Hooks add local restrictions before the normal PermissionGate. Use `hooks add|list|show|doctor|enable|disable|remove` to manage user or project rules; new rules are disabled by default, and `/hooks` only inspects current state read-only. Implemented-foundations and ADR 0125 define matching and Turn-freezing boundaries.
+
 ## Configuration and local state
 
 | Path | Contents |
@@ -392,6 +395,8 @@ Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | exact user MCP tool permission policies |
 | `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-oauth.json` | user remote-MCP OAuth pending state and tokens; private mode-`0600` file |
 | `<workspace>/.leonervis-code/mcp-tool-policies.json` | exact project MCP tool permission policies |
+| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/hooks.json` | user declarative Hook configuration; new rules default to disabled |
+| `<workspace>/.leonervis-code/hooks.json` | project declarative Hook configuration; applied through frozen Turn snapshots |
 | `<workspace>/.leonervis-code/provider.json` | workspace active profile |
 | `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
 | `<workspace>/.leonervis-code/tasks/.../*.jsonl` | independent Task transcripts |

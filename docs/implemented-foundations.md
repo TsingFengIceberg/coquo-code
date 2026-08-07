@@ -85,6 +85,7 @@
 - [Target-aware runtime switch UX](#target-aware-runtime-switch-ux)
 - [Target-specific request counting 与 per-invocation preflight](#target-specific-request-counting-与-per-invocation-preflight)
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
+- [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [ADR 索引](#adr-索引)
 
 ## Canonical model system prompt
@@ -1293,6 +1294,14 @@ SessionStore可从严格replay的committed Turn只读投影`skill_load`请求身
 
 每个prepared Turn继续冻结SkillInventorySnapshot，新安装不会热改当前Turn的ToolSet，只在后续Turn可发现。Registry升级generation 5，system prompt升级v40，provider adapter升级v41，full/compacted Effective Context升级v15/v16并继续读取legacy v13/v14；Skill inventory v2及Session、Task、Action Audit、import lock schema不变。详见[0124](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)。
 
+## Frozen Declarative Preauthorization Hooks
+
+Hook schema v1只支持`before_action_authorization`事件与`continue|deny|require_ask|advisory`四种无副作用effect。规则以exact tool name、PermissionAction、规范workspace相对path prefix及`builtin|mcp`来源做有界确定性匹配；不接受regex、shell、HTTP、模型调用、argument mutation、credential或任意表达式。user与project配置使用strict revisioned JSON、跨scope唯一ID、默认disabled、revision CAS及私有原子写入；`hooks ...`负责独立管理，`/hooks`系列只读检查当前状态。
+
+每个Turn准备时冻结完整`HookSetSnapshot`，包括disabled规则，并把`hooks-v1`身份纳入Effective Context与ActionLease验证；运行中配置变化只影响后续Turn。求值发生在Tool hard preparation、PermissionAction分类、Extension Contract验证和ActionIdentity构造之后，但早于ActionCoordinator与Action Audit admission。`deny`直接返回有界model-visible错误，`require_ask`只能把`auto`收紧为`ask`，`advisory`只附加到正常ToolResult；任何effect都不能把PermissionGate拒绝变成允许、提升MCP policy、绕过沙箱或Tool硬边界。损坏配置在Provider调用前fail closed。
+
+system prompt提升到v41，provider adapter提升到v42，full/compacted Effective Context提升到v17/v18并将v15/v16保留为legacy Skill-v3表示。Hook没有新增model-visible Tool schema，因此Registry仍为generation 5，Session、Task、Action Audit、ToolSet与Skill inventory schema不变。见[0125](./decisions/0125-frozen-declarative-preauthorization-hooks.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1419,3 +1428,4 @@ SessionStore可从严格replay的committed Turn只读投影`skill_load`请求身
 122. [0122：Bounded Skill Resources, Composition, and Observability](./decisions/0122-bounded-skill-resources-composition-and-observability.md)
 123. [0123：Skill Authoring, Local Import, Task Audit, and Execution Boundary](./decisions/0123-skill-authoring-import-audit-and-execution-boundary.md)
 124. [0124：Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
+125. [0125：Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
