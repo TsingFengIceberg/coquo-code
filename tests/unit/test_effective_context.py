@@ -57,7 +57,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v19-3ffef74825991f05c9f8416e5756b6e855636b6ea01315342268670c9c2a3b55"
+        == "ctx-v21-34a004e3bd5cb867f19de3a05f03c641537e557edac19dbfead67a7b249a47ad"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -285,6 +285,18 @@ def test_legacy_skill_context_requires_the_original_inventory_identity_version()
         replace(legacy, skill_inventory_id=SKILL_INVENTORY_ID)
 
 
+def test_legacy_hook_v2_context_remains_strictly_readable() -> None:
+    legacy = replace(
+        snapshot(),
+        representation_version=19,
+        hook_set_id="hooks-v2-" + "a" * 64,
+    )
+
+    assert legacy.context_id.startswith("ctx-v19-")
+    with pytest.raises(ValueError, match="v2 Hook set"):
+        replace(legacy, hook_set_id=HOOK_SET_ID)
+
+
 def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None:
     full = (
         UserMessage("one"),
@@ -308,7 +320,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v20-")
+    assert context.context_id.startswith("ctx-v22-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

@@ -590,6 +590,9 @@ class Session:
     def hook_evaluations(self, limit=20):
         return ()
 
+    def hook_handler_runs(self, limit=20):
+        return ()
+
     def task_hook_evaluations(self, task_id, limit=20):
         return ()
 
@@ -913,7 +916,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v19-" in context.message
+    assert "Context ID: ctx-v21-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -1614,9 +1617,12 @@ def test_hook_commands_are_host_only_read_only_inspections(tmp_path) -> None:
     shown = dispatch_slash("/hooks show protect-config", session)
     assert "Message: Configuration requires review." in shown.message
     doctor = dispatch_slash("/hooks doctor", session)
-    assert "Side-effect handlers: disabled by contract" in doctor.message
+    assert "Handler readiness requires standalone hooks doctor." in doctor.message
     assert dispatch_slash("/hooks evaluations 5", session).message == (
         "No durable Hook evaluations found."
+    )
+    assert dispatch_slash("/hooks runs 5", session).message == (
+        "No audited Hook handler runs found."
     )
     assert (
         dispatch_slash(
@@ -1632,6 +1638,7 @@ def test_hook_commands_are_host_only_read_only_inspections(tmp_path) -> None:
     assert dispatch_slash("/hooks evaluations 0", session).message == (
         "Usage: /hooks evaluations [1-100]"
     )
+    assert dispatch_slash("/hooks runs 0", session).message == "Usage: /hooks runs [1-100]"
     assert "Did you mean doctor?" in dispatch_slash("/hooks doctro", session).message
 
 

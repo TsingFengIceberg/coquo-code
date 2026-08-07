@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import json
 import subprocess
@@ -25,7 +26,11 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionMode
-from leonervis_code.core.hook_contracts import HookActionOutcome, HookEvent
+from leonervis_code.core.hook_contracts import (
+    HookActionOutcome,
+    HookEvent,
+    HookHandlerSpec,
+)
 from leonervis_code.hooks import HookConfigurationError, HookEffect, HookRule, HookStore
 from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
 from leonervis_code.session import ProjectSession
@@ -51,7 +56,9 @@ from leonervis_code.tools.web_search import (
     WebSearchTool,
 )
 from leonervis_code.tools.download_file import DownloadFileTool
+from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
 from leonervis_code.tools.move_directory import MoveDirectoryTool
+from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.web_fetch import WebFetchTool
 from leonervis_code.tools.web_transport import WebHttpResponse
 
@@ -141,6 +148,249 @@ def enable_hook(workspace: Path, rule: HookRule) -> None:
     registry = hook_store(workspace)
     registry.add_hook(rule, scope="project")
     registry.set_enabled(rule.hook_id, scope="project", enabled=True, expected_revision=1)
+
+
+class DirectCommandSandbox:
+    def prepare_launch(self, *, workspace, cwd, argv, environment) -> CommandSandboxLaunch:
+        return CommandSandboxLaunch(argv=argv, cwd=cwd, environment=dict(environment))
+
+
+def local_handler(tmp_path: Path, effect: str, message: str = "") -> HookHandlerSpec:
+    path = tmp_path / f"hook-{effect}.py"
+    result = json.dumps({"version": 1, "effect": effect, "message": message})
+    path.write_text(f"#!/usr/bin/python3\nprint({result!r})\n", encoding="utf-8")
+    path.chmod(0o700)
+    return HookHandlerSpec(
+        executable=path.name,
+        arguments=(),
+        timeout_seconds=5,
+        executable_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+
+
+def direct_run_command(workspace: Path, environment) -> RunCommandTool:
+    return RunCommandTool(
+        workspace,
+        environment,
+        command_sandbox=DirectCommandSandbox(),
+    )
+
+
+def test_executable_preauthorization_hook_denies_through_audited_dangerous_action(
+    tmp_path: Path,
+) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "local-deny",
+            HookEffect.CONTINUE,
+            tool_names=("write_file",),
+            handler=local_handler(tmp_path, "deny", "Local policy rejected this write."),
+        ),
+    )
+    provider = ToolProvider([write_call(), AssistantText("blocked")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("write note") == "blocked"
+        assert provider.requests[1].history[-1] == ToolResult(
+            "write-1",
+            "Hook denied action [local-deny]: Local policy rejected this write.",
+            is_error=True,
+        )
+        assert not (tmp_path / "note.txt").exists()
+        audits = session.action_audits()
+        assert len(audits) == 1
+        assert audits[0].identity.tool_name == "hook_handler"
+        assert audits[0].identity.action.value == "dangerous"
+        assert audits[0].status is ActionAuditStatus.SUCCEEDED
+        assert audits[0].result_code == "hook_handler_deny"
+        assert "Local policy" not in json.dumps(audits[0].identity.arguments.as_mapping())
+        assert "Local policy" not in (audits[0].message or "")
+    finally:
+        session.close()
+
+
+def test_handler_permission_failure_fails_closed_before_original_action(tmp_path: Path) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "local-check",
+            HookEffect.CONTINUE,
+            tool_names=("write_file",),
+            handler=local_handler(tmp_path, "continue"),
+        ),
+    )
+    provider = ToolProvider([write_call(), AssistantText("blocked")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("write note") == "blocked"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert "hook_handler" not in result.content
+        assert "Hook denied action [local-check]" in result.content
+        assert "denied_workspace_write_mode" in result.content
+        assert not (tmp_path / "note.txt").exists()
+        assert len(session.action_audits()) == 1
+        assert session.action_audits()[0].status is ActionAuditStatus.DENIED
+    finally:
+        session.close()
+
+
+def test_handler_changed_during_approval_fails_closed_with_terminal_audit(tmp_path: Path) -> None:
+    handler = local_handler(tmp_path, "continue")
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "local-check",
+            HookEffect.CONTINUE,
+            tool_names=("write_file",),
+            handler=handler,
+        ),
+    )
+
+    def replace_then_accept(request: HumanApprovalRequest) -> ApprovalResolution:
+        assert request.identity.tool_name == "hook_handler"
+        assert request.preview is not None
+        assert request.preview.kind.value == "hook-handler"
+        (tmp_path / handler.executable).write_text(
+            "#!/usr/bin/python3\nprint('changed')\n",
+            encoding="utf-8",
+        )
+        return ApprovalResolution.ACCEPT
+
+    provider = ToolProvider([write_call(), AssistantText("blocked")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=replace_then_accept,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("write note") == "blocked"
+        assert not (tmp_path / "note.txt").exists()
+        audit = session.action_audits()[0]
+        assert audit.status is ActionAuditStatus.FAILED
+        assert audit.result_code == "hook_handler_stale"
+        assert audit.approval_outcome.value == "accepted"
+        assert "hook_handler_stale" in provider.requests[1].history[-1].content
+    finally:
+        session.close()
+
+
+def test_handler_event_budget_executes_four_then_fails_closed(tmp_path: Path) -> None:
+    handler = local_handler(tmp_path, "continue")
+    for index in range(5):
+        enable_hook(
+            tmp_path,
+            HookRule(
+                f"local-{index}",
+                HookEffect.CONTINUE,
+                tool_names=("write_file",),
+                handler=handler,
+            ),
+        )
+    provider = ToolProvider([write_call(), AssistantText("blocked")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("write note") == "blocked"
+        assert not (tmp_path / "note.txt").exists()
+        result = provider.requests[1].history[-1]
+        assert "Hook denied action [local-4]" in result.content
+        assert "hook_handler_budget_exhausted" in result.content
+        assert len(session.hook_handler_runs()) == 4
+        assert all(
+            audit.result_code == "hook_handler_continue" for audit in session.hook_handler_runs()
+        )
+    finally:
+        session.close()
+
+
+def test_after_action_handler_advisory_does_not_rewrite_success(tmp_path: Path) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "local-advice",
+            HookEffect.CONTINUE,
+            event=HookEvent.AFTER_ACTION,
+            tool_names=("write_file",),
+            action_outcomes=(HookActionOutcome.SUCCEEDED,),
+            handler=local_handler(tmp_path, "advisory", "Inspect the generated file."),
+        ),
+    )
+    provider = ToolProvider([write_call(), AssistantText("created")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("write note") == "created"
+        result = provider.requests[1].history[-1]
+        assert isinstance(result, ToolResult)
+        assert not result.is_error
+        assert result.content.endswith("Hook advisory [local-advice]: Inspect the generated file.")
+        assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello\n"
+        assert [audit.identity.tool_name for audit in session.action_audits()] == [
+            "write_file",
+            "hook_handler",
+        ]
+        assert session.action_audits()[0].result_code == "created"
+        assert session.action_audits()[1].result_code == "hook_handler_advisory"
+    finally:
+        session.close()
+
+
+def test_turn_committed_handler_runs_only_after_the_turn_is_durable(tmp_path: Path) -> None:
+    enable_hook(
+        tmp_path,
+        HookRule(
+            "turn-observer",
+            HookEffect.CONTINUE,
+            event=HookEvent.TURN_COMMITTED,
+            handler=local_handler(tmp_path, "continue"),
+        ),
+    )
+    provider = ToolProvider([AssistantText("done")])
+    session = open_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        assert session.prompt("answer") == "done"
+        assert len(session.turns) == 1
+        audits = session.hook_handler_runs()
+        assert len(audits) == 1
+        assert audits[0].identity.arguments.as_mapping()["event"] == "turn_committed"
+        records = session._writer.state.records
+        assert isinstance(records[-5], TurnCommitted)
+        assert records[-4].record_type == "action_requested"
+    finally:
+        session.close()
 
 
 def test_hook_deny_is_model_visible_and_precedes_action_audit(tmp_path: Path) -> None:

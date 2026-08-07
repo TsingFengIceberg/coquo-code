@@ -251,6 +251,7 @@ _TOOL_PREVIEW_KINDS = {
     "web_fetch": ApprovalPreviewKind.WEB_FETCH,
     "move_directory": ApprovalPreviewKind.DIRECTORY_MOVE,
     "download_file": ApprovalPreviewKind.FILE_DOWNLOAD,
+    "hook_handler": ApprovalPreviewKind.HOOK_HANDLER,
 }
 
 

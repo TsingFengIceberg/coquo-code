@@ -11,6 +11,8 @@ from leonervis_code.core.hook_contracts import (
     HookActionOutcome,
     HookEffect,
     HookEvent,
+    HookHandlerResult,
+    HookHandlerSpec,
     hook_audit_ledger_from_mapping,
     hook_audit_ledger_to_mapping,
     HookAuditLedger,
@@ -25,6 +27,7 @@ from leonervis_code.hooks import (
     evaluate_after_action,
     evaluate_before_action_authorization,
     evaluate_lifecycle_event,
+    apply_handler_results,
 )
 
 
@@ -59,6 +62,29 @@ def test_hook_rule_round_trips_as_closed_declarative_data() -> None:
     assert HookRule.from_mapping(mapping) == original
     with pytest.raises(HookConfigurationError, match="unknown field"):
         HookRule.from_mapping({**mapping, "shell": "echo unsafe"})
+
+
+def test_executable_hook_rule_is_pinned_static_continue_data() -> None:
+    handler = HookHandlerSpec("hooks/check.py", ("--strict",), 5, "a" * 64)
+    original = HookRule(
+        "local-check",
+        HookEffect.CONTINUE,
+        handler=handler,
+        enabled=True,
+    )
+
+    assert HookRule.from_mapping(original.as_mapping()) == original
+    with pytest.raises(HookConfigurationError, match="must use continue"):
+        HookRule(
+            "invalid-handler",
+            HookEffect.ADVISORY,
+            message="invalid",
+            handler=handler,
+        )
+    with pytest.raises(ValueError, match="timeout"):
+        HookHandlerSpec("hooks/check.py", (), 31, "a" * 64)
+    with pytest.raises(ValueError, match="argument"):
+        HookHandlerSpec("hooks/check.py", ("bad\nargument",), 5, "a" * 64)
 
 
 @pytest.mark.parametrize(
@@ -125,6 +151,28 @@ def test_store_rejects_unknown_nonfinite_and_symlinked_configuration(tmp_path) -
         registry.snapshot()
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_store_strictly_reads_legacy_hook_configuration_without_rewriting(
+    tmp_path,
+    schema_version,
+) -> None:
+    registry = store(tmp_path)
+    registry.project_path.parent.mkdir(parents=True)
+    mapping = rule().as_mapping()
+    mapping.pop("handler")
+    if schema_version == 1:
+        mapping.pop("action_outcomes")
+    payload = {"hooks": {"protect-config": mapping}, "schema_version": schema_version}
+    original = json.dumps(payload, sort_keys=True)
+    registry.project_path.write_text(original, encoding="utf-8")
+
+    loaded = registry.get_hook("protect-config")
+
+    assert loaded.rule.handler is None
+    assert loaded.rule.action_outcomes == ()
+    assert registry.project_path.read_text(encoding="utf-8") == original
+
+
 def test_snapshot_identity_is_deterministic_and_covers_disabled_configuration(tmp_path) -> None:
     registry = store(tmp_path)
     empty = registry.snapshot()
@@ -180,6 +228,41 @@ def test_deny_precedes_require_ask_and_advisories_are_bounded(tmp_path) -> None:
     assert result.denied_by == "c-deny"
     assert not result.requires_ask
     assert result.advisory_text is None
+
+
+def test_handler_results_replace_only_exact_executable_matches(tmp_path) -> None:
+    registry = store(tmp_path)
+    registry.add_hook(
+        HookRule(
+            "local-check",
+            HookEffect.CONTINUE,
+            handler=HookHandlerSpec("hooks/check.py", (), 5, "a" * 64),
+            enabled=True,
+        ),
+        scope="project",
+    )
+    evaluation = evaluate_before_action_authorization(
+        registry.snapshot(),
+        tool_name="write_file",
+        action=PermissionAction.WORKSPACE_CREATE,
+        arguments=ToolArguments.from_mapping({"path": "note.txt"}),
+        source_kind=ExtensionSourceKind.BUILTIN,
+    )
+
+    resolved = apply_handler_results(
+        evaluation,
+        {
+            "local-check": HookHandlerResult(
+                HookEffect.REQUIRE_ASK,
+                "Confirm the local policy result.",
+            )
+        },
+    )
+
+    assert resolved.requires_ask
+    assert resolved.matches[0].effect is HookEffect.REQUIRE_ASK
+    with pytest.raises(ValueError, match="requires one handler result"):
+        apply_handler_results(evaluation, {})
 
 
 def test_after_action_matches_terminal_outcome_and_cannot_change_authority(tmp_path) -> None:

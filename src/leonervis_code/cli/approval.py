@@ -176,6 +176,11 @@ def _approval_header(request: HumanApprovalRequest) -> str:
         detail = f" url={url!r} path={path!r}"
     elif request.identity.tool_name.startswith("mcp_"):
         detail = " arguments=<redacted>"
+    elif request.identity.tool_name == "hook_handler":
+        hook_id = arguments.get("hook_id", "<unknown>")
+        event = arguments.get("event", "<unknown>")
+        executable = arguments.get("executable", "<unknown>")
+        detail = f" hook={hook_id!r} event={event!r} executable={executable!r}"
     else:
         path = arguments.get("path", "<unknown>")
         content = arguments.get("content")
@@ -278,6 +283,14 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
             )
         return _style(
             f"{message}\n",
+            _YELLOW,
+            color=color,
+        )
+    if preview.kind == ApprovalPreviewKind.HOOK_HANDLER:
+        return _style(
+            "The pinned direct-argv Hook handler runs in the Linux command sandbox with a "
+            "read-only Host, writable workspace, private temporary paths, and no sockets. "
+            "Its result cannot bypass PermissionGate or rewrite an authoritative outcome.\n",
             _YELLOW,
             color=color,
         )

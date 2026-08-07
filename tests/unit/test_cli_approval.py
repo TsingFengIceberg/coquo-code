@@ -732,3 +732,57 @@ def test_terminal_mcp_approval_describes_the_exact_transport_boundary(
     assert "SECRET_ARGUMENT" not in rendered
     assert "SECRET_CREDENTIAL" not in rendered
     assert "mcp.example" not in rendered
+
+
+def test_terminal_hook_handler_approval_is_redacted_and_describes_sandbox() -> None:
+    identity = ActionIdentity(
+        request_id="12345678-1234-4234-9234-123456789abc",
+        tool_use_id="hook-handler-1",
+        tool_name="hook_handler",
+        arguments=ToolArguments.from_mapping(
+            {
+                "event": "before_action_authorization",
+                "executable": "/workspace/hooks/check.py",
+                "executable_sha256": "a" * 64,
+                "hook_id": "local-check",
+                "hook_set_id": "hooks-v3-" + "b" * 64,
+                "subject_id": "tool-use-1",
+                "timeout_seconds": 5,
+            }
+        ),
+        action=PermissionAction.DANGEROUS,
+        workspace_fingerprint=f"v1-{'1' * 64}",
+        lease=ActionLease(
+            "22345678-1234-4234-9234-123456789abc",
+            "32345678-1234-4234-9234-123456789abc",
+            0,
+            f"ctx-v21-{'2' * 64}",
+        ),
+        precondition=ActionPrecondition.expected_configuration("3" * 64),
+    )
+    request = HumanApprovalRequest(
+        identity,
+        PermissionResult(
+            PermissionDecision.ASK,
+            PermissionReason.APPROVAL_REQUIRED_DANGEROUS,
+        ),
+        build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.HOOK_HANDLER,
+        ),
+    )
+    stdout = io.StringIO()
+
+    assert (
+        terminal_approval_handler(io.StringIO("y\n"), stdout)(request) == ApprovalResolution.ACCEPT
+    )
+    rendered = stdout.getvalue()
+    assert (
+        "Approval required: dangerous hook_handler hook='local-check' "
+        "event='before_action_authorization' executable='/workspace/hooks/check.py'" in rendered
+    )
+    assert "pinned direct-argv Hook handler" in rendered
+    assert "no sockets" in rendered
+    assert "--leonervis-hook-event-v1" not in rendered
+    assert "tool-use-1" not in rendered
+    assert "aaaa" not in rendered

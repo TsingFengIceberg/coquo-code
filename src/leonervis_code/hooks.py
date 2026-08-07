@@ -23,6 +23,8 @@ from leonervis_code.core.hook_contracts import (
     HookAuditMatch,
     HookEffect,
     HookEvent,
+    HookHandlerResult,
+    HookHandlerSpec,
     aggregate_hook_effect,
 )
 from leonervis_code.core.permissions import PermissionAction
@@ -34,8 +36,9 @@ else:
 
 
 LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION = 1
-HOOK_CONFIGURATION_SCHEMA_VERSION = 2
-HOOK_SET_SNAPSHOT_VERSION = 2
+OBSERVATION_HOOK_CONFIGURATION_SCHEMA_VERSION = 2
+HOOK_CONFIGURATION_SCHEMA_VERSION = 3
+HOOK_SET_SNAPSHOT_VERSION = 3
 MAX_HOOK_CONFIGURATION_BYTES = 256 * 1024
 MAX_HOOKS_PER_SCOPE = 64
 MAX_HOOK_MATCHER_VALUES = 32
@@ -43,8 +46,9 @@ MAX_HOOK_MESSAGE_CHARACTERS = 1024
 MAX_HOOK_MESSAGE_BYTES = 4096
 MAX_HOOK_PATH_CHARACTERS = 4096
 MAX_HOOK_ADVISORY_CHARACTERS = 2048
+HOOK_IMPORT_SCHEMA_VERSION = 1
 _HOOK_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
-_HOOK_SET_ID_DOMAIN = b"leonervis-code-hook-set-snapshot-v2\0"
+_HOOK_SET_ID_DOMAIN = b"leonervis-code-hook-set-snapshot-v3\0"
 _PATH_ARGUMENT_KEYS = frozenset({"path", "source", "destination", "cwd"})
 
 
@@ -61,7 +65,7 @@ class HookSource(StrEnum):
 
 @dataclass(frozen=True)
 class HookRule:
-    """One revisioned declarative rule without executable content."""
+    """One revisioned declarative rule with an optional pinned local handler."""
 
     hook_id: str
     effect: HookEffect
@@ -71,6 +75,7 @@ class HookRule:
     path_prefixes: tuple[str, ...] = ()
     action_outcomes: tuple[HookActionOutcome, ...] = ()
     sources: tuple[HookSource, ...] = ()
+    handler: HookHandlerSpec | None = None
     enabled: bool = False
     event: HookEvent = HookEvent.BEFORE_ACTION_AUTHORIZATION
     revision: int = 1
@@ -113,6 +118,13 @@ class HookRule:
             raise HookConfigurationError("Hook message exceeds the supported size")
         if self.effect is not HookEffect.CONTINUE and not self.message.strip():
             raise HookConfigurationError(f"Hook {self.effect.value} effect requires a message")
+        if self.handler is not None:
+            if type(self.handler) is not HookHandlerSpec:
+                raise HookConfigurationError("Hook handler is invalid")
+            if self.effect is not HookEffect.CONTINUE or self.message:
+                raise HookConfigurationError(
+                    "executable Hook rules must use continue with an empty static message"
+                )
         if self.event is not HookEvent.BEFORE_ACTION_AUTHORIZATION and self.effect in {
             HookEffect.DENY,
             HookEffect.REQUIRE_ASK,
@@ -142,6 +154,7 @@ class HookRule:
             "enabled",
             "event",
             "hook_id",
+            "handler",
             "message",
             "action_outcomes",
             "path_prefixes",
@@ -158,6 +171,7 @@ class HookRule:
             raise HookConfigurationError(f"Hook is missing required field: {sorted(missing)[0]}")
         return cls(
             hook_id=_required_text(value["hook_id"], "Hook ID"),
+            handler=(None if value["handler"] is None else _parse_handler(value["handler"])),
             event=_parse_enum(value["event"], HookEvent, "Hook event"),
             effect=_parse_enum(value["effect"], HookEffect, "Hook effect"),
             message=_required_text(value["message"], "Hook message", allow_empty=True),
@@ -186,6 +200,7 @@ class HookRule:
             "enabled": self.enabled,
             "event": self.event.value,
             "hook_id": self.hook_id,
+            "handler": self.handler.as_mapping() if self.handler is not None else None,
             "message": self.message,
             "path_prefixes": list(self.path_prefixes),
             "permission_actions": [action.value for action in self.permission_actions],
@@ -272,6 +287,7 @@ class HookEvaluation:
     require_ask_by: tuple[str, ...] = ()
     advisories: tuple[tuple[str, str], ...] = ()
     matches: tuple[HookAuditMatch, ...] = ()
+    matched_entries: tuple[HookEntry, ...] = ()
 
     @property
     def requires_ask(self) -> bool:
@@ -505,6 +521,7 @@ class HookStore:
         schema_version = data["schema_version"]
         if schema_version not in {
             LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION,
+            OBSERVATION_HOOK_CONFIGURATION_SCHEMA_VERSION,
             HOOK_CONFIGURATION_SCHEMA_VERSION,
         }:
             raise HookConfigurationError(f"unsupported {scope} Hook configuration schema version")
@@ -523,6 +540,13 @@ class HookStore:
                 if not isinstance(value, dict):
                     raise HookConfigurationError("Hook entry must be a JSON object")
                 value = {**value, "action_outcomes": []}
+            if schema_version in {
+                LEGACY_HOOK_CONFIGURATION_SCHEMA_VERSION,
+                OBSERVATION_HOOK_CONFIGURATION_SCHEMA_VERSION,
+            }:
+                if not isinstance(value, dict):
+                    raise HookConfigurationError("Hook entry must be a JSON object")
+                value = {**value, "handler": None}
             rule = HookRule.from_mapping(value)
             if rule.hook_id != hook_id:
                 raise HookConfigurationError(f"{scope} Hook key/ID mismatch: {hook_id}")
@@ -549,6 +573,56 @@ def default_user_hooks_path(environment: Mapping[str, str] | None = None) -> Pat
 
 def default_project_hooks_path(workspace: Path) -> Path:
     return Path(workspace) / ".leonervis-code" / "hooks.json"
+
+
+def hook_handler_import_template() -> dict[str, object]:
+    """Return one strict disabled local-handler import template."""
+    return {
+        "hook": HookRule(
+            hook_id="replace-with-hook-id",
+            event=HookEvent.AFTER_ACTION,
+            effect=HookEffect.CONTINUE,
+            handler=HookHandlerSpec(
+                executable="hooks/replace-with-handler",
+                arguments=(),
+                timeout_seconds=10,
+                executable_sha256="0" * 64,
+            ),
+        ).as_mapping(),
+        "schema_version": HOOK_IMPORT_SCHEMA_VERSION,
+    }
+
+
+def load_hook_import_file(workspace: Path, relative_path: str) -> HookRule:
+    """Strictly load one workspace-local import candidate without following symlinks."""
+    _validate_path_prefix(relative_path)
+    if relative_path == ".":
+        raise HookConfigurationError("Hook import path must identify a file")
+    root = Path(workspace).resolve()
+    current = root
+    for part in PurePosixPath(relative_path).parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError:
+            raise HookConfigurationError("Hook import file is unavailable") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise HookConfigurationError("Hook import path must not contain symbolic links")
+    if not stat.S_ISREG(info.st_mode):
+        raise HookConfigurationError("Hook import path must identify a regular file")
+    if info.st_size > MAX_HOOK_CONFIGURATION_BYTES:
+        raise HookConfigurationError("Hook import file exceeds its byte bound")
+    try:
+        payload = current.read_bytes()
+        value = json.loads(payload, parse_constant=_reject_json_constant)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise HookConfigurationError("Hook import file is unreadable or invalid") from None
+    if not isinstance(value, dict) or set(value) != {"hook", "schema_version"}:
+        raise HookConfigurationError("Hook import file must be a closed object")
+    if value["schema_version"] != HOOK_IMPORT_SCHEMA_VERSION:
+        raise HookConfigurationError("Hook import schema version is unsupported")
+    rule = HookRule.from_mapping(value["hook"])
+    return replace(rule, enabled=False, revision=1)
 
 
 def evaluate_before_action_authorization(
@@ -660,6 +734,45 @@ def _evaluation_from_matches(matched: tuple[HookEntry, ...]) -> HookEvaluation:
         require_ask_by=(() if denied is not None else required),
         advisories=(() if denied is not None else advisories),
         matches=matches,
+        matched_entries=matched,
+    )
+
+
+def apply_handler_results(
+    evaluation: HookEvaluation,
+    results: Mapping[str, HookHandlerResult],
+) -> HookEvaluation:
+    """Replace matched executable-rule placeholders with strict handler results."""
+    if not isinstance(evaluation, HookEvaluation) or not isinstance(results, Mapping):
+        raise ValueError("Hook handler result application is invalid")
+    resolved: list[tuple[HookEntry, HookEffect, str]] = []
+    for entry in evaluation.matched_entries:
+        result = results.get(entry.rule.hook_id)
+        if entry.rule.handler is None:
+            if result is not None:
+                raise ValueError("static Hook rule cannot have a handler result")
+            resolved.append((entry, entry.rule.effect, entry.rule.message))
+            continue
+        if type(result) is not HookHandlerResult:
+            raise ValueError("executable Hook rule requires one handler result")
+        resolved.append((entry, result.effect, result.message))
+    if set(results) != {
+        entry.rule.hook_id for entry in evaluation.matched_entries if entry.rule.handler is not None
+    }:
+        raise ValueError("Hook handler results do not match evaluated rules")
+    denied = next((item for item in resolved if item[1] is HookEffect.DENY), None)
+    required = tuple(item[0].rule.hook_id for item in resolved if item[1] is HookEffect.REQUIRE_ASK)
+    advisories = tuple(
+        (item[0].rule.hook_id, item[2]) for item in resolved if item[1] is HookEffect.ADVISORY
+    )
+    matches = tuple(HookAuditMatch(item[0].rule.hook_id, item[1]) for item in resolved)
+    return HookEvaluation(
+        denied_by=denied[0].rule.hook_id if denied is not None else None,
+        deny_message=denied[2] if denied is not None else None,
+        require_ask_by=(() if denied is not None else required),
+        advisories=(() if denied is not None else advisories),
+        matches=matches,
+        matched_entries=evaluation.matched_entries,
     )
 
 
@@ -765,6 +878,13 @@ def _parse_enum(value: object, enum_type, label: str):
         return enum_type(value)
     except ValueError:
         raise HookConfigurationError(f"{label} is unsupported: {value}") from None
+
+
+def _parse_handler(value: object) -> HookHandlerSpec:
+    try:
+        return HookHandlerSpec.from_mapping(value)
+    except ValueError as error:
+        raise HookConfigurationError(str(error)) from None
 
 
 def _required_text(value: object, label: str, *, allow_empty: bool = False) -> str:

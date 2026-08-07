@@ -34,6 +34,7 @@ from leonervis_code.cli.presentation import (
     MAX_TOOL_LEDGER_COUNT,
     render_action_audits,
     render_hook_evaluations,
+    render_hook_handler_runs,
     render_mcp_catalog,
     render_mcp_catalog_reason,
     render_mcp_policy_diagnostics,
@@ -67,7 +68,11 @@ from leonervis_code.hooks import (
     HookRule,
     HookSource,
     HookStore,
+    hook_handler_import_template,
+    load_hook_import_file,
 )
+from leonervis_code.hook_runner import HookRunner
+from leonervis_code.core.hook_contracts import HookHandlerSpec
 from leonervis_code.mcp import (
     MCP_CATALOG_REASON_CODES,
     McpClient,
@@ -536,6 +541,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--source", action="append", choices=[source.value for source in HookSource], default=[]
     )
     hooks_add.add_argument("--message", default="")
+    hooks_add.add_argument("--handler-executable")
+    hooks_add.add_argument("--handler-arg", action="append", default=[])
+    hooks_add.add_argument("--handler-timeout", type=int)
+    hooks_add.add_argument("--handler-sha256")
     hooks_add.add_argument("--replace", action="store_true")
     hooks_add.add_argument("--if-revision", type=int)
     hooks_commands.add_parser("list", help="list configured Hooks")
@@ -550,6 +559,20 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_task = hooks_commands.add_parser("task", help="inspect durable Task Hook evaluations")
     hooks_task.add_argument("task_id")
     hooks_task.add_argument("--limit", type=task_list_limit, default=20)
+    hooks_runs = hooks_commands.add_parser("runs", help="inspect audited Hook handler actions")
+    hooks_runs.add_argument("selector", nargs="?", default="latest")
+    hooks_runs.add_argument("--limit", type=task_list_limit, default=20)
+    hooks_fingerprint = hooks_commands.add_parser(
+        "fingerprint", help="calculate one local handler executable SHA-256"
+    )
+    hooks_fingerprint.add_argument("executable")
+    hooks_template = hooks_commands.add_parser("template", help="print a Hook import template")
+    hooks_template.add_argument("kind", choices=["local-handler"])
+    hooks_import = hooks_commands.add_parser("import", help="import one disabled local Hook file")
+    hooks_import.add_argument("path")
+    hooks_import.add_argument("--scope", choices=["user", "project"], default="project")
+    hooks_import.add_argument("--replace", action="store_true")
+    hooks_import.add_argument("--if-revision", type=int)
     for action in ("enable", "disable", "remove"):
         command = hooks_commands.add_parser(action, help=f"{action} one Hook")
         command.add_argument("hook_id")
@@ -1513,7 +1536,79 @@ def handle_hooks_command(
         )
         stdout.write(f"{render_hook_evaluations(observations)}\n")
         return 0
+    if command == "runs":
+        audits = tuple(
+            audit
+            for audit in SessionStore(workspace).action_audits(arguments.selector)
+            if audit.identity.tool_name == "hook_handler"
+        )
+        stdout.write(f"{render_hook_handler_runs(audits, arguments.limit)}\n")
+        return 0
+    if command == "fingerprint":
+        runner = HookRunner(workspace, RunCommandTool(workspace, environment))
+        try:
+            digest = runner.executable_sha256(arguments.executable)
+        except ValueError as error:
+            raise HookConfigurationError(str(error)) from None
+        stdout.write(f"{digest}\n")
+        return 0
+    if command == "template":
+        stdout.write(
+            json.dumps(
+                hook_handler_import_template(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if command == "import":
+        entry = store.add_hook(
+            load_hook_import_file(workspace, arguments.path),
+            scope=arguments.scope,
+            replace_existing=arguments.replace,
+            expected_revision=arguments.if_revision,
+        )
+        stdout.write(
+            f"Imported {entry.scope} Hook {entry.rule.hook_id} at revision "
+            f"{entry.rule.revision} (disabled).\n"
+        )
+        return 0
     if command == "add":
+        handler_requested = any(
+            (
+                arguments.handler_executable is not None,
+                bool(arguments.handler_arg),
+                arguments.handler_timeout is not None,
+                arguments.handler_sha256 is not None,
+            )
+        )
+        if handler_requested and any(
+            value is None
+            for value in (
+                arguments.handler_executable,
+                arguments.handler_timeout,
+                arguments.handler_sha256,
+            )
+        ):
+            raise HookConfigurationError(
+                "local handler requires --handler-executable, --handler-timeout, and "
+                "--handler-sha256"
+            )
+        try:
+            handler = (
+                HookHandlerSpec(
+                    executable=arguments.handler_executable,
+                    arguments=tuple(arguments.handler_arg),
+                    timeout_seconds=arguments.handler_timeout,
+                    executable_sha256=arguments.handler_sha256,
+                )
+                if handler_requested
+                else None
+            )
+        except ValueError as error:
+            raise HookConfigurationError(str(error)) from None
         entry = store.add_hook(
             HookRule(
                 hook_id=arguments.hook_id,
@@ -1540,6 +1635,7 @@ def handle_hooks_command(
                         key=lambda value: value.value,
                     )
                 ),
+                handler=handler,
             ),
             scope=arguments.scope,
             replace_existing=arguments.replace,
@@ -1563,6 +1659,10 @@ def handle_hooks_command(
         stdout.write(f"{_render_hook_entry(store.get_hook(arguments.hook_id))}\n")
     elif command == "doctor":
         snapshot = store.snapshot()
+        runner = HookRunner(workspace, RunCommandTool(workspace, environment))
+        inspections = tuple(
+            runner.inspect(entry) for entry in snapshot.entries if entry.rule.handler is not None
+        )
         stdout.write(
             "Hook configuration: valid\n"
             f"User path: {store.user_path}\n"
@@ -1570,8 +1670,26 @@ def handle_hooks_command(
             f"Configured: {len(snapshot.entries)}\n"
             f"Active: {len(snapshot.active_entries)}\n"
             f"Snapshot: {snapshot.snapshot_id}\n"
+            f"Executable handlers: {len(inspections)}\n"
+            f"Handlers ready: {sum(inspection.ready for inspection in inspections)}\n"
+            f"Handlers stale: {sum(not inspection.ready for inspection in inspections)}\n"
         )
+        for inspection in inspections:
+            observed = inspection.executable_sha256 or "unavailable"
+            stdout.write(
+                f"Handler {inspection.hook_id}: "
+                f"{'ready' if inspection.ready else inspection.code}; "
+                f"observed SHA-256 {observed}\n"
+            )
     elif command in {"enable", "disable"}:
+        current = store.get_hook(arguments.hook_id, scope=arguments.scope)
+        if command == "enable" and current.rule.handler is not None:
+            inspection = HookRunner(
+                workspace,
+                RunCommandTool(workspace, environment),
+            ).inspect(current)
+            if not inspection.ready:
+                raise HookConfigurationError(f"Hook handler is not ready: {inspection.code}")
         entry = store.set_enabled(
             arguments.hook_id,
             scope=arguments.scope,
@@ -1595,6 +1713,17 @@ def handle_hooks_command(
 
 def _render_hook_entry(entry) -> str:
     rule = entry.rule
+    handler = rule.handler
+    handler_lines = (
+        "Handler: none"
+        if handler is None
+        else (
+            f"Handler executable: {handler.executable}\n"
+            f"Handler arguments: {len(handler.arguments)} hidden\n"
+            f"Handler timeout: {handler.timeout_seconds}s\n"
+            f"Handler SHA-256: {handler.executable_sha256}"
+        )
+    )
     return (
         f"Hook: {rule.hook_id}\n"
         f"Scope: {entry.scope}\n"
@@ -1607,7 +1736,8 @@ def _render_hook_entry(entry) -> str:
         f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
         f"Outcomes: {', '.join(outcome.value for outcome in rule.action_outcomes) or 'any'}\n"
         f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
-        f"Message: {rule.message or 'none'}"
+        f"Message: {rule.message or 'none'}\n"
+        f"{handler_lines}"
     )
 
 

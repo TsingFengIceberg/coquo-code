@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 from uuid import UUID
 
 from leonervis_code.cli.main import main
@@ -72,7 +74,7 @@ def test_hooks_cli_adds_disabled_rule_then_enables_inspects_and_removes(tmp_path
     assert main(["hooks", "doctor"], stdout=output, **common) == 0
     assert "Hook configuration: valid" in output.getvalue()
     assert "Active: 1" in output.getvalue()
-    assert "hooks-v2-" in output.getvalue()
+    assert "hooks-v3-" in output.getvalue()
 
     assert main(["hooks", "remove", "protect-config", "--if-revision", "2"], **common) == 0
     output = io.StringIO()
@@ -227,3 +229,121 @@ def test_hooks_cli_reads_session_and_task_evaluations_without_provider(tmp_path)
     output = io.StringIO()
     assert main(["hooks", "task", task.task_id], stdout=output, **common) == 0
     assert "task_stage_started" in output.getvalue()
+
+
+def test_hooks_cli_fingerprints_configures_and_checks_local_handler(tmp_path) -> None:
+    executable = tmp_path / "handler.py"
+    executable.write_text(
+        '#!/usr/bin/python3\nprint("{\\"version\\":1,\\"effect\\":\\"continue\\",\\"message\\":\\"\\"}")\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_hooks_path": tmp_path / "user.json",
+        "project_hooks_path": tmp_path / "project.json",
+    }
+
+    output = io.StringIO()
+    assert main(["hooks", "fingerprint", "handler.py"], stdout=output, **common) == 0
+    assert output.getvalue() == f"{digest}\n"
+    assert (
+        main(
+            [
+                "hooks",
+                "add",
+                "local-observer",
+                "--event",
+                "after_action",
+                "--effect",
+                "continue",
+                "--handler-executable",
+                "handler.py",
+                "--handler-timeout",
+                "5",
+                "--handler-sha256",
+                digest,
+            ],
+            stdout=io.StringIO(),
+            **common,
+        )
+        == 0
+    )
+    configured = HookStore(common["user_hooks_path"], common["project_hooks_path"]).get_hook(
+        "local-observer"
+    )
+    assert configured.rule.handler is not None
+    assert configured.rule.enabled is False
+    assert main(["hooks", "enable", "local-observer"], stdout=io.StringIO(), **common) == 0
+
+    output = io.StringIO()
+    assert main(["hooks", "doctor"], stdout=output, **common) == 0
+    assert "Executable handlers: 1" in output.getvalue()
+    assert "Handlers ready: 1" in output.getvalue()
+    assert "Handlers stale: 0" in output.getvalue()
+
+    executable.write_text("#!/usr/bin/python3\nprint('changed')\n", encoding="utf-8")
+    output = io.StringIO()
+    assert main(["hooks", "doctor"], stdout=output, **common) == 0
+    assert "Handlers stale: 1" in output.getvalue()
+
+
+def test_hooks_cli_import_is_closed_workspace_local_and_disabled(tmp_path) -> None:
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_hooks_path": tmp_path / "user.json",
+        "project_hooks_path": tmp_path / "project.json",
+    }
+    output = io.StringIO()
+    assert main(["hooks", "template", "local-handler"], stdout=output, **common) == 0
+    value = json.loads(output.getvalue())
+    value["hook"]["hook_id"] = "imported-handler"
+    candidate = tmp_path / "hook-import.json"
+    candidate.write_text(json.dumps(value), encoding="utf-8")
+
+    output = io.StringIO()
+    assert main(["hooks", "import", "hook-import.json"], stdout=output, **common) == 0
+    assert "(disabled)" in output.getvalue()
+    imported = HookStore(common["user_hooks_path"], common["project_hooks_path"]).get_hook(
+        "imported-handler"
+    )
+    assert imported.rule.enabled is False
+    assert imported.rule.revision == 1
+
+    errors = io.StringIO()
+    assert main(["hooks", "import", "../hook-import.json"], stderr=errors, **common) == 2
+    assert "workspace-relative" in errors.getvalue()
+
+
+def test_hooks_cli_rejects_incomplete_or_invalid_handler_configuration(tmp_path) -> None:
+    common = {
+        "cwd": tmp_path,
+        "environment": {},
+        "user_hooks_path": tmp_path / "user.json",
+        "project_hooks_path": tmp_path / "project.json",
+    }
+    errors = io.StringIO()
+    assert (
+        main(
+            [
+                "hooks",
+                "add",
+                "bad-handler",
+                "--effect",
+                "continue",
+                "--handler-executable",
+                "handler.py",
+            ],
+            stderr=errors,
+            **common,
+        )
+        == 2
+    )
+    assert "requires --handler-executable" in errors.getvalue()
+
+    errors = io.StringIO()
+    assert main(["hooks", "fingerprint", "missing.py"], stderr=errors, **common) == 2
+    assert "handler_executable_unavailable" in errors.getvalue()

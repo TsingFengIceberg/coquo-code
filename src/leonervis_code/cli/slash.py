@@ -48,6 +48,7 @@ from leonervis_code.cli.presentation import (
     render_hook_doctor,
     render_hook_entry,
     render_hook_evaluations,
+    render_hook_handler_runs,
     render_hook_set,
     render_provider_adapter_error,
     render_project_status,
@@ -267,6 +268,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/hooks show", "Show one configured Hook"),
     SlashCompletionSpec("/hooks doctor", "Validate current Hook configuration"),
     SlashCompletionSpec("/hooks evaluations", "Show durable Session Hook evaluations"),
+    SlashCompletionSpec("/hooks runs", "Show audited local Hook handler executions"),
     SlashCompletionSpec("/hooks task", "Show durable Task Hook evaluations"),
     SlashCompletionSpec("/skills fetch", "Fetch a public Skill into quarantine"),
     SlashCompletionSpec("/skills candidates", "List quarantined Skill candidates"),
@@ -440,6 +442,8 @@ class ReplSession(Protocol):
     def inspect_task(self, task_id: str): ...
 
     def hook_evaluations(self, limit: int = 20): ...
+
+    def hook_handler_runs(self, limit: int = 20): ...
 
     def task_hook_evaluations(self, task_id: str, limit: int = 20): ...
 
@@ -626,6 +630,18 @@ def dispatch_slash(
             kind="info",
             failure_prefix="Hook evaluation inspection failed",
         )
+    if command == "/hooks runs" or command.startswith("/hooks runs "):
+        parts = command.split()
+        if len(parts) not in {2, 3} or (len(parts) == 3 and not _positive_ascii_integer(parts[2])):
+            return _usage("Usage: /hooks runs [1-100]")
+        limit = 20 if len(parts) == 2 else int(parts[2])
+        if limit > 100:
+            return _usage("Usage: /hooks runs [1-100]")
+        return _call(
+            lambda: render_hook_handler_runs(session.hook_handler_runs(limit), limit),
+            kind="info",
+            failure_prefix="Hook handler run inspection failed",
+        )
     if command == "/hooks task" or command.startswith("/hooks task "):
         parts = command.split()
         if len(parts) not in {3, 4} or (len(parts) == 4 and not _positive_ascii_integer(parts[3])):
@@ -650,11 +666,11 @@ def dispatch_slash(
     if command.startswith("/hooks "):
         subcommand = command.split(maxsplit=2)[1]
         suggestion = _suggest_token(
-            subcommand, ("active", "list", "show", "doctor", "evaluations", "task")
+            subcommand, ("active", "list", "show", "doctor", "evaluations", "runs", "task")
         )
         return _usage(
             f"Unknown Hook command: {subcommand}{_suggestion_line(suggestion)}\n"
-            "Usage: /hooks <active|list|show|doctor|evaluations|task>"
+            "Usage: /hooks <active|list|show|doctor|evaluations|runs|task>"
         )
     if command == "/skills":
         return _call(lambda: render_skill_activation(session.inspect_skills()), kind="info")

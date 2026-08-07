@@ -15,7 +15,7 @@ from leonervis_code.agent.tool_events import (
     TaskLifecycleCommitted,
     HookLifecycleObserved,
 )
-from leonervis_code.core.hook_contracts import HookEvent
+from leonervis_code.core.hook_contracts import HookEvent, HookHandlerSpec
 from leonervis_code.core.contracts import (
     AssistantText,
     ToolArguments,
@@ -25,6 +25,7 @@ from leonervis_code.core.contracts import (
     UserMessage,
 )
 from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
+from leonervis_code.core.permissions import ApprovalMode, PermissionMode
 from leonervis_code.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 from leonervis_code.core.orchestration import ProviderFailureKind
 from leonervis_code.providers.errors import adapter_error
@@ -68,6 +69,8 @@ from leonervis_code.task_store import (
 )
 from leonervis_code.task_verification import TaskVerificationError
 from leonervis_code.tools.catalog import ORDINARY_TOOL_NAMES
+from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
+from leonervis_code.tools.run_command import RunCommandTool
 from leonervis_code.tools.task_coordination import (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
@@ -133,6 +136,9 @@ def open_task_session(
     *,
     session_id: str = SESSION_ONE,
     resume: str | None = None,
+    permission_mode: PermissionMode = PermissionMode.READ_ONLY,
+    approval_mode: ApprovalMode = ApprovalMode.ASK,
+    run_command_factory=RunCommandTool,
 ) -> ProjectSession:
     return ProjectSession.open(
         workspace,
@@ -145,6 +151,22 @@ def open_task_session(
         user_hooks_path=workspace / "user-hooks.json",
         project_hooks_path=workspace / ".leonervis-code" / "hooks.json",
         session_store_factory=session_store_factory(session_id),
+        permission_mode=permission_mode,
+        approval_mode=approval_mode,
+        run_command_factory=run_command_factory,
+    )
+
+
+class DirectCommandSandbox:
+    def prepare_launch(self, *, workspace, cwd, argv, environment) -> CommandSandboxLaunch:
+        return CommandSandboxLaunch(argv=argv, cwd=cwd, environment=dict(environment))
+
+
+def direct_run_command(workspace: Path, environment) -> RunCommandTool:
+    return RunCommandTool(
+        workspace,
+        environment,
+        command_sandbox=DirectCommandSandbox(),
     )
 
 
@@ -185,6 +207,66 @@ def test_task_stage_lifecycle_hooks_are_durable_observations(tmp_path: Path) -> 
         )
         visible = [event for event in events if isinstance(event, HookLifecycleObserved)]
         assert tuple(event.event for event in visible) == (
+            HookEvent.TASK_STAGE_STARTED,
+            HookEvent.TASK_STAGE_COMMITTED,
+        )
+    finally:
+        session.close()
+
+
+def test_task_stage_executable_handlers_are_separate_audited_actions(tmp_path: Path) -> None:
+    executable = tmp_path / "task-hook.py"
+    executable.write_text(
+        '#!/usr/bin/python3\nprint("{\\"version\\":1,\\"effect\\":\\"continue\\",\\"message\\":\\"\\"}")\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    handler = HookHandlerSpec(
+        executable.name,
+        (),
+        5,
+        hashlib.sha256(executable.read_bytes()).hexdigest(),
+    )
+    registry = HookStore(
+        tmp_path / "user-hooks.json",
+        tmp_path / ".leonervis-code" / "hooks.json",
+    )
+    for hook_id, event in (
+        ("stage-start-handler", HookEvent.TASK_STAGE_STARTED),
+        ("stage-commit-handler", HookEvent.TASK_STAGE_COMMITTED),
+    ):
+        registry.add_hook(
+            HookRule(
+                hook_id,
+                HookEffect.CONTINUE,
+                event=event,
+                handler=handler,
+            ),
+            scope="project",
+        )
+        registry.set_enabled(hook_id, scope="project", enabled=True, expected_revision=1)
+
+    provider = ScriptedTaskProvider([AssistantText("Stage work is complete.")])
+    session = open_task_session(
+        tmp_path,
+        provider,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
+    )
+    try:
+        task = session.create_task("Run executable Task observers")
+        result = session.continue_task(task.task_id, "Run one bounded Stage")
+
+        assert result.stage_number == 1
+        runs = session.hook_handler_runs()
+        assert tuple(run.identity.arguments.as_mapping()["event"] for run in runs) == (
+            "task_stage_started",
+            "task_stage_committed",
+        )
+        assert all(run.result_code == "hook_handler_continue" for run in runs)
+        observations = session.task_hook_evaluations(task.task_id, 10)
+        assert tuple(item.entry.event for item in observations) == (
             HookEvent.TASK_STAGE_STARTED,
             HookEvent.TASK_STAGE_COMMITTED,
         )

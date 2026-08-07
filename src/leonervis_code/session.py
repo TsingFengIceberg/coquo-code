@@ -101,17 +101,29 @@ from leonervis_code.core.contracts import (
 )
 from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from leonervis_code.hooks import (
+    HookEvaluation,
     HookSetSnapshot,
     HookStore,
+    apply_handler_results,
     evaluate_after_action,
     evaluate_before_action_authorization,
     evaluate_lifecycle_event,
+)
+from leonervis_code.hook_runner import (
+    HOOK_HANDLER_ACTION_NAME,
+    HookHandlerEvent,
+    HookHandlerExecution,
+    HookHandlerPreparationError,
+    HookRunner,
 )
 from leonervis_code.core.hook_contracts import (
     HookActionOutcome,
     HookAuditEntry,
     HookAuditLedger,
+    HookEffect,
     HookEvent,
+    HookHandlerResult,
+    aggregate_hook_effect,
 )
 from leonervis_code.core.project_instructions import (
     ProjectInstructionsLoader,
@@ -427,6 +439,8 @@ from leonervis_code.tools.catalog import (
 )
 
 _COMMIT_CONTROL_TOOL_NAMES = TASK_CONTROL_TOOL_NAMES + SKILL_AUTHORING_CONTROL_TOOL_NAMES
+MAX_HOOK_HANDLER_EXECUTIONS_PER_EVENT = 4
+MAX_HOOK_HANDLER_EXECUTIONS_PER_TURN = 12
 _TASK_PLANNING_READ_TOOL_NAMES = (
     READ_FILE_TOOL_NAME,
     GLOB_TOOL_NAME,
@@ -864,6 +878,7 @@ class ProjectSession:
         self._write_file = write_file or WriteFileTool(workspace)
         self._edit_file = edit_file or EditFileTool(workspace)
         self._run_command = run_command or RunCommandTool(workspace)
+        self._hook_runner = HookRunner(workspace, self._run_command)
         self._mkdir = mkdir or MkdirTool(workspace)
         self._move_file = move_file or MoveFileTool(workspace)
         self._delete_file = delete_file or DeleteFileTool(workspace)
@@ -924,6 +939,8 @@ class ProjectSession:
         self._active_tool_set_snapshot: ToolSetSnapshot | None = None
         self._active_hook_set_snapshot: HookSetSnapshot | None = None
         self._active_hook_audit_entries: list[HookAuditEntry] = []
+        self._active_hook_handler_executions = 0
+        self._hook_handler_depth = 0
         self._active_usage_cursor: int | None = None
         self._active_turn_runtime: TurnRuntimeSnapshot | None = None
         self._active_cancellation: TurnCancellation | None = None
@@ -1372,6 +1389,18 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._session_store.hook_evaluations(self._writer.session_id, limit)
+
+    def hook_handler_runs(self, limit: int = 20) -> tuple[ActionAuditState, ...]:
+        """Inspect recent content-free Hook handler actions without mutation."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Hook handler run limit must be between 1 and 100")
+        with self._lock:
+            self._ensure_open()
+            return tuple(
+                audit
+                for audit in self._writer.state.action_audits
+                if audit.identity.tool_name == HOOK_HANDLER_ACTION_NAME
+            )[-limit:]
 
     def task_hook_evaluations(self, task_id: str, limit: int = 20):
         """Inspect recent Hook evaluations for one Task without mutation."""
@@ -2092,15 +2121,29 @@ class ProjectSession:
             self._ensure_open()
             sequence_before = writer.state.next_sequence
             if writer.state.active_stage is not None:
-                writer.recover_stage(
-                    committed_hook_audit=self._task_hook_audit(
-                        HookEvent.TASK_STAGE_COMMITTED,
-                        task_id,
-                    ),
-                    failed_hook_audit=self._task_hook_audit(
-                        HookEvent.TASK_STAGE_FAILED,
-                        task_id,
-                    ),
+                committed_hook_audit = self._task_hook_audit(
+                    HookEvent.TASK_STAGE_COMMITTED,
+                    task_id,
+                )
+                failed_hook_audit = self._task_hook_audit(
+                    HookEvent.TASK_STAGE_FAILED,
+                    task_id,
+                )
+                recovered = writer.recover_stage(
+                    committed_hook_audit=committed_hook_audit,
+                    failed_hook_audit=failed_hook_audit,
+                )
+                recovered_event = (
+                    HookEvent.TASK_STAGE_COMMITTED
+                    if isinstance(recovered, StageCommitted)
+                    else HookEvent.TASK_STAGE_FAILED
+                )
+                self._run_lifecycle_hook_handlers(
+                    recovered_event,
+                    task_id,
+                    committed_hook_audit
+                    if isinstance(recovered, StageCommitted)
+                    else failed_hook_audit,
                 )
             self._reconcile_task_stage_signal(writer)
             if writer.state.next_sequence == sequence_before:
@@ -2173,11 +2216,20 @@ class ProjectSession:
                 return
         if parsed.blocker is not None:
             assert proposal_tool_use_id is not None
+            blocked_hook_audit = self._task_hook_audit(
+                HookEvent.TASK_BLOCKED,
+                state.header.task_id,
+            )
             writer.record_blocker(
                 parsed.blocker.category,
                 parsed.blocker.summary,
                 proposal_tool_use_id=proposal_tool_use_id,
-                hook_audit=self._task_hook_audit(HookEvent.TASK_BLOCKED, state.header.task_id),
+                hook_audit=blocked_hook_audit,
+            )
+            self._run_lifecycle_hook_handlers(
+                HookEvent.TASK_BLOCKED,
+                state.header.task_id,
+                blocked_hook_audit,
             )
         elif stage.started.kind is StageKind.PLANNING:
             assert parsed.plan_steps is not None
@@ -2313,12 +2365,19 @@ class ProjectSession:
             return False
         if len(state.verified_criteria) != len(state.criteria):
             return False
+        task_id = writer.state.header.task_id
+        hook_audit = self._task_hook_audit(
+            HookEvent.TASK_TERMINATED,
+            task_id,
+        )
         writer.terminate(
             TaskTerminalOutcome.COMPLETED,
-            hook_audit=self._task_hook_audit(
-                HookEvent.TASK_TERMINATED,
-                writer.state.header.task_id,
-            ),
+            hook_audit=hook_audit,
+        )
+        self._run_lifecycle_hook_handlers(
+            HookEvent.TASK_TERMINATED,
+            task_id,
+            hook_audit,
         )
         return True
 
@@ -2356,11 +2415,26 @@ class ProjectSession:
                 if writer.state.active_stage is not None
                 else HookAuditLedger()
             )
+            terminated_hook_audit = self._task_hook_audit(
+                HookEvent.TASK_TERMINATED,
+                task_id,
+            )
             writer.terminate(
                 outcome,
                 reason,
-                hook_audit=self._task_hook_audit(HookEvent.TASK_TERMINATED, task_id),
+                hook_audit=terminated_hook_audit,
                 active_stage_hook_audit=active_stage_hook_audit,
+            )
+            if active_stage_hook_audit.entries:
+                self._run_lifecycle_hook_handlers(
+                    HookEvent.TASK_STAGE_FAILED,
+                    task_id,
+                    active_stage_hook_audit,
+                )
+            self._run_lifecycle_hook_handlers(
+                HookEvent.TASK_TERMINATED,
+                task_id,
+                terminated_hook_audit,
             )
             return writer.info
 
@@ -2403,17 +2477,24 @@ class ProjectSession:
                 prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
                 session_record_before = self._writer.state.next_sequence - 1
                 turn_count_before = len(self._writer.state.turns)
+                started_hook_audit = self._task_hook_audit(
+                    HookEvent.TASK_STAGE_STARTED,
+                    task_id,
+                    event_sink=event_sink,
+                )
                 started = writer.start_stage(
                     stage_objective,
                     kind=kind,
                     session_record_sequence_before=session_record_before,
                     session_turn_count_before=turn_count_before,
                     prompt_sha256=prompt_sha256,
-                    hook_audit=self._task_hook_audit(
-                        HookEvent.TASK_STAGE_STARTED,
-                        task_id,
-                        event_sink=event_sink,
-                    ),
+                    hook_audit=started_hook_audit,
+                )
+                self._run_lifecycle_hook_handlers(
+                    HookEvent.TASK_STAGE_STARTED,
+                    task_id,
+                    started_hook_audit,
+                    event_sink=event_sink,
                 )
                 response: str | None = None
                 task_proposal: TaskControlProposal | None = None
@@ -2468,47 +2549,75 @@ class ProjectSession:
                         self._writer.state.records, session_record_before
                     )
                     if committed is not None:
+                        committed_hook_audit = self._task_hook_audit(
+                            HookEvent.TASK_STAGE_COMMITTED,
+                            task_id,
+                            event_sink=event_sink,
+                        )
                         writer.commit_stage(
                             committed.sequence,
-                            hook_audit=self._task_hook_audit(
-                                HookEvent.TASK_STAGE_COMMITTED,
-                                task_id,
-                                event_sink=event_sink,
-                            ),
+                            hook_audit=committed_hook_audit,
+                        )
+                        self._run_lifecycle_hook_handlers(
+                            HookEvent.TASK_STAGE_COMMITTED,
+                            task_id,
+                            committed_hook_audit,
+                            event_sink=event_sink,
                         )
                     else:
+                        failed_hook_audit = self._task_hook_audit(
+                            HookEvent.TASK_STAGE_FAILED,
+                            task_id,
+                            event_sink=event_sink,
+                        )
                         writer.fail_stage(
                             _task_stage_failure_reason(error),
                             usage=failed_stage_usage,
-                            hook_audit=self._task_hook_audit(
-                                HookEvent.TASK_STAGE_FAILED,
-                                task_id,
-                                event_sink=event_sink,
-                            ),
+                            hook_audit=failed_hook_audit,
+                        )
+                        self._run_lifecycle_hook_handlers(
+                            HookEvent.TASK_STAGE_FAILED,
+                            task_id,
+                            failed_hook_audit,
+                            event_sink=event_sink,
                         )
                     raise
                 committed = _latest_turn_after(self._writer.state.records, session_record_before)
                 if committed is None:
+                    failed_hook_audit = self._task_hook_audit(
+                        HookEvent.TASK_STAGE_FAILED,
+                        task_id,
+                        event_sink=event_sink,
+                    )
                     writer.fail_stage(
                         StageFailureReason.TURN_NOT_COMMITTED,
-                        hook_audit=self._task_hook_audit(
-                            HookEvent.TASK_STAGE_FAILED,
-                            task_id,
-                            event_sink=event_sink,
-                        ),
+                        hook_audit=failed_hook_audit,
+                    )
+                    self._run_lifecycle_hook_handlers(
+                        HookEvent.TASK_STAGE_FAILED,
+                        task_id,
+                        failed_hook_audit,
+                        event_sink=event_sink,
                     )
                     raise TaskRuntimeError("Task Stage returned without a committed Session Turn")
                 try:
+                    committed_hook_audit = self._task_hook_audit(
+                        HookEvent.TASK_STAGE_COMMITTED,
+                        task_id,
+                        event_sink=event_sink,
+                    )
                     stage_record = writer.commit_stage(
                         committed.sequence,
-                        hook_audit=self._task_hook_audit(
-                            HookEvent.TASK_STAGE_COMMITTED,
-                            task_id,
-                            event_sink=event_sink,
-                        ),
+                        hook_audit=committed_hook_audit,
                     )
                 except TaskAppendCommitError:
                     raise
+                self._run_lifecycle_hook_handlers(
+                    HookEvent.TASK_STAGE_COMMITTED,
+                    task_id,
+                    committed_hook_audit,
+                    event_sink=event_sink,
+                )
                 parsed = _resolve_task_stage_response(
                     response,
                     kind=kind,
@@ -2516,15 +2625,22 @@ class ProjectSession:
                 )
                 if parsed.blocker is not None:
                     assert task_proposal is not None
+                    blocked_hook_audit = self._task_hook_audit(
+                        HookEvent.TASK_BLOCKED,
+                        task_id,
+                        event_sink=event_sink,
+                    )
                     writer.record_blocker(
                         parsed.blocker.category,
                         parsed.blocker.summary,
                         proposal_tool_use_id=task_proposal.tool_use_id,
-                        hook_audit=self._task_hook_audit(
-                            HookEvent.TASK_BLOCKED,
-                            task_id,
-                            event_sink=event_sink,
-                        ),
+                        hook_audit=blocked_hook_audit,
+                    )
+                    self._run_lifecycle_hook_handlers(
+                        HookEvent.TASK_BLOCKED,
+                        task_id,
+                        blocked_hook_audit,
+                        event_sink=event_sink,
                     )
                 elif kind is StageKind.PLANNING:
                     assert parsed.plan_steps is not None
@@ -2810,6 +2926,7 @@ class ProjectSession:
             )
             self._active_hook_set_snapshot = prepared.hook_set_snapshot
             self._active_hook_audit_entries = []
+            self._active_hook_handler_executions = 0
             loop = self._loop
             binding: BindingSnapshot | None = None
             usage_cursor = self._manager.begin_turn_usage()
@@ -2915,6 +3032,7 @@ class ProjectSession:
                 self._active_tool_set_snapshot = None
                 self._active_hook_set_snapshot = None
                 self._active_hook_audit_entries = []
+                self._active_hook_handler_executions = 0
                 self._active_usage_cursor = None
                 self._active_turn_runtime = None
                 self._active_cancellation = None
@@ -3532,6 +3650,236 @@ class ProjectSession:
         except Exception:
             pass
 
+    def _resolve_hook_handlers(
+        self,
+        evaluation: HookEvaluation,
+        snapshot: HookSetSnapshot,
+        *,
+        event: HookEvent,
+        subject_id: str,
+        tool_name: str | None = None,
+        permission_action: str | None = None,
+        source: str | None = None,
+        action_outcome: HookActionOutcome | None = None,
+    ) -> HookEvaluation:
+        """Synchronously resolve matched executable rules through audited actions."""
+        executable = tuple(
+            entry for entry in evaluation.matched_entries if entry.rule.handler is not None
+        )
+        if not executable:
+            return evaluation
+        results: dict[str, HookHandlerResult] = {}
+        inside_turn = self._active_action_lease is not None
+        for index, entry in enumerate(executable):
+            if index >= MAX_HOOK_HANDLER_EXECUTIONS_PER_EVENT or (
+                inside_turn
+                and self._active_hook_handler_executions >= MAX_HOOK_HANDLER_EXECUTIONS_PER_TURN
+            ):
+                results[entry.rule.hook_id] = self._hook_handler_failure_result(
+                    event,
+                    entry.rule.hook_id,
+                    "hook_handler_budget_exhausted",
+                )
+                continue
+            if inside_turn:
+                self._active_hook_handler_executions += 1
+            try:
+                result, code = self._execute_hook_handler(
+                    entry,
+                    snapshot,
+                    HookHandlerEvent(
+                        event=event,
+                        hook_set_id=snapshot.snapshot_id,
+                        subject_id=subject_id,
+                        tool_name=tool_name,
+                        permission_action=permission_action,
+                        source=source,
+                        action_outcome=action_outcome,
+                    ),
+                )
+            except Exception:
+                result = None
+                code = "hook_handler_internal_error"
+            results[entry.rule.hook_id] = (
+                result
+                if result is not None
+                else self._hook_handler_failure_result(event, entry.rule.hook_id, code)
+            )
+        return apply_handler_results(evaluation, results)
+
+    @staticmethod
+    def _hook_handler_failure_result(
+        event: HookEvent,
+        hook_id: str,
+        code: str,
+    ) -> HookHandlerResult:
+        message = f"Hook handler [{hook_id}] failed ({code})"
+        return HookHandlerResult(
+            HookEffect.DENY
+            if event is HookEvent.BEFORE_ACTION_AUTHORIZATION
+            else HookEffect.ADVISORY,
+            message,
+        )
+
+    def _execute_hook_handler(
+        self,
+        entry,
+        snapshot: HookSetSnapshot,
+        event: HookHandlerEvent,
+    ) -> tuple[HookHandlerResult | None, str]:
+        """Run one handler as a dangerous Action without recursive Hook dispatch."""
+        if self._hook_handler_depth:
+            return None, "hook_handler_recursion_denied"
+        active = (
+            self._active_action_lease is not None
+            and self._active_action_binding is not None
+            and self._active_hook_set_snapshot is not None
+            and self._active_hook_set_snapshot.snapshot_id == snapshot.snapshot_id
+        )
+        if active:
+            assert self._active_action_lease is not None
+            assert self._active_action_binding is not None
+            lease = self._active_action_lease
+            binding = self._active_action_binding
+            standalone_context_id = None
+        else:
+            context = self._loop.effective_context_snapshot()
+            if context.hook_set_id != snapshot.snapshot_id:
+                return None, "hook_handler_hook_set_stale"
+            status = self._manager.status()
+            lease = ActionLease(
+                session_id=self._writer.session_id,
+                lease_id=_uuid4_text(self._action_uuid_factory(), "Hook handler lease ID"),
+                runtime_generation=status.generation,
+                context_id=context.context_id,
+            )
+            binding = binding_from_status(status)
+            standalone_context_id = context.context_id
+        request_id = _uuid4_text(self._action_uuid_factory(), "Hook handler request ID")
+        tool_use_id = f"hook-handler-{request_id}"
+        try:
+            prepared = self._hook_runner.prepare(entry, event, tool_use_id=tool_use_id)
+        except HookHandlerPreparationError as error:
+            return None, str(error)
+        identity = ActionIdentity(
+            request_id=request_id,
+            tool_use_id=tool_use_id,
+            tool_name=HOOK_HANDLER_ACTION_NAME,
+            arguments=prepared.identity_arguments,
+            action=PermissionAction.DANGEROUS,
+            workspace_fingerprint=self._session_store.workspace_fingerprint,
+            lease=lease,
+            precondition=prepared.precondition,
+        )
+        preview = build_metadata_preview(
+            action_digest=identity.digest,
+            kind=ApprovalPreviewKind.HOOK_HANDLER,
+        )
+        execution: HookHandlerExecution | None = None
+
+        def revalidate(current: ActionIdentity) -> ActionIdentity:
+            if active:
+                self._assert_action_lease(lease)
+            else:
+                current_context = self._loop.effective_context_snapshot()
+                if (
+                    self._writer.session_id != lease.session_id
+                    or self._manager.status().generation != lease.runtime_generation
+                    or current_context.context_id != standalone_context_id
+                    or current_context.hook_set_id != snapshot.snapshot_id
+                ):
+                    raise RuntimeError("Hook handler action lease is stale")
+            return current
+
+        def execute(_current: ActionIdentity) -> ActionExecutionResult:
+            nonlocal execution
+            execution = self._hook_runner.execute(
+                prepared,
+                cancellation=self._active_cancellation,
+            )
+            return ActionExecutionResult(
+                execution.tool_result,
+                execution.outcome,
+                execution.result_code,
+                execution.audit_message,
+            )
+
+        self._hook_handler_depth += 1
+        try:
+            coordinated = ActionCoordinator(
+                writer=self._writer,
+                approval_handler=self._approval_handler,
+                uuid_factory=self._action_uuid_factory,
+            ).run(
+                identity=identity,
+                binding=binding,
+                permission_mode=self._permission_mode,
+                approval_mode=self._approval_mode,
+                revalidate=revalidate,
+                execute=execute,
+                approval_preview=preview,
+            )
+        finally:
+            self._hook_handler_depth -= 1
+        if not coordinated.executed:
+            if coordinated.permission_result.decision.value == "deny":
+                return None, coordinated.permission_result.reason.value
+            if coordinated.approval_resolution is ApprovalResolution.REJECT:
+                return None, "hook_handler_approval_rejected"
+            return None, "hook_handler_approval_cancelled"
+        if execution is None or execution.handler_result is None:
+            return None, coordinated.result_code or "hook_handler_execution_failed"
+        return execution.handler_result, execution.result_code
+
+    def _run_lifecycle_hook_handlers(
+        self,
+        event: HookEvent,
+        subject_id: str,
+        hook_audit: HookAuditLedger,
+        *,
+        event_sink: PromptEventSink | None = None,
+    ) -> None:
+        """Run observation handlers only after their authoritative event commits."""
+        entry = next((item for item in reversed(hook_audit.entries) if item.event is event), None)
+        if entry is None:
+            return
+        try:
+            snapshot = (
+                self._active_hook_set_snapshot
+                if self._active_hook_set_snapshot is not None
+                and self._active_hook_set_snapshot.snapshot_id == entry.hook_set_id
+                else self._hook_store.snapshot()
+            )
+            if snapshot.snapshot_id != entry.hook_set_id:
+                return
+            base = evaluate_lifecycle_event(snapshot, event=event)
+            if not any(item.rule.handler is not None for item in base.matched_entries):
+                return
+            resolved = self._resolve_hook_handlers(
+                base,
+                snapshot,
+                event=event,
+                subject_id=subject_id,
+            )
+            handler_matches = tuple(
+                match
+                for match in resolved.matches
+                if snapshot.get(match.hook_id).rule.handler is not None
+            )
+            if handler_matches:
+                self._emit_prompt_event(
+                    event_sink,
+                    HookLifecycleObserved(
+                        event=event,
+                        hook_set_id=snapshot.snapshot_id,
+                        result=aggregate_hook_effect(handler_matches),
+                        matched_hook_ids=tuple(match.hook_id for match in handler_matches),
+                        advisory=resolved.advisory_text,
+                    ),
+                )
+        except Exception:
+            return
+
     def _task_hook_audit(
         self,
         event: HookEvent,
@@ -3551,14 +3899,19 @@ class ProjectSession:
                 ),
             )
         )
-        if evaluation.matches:
+        static_matches = tuple(
+            match
+            for match in evaluation.matches
+            if snapshot.get(match.hook_id).rule.handler is None
+        )
+        if static_matches:
             self._emit_prompt_event(
                 event_sink,
                 HookLifecycleObserved(
                     event=event,
                     hook_set_id=snapshot.snapshot_id,
-                    result=ledger.entries[0].result,
-                    matched_hook_ids=tuple(match.hook_id for match in evaluation.matches),
+                    result=aggregate_hook_effect(static_matches),
+                    matched_hook_ids=tuple(match.hook_id for match in static_matches),
                     advisory=evaluation.advisory_text,
                 ),
             )
@@ -4204,13 +4557,20 @@ class ProjectSession:
                         )
                 if len(writer.state.verified_criteria) != len(writer.state.criteria):
                     raise RuntimeError("Task completion criteria are not fully verified")
+                terminated_hook_audit = self._task_hook_audit(
+                    HookEvent.TASK_TERMINATED,
+                    request.subject_id,
+                    event_sink=self._active_event_sink,
+                )
                 writer.terminate(
                     TaskTerminalOutcome.COMPLETED,
-                    hook_audit=self._task_hook_audit(
-                        HookEvent.TASK_TERMINATED,
-                        request.subject_id,
-                        event_sink=self._active_event_sink,
-                    ),
+                    hook_audit=terminated_hook_audit,
+                )
+                self._run_lifecycle_hook_handlers(
+                    HookEvent.TASK_TERMINATED,
+                    request.subject_id,
+                    terminated_hook_audit,
+                    event_sink=self._active_event_sink,
                 )
                 task = writer.info
 
@@ -4431,6 +4791,15 @@ class ProjectSession:
             source_kind=contract.source.kind,
         )
         hook_source = "mcp" if contract.source.kind is ExtensionSourceKind.MCP else "builtin"
+        hook_evaluation = self._resolve_hook_handlers(
+            hook_evaluation,
+            hook_set,
+            event=HookEvent.BEFORE_ACTION_AUTHORIZATION,
+            subject_id=request.tool_use_id,
+            tool_name=request.name,
+            permission_action=action.value,
+            source=hook_source,
+        )
         preauthorization_audit = hook_evaluation.audit_entry(
             event=HookEvent.BEFORE_ACTION_AUTHORIZATION,
             hook_set_id=hook_set.snapshot_id,
@@ -4447,6 +4816,16 @@ class ProjectSession:
                 arguments=request.arguments,
                 source_kind=contract.source.kind,
                 outcome=HookActionOutcome.DENIED,
+            )
+            after_evaluation = self._resolve_hook_handlers(
+                after_evaluation,
+                hook_set,
+                event=HookEvent.AFTER_ACTION,
+                subject_id=request.tool_use_id,
+                tool_name=request.name,
+                permission_action=action.value,
+                source=hook_source,
+                action_outcome=HookActionOutcome.DENIED,
             )
             content = (
                 f"Hook denied action [{hook_evaluation.denied_by}]: {hook_evaluation.deny_message}"
@@ -4956,6 +5335,16 @@ class ProjectSession:
             source_kind=contract.source.kind,
             outcome=action_outcome,
         )
+        after_evaluation = self._resolve_hook_handlers(
+            after_evaluation,
+            hook_set,
+            event=HookEvent.AFTER_ACTION,
+            subject_id=request.tool_use_id,
+            tool_name=request.name,
+            permission_action=action.value,
+            source=hook_source,
+            action_outcome=action_outcome,
+        )
         advisories = tuple(
             text
             for text in (
@@ -5184,6 +5573,21 @@ class ProjectSession:
             session_name_source=session_name_source,
             session_title_fallback_reason=session_title_fallback_reason,
         )
+        terminal = next(
+            (
+                entry
+                for entry in reversed(turn.hook_audit.entries)
+                if entry.event is HookEvent.TURN_COMMITTED
+            ),
+            None,
+        )
+        if terminal is not None:
+            self._run_lifecycle_hook_handlers(
+                HookEvent.TURN_COMMITTED,
+                terminal.subject_id,
+                turn.hook_audit,
+                event_sink=self._active_event_sink,
+            )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
         self._web_search.disable_sources()
@@ -5220,14 +5624,19 @@ class ProjectSession:
                     ),
                 )
             )
-            if evaluation.matches:
+            static_matches = tuple(
+                match
+                for match in evaluation.matches
+                if hook_set.get(match.hook_id).rule.handler is None
+            )
+            if static_matches:
                 self._emit_prompt_event(
                     self._active_event_sink,
                     HookLifecycleObserved(
                         event=HookEvent.TURN_FAILED,
                         hook_set_id=hook_set.snapshot_id,
-                        result=hook_audit.entries[0].result,
-                        matched_hook_ids=tuple(match.hook_id for match in evaluation.matches),
+                        result=aggregate_hook_effect(static_matches),
+                        matched_hook_ids=tuple(match.hook_id for match in static_matches),
                         advisory=evaluation.advisory_text,
                     ),
                 )
@@ -5241,6 +5650,13 @@ class ProjectSession:
             )
         except SessionStoreError:
             pass
+        else:
+            self._run_lifecycle_hook_handlers(
+                HookEvent.TURN_FAILED,
+                self._writer.session_id,
+                hook_audit,
+                event_sink=self._active_event_sink,
+            )
 
     def _ensure_not_compacting(self) -> None:
         if self._active_compaction is not None:

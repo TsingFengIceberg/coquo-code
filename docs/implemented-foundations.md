@@ -87,6 +87,7 @@
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation 与 Audit](#durable-hook-observation-与-audit)
+- [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [ADR 索引](#adr-索引)
 
 ## Canonical model system prompt
@@ -1311,6 +1312,16 @@ Hook配置与HookSetSnapshot升级为v2，并继续严格读取v1配置。除原
 
 Lifecycle advisory通过typed transient terminal event展示但不复制到audit ledger；after-action advisory可进入普通ToolResult，但不能改变真实Tool或Action Audit outcome。Standalone `hooks evaluations [session]`、`hooks task <task-id>`及REPL `/hooks evaluations [count]`、`/hooks task <task-id> [count]`只做strict replay和有界content-free投影，不调用Provider或修改状态。system prompt为v42，provider adapter为v43，HookSet为`hooks-v2`，Effective Context为v19/v20并保留v17/v18 legacy Hook-v1表示；Registry保持generation 5。见[0126](./decisions/0126-durable-hook-observation-and-audit.md)。
 
+## Audited Pinned Local Hook Handlers
+
+Hook配置及HookSetSnapshot升级为v3，同时严格读取v1/v2并只写v3。规则可选配置一个固定direct executable、6 KiB内最多16个固定argument、1至30秒timeout及可执行文件SHA-256；handler规则自身必须是空message的`continue`，实际effect来自运行结果。workspace相对可执行文件拒绝symlink，绝对路径解析到实际文件；文件必须regular、可执行且不超过16 MiB。Host把一个不含消息、Tool参数、文件内容、credential或任意result的closed JSON event envelope追加到固定argv，绝不做shell解析。
+
+每次handler调用都是一个名为`hook_handler`的synthetic dangerous Action，复用现有ActionLease、PermissionGate、ask/auto审批、Action Audit、取消、RunCommandTool及Linux bubblewrap。read-only和workspace-write会拒绝handler；enable Hook不等于授权执行。执行阶段再次检查固定指纹，stale时形成闭合failed Action且不启动进程。sandbox保持Host root只读、workspace可写、私有temp/home、socket禁止、环境allowlist、timeout、有界输出及process-group cleanup；handler的stdout/stderr原文不进入Action Audit或模型历史。
+
+成功handler只接受一个closed JSON stdout结果，effect为`continue|deny|require_ask|advisory`。只有preauthorization可返回deny/require_ask；观察事件只接受continue/advisory。preauthorization的准备、权限、审批、执行、timeout、stale或协议失败均fail closed；after-action与lifecycle失败只产生advisory，不能改写权威action、Turn或Task结果。每event最多执行4个handler、普通Turn最多12个，禁止递归、自动retry与rollback。Turn/Task lifecycle handler只在对应权威record提交后执行，其运行事实进入Session Action Audit。
+
+Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks template local-handler`、strict workspace-local `hooks import`、readiness-aware `hooks doctor`及`hooks runs [session]`；REPL新增`/hooks runs [count]`。Import始终落为disabled revision 1；enable前必须匹配固定指纹。approval preview升级到v6，system prompt为v43，provider adapter为v44，HookSet为`hooks-v3`，Effective Context为v21/v22并保留v19/v20 legacy Hook-v2；Registry及Session/Task record schema不变。见[0127](./decisions/0127-audited-pinned-local-hook-handlers.md)。
+
 ## ADR 索引
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1439,3 +1450,4 @@ Lifecycle advisory通过typed transient terminal event展示但不复制到audit
 124. [0124：Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
 125. [0125：Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
 126. [0126：Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
+127. [0127：Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)

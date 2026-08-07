@@ -59,7 +59,7 @@ from leonervis_code.session import (
     TurnUsageCompleted,
 )
 from leonervis_code.task_runtime import TaskNextAction, TaskRunStopped
-from leonervis_code.session_records import SessionTitleFallbackReason
+from leonervis_code.session_records import ActionAuditState, SessionTitleFallbackReason
 from leonervis_code.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from leonervis_code.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
 from leonervis_code.skills import (
@@ -263,6 +263,7 @@ HOOKS_HELP = (
     "  /hooks show <hook-id>\n"
     "  /hooks doctor\n"
     "  /hooks evaluations [1-100]\n"
+    "  /hooks runs [1-100]\n"
     "  /hooks task <task-id> [1-100]\n"
     "These commands are Host-only and read-only. Use standalone hooks commands to edit "
     "configuration; changes become effective from the next prepared Turn."
@@ -304,8 +305,19 @@ HELP_BY_TOPIC = {
 
 
 def render_hook_entry(entry: HookEntry) -> str:
-    """Render one declarative Hook without executable or secret content."""
+    """Render one Hook without handler argv or secret content."""
     rule = entry.rule
+    handler = rule.handler
+    handler_lines = (
+        "Handler: none"
+        if handler is None
+        else (
+            f"Handler executable: {handler.executable}\n"
+            f"Handler arguments: {len(handler.arguments)} hidden\n"
+            f"Handler timeout: {handler.timeout_seconds}s\n"
+            f"Handler SHA-256: {handler.executable_sha256}"
+        )
+    )
     return (
         f"Hook: {rule.hook_id}\n"
         f"Scope: {entry.scope}\n"
@@ -318,7 +330,8 @@ def render_hook_entry(entry: HookEntry) -> str:
         f"Path prefixes: {', '.join(rule.path_prefixes) or 'any'}\n"
         f"Outcomes: {', '.join(outcome.value for outcome in rule.action_outcomes) or 'any'}\n"
         f"Sources: {', '.join(source.value for source in rule.sources) or 'any'}\n"
-        f"Message: {rule.message or 'none'}"
+        f"Message: {rule.message or 'none'}\n"
+        f"{handler_lines}"
     )
 
 
@@ -346,7 +359,8 @@ def render_hook_doctor(snapshot: HookSetSnapshot) -> str:
         f"Configured: {len(snapshot.entries)}\n"
         f"Active: {len(snapshot.active_entries)}\n"
         f"Snapshot: {snapshot.snapshot_id}\n"
-        "Side-effect handlers: disabled by contract"
+        f"Executable handlers: {sum(entry.rule.handler is not None for entry in snapshot.entries)}\n"
+        "Handler readiness requires standalone hooks doctor."
     )
 
 
@@ -377,6 +391,26 @@ def render_hook_evaluations(observations: tuple[HookAuditObservation, ...]) -> s
         if entry.action_outcome is not None:
             detail.append(f"outcome={entry.action_outcome.value}")
         lines.append("  " + " · ".join(detail))
+    return "\n".join(lines)
+
+
+def render_hook_handler_runs(audits: tuple[ActionAuditState, ...], count: int) -> str:
+    """Render bounded content-free handler Action Audit statistics."""
+    recent = audits[-count:]
+    if not recent:
+        return "No audited Hook handler runs found."
+    lines = [f"Hook handler runs: {len(recent)}"]
+    for audit in recent:
+        arguments = audit.identity.arguments.as_mapping()
+        hook_id = _safe_inline(str(arguments.get("hook_id", "<unknown>")))
+        event = _safe_inline(str(arguments.get("event", "<unknown>")))
+        executable = _safe_inline(str(arguments.get("executable", "<unknown>")))
+        digest = str(arguments.get("executable_sha256", "<unknown>"))
+        result = audit.result_code or "none"
+        lines.append(
+            f"  {hook_id} · event={event} · status={audit.status.value} · "
+            f"result={_safe_inline(result)} · executable={executable} · sha256={digest}"
+        )
     return "\n".join(lines)
 
 

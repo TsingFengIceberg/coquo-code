@@ -87,6 +87,7 @@
 - [Provider-owned model context capability](#provider-owned-model-context-capability)
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation and Audit](#durable-hook-observation-and-audit)
+- [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [ADR index](#adr-index)
 
 ## Canonical model system prompt
@@ -1311,6 +1312,16 @@ Each evaluation creates one bounded content-free `HookAuditEntry` containing onl
 
 Lifecycle advisories use typed transient terminal events and are not copied into the audit ledger. An after-action advisory may enter the normal ToolResult without changing the actual Tool or Action Audit outcome. Standalone `hooks evaluations [session]` and `hooks task <task-id>`, plus REPL `/hooks evaluations [count]` and `/hooks task <task-id> [count]`, perform only strict replay and bounded content-free projection without a Provider call or state mutation. The system prompt is v42, provider adapter v43, HookSet identity `hooks-v2`, and Effective Context v19/v20 with v17/v18 retained as legacy Hook-v1 representations; Registry remains generation 5. See [0126](./decisions/0126-durable-hook-observation-and-audit.md).
 
+## Audited Pinned Local Hook Handlers
+
+Hook configuration and HookSetSnapshot advance to v3 while strictly reading v1/v2 and writing only v3. A rule may optionally configure one fixed direct executable, up to 16 fixed arguments within a 6 KiB budget, a 1-30 second timeout, and the executable SHA-256; a handler rule itself must use `continue` with an empty message, while the runtime result supplies the effective effect. Workspace-relative executables reject symlinks and absolute paths resolve to the actual file; the target must be regular, executable, and no larger than 16 MiB. The Host appends one closed JSON event envelope containing no messages, Tool arguments, file content, credentials, or arbitrary result data to fixed argv and never performs shell parsing.
+
+Every handler invocation is a synthetic dangerous Action named `hook_handler` that reuses the existing ActionLease, PermissionGate, ask/auto approval, Action Audit, cancellation, RunCommandTool, and Linux bubblewrap. Read-only and workspace-write deny handlers; enabling a Hook is not execution authorization. The execution phase rechecks the pinned fingerprint, and a stale file becomes a closed failed Action without starting a process. The sandbox keeps the Host root read-only, workspace writable, temp/home private, sockets denied, environment allowlisted, output bounded, timeout enforced, and process groups cleaned up; raw handler stdout/stderr enters neither Action Audit nor model history.
+
+A successful handler accepts only one closed JSON stdout result whose effect is `continue|deny|require_ask|advisory`. Only preauthorization may return deny/require_ask; observation events accept continue/advisory only. Preauthorization preparation, permission, approval, execution, timeout, stale, or protocol failures fail closed, while after-action and lifecycle failures become advisories and cannot rewrite authoritative action, Turn, or Task outcomes. At most four handlers run per event and twelve per ordinary Turn; recursion, automatic retry, and rollback are prohibited. Turn and Task lifecycle handlers run only after the corresponding authoritative record commits, and their runtime facts enter Session Action Audit.
+
+Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks template local-handler`, strict workspace-local `hooks import`, readiness-aware `hooks doctor`, and `hooks runs [session]`; the REPL adds `/hooks runs [count]`. Import always creates disabled revision 1, and enablement requires the pinned fingerprint to match. Approval preview advances to v6, system prompt to v43, provider adapter to v44, HookSet identity to `hooks-v3`, and Effective Context to v21/v22 with v19/v20 retained as legacy Hook-v2; Registry and Session/Task record schemas remain unchanged. See [0127](./decisions/0127-audited-pinned-local-hook-handlers.md).
+
 ## ADR index
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
@@ -1439,3 +1450,4 @@ Lifecycle advisories use typed transient terminal events and are not copied into
 124. [0124: Explicit Skill Authoring and Quarantined Remote Install](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)
 125. [0125: Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
 126. [0126: Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
+127. [0127: Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)

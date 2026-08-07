@@ -81,7 +81,11 @@ from leonervis_code.skills import (
     active_skills_from_history,
 )
 from leonervis_code.hooks import HookSetSnapshot, evaluate_lifecycle_event
-from leonervis_code.core.hook_contracts import HookAuditLedger, HookEvent
+from leonervis_code.core.hook_contracts import (
+    HookAuditLedger,
+    HookEvent,
+    aggregate_hook_effect,
+)
 from leonervis_code.tools.skill_discovery import (
     SKILL_LOAD_TOOL_NAME,
     SKILL_READ_RESOURCE_TOOL_NAME,
@@ -672,16 +676,19 @@ class AgentLoop:
                     )
                 )
                 self._commit(pending + (response,), user, response, ledger, hook_audit)
-                if turn_hook_evaluation.matches:
+                static_turn_matches = tuple(
+                    match
+                    for match in turn_hook_evaluation.matches
+                    if prepared.hook_set_snapshot.get(match.hook_id).rule.handler is None
+                )
+                if static_turn_matches:
                     self._emit_prompt_event(
                         event_sink,
                         HookLifecycleObserved(
                             event=HookEvent.TURN_COMMITTED,
                             hook_set_id=prepared.hook_set_snapshot.snapshot_id,
-                            result=hook_audit.entries[-1].result,
-                            matched_hook_ids=tuple(
-                                match.hook_id for match in turn_hook_evaluation.matches
-                            ),
+                            result=aggregate_hook_effect(static_turn_matches),
+                            matched_hook_ids=tuple(match.hook_id for match in static_turn_matches),
                             advisory=turn_hook_evaluation.advisory_text,
                         ),
                     )

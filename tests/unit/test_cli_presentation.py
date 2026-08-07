@@ -41,6 +41,7 @@ from leonervis_code.cli.presentation import (
     render_git_show,
     render_git_status,
     render_host_message,
+    render_hook_handler_runs,
     render_action_audits,
     render_activity_line,
     render_message,
@@ -462,6 +463,39 @@ def test_action_audits_are_recent_bounded_and_redacted() -> None:
     assert "first.txt" not in rendered
     assert "secret-content" not in rendered
     assert render_action_audits((), 20) == "No action audits yet."
+
+
+def test_hook_handler_runs_are_content_free_and_terminal_safe() -> None:
+    audit = SimpleNamespace(
+        identity=SimpleNamespace(
+            tool_name="hook_handler",
+            arguments=ToolArguments.from_mapping(
+                {
+                    "event": "after_action",
+                    "executable": "/workspace/hooks/check.py",
+                    "executable_sha256": "a" * 64,
+                    "hook_id": "local-check",
+                    "hook_set_id": "hooks-v3-" + "b" * 64,
+                    "subject_id": "tool-use-1",
+                    "timeout_seconds": 5,
+                }
+            ),
+        ),
+        status=ActionAuditStatus.SUCCEEDED,
+        result_code="hook_handler_advisory",
+    )
+
+    rendered = render_hook_handler_runs((audit,), 20)
+
+    assert "Hook handler runs: 1" in rendered
+    assert "local-check" in rendered
+    assert "event=after_action" in rendered
+    assert "status=succeeded" in rendered
+    assert "check.py" in rendered
+    assert "a" * 64 in rendered
+    assert "tool-use-1" not in rendered
+    assert "message" not in rendered
+    assert "stdout" not in rendered
 
 
 def test_tool_ledgers_render_summary_details_and_legacy_availability() -> None:
@@ -925,7 +959,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
 
     assert kind == "warning"
     assert "Source: full committed history" in rendered
-    assert "Context ID: ctx-v19-" in rendered
+    assert "Context ID: ctx-v21-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
     assert "Effective history: 1 turn, 2 items" in rendered
     assert "Input: 80 tokens (estimated)" in rendered

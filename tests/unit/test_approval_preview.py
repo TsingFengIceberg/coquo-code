@@ -101,7 +101,7 @@ def test_additional_action_previews_are_content_free(kind: ApprovalPreviewKind) 
     assert preview.kind is kind
     assert preview.body is None
     assert preview.byte_count is None
-    assert preview.version == APPROVAL_PREVIEW_VERSION == 5
+    assert preview.version == APPROVAL_PREVIEW_VERSION == 6
 
 
 @pytest.mark.parametrize("transport", ("stdio", "streamable-http"))
@@ -113,7 +113,7 @@ def test_mcp_preview_requires_one_known_transport(transport: str) -> None:
     )
 
     assert preview.transport == transport
-    assert preview.version == APPROVAL_PREVIEW_VERSION == 5
+    assert preview.version == APPROVAL_PREVIEW_VERSION == 6
 
     for invalid in (None, "sse"):
         with pytest.raises(ValueError, match="transport"):
@@ -137,7 +137,7 @@ def test_web_search_preview_requires_a_supported_backend() -> None:
         backend="tavily",
     )
     assert tavily.backend == "tavily"
-    assert tavily.version == APPROVAL_PREVIEW_VERSION == 5
+    assert tavily.version == APPROVAL_PREVIEW_VERSION == 6
     assert (
         build_metadata_preview(
             action_digest=ACTION_DIGEST,

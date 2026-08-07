@@ -10,8 +10,15 @@ import re
 MAX_HOOK_AUDIT_ENTRIES = 128
 MAX_HOOK_AUDIT_MATCHES = 64
 MAX_HOOK_AUDIT_QUERY_ENTRIES = 100
+MAX_HOOK_HANDLER_ARGUMENTS = 16
+MAX_HOOK_HANDLER_ARGUMENT_BYTES = 1024
+MAX_HOOK_HANDLER_ARGV_BYTES = 6 * 1024
+MAX_HOOK_HANDLER_TIMEOUT_SECONDS = 30
+MAX_HOOK_HANDLER_MESSAGE_CHARACTERS = 1024
+MAX_HOOK_HANDLER_MESSAGE_BYTES = 4096
 _HOOK_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
-_HOOK_SET_ID = re.compile(r"hooks-v(?:1|2)-[0-9a-f]{64}\Z")
+_HOOK_SET_ID = re.compile(r"hooks-v(?:1|2|3)-[0-9a-f]{64}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class HookEvent(StrEnum):
@@ -55,6 +62,101 @@ class HookActionOutcome(StrEnum):
     FAILED = "failed"
     PARTIAL = "partial"
     OUTCOME_UNKNOWN = "outcome-unknown"
+
+
+@dataclass(frozen=True)
+class HookHandlerSpec:
+    """One fixed direct-argv local handler pinned to an executable digest."""
+
+    executable: str
+    arguments: tuple[str, ...]
+    timeout_seconds: int
+    executable_sha256: str
+
+    def __post_init__(self) -> None:
+        _handler_text(self.executable, "Hook handler executable")
+        if (
+            not isinstance(self.arguments, tuple)
+            or len(self.arguments) > MAX_HOOK_HANDLER_ARGUMENTS
+        ):
+            raise ValueError("Hook handler arguments are invalid")
+        total = len(self.executable.encode("utf-8"))
+        for argument in self.arguments:
+            _handler_text(argument, "Hook handler argument", allow_empty=True)
+            encoded = argument.encode("utf-8")
+            if len(encoded) > MAX_HOOK_HANDLER_ARGUMENT_BYTES:
+                raise ValueError("Hook handler argument exceeds its byte bound")
+            total += len(encoded)
+        if total > MAX_HOOK_HANDLER_ARGV_BYTES:
+            raise ValueError("Hook handler argv exceeds its byte bound")
+        if (
+            type(self.timeout_seconds) is not int
+            or not 1 <= self.timeout_seconds <= MAX_HOOK_HANDLER_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                "Hook handler timeout must be between 1 and "
+                f"{MAX_HOOK_HANDLER_TIMEOUT_SECONDS} seconds"
+            )
+        if (
+            not isinstance(self.executable_sha256, str)
+            or _SHA256.fullmatch(self.executable_sha256) is None
+        ):
+            raise ValueError("Hook handler executable SHA-256 is invalid")
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "arguments": list(self.arguments),
+            "executable": self.executable,
+            "executable_sha256": self.executable_sha256,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> HookHandlerSpec:
+        if not isinstance(value, dict) or set(value) != {
+            "arguments",
+            "executable",
+            "executable_sha256",
+            "timeout_seconds",
+        }:
+            raise ValueError("Hook handler must be a closed object")
+        raw_arguments = value["arguments"]
+        if not isinstance(raw_arguments, list) or any(
+            not isinstance(argument, str) for argument in raw_arguments
+        ):
+            raise ValueError("Hook handler arguments must be an array of strings")
+        return cls(
+            executable=value["executable"],  # type: ignore[arg-type]
+            arguments=tuple(raw_arguments),
+            timeout_seconds=value["timeout_seconds"],  # type: ignore[arg-type]
+            executable_sha256=value["executable_sha256"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True)
+class HookHandlerResult:
+    """One strictly parsed authority-nonexpanding handler response."""
+
+    effect: HookEffect
+    message: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.effect) is not HookEffect:
+            raise ValueError("Hook handler effect is invalid")
+        if not isinstance(self.message, str) or any(
+            ord(character) < 32 and character not in {"\n", "\t"} for character in self.message
+        ):
+            raise ValueError("Hook handler message is invalid")
+        if (
+            len(self.message) > MAX_HOOK_HANDLER_MESSAGE_CHARACTERS
+            or len(self.message.encode("utf-8")) > MAX_HOOK_HANDLER_MESSAGE_BYTES
+        ):
+            raise ValueError("Hook handler message exceeds its bound")
+        if self.effect is HookEffect.CONTINUE:
+            if self.message:
+                raise ValueError("continue Hook handler result cannot contain a message")
+        elif not self.message.strip():
+            raise ValueError("non-continue Hook handler result requires a message")
 
 
 @dataclass(frozen=True)
@@ -274,6 +376,20 @@ def _safe_identity(value: object, label: str) -> None:
         or not value
         or len(value) > 256
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{label} is invalid")
+
+
+def _handler_text(value: object, label: str, *, allow_empty: bool = False) -> None:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError(f"{label} is invalid")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{label} is invalid") from None
+    if (
+        any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or len(encoded) > MAX_HOOK_HANDLER_ARGUMENT_BYTES
     ):
         raise ValueError(f"{label} is invalid")
 
