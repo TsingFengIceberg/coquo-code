@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.mcp.client import (
+from coquo.mcp.client import (
     McpClientError,
     McpNotificationKind,
     McpStdioClient,
 )
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
+from coquo.mcp.config import McpServerConfiguration, McpServerEntry
+from coquo.tools.command_sandbox import CommandSandboxLaunch
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -115,7 +115,7 @@ def test_probe_hides_json_rpc_error_and_stderr_content(tmp_path) -> None:
 
 
 def test_probe_timeout_terminates_temporary_process(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("leonervis_code.mcp.client.MCP_INITIALIZE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("coquo.mcp.client.MCP_INITIALIZE_TIMEOUT_SECONDS", 0.05)
 
     with pytest.raises(McpClientError) as raised:
         client(tmp_path).probe(entry("timeout"))
@@ -147,7 +147,7 @@ def test_default_client_uses_read_only_workspace_sandbox(tmp_path, monkeypatch) 
         def __init__(self, *, workspace_writable: bool) -> None:
             observed["workspace_writable"] = workspace_writable
 
-    monkeypatch.setattr("leonervis_code.mcp.client.LinuxBubblewrapCommandSandbox", RecordingSandbox)
+    monkeypatch.setattr("coquo.mcp.client.LinuxBubblewrapCommandSandbox", RecordingSandbox)
 
     McpStdioClient(tmp_path, environment={})
 

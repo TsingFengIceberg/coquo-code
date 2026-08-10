@@ -4,12 +4,12 @@ from dataclasses import dataclass, replace
 
 import pytest
 
-from leonervis_code.core.compaction import (
+from coquo.core.compaction import (
     CompactSummaryRequest,
     CompactionUnavailableError,
     build_compact_prompt,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ConversationRequest,
@@ -17,35 +17,35 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.session_title import build_session_title_request
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
-from leonervis_code.providers.manager import (
+from coquo.core.session_title import build_session_title_request
+from coquo.providers.definitions import WireProtocol
+from coquo.providers.errors import ProviderAdapterError, output_limit_error
+from coquo.providers.manager import (
     RuntimeProviderManager,
     RuntimeProviderStateError,
     RuntimeSwitchContextError,
 )
-from leonervis_code.providers.model_context import (
+from coquo.providers.model_context import (
     ModelContextCapability,
     ModelContextCapabilityResolver,
     ModelContextSource,
     ModelContextTarget,
 )
-from leonervis_code.providers.profile import NamedProviderProfile
-from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.request_context import (
+from coquo.providers.profile import NamedProviderProfile
+from coquo.providers.profile_store import ProviderProfileStore
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextPreflightError,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
-from leonervis_code.providers.usage import ProviderInvocationKind, ProviderTokenUsage
-from leonervis_code.session import ProjectSession
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.read_file import ReadFileTool
+from coquo.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
+from coquo.providers.usage import ProviderInvocationKind, ProviderTokenUsage
+from coquo.session import ProjectSession
+from coquo.system_prompt import build_system_prompt
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.read_file import ReadFileTool
 
 
 @dataclass

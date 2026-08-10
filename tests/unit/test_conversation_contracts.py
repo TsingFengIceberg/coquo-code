@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantText,
     MAX_ASSISTANT_TOOL_TEXT_BYTES,
     MAX_ASSISTANT_TOOL_TEXT_CHARACTERS,
@@ -18,7 +18,7 @@ from leonervis_code.core.contracts import (
     ToolTurnLedger,
     ToolUse,
 )
-from leonervis_code.system_prompt import build_system_prompt
+from coquo.system_prompt import build_system_prompt
 
 
 def tool_use(*, assistant_text: str | None = None) -> ToolUse:

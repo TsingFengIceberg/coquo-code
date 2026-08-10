@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
 
 
 def request(left: str = "a.txt", right: str = "b.txt") -> ToolUse:

@@ -4,8 +4,8 @@ import io
 from pathlib import Path
 from types import SimpleNamespace
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.agent.tool_events import (
+from coquo.agent.loop import AgentLoop
+from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextReceived,
@@ -14,42 +14,42 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestStarted,
 )
-from leonervis_code.cli.presentation import render_recent_history, render_session_summary
-from leonervis_code.cli.prompt_editor import (
+from coquo.cli.presentation import render_recent_history, render_session_summary
+from coquo.cli.prompt_editor import (
     MAX_PROMPT_BYTES,
     PromptInputError,
     PromptRead,
     StreamPromptEditor,
     complete_command,
 )
-from leonervis_code.cli.repl import (
+from coquo.cli.repl import (
     _session_prompt_history,
     parse_history_count,
     run_repl,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ConversationTurn,
     ToolUse,
     UserMessage,
 )
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.providers.errors import output_limit_error
-from leonervis_code.providers.manager import (
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.providers.errors import output_limit_error
+from coquo.providers.manager import (
     OutputBudgetUpdateResult,
     RuntimeStatus,
     RuntimeSwitchResult,
 )
-from leonervis_code.providers.usage import ProviderTokenUsage
-from leonervis_code.providers.profile import NamedProviderProfile
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.session_records import BindingSnapshot, SessionNameSource
-from leonervis_code.session_store import SessionInfo, ToolLedgerQueryResult
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
+from coquo.providers.usage import ProviderTokenUsage
+from coquo.providers.profile import NamedProviderProfile
+from coquo.providers.definitions import WireProtocol
+from coquo.session_records import BindingSnapshot, SessionNameSource
+from coquo.session_store import SessionInfo, ToolLedgerQueryResult
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
 
 
 class RecordingLoop:
@@ -139,8 +139,8 @@ def test_tab_completion_returns_existing_slash_commands() -> None:
 def test_stream_prompt_editor_uses_injected_streams_without_tty_editor() -> None:
     output = io.StringIO()
 
-    assert StreamPromptEditor(io.StringIO("Hello\n"), output).read("leonervis> ").text == "Hello"
-    assert output.getvalue() == "leonervis> "
+    assert StreamPromptEditor(io.StringIO("Hello\n"), output).read("coquo> ").text == "Hello"
+    assert output.getvalue() == "coquo> "
 
 
 def test_parse_history_count_accepts_positive_integer_only() -> None:
@@ -211,7 +211,7 @@ def test_repl_routes_each_nonblank_prompt_and_prints_banner(tmp_path) -> None:
     rendered = output.getvalue()
     assert status == 0
     assert loop.prompts == ["Hello", "World"]
-    assert rendered.count("LEONERVIS CODE v0.1.0") == 1
+    assert rendered.count("COQUO v0.1.0") == 1
     assert "reply: Hello\n" in rendered
     assert "reply: World\n" in rendered
 

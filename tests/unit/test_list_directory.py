@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools import list_directory as list_directory_module
-from leonervis_code.tools.list_directory import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools import list_directory as list_directory_module
+from coquo.tools.list_directory import (
     LIST_DIRECTORY_TRUNCATION_MARKER,
     ListDirectoryTool,
     list_directory_model_definition,

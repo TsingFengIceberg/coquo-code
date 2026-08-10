@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.json_query import JSON_QUERY_TOOL_NAME, JsonQueryTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.json_query import JSON_QUERY_TOOL_NAME, JsonQueryTool
 
 
 def request(pointer: str, path: str = "data.json") -> ToolUse:

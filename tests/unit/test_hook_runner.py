@@ -5,20 +5,20 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.hook_contracts import (
+from coquo.core.hook_contracts import (
     HookActionOutcome,
     HookEffect,
     HookEvent,
     HookHandlerSpec,
 )
-from leonervis_code.hook_runner import (
+from coquo.hook_runner import (
     HookHandlerEvent,
     HookHandlerPreparationError,
     HookRunner,
 )
-from leonervis_code.hooks import HookEntry, HookRule
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
-from leonervis_code.tools.run_command import RunCommandTool
+from coquo.hooks import HookEntry, HookRule
+from coquo.tools.command_sandbox import CommandSandboxLaunch
+from coquo.tools.run_command import RunCommandTool
 
 
 class DirectSandbox:
@@ -71,7 +71,7 @@ def test_runner_executes_pinned_direct_argv_and_parses_closed_result(tmp_path: P
         """import json, sys
 flag, payload = sys.argv[-2:]
 event = json.loads(payload)
-assert flag == "--leonervis-hook-event-v1"
+assert flag == "--coquo-hook-event-v1"
 assert set(event) == {"action_outcome", "event", "hook_id", "hook_set_id", "permission_action", "source", "subject_id", "tool_name", "version"}
 print(json.dumps({"version": 1, "effect": "advisory", "message": "Review generated output."}))
 """,

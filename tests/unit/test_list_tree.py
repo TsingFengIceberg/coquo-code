@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.list_tree import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.list_tree import (
     MAX_LIST_TREE_DEPTH,
     MAX_LIST_TREE_OUTPUT_BYTES,
     MAX_LIST_TREE_RESULTS,

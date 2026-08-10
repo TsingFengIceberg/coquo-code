@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     AssistantToolTextReceived,
     SkillCandidateCommitted,
     SkillCandidateInstalled,
@@ -15,7 +15,7 @@ from leonervis_code.agent.tool_events import (
     ToolRequestStarted,
     ToolTurnSummaryCommitted,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ToolResult,
@@ -23,28 +23,28 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.compaction import CompactionCandidateError
-from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
-from leonervis_code.core.extensions import ToolRegistrySnapshot
-from leonervis_code.core.permissions import PermissionAction, PermissionMode
-from leonervis_code.core.skill_authoring import (
+from coquo.core.compaction import CompactionCandidateError
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
+from coquo.core.extensions import ToolRegistrySnapshot
+from coquo.core.permissions import PermissionAction, PermissionMode
+from coquo.core.skill_authoring import (
     SKILL_ACCEPT_CREATE_TOOL_NAME,
     SKILL_PROPOSE_CREATE_TOOL_NAME,
 )
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.manager import RuntimeSwitchAuditError
-from leonervis_code.providers.errors import ProviderAdapterError, output_limit_error
-from leonervis_code.providers.profile import ProviderProfileSpec
-from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.providers.request_context import (
+from coquo.providers.definitions import WireProtocol
+from coquo.providers.manager import RuntimeSwitchAuditError
+from coquo.providers.errors import ProviderAdapterError, output_limit_error
+from coquo.providers.profile import ProviderProfileSpec
+from coquo.providers.profile_store import ProviderProfileStore
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.providers.request_context import (
     ContextFitDecision,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.providers.streaming import ProviderResponseOutcome
-from leonervis_code.providers.usage import ProviderInvocationKind, ProviderTokenUsage
-from leonervis_code.session import (
+from coquo.providers.streaming import ProviderResponseOutcome
+from coquo.providers.usage import ProviderInvocationKind, ProviderTokenUsage
+from coquo.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
     AutoCompactionStarted,
@@ -55,7 +55,7 @@ from leonervis_code.session import (
     SessionTitlePrepared,
     TurnCommitStarted,
 )
-from leonervis_code.session_records import (
+from coquo.session_records import (
     ActionAuditStatus,
     BindingSnapshot,
     CompactionFailed,
@@ -63,11 +63,11 @@ from leonervis_code.session_records import (
     SessionTitleFallbackReason,
     TurnCommitted,
 )
-from leonervis_code.session_store import SessionStore, SessionStoreError
-from leonervis_code.skills import SkillInventoryLoader
-from leonervis_code.skill_candidates import SkillCandidateStatus
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
+from coquo.session_store import SessionStore, SessionStoreError
+from coquo.skills import SkillInventoryLoader
+from coquo.skill_candidates import SkillCandidateStatus
+from coquo.system_prompt import build_system_prompt
+from coquo.tools.catalog import TOOL_REGISTRY_SNAPSHOT
 
 SESSION_ONE = "12345678-1234-4234-9234-123456789abc"
 SESSION_TWO = "22345678-1234-4234-9234-123456789abc"
@@ -322,8 +322,8 @@ def test_project_session_rejects_contract_action_mismatch_before_action_audit(
 def test_project_session_retires_action_lease_when_discovery_promotes_a_later_epoch(
     tmp_path: Path,
 ) -> None:
-    from leonervis_code.core.effective_context import CanonicalToolDefinition
-    from leonervis_code.core.extensions import (
+    from coquo.core.effective_context import CanonicalToolDefinition
+    from coquo.core.extensions import (
         ExtensionSource,
         ExtensionSourceKind,
         ExtensionToolContract,
@@ -399,8 +399,8 @@ def test_project_session_retires_action_lease_when_discovery_promotes_a_later_ep
 def test_project_session_rejects_mcp_promotion_when_frozen_registry_is_stale(
     tmp_path: Path,
 ) -> None:
-    from leonervis_code.core.effective_context import CanonicalToolDefinition
-    from leonervis_code.core.extensions import (
+    from coquo.core.effective_context import CanonicalToolDefinition
+    from coquo.core.extensions import (
         ExtensionSource,
         ExtensionSourceKind,
         ExtensionToolContract,

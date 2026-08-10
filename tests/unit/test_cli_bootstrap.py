@@ -7,8 +7,8 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code import __version__
-from leonervis_code.agent.tool_events import (
+from coquo import __version__
+from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
@@ -17,9 +17,9 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestStarted,
 )
-from leonervis_code.cli.main import main
-from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
-from leonervis_code.core.contracts import (
+from coquo.cli.main import main
+from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from coquo.core.contracts import (
     AssistantText,
     ToolArguments,
     ToolOutcomeEntry,
@@ -29,25 +29,25 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.permissions import (
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionGate,
     PermissionMode,
     PermissionRequest,
 )
-from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.errors import output_limit_error
-from leonervis_code.providers.usage import ProviderTokenUsage
-from leonervis_code.session import ProjectSession
-from leonervis_code.session_records import (
+from coquo.providers.profile_store import ProviderProfileStore
+from coquo.providers.errors import output_limit_error
+from coquo.providers.usage import ProviderTokenUsage
+from coquo.session import ProjectSession
+from coquo.session_records import (
     ActionAuthorization,
     ActionExecutionOutcome,
     ApprovalAuditOutcome,
     BindingSnapshot,
     workspace_fingerprint,
 )
-from leonervis_code.session_store import SessionStore
+from coquo.session_store import SessionStore
 
 
 class InteractiveStream(io.StringIO):
@@ -296,7 +296,7 @@ def test_tty_markdown_rendering_does_not_change_durable_assistant_text(tmp_path)
     assert "Heading" in rendered
     assert "This is bold." in rendered
     assert "# Heading" not in rendered
-    transcript = next((tmp_path / ".leonervis-code").rglob("*.jsonl"))
+    transcript = next((tmp_path / ".coquo").rglob("*.jsonl"))
     records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
     turn = next(record for record in records if record["record_type"] == "turn_committed")
     assert turn["items"][-1] == {
@@ -605,7 +605,7 @@ def test_session_actions_is_read_only_when_no_session_root_exists(tmp_path) -> N
     assert status == 2
     assert output.getvalue() == ""
     assert "session directory does not exist or is inaccessible" in errors.getvalue()
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_session_tools_is_read_only_when_no_session_root_exists(tmp_path) -> None:
@@ -625,7 +625,7 @@ def test_session_tools_is_read_only_when_no_session_root_exists(tmp_path) -> Non
     assert status == 2
     assert output.getvalue() == ""
     assert "session directory does not exist or is inaccessible" in errors.getvalue()
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_startup_resume_evidence_uses_stderr_and_stdout_remains_model_only(
@@ -710,7 +710,7 @@ def test_startup_resume_known_overflow_has_empty_stdout_and_does_not_mutate_targ
 
     class CountingProvider:
         def count_input_tokens(self, request):
-            from leonervis_code.providers.request_context import (
+            from coquo.providers.request_context import (
                 RequestTokenCount,
                 RequestTokenCountMethod,
             )
@@ -745,7 +745,7 @@ def test_prompt_command_uses_its_cwd_as_the_read_file_workspace(monkeypatch, tmp
         def __init__(self, workspace) -> None:
             workspaces.append(workspace)
 
-    monkeypatch.setattr("leonervis_code.cli.main.ReadFileTool", RecordingReadFileTool)
+    monkeypatch.setattr("coquo.cli.main.ReadFileTool", RecordingReadFileTool)
 
     assert (
         main(
@@ -804,7 +804,7 @@ def test_real_prompt_uses_injected_provider_and_workspace(monkeypatch, tmp_path)
         constructed.append((route, dict(environment)))
         return TextProvider()
 
-    monkeypatch.setattr("leonervis_code.cli.main.create_provider", fake_factory)
+    monkeypatch.setattr("coquo.cli.main.create_provider", fake_factory)
     output = io.StringIO()
 
     assert (
@@ -1051,7 +1051,7 @@ def test_bare_command_launches_the_interactive_terminal(tmp_path) -> None:
 
     assert status == 0
     rendered = stdout.getvalue()
-    assert "LEONERVIS CODE v0.1.0" in rendered
+    assert "COQUO v0.1.0" in rendered
     assert "Fake response: Hello\n" in rendered
 
 
@@ -1062,7 +1062,7 @@ def test_bare_command_rejects_noninteractive_streams() -> None:
 
     assert status == 2
     assert error.getvalue() == (
-        'interactive mode requires a terminal; use leonervis-code prompt "..." instead\n'
+        'interactive mode requires a terminal; use coquo prompt "..." instead\n'
     )
 
 
@@ -1337,12 +1337,12 @@ def test_invalid_cli_input_exits_with_usage_error(arguments, capsys) -> None:
         main(arguments)
 
     assert error.value.code == 2
-    assert "usage: leonervis-code" in capsys.readouterr().err
+    assert "usage: coquo" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     ("arguments", "expected"),
-    [(["--help"], "usage: leonervis-code"), (["prompt", "--help"], "the prompt to send")],
+    [(["--help"], "usage: coquo"), (["prompt", "--help"], "the prompt to send")],
 )
 def test_help_exits_successfully(arguments, expected, capsys) -> None:
     with pytest.raises(SystemExit) as error:
@@ -1357,4 +1357,4 @@ def test_version_exits_successfully(capsys) -> None:
         main(["--version"])
 
     assert error.value.code == 0
-    assert capsys.readouterr().out == "leonervis-code 0.1.0\n"
+    assert capsys.readouterr().out == "coquo 0.1.0\n"

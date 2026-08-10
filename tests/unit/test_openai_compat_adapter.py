@@ -13,13 +13,13 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     Function,
 )
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.core.compaction import (
+from coquo.agent.loop import AgentLoop
+from coquo.core.compaction import (
     CompactSummaryRequest,
     EffectiveContextSummary,
     build_compact_prompt,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantToolBatch,
     ToolArguments,
     AssistantText,
@@ -28,14 +28,14 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.orchestration import ProviderFailureKind
-from leonervis_code.core.project_instructions import ProjectInstructionsLoader
-from leonervis_code.core.session_title import build_session_title_request
-from leonervis_code.providers.definitions import OPENAI
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.native_search import NativeSearchConfiguration
-from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.openai_compat import (
+from coquo.core.orchestration import ProviderFailureKind
+from coquo.core.project_instructions import ProjectInstructionsLoader
+from coquo.core.session_title import build_session_title_request
+from coquo.providers.definitions import OPENAI
+from coquo.providers.definitions import WireProtocol
+from coquo.providers.native_search import NativeSearchConfiguration
+from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.openai_compat import (
     OpenAICompatibleConversationProvider,
     archive_list_tool_definition,
     build_compact_summary_request,
@@ -85,15 +85,15 @@ from leonervis_code.providers.openai_compat import (
     task_report_blocker_tool_definition,
     task_report_reflection_tool_definition,
 )
-from leonervis_code.providers.request_context import RequestTokenCountMethod
-from leonervis_code.providers.streaming import ProviderTextDelta
-from leonervis_code.providers.usage import ProviderTokenUsage
-from leonervis_code.providers.resolver import resolve_runtime_route
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
+from coquo.providers.request_context import RequestTokenCountMethod
+from coquo.providers.streaming import ProviderTextDelta
+from coquo.providers.usage import ProviderTokenUsage
+from coquo.providers.resolver import resolve_runtime_route
+from coquo.system_prompt import build_system_prompt
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
 
 
 class RecordingChatClient:
@@ -958,7 +958,7 @@ def test_compatible_stream_closes_after_parse_failure_and_ignores_close_failure(
 
 
 def test_compatible_stream_enforces_chunk_and_identifier_bounds(monkeypatch) -> None:
-    monkeypatch.setattr("leonervis_code.providers.openai_compat.MAX_PROVIDER_STREAM_EVENTS", 1)
+    monkeypatch.setattr("coquo.providers.openai_compat.MAX_PROVIDER_STREAM_EVENTS", 1)
     with pytest.raises(ProviderAdapterError, match="too many chunks"):
         parse_response_stream(
             [stream_chunk(content="one"), stream_chunk(content="two", finish_reason="stop")],

@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="./docs/assets/leo-mark.png" alt="LEO mark" width="240">
+<img src="./docs/assets/coquo-mark.png" alt="Coquo COQ mark" width="240">
 
-# Leonervis Code
+# Coquo
 
 [English](./README_en.md) | 中文
 
@@ -13,7 +13,9 @@
 
 </div>
 
-Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
+Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI 原型。模型负责决策，Host 在明确的 workspace 边界内执行受控工具，并把结构化结果写回模型。
+
+名称取自拉丁文 *coquō*（“我烹饪”），表达将需求、上下文、工具与模型决策组织成经过验证的软件变更。
 
 > **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval及35个普通受限工具，覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行和声明式Skill加载。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
@@ -37,9 +39,9 @@ Leonervis Code 是一个面向本地单用户使用、以学习为先的 Coding 
 要求 Python 3.12 或 3.13、最新稳定版 [uv](https://docs.astral.sh/uv/) 和 Git。项目使用 `uv.lock` 管理可复现环境。模型使用`run_command`还要求Linux、`/usr/bin/bwrap`与`libseccomp.so.2`；独立网页搜索要求进程环境中存在`BRAVE_SEARCH_API_KEY`或`TAVILY_API_KEY`。缺少这些可选条件时其他功能仍可使用，对应工具会fail closed。
 
 ```bash
-cd leonervis-code
+cd coquo
 uv sync
-uv run leonervis-code
+uv run coquo
 ```
 
 裸命令会在真实终端中启动 REPL。未选择真实 provider 时使用确定性的 fake provider，不访问网络：
@@ -47,14 +49,14 @@ uv run leonervis-code
 ```text
 ›
 
-  fake · ~/Projects/leonervis-code
+  fake · ~/Projects/coquo
 ```
 
-正式命令为 `leonervis-code`，`leonervis` 是简写；也可使用模块入口：
+正式命令为 `coquo`，`coquo` 是简写；也可使用模块入口：
 
 ```bash
-uv run leonervis --version
-uv run python -m leonervis_code --help
+uv run coquo --version
+uv run python -m coquo --help
 ```
 
 ## 主要命令
@@ -62,39 +64,39 @@ uv run python -m leonervis_code --help
 完整参数始终以命令自身帮助为准：
 
 ```bash
-uv run leonervis-code --help
-uv run leonervis-code provider --help
-uv run leonervis-code session --help
-uv run leonervis-code task --help
+uv run coquo --help
+uv run coquo provider --help
+uv run coquo session --help
+uv run coquo task --help
 ```
 
 ### 执行任务与启动 REPL
 
 | 用途 | 命令 |
 | --- | --- |
-| 启动新 Session 的 REPL | `uv run leonervis-code` |
-| 恢复当前 workspace 的最新 Session | `uv run leonervis-code --resume latest` |
-| 执行一次 prompt | `uv run leonervis-code prompt "解释这个 workspace"` |
-| 在指定 workspace 执行 | `uv run leonervis-code -C ../project prompt "解释项目结构"` |
-| 使用命名 profile | `uv run leonervis-code --profile work prompt "解释 README"` |
-| 临时覆盖本进程输出预算 | `uv run leonervis-code --profile work --max-output-tokens 8192 prompt "生成详细报告"` |
-| 临时覆盖 profile 的 model | `uv run leonervis-code --profile work --model model-v2 prompt "继续"` |
-| 使用直接 model route | `uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "解释 README"` |
-| 在 REPL 逐次审批 workspace 写入 | `uv run leonervis-code --permission-mode workspace-write --approval ask` |
-| 一次性允许 workspace 自动写入 | `uv run leonervis-code --permission-mode workspace-write --approval auto prompt "创建 note.txt"` |
-| 在 REPL 逐次审批本地命令 | `uv run leonervis-code --permission-mode danger-full-access --approval ask` |
-| 一次性自动运行获准命令 | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
-| 启动可显式选择Tavily的REPL | `TAVILY_API_KEY=... uv run leonervis-code --permission-mode danger-full-access --approval ask`，进入后执行`/search use tavily` |
-| 使用Profile声明的Provider原生搜索 | `uv run leonervis-code --profile search-provider prompt "搜索Python 3.14官方发布说明并列出来源"` |
-| 查看版本 | `uv run leonervis-code --version` |
+| 启动新 Session 的 REPL | `uv run coquo` |
+| 恢复当前 workspace 的最新 Session | `uv run coquo --resume latest` |
+| 执行一次 prompt | `uv run coquo prompt "解释这个 workspace"` |
+| 在指定 workspace 执行 | `uv run coquo -C ../project prompt "解释项目结构"` |
+| 使用命名 profile | `uv run coquo --profile work prompt "解释 README"` |
+| 临时覆盖本进程输出预算 | `uv run coquo --profile work --max-output-tokens 8192 prompt "生成详细报告"` |
+| 临时覆盖 profile 的 model | `uv run coquo --profile work --model model-v2 prompt "继续"` |
+| 使用直接 model route | `uv run coquo --model anthropic/claude-opus-4-8 prompt "解释 README"` |
+| 在 REPL 逐次审批 workspace 写入 | `uv run coquo --permission-mode workspace-write --approval ask` |
+| 一次性允许 workspace 自动写入 | `uv run coquo --permission-mode workspace-write --approval auto prompt "创建 note.txt"` |
+| 在 REPL 逐次审批本地命令 | `uv run coquo --permission-mode danger-full-access --approval ask` |
+| 一次性自动运行获准命令 | `uv run coquo --permission-mode danger-full-access --approval auto prompt "运行项目测试"` |
+| 启动可显式选择Tavily的REPL | `TAVILY_API_KEY=... uv run coquo --permission-mode danger-full-access --approval ask`，进入后执行`/search use tavily` |
+| 使用Profile声明的Provider原生搜索 | `uv run coquo --profile search-provider prompt "搜索Python 3.14官方发布说明并列出来源"` |
+| 查看版本 | `uv run coquo --version` |
 
 常用权限模式：
 
 ```bash
-uv run leonervis-code                                      # read-only REPL
-uv run leonervis-code --permission-mode workspace-write --approval ask
-uv run leonervis-code --permission-mode danger-full-access --approval ask
-uv run leonervis-code --permission-mode workspace-write --approval auto prompt "修改并验证项目"
+uv run coquo                                      # read-only REPL
+uv run coquo --permission-mode workspace-write --approval ask
+uv run coquo --permission-mode danger-full-access --approval ask
+uv run coquo --permission-mode workspace-write --approval auto prompt "修改并验证项目"
 ```
 
 ### 配置 Provider
@@ -103,7 +105,7 @@ uv run leonervis-code --permission-mode workspace-write --approval auto prompt "
 
 ```bash
 export ANTHROPIC_API_KEY='...'
-uv run leonervis-code provider add work \
+uv run coquo provider add work \
   --provider anthropic \
   --model claude-opus-4-8
 ```
@@ -112,7 +114,7 @@ uv run leonervis-code provider add work \
 
 ```bash
 export VENDOR_API_KEY='...'
-uv run leonervis-code provider add vendor \
+uv run coquo provider add vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
@@ -124,7 +126,7 @@ uv run leonervis-code provider add vendor \
 官方DeepSeek V4 Flash会自动选择Responses并默认启用Provider原生搜索；其他DeepSeek model继续使用Chat Completions：
 
 ```bash
-uv run leonervis-code provider add deepseek-flash \
+uv run coquo provider add deepseek-flash \
   --provider deepseek \
   --model deepseek-v4-flash \
   --api-key-env DEEPSEEK_API_KEY \
@@ -134,7 +136,7 @@ uv run leonervis-code provider add deepseek-flash \
 实现Responses的自定义endpoint可显式选择`openai-responses`：
 
 ```bash
-uv run leonervis-code provider add responses-gateway \
+uv run coquo provider add responses-gateway \
   --provider custom \
   --model vendor/model \
   --protocol openai-responses \
@@ -145,7 +147,7 @@ uv run leonervis-code provider add responses-gateway \
 Provider preset、消息protocol和原生搜索adapter彼此独立。Built-in Profile默认`auto`，只启用catalog明确声明的能力；custom Profile默认`none`。可为兼容endpoint显式选择已实现adapter：
 
 ```bash
-uv run leonervis-code provider add search-provider \
+uv run coquo provider add search-provider \
   --provider custom \
   --model vendor/search-model \
   --protocol openai-compatible \
@@ -173,14 +175,14 @@ Manifest只允许受限`extra_body`、非function server tool和预置citation�
 常用 profile 管理命令：
 
 ```bash
-uv run leonervis-code provider list
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider use vendor              # workspace scope
-uv run leonervis-code provider use vendor --scope user
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider rename vendor vendor-new --if-revision 1
-uv run leonervis-code provider remove vendor-new
-uv run leonervis-code provider migrate
+uv run coquo provider list
+uv run coquo provider show vendor
+uv run coquo provider use vendor              # workspace scope
+uv run coquo provider use vendor --scope user
+uv run coquo provider clear --scope project
+uv run coquo provider rename vendor vendor-new --if-revision 1
+uv run coquo provider remove vendor-new
+uv run coquo provider migrate
 ```
 
 选择优先级为：显式 `--profile` → 显式 direct `--model` → workspace active → user active → fake/offline。`provider use` 会在候选 route、credential 和 client 准备成功后才原子切换；失败时保留旧配置与旧 client。
@@ -190,14 +192,14 @@ uv run leonervis-code provider migrate
 `route` 是离线诊断命令：不构造 provider client，不读取 key value，也不发起网络请求。
 
 ```bash
-uv run leonervis-code --profile vendor route
-uv run leonervis-code --model openai/gpt-5 route
+uv run coquo --profile vendor route
+uv run coquo --model openai/gpt-5 route
 ```
 
 命名 profile 可为 exact endpoint/model 配置上下文窗口：
 
 ```bash
-uv run leonervis-code provider replace vendor \
+uv run coquo provider replace vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
@@ -206,8 +208,8 @@ uv run leonervis-code provider replace vendor \
   --context-window-tokens 1000000 \
   --if-revision 1
 
-uv run leonervis-code provider show vendor
-uv run leonervis-code --profile vendor route
+uv run coquo provider show vendor
+uv run coquo --profile vendor route
 ```
 
 使用`route`查看离线解析结果，在REPL中使用`/status`和`/context`查看当前runtime与context状态。Capability解析、request preflight、自动compact和切换前screening的完整规则见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
@@ -215,14 +217,14 @@ uv run leonervis-code --profile vendor route
 ### 管理 Session
 
 ```bash
-uv run leonervis-code prompt "第一轮"
-uv run leonervis-code session list
-uv run leonervis-code session show latest
-uv run leonervis-code session actions latest
-uv run leonervis-code session tools latest
-uv run leonervis-code session tools latest --limit 5 --details
-uv run leonervis-code --resume latest prompt "继续上一轮"
-uv run leonervis-code --resume <session-uuid>
+uv run coquo prompt "第一轮"
+uv run coquo session list
+uv run coquo session show latest
+uv run coquo session actions latest
+uv run coquo session tools latest
+uv run coquo session tools latest --limit 5 --details
+uv run coquo --resume latest prompt "继续上一轮"
+uv run coquo --resume <session-uuid>
 ```
 
 Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保存Host逐请求工具账本，记录实际成功、错误、跳过和预算拒绝，不依赖模型自报。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
@@ -230,15 +232,15 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 ### 管理 Task
 
 ```bash
-uv run leonervis-code task create "实现可恢复的多阶段任务" \
+uv run coquo task create "实现可恢复的多阶段任务" \
   --name "Task runtime" \
   --accept "人工确认变更符合目标" \
   --criterion '{"kind":"path-exists","description":"测试文件存在","path":"tests/test_app.py","path_type":"file"}' \
   --completion-policy auto-verified \
   --max-stages 12 --max-provider-invocations 288 --max-tool-requests 384
-uv run leonervis-code task list --status ready --archive active --name runtime
-uv run leonervis-code task show <task-uuid>
-uv run leonervis-code task timeline <task-uuid>
+uv run coquo task list --status ready --archive active --name runtime
+uv run coquo task show <task-uuid>
+uv run coquo task timeline <task-uuid>
 ```
 
 Task用于管理可恢复的前台多阶段工作，既可由自然语言交互发起，也可通过`task`与`/task`命令检查和控制。完整状态机、验收与恢复边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及Task相关ADR。
@@ -373,15 +375,15 @@ REPL的输入、呈现、Session管理、Task控制、上下文观测与Git检�
 用于观察受限工具循环的确定性演示命令：
 
 ```bash
-uv run leonervis-code demo-read README.md
-uv run leonervis-code demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
+uv run coquo demo-read README.md
+uv run coquo demo-read ../outside.txt   # 验证 workspace 逃逸拒绝
 ```
 
 `demo-read` 不是实际模型接口，不写文件、不执行 shell，也不访问网络。
 
 MCP工具默认按`dangerous`处理。可先运行`mcp catalog`取得exact qualified name与schema fingerprint，再用`mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read`为精确的本地stdio版本声明只读策略；远程工具始终保持`dangerous`。`mcp catalog explain <reason-code>`解释隔离原因，`mcp policy stale`检查失效或暂时无法确认的策略，`mcp policy prune --dry-run`只预览带revision的清理命令。`mcp add-http`、`mcp oauth`、`mcp resources`、`mcp prompts`及`mcp doctor`分别用于远程配置、授权、非Tool capability检查和互操作诊断。
 
-声明式Skill可放在workspace的`.leonervis-code/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills init|check|search|import|lock`维护本地包，使用`skills fetch|candidate|install`隔离检查和安装公开raw/ZIP包，或在REPL中用`/skills`检查当前激活与候选。模型只会在用户明确要求时提议保存流程，不会自动从经验学习；详细格式、预算与权限边界见implemented-foundations。
+声明式Skill可放在workspace的`.coquo/skills`或`.agents/skills`，也可放在XDG user配置目录；使用`skills init|check|search|import|lock`维护本地包，使用`skills fetch|candidate|install`隔离检查和安装公开raw/ZIP包，或在REPL中用`/skills`检查当前激活与候选。模型只会在用户明确要求时提议保存流程，不会自动从经验学习；详细格式、预算与权限边界见implemented-foundations。
 
 Hook可在普通PermissionGate之前增加本地约束，并观察action终局及选定Turn/Task生命周期。可选的固定指纹本地handler会作为独立dangerous Action经过审批、Action Audit及命令沙箱，绝不成为特权回调。使用`hooks add|fingerprint|template|import|list|show|doctor|enable|disable|remove|runs`管理和检查默认disabled的user或project规则；详细边界见implemented-foundations及ADR 0125-0127。
 
@@ -389,20 +391,20 @@ Hook可在普通PermissionGate之前增加本地约束，并观察action终局�
 
 | 路径 | 内容 |
 | --- | --- |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles 与 active selection |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP server定义；只保存endpoint、客户端元数据和环境变量名称，不保存credential value |
-| `<workspace>/.leonervis-code/mcp-servers.json` | project MCP server定义；新server默认disabled |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | user MCP tool精确权限策略 |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-oauth.json` | user remote MCP OAuth pending state与token；私有`0600`文件 |
-| `<workspace>/.leonervis-code/mcp-tool-policies.json` | project MCP tool精确权限策略 |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/hooks.json` | user声明式Hook配置；新规则默认disabled |
-| `<workspace>/.leonervis-code/hooks.json` | project声明式Hook配置；按Turn冻结后生效 |
-| `<workspace>/.leonervis-code/provider.json` | workspace active profile |
-| `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcript |
-| `<workspace>/.leonervis-code/tasks/.../*.jsonl` | 独立的Task transcript |
-| `${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json` | private context capability discovery cache |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/providers.json` | user provider profiles 与 active selection |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-servers.json` | user MCP server定义；只保存endpoint、客户端元数据和环境变量名称，不保存credential value |
+| `<workspace>/.coquo/mcp-servers.json` | project MCP server定义；新server默认disabled |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-tool-policies.json` | user MCP tool精确权限策略 |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-oauth.json` | user remote MCP OAuth pending state与token；私有`0600`文件 |
+| `<workspace>/.coquo/mcp-tool-policies.json` | project MCP tool精确权限策略 |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/hooks.json` | user声明式Hook配置；新规则默认disabled |
+| `<workspace>/.coquo/hooks.json` | project声明式Hook配置；按Turn冻结后生效 |
+| `<workspace>/.coquo/provider.json` | workspace active profile |
+| `<workspace>/.coquo/sessions/.../*.jsonl` | Session transcript |
+| `<workspace>/.coquo/tasks/.../*.jsonl` | 独立的Task transcript |
+| `${XDG_CACHE_HOME:-~/.cache}/coquo/model-context-capabilities.json` | private context capability discovery cache |
 
-`.leonervis-code/` 可能包含用户输入、模型回答、源码片段和工具结果，应加入目标项目的 `.gitignore`，不要提交、同步或公开。配置和 capability cache 不保存已知 credential value，但系统无法识别用户文本或源码中自行出现的未知 secret。
+`.coquo/` 可能包含用户输入、模型回答、源码片段和工具结果，应加入目标项目的 `.gitignore`，不要提交、同步或公开。配置和 capability cache 不保存已知 credential value，但系统无法识别用户文本或源码中自行出现的未知 secret。
 
 ## 开发与验证
 
@@ -412,16 +414,16 @@ uv run ruff check .
 uv run ruff format --check .
 uv lock --check
 git diff --check
-uv run leonervis-code eval list
-uv run leonervis-code eval run all
-uv run leonervis-code eval run all --format json
-uv run leonervis-code eval task list
+uv run coquo eval list
+uv run coquo eval run all
+uv run coquo eval run all --format json
+uv run coquo eval task list
 tmp=$(mktemp -d)
-uv run leonervis-code eval task prepare inventory-validation "$tmp/task"
-uv run leonervis-code eval task score inventory-validation "$tmp/task"
+uv run coquo eval task prepare inventory-validation "$tmp/task"
+uv run coquo eval task score inventory-validation "$tmp/task"
 ```
 
-`pytest`验证函数、模块和协议边界；`eval run`用scripted fake provider把固定轨迹送入完整Host路径。`eval task prepare/score`则离线创建小型代码任务，并在候选目录外以可见测试和Host私有测试评分实际结果。只有显式写出`--real-provider`并选择profile/model的`eval task run`才会调用真实厂商；它固定在新建隔离任务目录内运行，工具事件写入stderr，稳定Host评分写入stdout。依赖变化后先执行 `uv lock`，再检查锁文件。Leonervis Code 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
+`pytest`验证函数、模块和协议边界；`eval run`用scripted fake provider把固定轨迹送入完整Host路径。`eval task prepare/score`则离线创建小型代码任务，并在候选目录外以可见测试和Host私有测试评分实际结果。只有显式写出`--real-provider`并选择profile/model的`eval task run`才会调用真实厂商；它固定在新建隔离任务目录内运行，工具事件写入stderr，稳定Host评分写入stdout。依赖变化后先执行 `uv lock`，再检查锁文件。Coquo 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
 
 ## 详细文档
 
@@ -512,11 +514,11 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md)：context/model-output limit 解析与缓存设计。
 - [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md)：模型可见契约、版本和 fingerprint。
 - [Stable profile identity and durable Sessions](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md)：profile UUID/revision 与 Session 持久化。
-- [Claw-Code prompt 学习入口](./docs/references/claw-code-prompts/README.md)：只读参考结构与 Leonervis 的采用差异。
+- [Claw-Code prompt 学习入口](./docs/references/claw-code-prompts/README.md)：只读参考结构与 Coquo 的采用差异。
 - [Harness-study](https://github.com/TsingFengIceberg/Harness-study)：相关 Harness 阅读与学习笔记。
 
 ## 当前范围与下一步
 
-Leonervis Code目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
+Coquo目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
 项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。可执行Skill、市场、浏览器自动化及后台或并行智能体尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

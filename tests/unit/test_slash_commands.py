@@ -3,19 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.cli.presentation import ToolDetailMode
-from leonervis_code.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
-from leonervis_code.core.compaction import CompactionCandidateError
-from leonervis_code.providers.manager import (
+from coquo.agent.loop import AgentLoop
+from coquo.cli.presentation import ToolDetailMode
+from coquo.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
+from coquo.core.compaction import CompactionCandidateError
+from coquo.providers.manager import (
     CurrentTargetContextAssessment,
     OutputBudgetUpdateResult,
     RuntimeStatus,
     RuntimeSwitchResult,
 )
-from leonervis_code.providers.request_context import ContextFitDecision
-from leonervis_code.providers.usage import ProviderUsageTotals, RuntimeUsageTracker
-from leonervis_code.session import (
+from coquo.providers.request_context import ContextFitDecision
+from coquo.providers.usage import ProviderUsageTotals, RuntimeUsageTracker
+from coquo.session import (
     CompactContextPreview,
     CompactContextResult,
     CompactionHistoryResult,
@@ -26,26 +26,26 @@ from leonervis_code.session import (
     ResumeEffect,
     SessionResumeResult,
 )
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
-from leonervis_code.mcp.client import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from coquo.mcp.client import (
     McpListedTool,
     McpLiveProcessStatus,
     McpProbeResult,
     McpServerStatus,
 )
-from leonervis_code.mcp.catalog import build_mcp_quarantine_catalog
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
-from leonervis_code.hooks import HookEffect, HookEntry, HookRule, HookSetSnapshot
-from leonervis_code.core.task_admission import (
+from coquo.mcp.catalog import build_mcp_quarantine_catalog
+from coquo.mcp.config import McpServerConfiguration, McpServerEntry
+from coquo.hooks import HookEffect, HookEntry, HookRule, HookSetSnapshot
+from coquo.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionOutcome,
     TaskAdmissionProposal,
 )
-from leonervis_code.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
-from leonervis_code.skills import SkillActivationInspection, SkillInventoryLoader
-from leonervis_code.skill_candidates import SkillCandidateStore
-from leonervis_code.session_store import (
+from coquo.session_records import ActionAuditStatus, BindingSnapshot, SessionNameSource
+from coquo.skills import SkillActivationInspection, SkillInventoryLoader
+from coquo.skill_candidates import SkillCandidateStore
+from coquo.session_store import (
     LatestUpdateStatus,
     SessionConversationExport,
     SessionDiagnosis,
@@ -60,19 +60,19 @@ from leonervis_code.session_store import (
     TaskAdmissionInfo,
     ToolLedgerQueryResult,
 )
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
-from leonervis_code.tools.command_sandbox import CommandSandboxDependencies
-from leonervis_code.tools.run_command import CommandSandboxInspection
-from leonervis_code.tools.catalog import TOOL_CATALOG
-from leonervis_code.tools.web_search import (
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
+from coquo.tools.command_sandbox import CommandSandboxDependencies
+from coquo.tools.run_command import CommandSandboxInspection
+from coquo.tools.catalog import TOOL_CATALOG
+from coquo.tools.web_search import (
     BRAVE_SEARCH_API_KEY_ENV,
     TAVILY_SEARCH_API_KEY_ENV,
     WebSearchTool,
 )
-from leonervis_code.task_records import (
+from coquo.task_records import (
     AcceptanceCheckOutcome,
     AcceptanceVerificationSource,
     TaskBudget,
@@ -81,7 +81,7 @@ from leonervis_code.task_records import (
     TaskStatus,
     TaskTerminalOutcome,
 )
-from leonervis_code.task_runtime import TaskDriverStopReason, TaskNextAction
+from coquo.task_runtime import TaskDriverStopReason, TaskNextAction
 
 
 @dataclass
@@ -988,7 +988,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert "Registry snapshot: registry-v1-" in catalog
-    assert " generation=5" in catalog
+    assert " generation=6" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert (
         "22. web_search: network-read; available "
@@ -997,7 +997,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "Contract: tool-v1-" in run_command
-    assert "Source: builtin:leonervis-code generation=5" in run_command
+    assert "Source: builtin:coquo generation=6" in run_command
     assert "Exposure: direct" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
@@ -1305,7 +1305,7 @@ def test_compact_failure_reports_unchanged_state(tmp_path) -> None:
     session = Session(tmp_path)
 
     def fail():
-        from leonervis_code.core.compaction import CompactionNotEligibleError
+        from coquo.core.compaction import CompactionNotEligibleError
 
         raise CompactionNotEligibleError("too few turns")
 
@@ -1676,7 +1676,7 @@ def test_real_search_commands_are_process_local_and_do_not_invoke_provider_or_wr
 
 
 def test_real_mcp_inspection_does_not_mutate_session_or_tool_surface(tmp_path) -> None:
-    project_mcp_path = tmp_path / ".leonervis-code" / "mcp-test.json"
+    project_mcp_path = tmp_path / ".coquo" / "mcp-test.json"
     session = ProjectSession.open(
         tmp_path,
         environment={},

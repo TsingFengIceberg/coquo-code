@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantText,
     AssistantToolBatch,
     CommittedTurn,
@@ -17,7 +17,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.task_admission import (
+from coquo.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionProposal,
     recover_task_admission_proposal,

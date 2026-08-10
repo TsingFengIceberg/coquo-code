@@ -4,9 +4,9 @@ from dataclasses import replace
 
 import pytest
 
-from leonervis_code.core.contracts import ConversationRequest, UserMessage
-from leonervis_code.core.effective_context import CanonicalToolDefinition
-from leonervis_code.core.extensions import (
+from coquo.core.contracts import ConversationRequest, UserMessage
+from coquo.core.effective_context import CanonicalToolDefinition
+from coquo.core.extensions import (
     ExtensionSource,
     ExtensionSourceKind,
     ExtensionToolContract,
@@ -14,23 +14,23 @@ from leonervis_code.core.extensions import (
     ToolExposure,
     ToolRegistrySnapshot,
 )
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.providers.anthropic import (
+from coquo.core.permissions import PermissionAction
+from coquo.providers.anthropic import (
     AnthropicProviderConfig,
     build_input_projection as build_anthropic_projection,
     build_request as build_anthropic_request,
 )
-from leonervis_code.providers.openai_compat import (
+from coquo.providers.openai_compat import (
     build_input_projection as build_openai_projection,
     build_request as build_openai_request,
 )
-from leonervis_code.providers.openai_responses import (
+from coquo.providers.openai_responses import (
     build_input_projection as build_responses_projection,
     build_request as build_responses_request,
 )
-from leonervis_code.providers.resolver import resolve_runtime_route
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
+from coquo.providers.resolver import resolve_runtime_route
+from coquo.system_prompt import build_system_prompt
+from coquo.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
 
 
 def _definition(
@@ -180,7 +180,7 @@ def test_builtin_catalog_has_one_complete_contract_per_tool() -> None:
     assert len(set(TOOL_REGISTRY_SNAPSHOT.names)) == len(TOOL_CATALOG)
     assert all(
         contract.source.kind is ExtensionSourceKind.BUILTIN
-        and contract.source.name == "leonervis-code"
+        and contract.source.name == "coquo"
         and contract.exposure is ToolExposure.DIRECT
         for contract in TOOL_REGISTRY_SNAPSHOT.contracts
     )

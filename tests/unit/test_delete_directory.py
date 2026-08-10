@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.actions import ActionPrecondition
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.delete_directory import (
+from coquo.core.actions import ActionPrecondition
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.delete_directory import (
     MAX_DELETE_DIRECTORY_COMPONENT_BYTES,
     MAX_DELETE_DIRECTORY_PATH_BYTES,
     MAX_DELETE_DIRECTORY_PATH_CHARACTERS,
@@ -175,7 +175,7 @@ def test_rmdir_failure_reports_failed_and_keeps_directory(
     tool = DeleteDirectoryTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_directory.os.rmdir",
+        "coquo.tools.delete_directory.os.rmdir",
         lambda *a, **k: (_ for _ in ()).throw(OSError()),
     )
 
@@ -193,7 +193,7 @@ def test_parent_fsync_failure_reports_deleted_partial(
     tool = DeleteDirectoryTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_directory._fsync_directory",
+        "coquo.tools.delete_directory._fsync_directory",
         lambda _fd: (_ for _ in ()).throw(OSError()),
     )
 

@@ -9,13 +9,13 @@ import httpx
 import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.core.compaction import (
+from coquo.agent.loop import AgentLoop
+from coquo.core.compaction import (
     CompactSummaryRequest,
     EffectiveContextSummary,
     build_compact_prompt,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantToolBatch,
     ToolArguments,
     AssistantText,
@@ -24,10 +24,10 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.orchestration import ProviderFailureKind
-from leonervis_code.core.project_instructions import ProjectInstructionsLoader
-from leonervis_code.core.session_title import build_session_title_request
-from leonervis_code.providers.anthropic import (
+from coquo.core.orchestration import ProviderFailureKind
+from coquo.core.project_instructions import ProjectInstructionsLoader
+from coquo.core.session_title import build_session_title_request
+from coquo.providers.anthropic import (
     AnthropicConversationProvider,
     AnthropicProviderConfig,
     archive_list_tool_definition,
@@ -83,15 +83,15 @@ from leonervis_code.providers.anthropic import (
     skill_propose_create_tool_definition,
     skill_accept_create_tool_definition,
 )
-from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.request_context import RequestTokenCountMethod
-from leonervis_code.providers.streaming import ProviderTextDelta
-from leonervis_code.providers.usage import ProviderTokenUsage
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
+from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.request_context import RequestTokenCountMethod
+from coquo.providers.streaming import ProviderTextDelta
+from coquo.providers.usage import ProviderTokenUsage
+from coquo.system_prompt import build_system_prompt
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
 
 
 class RecordingModelsClient:
@@ -1179,7 +1179,7 @@ def test_anthropic_stream_ignores_cleanup_failure_after_success() -> None:
 
 
 def test_anthropic_stream_enforces_event_and_identifier_bounds(monkeypatch) -> None:
-    monkeypatch.setattr("leonervis_code.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 1)
+    monkeypatch.setattr("coquo.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 1)
     with pytest.raises(ProviderAdapterError, match="too many events"):
         parse_response_stream(
             [
@@ -1190,7 +1190,7 @@ def test_anthropic_stream_enforces_event_and_identifier_bounds(monkeypatch) -> N
             event_sink=lambda _event: None,
         )
 
-    monkeypatch.setattr("leonervis_code.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 100_000)
+    monkeypatch.setattr("coquo.providers.anthropic.MAX_PROVIDER_STREAM_EVENTS", 100_000)
     oversized_name = "x" * (4 * 1024 + 1)
     with pytest.raises(ProviderAdapterError, match="tool block was too large"):
         parse_response_stream(

@@ -4,13 +4,13 @@ import io
 import json
 from pathlib import Path
 
-from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.skill_authoring import (
+from coquo.cli.main import main
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.skill_authoring import (
     SKILL_PROPOSE_CREATE_TOOL_NAME,
     SkillCreationProposal,
 )
-from leonervis_code.skill_candidates import SkillCandidateStore
+from coquo.skill_candidates import SkillCandidateStore
 
 
 def write_skill(root: Path, name: str, description: str = "Demo workflow") -> Path:
@@ -77,7 +77,7 @@ def test_skill_candidate_cli_lists_shows_and_installs_without_session(tmp_path: 
     installed = json.loads(output.getvalue())
     assert installed["status"] == "installed"
     assert installed["installed_scope"] == "project"
-    assert not (tmp_path / ".leonervis-code" / "sessions").exists()
+    assert not (tmp_path / ".coquo" / "sessions").exists()
 
 
 def test_skills_cli_is_read_only_and_reports_active_package(tmp_path) -> None:
@@ -104,7 +104,7 @@ def test_skills_cli_is_read_only_and_reports_active_package(tmp_path) -> None:
     assert listed["name"] == "demo"
     assert listed["active"] is True
     assert listed["resources"] == 1
-    assert not (tmp_path / ".leonervis-code" / "sessions").exists()
+    assert not (tmp_path / ".coquo" / "sessions").exists()
 
     output = io.StringIO()
     assert (
@@ -175,7 +175,7 @@ def test_skills_init_check_and_search_do_not_create_a_session(tmp_path) -> None:
         == 0
     )
     assert json.loads(searched.getvalue())["name"] == "release-check"
-    assert not (tmp_path / ".leonervis-code" / "sessions").exists()
+    assert not (tmp_path / ".coquo" / "sessions").exists()
 
 
 def test_skills_check_reports_invalid_named_package_and_init_rejects_existing(tmp_path) -> None:
@@ -213,7 +213,7 @@ def test_skills_check_reports_invalid_named_package_and_init_rejects_existing(tm
 
 def test_skills_search_all_and_conflicts_explain_shadowing(tmp_path) -> None:
     config = tmp_path / "config"
-    write_skill(config / "leonervis-code" / "skills", "review", "Review user package")
+    write_skill(config / "coquo" / "skills", "review", "Review user package")
     write_skill(tmp_path / ".agents" / "skills", "review", "Review project package")
     environment = {"XDG_CONFIG_HOME": str(config)}
 

@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantText,
     ToolArguments,
     ToolOutcomeEntry,
@@ -19,21 +19,21 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.task_admission import (
+from coquo.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionProposal,
     task_admission_receipt,
 )
-from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionStore
-from leonervis_code.task_records import (
+from coquo.session_records import BindingSnapshot
+from coquo.session_store import SessionStore
+from coquo.task_records import (
     ReflectionRecommendation,
     StageFailureReason,
     StageKind,
     TaskBlockerCategory,
     TaskStatus,
 )
-from leonervis_code.task_store import (
+from coquo.task_store import (
     MAX_TASK_TRANSCRIPT_BYTES,
     TaskCreateCommitError,
     TaskAppendCommitError,
@@ -98,7 +98,7 @@ def test_empty_list_is_read_only_and_does_not_create_state(tmp_path: Path) -> No
     store = task_store(tmp_path)
 
     assert store.list() == ()
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_create_links_existing_owner_and_round_trips_strictly(tmp_path: Path) -> None:
@@ -279,7 +279,7 @@ def test_inspection_rejects_oversized_and_nonregular_transcripts(tmp_path: Path)
 
 def test_task_storage_rejects_symlinked_state_directory(tmp_path: Path) -> None:
     create_session(tmp_path, SESSION_ONE)
-    state = tmp_path / ".leonervis-code"
+    state = tmp_path / ".coquo"
     sessions = state / "sessions"
     moved = tmp_path / "real-state"
     state.rename(moved)
@@ -296,7 +296,7 @@ def test_post_install_durability_failure_reports_visible_task(
     create_session(tmp_path, SESSION_ONE)
     store = task_store(tmp_path)
     store._ensure_root()
-    import leonervis_code.task_store as task_store_module
+    import coquo.task_store as task_store_module
 
     def fail_directory_fsync(_path: Path) -> None:
         raise TaskStoreError("injected durability failure")
@@ -460,7 +460,7 @@ def test_task_writer_lock_is_visible_to_another_process(tmp_path: Path) -> None:
     script = """
 import sys
 from pathlib import Path
-from leonervis_code.task_store import TaskStore, TaskStoreError
+from coquo.task_store import TaskStore, TaskStoreError
 
 store = TaskStore(Path(sys.argv[1]))
 assert store.inspect(sys.argv[2]).status.value == "stage-in-progress"
@@ -558,7 +558,7 @@ def test_uncertain_stage_append_poison_writer_and_requires_inspection(
     store = task_store(tmp_path)
     task = store.create("Durability uncertainty")
     writer = store.open(task.task_id)
-    import leonervis_code.task_store as task_store_module
+    import coquo.task_store as task_store_module
 
     def fail_fsync(_descriptor: int) -> None:
         raise OSError

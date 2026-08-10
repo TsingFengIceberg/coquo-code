@@ -6,8 +6,8 @@ from unittest.mock import ANY
 import openai
 import pytest
 
-from leonervis_code.core.compaction import CompactSummaryRequest, build_compact_prompt
-from leonervis_code.core.contracts import (
+from coquo.core.compaction import CompactSummaryRequest, build_compact_prompt
+from coquo.core.contracts import (
     AssistantText,
     AssistantToolBatch,
     ConversationRequest,
@@ -17,14 +17,14 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.orchestration import ProviderFailureKind
-from leonervis_code.providers.errors import ProviderAdapterError
-from leonervis_code.providers.native_search import (
+from coquo.core.orchestration import ProviderFailureKind
+from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.native_search import (
     NativeSearchContextSize,
     NativeSearchMode,
     NativeSearchRuntimeOptions,
 )
-from leonervis_code.providers.openai_responses import (
+from coquo.providers.openai_responses import (
     OpenAIResponsesConversationProvider,
     build_input_projection,
     build_request,
@@ -33,15 +33,15 @@ from leonervis_code.providers.openai_responses import (
     create_openai_responses_provider,
     serialize_history,
 )
-from leonervis_code.providers.resolver import resolve_runtime_route
-from leonervis_code.providers.streaming import (
+from coquo.providers.resolver import resolve_runtime_route
+from coquo.providers.streaming import (
     ProviderSearchActivity,
     ProviderSearchObservation,
     ProviderSearchPhase,
     ProviderTextDelta,
 )
-from leonervis_code.providers.usage import ProviderTokenUsage
-from leonervis_code.system_prompt import build_system_prompt
+from coquo.providers.usage import ProviderTokenUsage
+from coquo.system_prompt import build_system_prompt
 
 
 class RecordingResponsesClient:
@@ -152,7 +152,7 @@ def test_provider_owned_search_and_reasoning_round_trip_unchanged_in_history() -
             "type": "web_search_call",
             "id": "ws_1",
             "status": "completed",
-            "action": {"type": "search", "query": "Leonervis"},
+            "action": {"type": "search", "query": "Coquo"},
         }
     )
 

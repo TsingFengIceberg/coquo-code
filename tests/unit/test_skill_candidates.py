@@ -9,18 +9,18 @@ import zipfile
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.skill_authoring import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.skill_authoring import (
     SKILL_PROPOSE_CREATE_TOOL_NAME,
     SkillCreationProposal,
 )
-from leonervis_code.skill_candidates import (
+from coquo.skill_candidates import (
     SkillCandidateSource,
     SkillCandidateStatus,
     SkillCandidateStore,
 )
-from leonervis_code.skills import SkillCatalogError
-from leonervis_code.tools.web_transport import WebHttpResponse
+from coquo.skills import SkillCatalogError
+from coquo.tools.web_transport import WebHttpResponse
 
 
 SKILL = (

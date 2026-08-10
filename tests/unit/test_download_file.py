@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.download_file import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.download_file import (
     DOWNLOAD_FILE_TOOL_NAME,
     DownloadFileOutcome,
     DownloadFileTool,
 )
-from leonervis_code.tools.web_transport import WebHttpResponse, WebTransportError
+from coquo.tools.web_transport import WebHttpResponse, WebTransportError
 
 
 @dataclass

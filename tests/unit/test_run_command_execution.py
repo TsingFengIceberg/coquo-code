@@ -6,12 +6,12 @@ import sys
 from threading import Thread
 import time
 
-import leonervis_code.tools.run_command as run_command_module
+import coquo.tools.run_command as run_command_module
 import pytest
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.cancellation import TurnCancellation
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
-from leonervis_code.tools.run_command import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.cancellation import TurnCancellation
+from coquo.tools.command_sandbox import CommandSandboxLaunch
+from coquo.tools.run_command import (
     MAX_COMMAND_STDOUT_BYTES,
     RunCommandExecutionStatus,
     RunCommandOutcome,
@@ -131,9 +131,7 @@ def test_nonzero_and_missing_executable_are_structured_failures(tmp_path: Path) 
     nonzero = tool.execute_detailed(
         tool.prepare(command([sys.executable, "-c", "raise SystemExit(7)"]))
     )
-    missing = tool.execute_detailed(
-        tool.prepare(command(["definitely-not-a-leonervis-executable"]))
-    )
+    missing = tool.execute_detailed(tool.prepare(command(["definitely-not-a-coquo-executable"])))
 
     assert nonzero.outcome == RunCommandOutcome.FAILED
     assert nonzero.result_code == "command_exited_nonzero"

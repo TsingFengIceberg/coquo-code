@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments
-from leonervis_code.core.extensions import ExtensionSourceKind
-from leonervis_code.core.hook_contracts import (
+from coquo.core.contracts import ToolArguments
+from coquo.core.extensions import ExtensionSourceKind
+from coquo.core.hook_contracts import (
     HookActionOutcome,
     HookEffect,
     HookEvent,
@@ -17,8 +17,8 @@ from leonervis_code.core.hook_contracts import (
     hook_audit_ledger_to_mapping,
     HookAuditLedger,
 )
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.hooks import (
+from coquo.core.permissions import PermissionAction
+from coquo.hooks import (
     HOOK_CONFIGURATION_SCHEMA_VERSION,
     HookConfigurationError,
     HookRule,
@@ -48,7 +48,7 @@ def rule(hook_id: str = "protect-config", **changes) -> HookRule:
 def store(tmp_path) -> HookStore:
     return HookStore(
         tmp_path / "user" / "hooks.json",
-        tmp_path / "workspace" / ".leonervis-code" / "hooks.json",
+        tmp_path / "workspace" / ".coquo" / "hooks.json",
     )
 
 

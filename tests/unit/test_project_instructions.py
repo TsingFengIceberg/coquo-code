@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.project_instructions import (
+from coquo.core.project_instructions import (
     MAX_PROJECT_INSTRUCTIONS_BYTES,
     PROJECT_INSTRUCTIONS_FILENAME,
     PROJECT_INSTRUCTIONS_VERSION,

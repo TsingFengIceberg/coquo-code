@@ -6,24 +6,24 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.cli.presentation import render_action_audits
-from leonervis_code.core.action_coordinator import (
+from coquo.cli.presentation import render_action_audits
+from coquo.core.action_coordinator import (
     ActionCoordinator,
     ActionExecutionResult,
     ApprovalResolution,
     HumanApprovalRequest,
 )
-from leonervis_code.core.actions import ActionIdentity, ActionLease
-from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import ApprovalMode, PermissionMode
-from leonervis_code.session_records import (
+from coquo.core.actions import ActionIdentity, ActionLease
+from coquo.core.approvals import ApprovalGrantError, ApprovalGrantRejection
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import ApprovalMode, PermissionMode
+from coquo.session_records import (
     ActionAuditStatus,
     ActionExecutionOutcome,
     BindingSnapshot,
 )
-from leonervis_code.session_store import SessionStore
-from leonervis_code.tools.edit_file import EditFileOutcome, EditFileTool, PreparedEditFile
+from coquo.session_store import SessionStore
+from coquo.tools.edit_file import EditFileOutcome, EditFileTool, PreparedEditFile
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 REQUEST_ID = "22345678-1234-4234-9234-123456789abc"

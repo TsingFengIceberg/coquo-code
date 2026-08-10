@@ -3,8 +3,8 @@ from pathlib import Path
 import tarfile
 import zipfile
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
 
 
 def request(path: str) -> ToolUse:

@@ -4,8 +4,8 @@ import io
 import json
 from pathlib import Path
 
-from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import (
+from coquo.cli.main import main
+from coquo.core.contracts import (
     AssistantText,
     ToolArguments,
     ToolOutcomeEntry,
@@ -15,10 +15,10 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionStore
-from leonervis_code.task_store import TaskStore
-from leonervis_code.task_records import (
+from coquo.session_records import BindingSnapshot
+from coquo.session_store import SessionStore
+from coquo.task_store import TaskStore
+from coquo.task_records import (
     AcceptanceCriterionKind,
     StageFailureReason,
     TaskCompletionPolicy,
@@ -93,7 +93,7 @@ def test_task_cli_create_requires_an_existing_owner_session(tmp_path: Path) -> N
     assert status == 2
     assert output == ""
     assert "task error: owner Session is invalid or unavailable" in errors
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_task_cli_accepts_strict_structured_criteria_and_completion_policy(
@@ -154,7 +154,7 @@ def test_task_cli_list_is_read_only_when_no_task_storage_exists(tmp_path: Path) 
     assert status == 0
     assert output == "No durable Tasks found.\n"
     assert errors == ""
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_task_cli_exposes_configuration_filters_parent_and_timeline(tmp_path: Path) -> None:

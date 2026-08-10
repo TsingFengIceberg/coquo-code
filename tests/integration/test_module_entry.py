@@ -13,7 +13,7 @@ def isolated_environment(tmp_path):
 
 def test_module_entry_runs_one_deterministic_prompt_turn(tmp_path) -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "prompt", "Hello"],
+        [sys.executable, "-m", "coquo", "prompt", "Hello"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -24,13 +24,30 @@ def test_module_entry_runs_one_deterministic_prompt_turn(tmp_path) -> None:
     assert result.returncode == 0
     assert result.stdout == "Fake response: Hello\n"
     assert result.stderr == ""
+    assert (tmp_path / ".coquo").is_dir()
+    assert not (tmp_path / ".leonervis-code").exists()
+
+
+def test_legacy_module_entry_is_not_available(tmp_path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "leonervis_code", "--help"],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        env=isolated_environment(tmp_path),
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "No module named leonervis_code" in result.stderr
 
 
 def test_module_entry_visibly_demonstrates_a_read_file_tool_loop(tmp_path) -> None:
     (tmp_path / "note.txt").write_text("manual proof\n", encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "demo-read", "note.txt"],
+        [sys.executable, "-m", "coquo", "demo-read", "note.txt"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -54,7 +71,7 @@ def test_module_entry_renders_a_deterministic_offline_route_plan(tmp_path) -> No
         [
             sys.executable,
             "-m",
-            "leonervis_code",
+            "coquo",
             "route",
             "--model",
             "beta",
@@ -82,7 +99,7 @@ def test_module_entry_renders_a_deterministic_offline_route_plan(tmp_path) -> No
 def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None:
     environment = isolated_environment(tmp_path)
     first = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "prompt", "first"],
+        [sys.executable, "-m", "coquo", "prompt", "first"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -93,7 +110,7 @@ def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None
     assert first.stdout == "Fake response: first\n"
 
     shown = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "session", "show", "latest"],
+        [sys.executable, "-m", "coquo", "session", "show", "latest"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -109,7 +126,7 @@ def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None
     assert "turns: 1" in shown.stdout
 
     resumed = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "--resume", session_id, "prompt", "second"],
+        [sys.executable, "-m", "coquo", "--resume", session_id, "prompt", "second"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -120,7 +137,7 @@ def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None
     assert resumed.stdout == "Fake response: second\n"
 
     listed = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "session", "list"],
+        [sys.executable, "-m", "coquo", "session", "list"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -133,7 +150,7 @@ def test_module_entry_resumes_durable_session_across_processes(tmp_path) -> None
 
 def test_bare_module_entry_requires_an_interactive_terminal(tmp_path) -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "leonervis_code"],
+        [sys.executable, "-m", "coquo"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -144,5 +161,5 @@ def test_bare_module_entry_requires_an_interactive_terminal(tmp_path) -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr == (
-        'interactive mode requires a terminal; use leonervis-code prompt "..." instead\n'
+        'interactive mode requires a terminal; use coquo prompt "..." instead\n'
     )

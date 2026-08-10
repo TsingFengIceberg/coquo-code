@@ -8,16 +8,16 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     HookLifecycleObserved,
     ToolEventStatus,
     ToolRequestFinished,
     ToolRequestStarted,
     ToolTurnSummaryCommitted,
 )
-from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
-from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
-from leonervis_code.core.contracts import (
+from coquo.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
+from coquo.core.approvals import ApprovalGrantError, ApprovalGrantRejection
+from coquo.core.contracts import (
     AssistantToolBatch,
     AssistantText,
     ToolArguments,
@@ -25,42 +25,42 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.permissions import ApprovalMode, PermissionMode
-from leonervis_code.core.hook_contracts import (
+from coquo.core.permissions import ApprovalMode, PermissionMode
+from coquo.core.hook_contracts import (
     HookActionOutcome,
     HookEvent,
     HookHandlerSpec,
 )
-from leonervis_code.hooks import HookConfigurationError, HookEffect, HookRule, HookStore
-from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
-from leonervis_code.session import ProjectSession
-from leonervis_code.session_records import (
+from coquo.hooks import HookConfigurationError, HookEffect, HookRule, HookStore
+from coquo.providers.request_context import RequestTokenCount, RequestTokenCountMethod
+from coquo.session import ProjectSession
+from coquo.session_records import (
     ActionAuditStatus,
     ActionExecutionFinished,
     ActionExecutionOutcome,
     TurnCommitted,
     TurnFailed,
 )
-from leonervis_code.session_store import (
+from coquo.session_store import (
     ActionOutcomeAuditError,
     SessionStore,
     SessionStoreError,
 )
-from leonervis_code.tools import grep_regex as grep_regex_module
-from leonervis_code.tools.catalog import MAX_TOOL_REQUESTS_PER_TURN
-from leonervis_code.tools.web_search import (
+from coquo.tools import grep_regex as grep_regex_module
+from coquo.tools.catalog import MAX_TOOL_REQUESTS_PER_TURN
+from coquo.tools.web_search import (
     BRAVE_SEARCH_API_KEY_ENV,
     SearchHttpResponse,
     TAVILY_SEARCH_API_KEY_ENV,
     WebSearchPreparationError,
     WebSearchTool,
 )
-from leonervis_code.tools.download_file import DownloadFileTool
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
-from leonervis_code.tools.move_directory import MoveDirectoryTool
-from leonervis_code.tools.run_command import RunCommandTool
-from leonervis_code.tools.web_fetch import WebFetchTool
-from leonervis_code.tools.web_transport import WebHttpResponse
+from coquo.tools.download_file import DownloadFileTool
+from coquo.tools.command_sandbox import CommandSandboxLaunch
+from coquo.tools.move_directory import MoveDirectoryTool
+from coquo.tools.run_command import RunCommandTool
+from coquo.tools.web_fetch import WebFetchTool
+from coquo.tools.web_transport import WebHttpResponse
 
 SESSION_ID = "12345678-1234-4234-9234-123456789abc"
 NOW = "2026-07-23T12:00:00.000000Z"
@@ -126,7 +126,7 @@ def open_session(
         user_profile_path=workspace / "user.json",
         project_profile_path=workspace / "project.json",
         user_hooks_path=workspace / "user-hooks.json",
-        project_hooks_path=workspace / ".leonervis-code" / "hooks.json",
+        project_hooks_path=workspace / ".coquo" / "hooks.json",
         session_store_factory=session_store_factory,
         permission_mode=permission_mode,
         approval_mode=approval_mode,
@@ -140,7 +140,7 @@ def open_session(
 def hook_store(workspace: Path) -> HookStore:
     return HookStore(
         workspace / "user-hooks.json",
-        workspace / ".leonervis-code" / "hooks.json",
+        workspace / ".coquo" / "hooks.json",
     )
 
 
@@ -1011,7 +1011,7 @@ def test_git_observation_tools_are_read_only_audited_and_committed_without_appro
     subprocess.run(
         ["git", "config", "user.email", "tests@example.invalid"], cwd=tmp_path, check=True
     )
-    subprocess.run(["git", "config", "user.name", "Leonervis Tests"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Coquo Tests"], cwd=tmp_path, check=True)
     (tmp_path / "tracked.txt").write_text("before\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
@@ -1874,7 +1874,7 @@ def test_model_visible_mkdir_partial_durability_is_audited_truthfully(
     def fail_fsync(_directory: Path) -> None:
         raise OSError("injected")
 
-    monkeypatch.setattr("leonervis_code.tools.mkdir._fsync_directory", fail_fsync)
+    monkeypatch.setattr("coquo.tools.mkdir._fsync_directory", fail_fsync)
     session = open_session(
         tmp_path,
         provider,
@@ -2156,7 +2156,7 @@ def test_model_visible_move_partial_is_audited_truthfully(
     (tmp_path / "source.txt").write_text("source", encoding="utf-8")
     provider = ToolProvider([move_call(), AssistantText("inspect both paths")])
     monkeypatch.setattr(
-        "leonervis_code.tools.move_file.os.unlink",
+        "coquo.tools.move_file.os.unlink",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected")),
     )
     session = open_session(
@@ -2429,7 +2429,7 @@ def test_model_visible_copy_partial_is_audited_truthfully(
         permission_mode=PermissionMode.WORKSPACE_WRITE,
         approval_mode=ApprovalMode.AUTO,
     )
-    monkeypatch.setattr("leonervis_code.tools.copy_file._fsync", fail_second)
+    monkeypatch.setattr("coquo.tools.copy_file._fsync", fail_second)
     try:
         assert session.prompt("copy it") == "inspect destination"
         result = provider.requests[1].history[-1]
@@ -2610,7 +2610,7 @@ def test_delete_partial_durability_is_audited_and_not_hidden(
         approval_mode=ApprovalMode.AUTO,
     )
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_file._fsync_directory",
+        "coquo.tools.delete_file._fsync_directory",
         lambda _fd: (_ for _ in ()).throw(OSError("injected")),
     )
     try:
@@ -2921,7 +2921,7 @@ def test_delete_directory_partial_durability_is_audited(
         approval_mode=ApprovalMode.AUTO,
     )
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_directory._fsync_directory",
+        "coquo.tools.delete_directory._fsync_directory",
         lambda _fd: (_ for _ in ()).throw(OSError("injected")),
     )
     try:

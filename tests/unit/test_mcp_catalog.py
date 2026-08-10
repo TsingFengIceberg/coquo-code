@@ -5,12 +5,12 @@ import json
 
 import pytest
 
-from leonervis_code.core.extensions import (
+from coquo.core.extensions import (
     ExtensionSourceKind,
     ToolExecutionKind,
     ToolExposure,
 )
-from leonervis_code.mcp.catalog import (
+from coquo.mcp.catalog import (
     MCP_CATALOG_REASON_CODES,
     McpCandidateDisposition,
     McpCatalogSourceIssue,
@@ -20,10 +20,10 @@ from leonervis_code.mcp.catalog import (
     explain_mcp_catalog_reason,
     inspect_mcp_policy_diagnostics,
 )
-from leonervis_code.mcp.client import McpClientError, McpListedTool, McpProbeResult
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.mcp.policy import (
+from coquo.mcp.client import McpClientError, McpListedTool, McpProbeResult
+from coquo.mcp.config import McpServerConfiguration, McpServerEntry
+from coquo.core.permissions import PermissionAction
+from coquo.mcp.policy import (
     McpPolicyDisposition,
     McpToolPolicyRule,
     McpToolPolicyStore,

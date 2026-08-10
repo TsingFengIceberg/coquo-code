@@ -1,8 +1,8 @@
 from pathlib import Path
 import subprocess
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.git_refs import GIT_REFS_TOOL_NAME, GitRefsTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.git_refs import GIT_REFS_TOOL_NAME, GitRefsTool
 
 
 def git(workspace: Path, *arguments: str) -> None:

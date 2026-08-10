@@ -4,17 +4,17 @@ from dataclasses import replace
 
 import pytest
 
-from leonervis_code.agent.loop import (
+from coquo.agent.loop import (
     AgentLoop,
     TaskControlProtocolError,
     ToolLoopLimitError,
 )
-from leonervis_code.agent.task_control import (
+from coquo.agent.task_control import (
     TaskControlDispatchResult,
     TaskControlProposal,
     TaskProposalKind,
 )
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
@@ -26,8 +26,8 @@ from leonervis_code.agent.tool_events import (
     ToolRequestStarted,
     ToolTurnSummaryCommitted,
 )
-from leonervis_code.core.compaction import EffectiveContextSummary
-from leonervis_code.core.contracts import (
+from coquo.core.compaction import EffectiveContextSummary
+from coquo.core.contracts import (
     AssistantToolBatch,
     ToolArguments,
     AssistantText,
@@ -40,16 +40,16 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.core.project_instructions import ProjectInstructionsLoader
-from leonervis_code.core.extensions import ToolExposure, ToolRegistrySnapshot
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.providers.streaming import ProviderTextDelta
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
-from leonervis_code.tools.catalog import (
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.core.project_instructions import ProjectInstructionsLoader
+from coquo.core.extensions import ToolExposure, ToolRegistrySnapshot
+from coquo.core.permissions import PermissionAction
+from coquo.providers.streaming import ProviderTextDelta
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
+from coquo.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_REGISTRY_SNAPSHOT,
@@ -574,8 +574,8 @@ def test_prepared_turn_advances_only_through_an_explicit_later_tool_set_epoch(
 def test_discovery_search_promotes_exact_candidate_for_later_invocation_without_execution(
     tmp_path,
 ) -> None:
-    from leonervis_code.core.effective_context import CanonicalToolDefinition
-    from leonervis_code.core.extensions import (
+    from coquo.core.effective_context import CanonicalToolDefinition
+    from coquo.core.extensions import (
         ExtensionSource,
         ExtensionSourceKind,
         ExtensionToolContract,
@@ -908,7 +908,7 @@ def test_committed_context_snapshot_is_exact_read_only_and_independent(tmp_path)
     snapshots = []
 
     def build_snapshot():
-        from leonervis_code.system_prompt import build_system_prompt
+        from coquo.system_prompt import build_system_prompt
 
         snapshot = build_system_prompt()
         snapshots.append(snapshot)
@@ -962,7 +962,7 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
     snapshots = []
 
     def build_snapshot():
-        from leonervis_code.system_prompt import build_system_prompt
+        from coquo.system_prompt import build_system_prompt
 
         snapshot = build_system_prompt()
         snapshots.append(snapshot)
@@ -990,7 +990,7 @@ def test_loop_pins_one_system_prompt_snapshot_across_tool_continuations(tmp_path
 
 
 def _action_lease_for(prepared, *, lease_id="12345678-1234-4234-9234-123456789abc"):
-    from leonervis_code.core.actions import ActionLease
+    from coquo.core.actions import ActionLease
 
     return ActionLease(
         session_id="22345678-1234-4234-9234-123456789abc",

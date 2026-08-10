@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantText,
     ConversationRequest,
     ToolArguments,
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
-from leonervis_code.providers.streaming import (
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
+from coquo.providers.streaming import (
     ProviderTextDelta,
     respond_with_streaming,
 )
-from leonervis_code.system_prompt import build_system_prompt
+from coquo.system_prompt import build_system_prompt
 
 
 def request() -> ConversationRequest:
@@ -107,8 +107,8 @@ def test_streaming_helper_matches_atomic_tool_companion_text() -> None:
 
 
 def test_streaming_helper_rejects_aggregate_text_over_bound(monkeypatch) -> None:
-    monkeypatch.setattr("leonervis_code.providers.streaming.MAX_PROVIDER_STREAM_TEXT_CHARACTERS", 5)
-    monkeypatch.setattr("leonervis_code.providers.streaming.MAX_PROVIDER_STREAM_TEXT_BYTES", 5)
+    monkeypatch.setattr("coquo.providers.streaming.MAX_PROVIDER_STREAM_TEXT_CHARACTERS", 5)
+    monkeypatch.setattr("coquo.providers.streaming.MAX_PROVIDER_STREAM_TEXT_BYTES", 5)
     provider = StreamingProvider(AssistantText("abcdef"), ("abc", "def"))
 
     with pytest.raises(ValueError, match="exceeds"):

@@ -6,8 +6,8 @@ import subprocess
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.git_show import GitShowTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.git_show import GitShowTool
 
 
 def _git(workspace: Path, *arguments: str) -> str:
@@ -28,7 +28,7 @@ def _repository(tmp_path: Path) -> Path:
     workspace.mkdir()
     _git(workspace, "init", "-q")
     _git(workspace, "config", "user.email", "tests@example.invalid")
-    _git(workspace, "config", "user.name", "Leonervis Tests")
+    _git(workspace, "config", "user.name", "Coquo Tests")
     (workspace / "first.txt").write_text("before\n", encoding="utf-8")
     (workspace / "other.txt").write_text("other\n", encoding="utf-8")
     _git(workspace, "add", "first.txt", "other.txt")

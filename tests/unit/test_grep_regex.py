@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-import leonervis_code.tools.grep_regex as grep_regex_module
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.grep_regex import (
+import coquo.tools.grep_regex as grep_regex_module
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.grep_regex import (
     MAX_GREP_REGEX_FILE_BYTES,
     MAX_GREP_REGEX_MATCHES,
     GrepRegexTool,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.read_file import MAX_CONTENT_BYTES, TRUNCATION_MARKER, ReadFileTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.read_file import MAX_CONTENT_BYTES, TRUNCATION_MARKER, ReadFileTool
 
 
 def request(path: str = "README.md") -> ToolUse:

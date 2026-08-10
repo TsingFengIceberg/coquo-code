@@ -5,18 +5,18 @@ import json
 import os
 from types import SimpleNamespace
 
-from leonervis_code.providers.definitions import (
+from coquo.providers.definitions import (
     ANTHROPIC,
     OPENAI,
     RuntimeProviderRoute,
     WireProtocol,
 )
-from leonervis_code.providers.model_context import (
+from coquo.providers.model_context import (
     ModelContextCapabilityResolver,
     ModelContextDiscovery,
     ModelContextSource,
 )
-from leonervis_code.providers.model_context_cache import ModelContextCapabilityCache
+from coquo.providers.model_context_cache import ModelContextCapabilityCache
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 

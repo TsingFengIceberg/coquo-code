@@ -6,9 +6,10 @@ CLAUDE.md
 AGENTS.md
 /.handoff/
 
-# Local configuration and Leonervis runtime state
+# Local configuration and current or legacy runtime state
 .env
 .env.*
+/.coquo/
 /.leonervis-code/
 
 # Python environments, caches, and build artifacts

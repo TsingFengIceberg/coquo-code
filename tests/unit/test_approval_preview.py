@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.approval_preview import (
+from coquo.core.approval_preview import (
     APPROVAL_PREVIEW_VERSION,
     MAX_APPROVAL_DIFF_BYTES,
     MAX_APPROVAL_DIFF_LINES,

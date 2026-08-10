@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.agent.tool_events import (
+from coquo.agent.loop import AgentLoop
+from coquo.agent.tool_events import (
     AssistantToolTextReceived,
     McpNotificationActivityReceived,
     ProviderInvocationPreflighted,
@@ -23,7 +23,7 @@ from leonervis_code.agent.tool_events import (
     ToolResultDetails,
     ToolTurnSummaryCommitted,
 )
-from leonervis_code.cli.presentation import (
+from coquo.cli.presentation import (
     BLUE,
     GREEN,
     RED,
@@ -69,25 +69,25 @@ from leonervis_code.cli.presentation import (
     render_durable_usage_summary,
     render_usage_summary,
 )
-from leonervis_code.mcp.client import McpNotificationKind
-from leonervis_code.providers.manager import (
+from coquo.mcp.client import McpNotificationKind
+from coquo.providers.manager import (
     CurrentTargetContextAssessment,
     OutputBudgetUpdateResult,
     RuntimeStatus,
 )
-from leonervis_code.providers.errors import output_limit_error
-from leonervis_code.providers.request_context import (
+from coquo.providers.errors import output_limit_error
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.providers.streaming import (
+from coquo.providers.streaming import (
     ProviderSearchObservation,
     ProviderSearchPhase,
 )
-from leonervis_code.core.compaction import CompactionTrigger
-from leonervis_code.core.contracts import (
+from coquo.core.compaction import CompactionTrigger
+from coquo.core.contracts import (
     AssistantText,
     ToolArguments,
     ToolOutcomeEntry,
@@ -95,13 +95,13 @@ from leonervis_code.core.contracts import (
     ToolTurnLedger,
     UserMessage,
 )
-from leonervis_code.core.permissions import (
+from coquo.core.permissions import (
     PermissionAction,
     PermissionDecision,
     PermissionReason,
     PermissionResult,
 )
-from leonervis_code.session import (
+from coquo.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
     AutoCompactionStarted,
@@ -117,34 +117,34 @@ from leonervis_code.session import (
     SessionTitleFallbackApplied,
     TurnUsageCompleted,
 )
-from leonervis_code.providers.usage import (
+from coquo.providers.usage import (
     ProviderInvocationKind,
     ProviderInvocationUsage,
     ProviderTokenUsage,
     ProviderUsageTotals,
     RuntimeUsageTracker,
 )
-from leonervis_code.session_records import (
+from coquo.session_records import (
     ActionAuditStatus,
     ApprovalAuditOutcome,
     BindingSnapshot,
     SessionNameSource,
     SessionTitleFallbackReason,
 )
-from leonervis_code.session_store import (
+from coquo.session_store import (
     LatestUpdateStatus,
     SessionInfo,
     ToolLedgerQueryResult,
     TurnToolLedger,
 )
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
-from leonervis_code.tools.git_diff import GitDiffScope, GitDiffSnapshot
-from leonervis_code.tools.git_log import GitLogEntry, GitLogSnapshot
-from leonervis_code.tools.git_show import GitShowSnapshot
-from leonervis_code.tools.git_status import GitStatusEntry, GitStatusSnapshot
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
+from coquo.tools.git_diff import GitDiffScope, GitDiffSnapshot
+from coquo.tools.git_log import GitLogEntry, GitLogSnapshot
+from coquo.tools.git_show import GitShowSnapshot
+from coquo.tools.git_status import GitStatusEntry, GitStatusSnapshot
 
 
 def test_render_git_changes_is_bounded_clear_and_terminal_safe() -> None:
@@ -413,10 +413,10 @@ def test_durable_usage_presentation_distinguishes_unknown_and_legacy() -> None:
     assert (
         render_prompt_toolbar(
             status(mode="real", profile="work-openai", provider="openai", model="gpt-5"),
-            Path.home() / "Projects" / "leonervis-code",
+            Path.home() / "Projects" / "coquo",
             color=False,
         )
-        == "  gpt-5 · ~/Projects/leonervis-code"
+        == "  gpt-5 · ~/Projects/coquo"
     )
 
 

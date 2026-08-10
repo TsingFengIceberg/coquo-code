@@ -4,19 +4,19 @@ import json
 
 import pytest
 
-from leonervis_code.mcp.client import McpClientError
-from leonervis_code.mcp.config import (
+from coquo.mcp.client import McpClientError
+from coquo.mcp.config import (
     McpServerConfiguration,
     McpServerEntry,
     McpTransport,
     McpTrustMode,
 )
-from leonervis_code.mcp.http_client import (
+from coquo.mcp.http_client import (
     MAX_MCP_HTTP_SSE_LINE_BYTES,
     McpStreamableHttpClient,
     _response_messages,
 )
-from leonervis_code.tools.web_transport import WebHttpResponse
+from coquo.tools.web_transport import WebHttpResponse
 
 
 class FakeHttpTransport:

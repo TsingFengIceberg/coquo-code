@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import AssistantText
-from leonervis_code.evals.baseline import (
+from coquo.cli.main import main
+from coquo.core.contracts import AssistantText
+from coquo.evals.baseline import (
     DETERMINISTIC_BASELINE_ID,
     EvalWorkspaceFile,
     builtin_eval_cases,
@@ -53,7 +53,7 @@ def test_host_workspace_fact_fails_a_false_success_claim() -> None:
     assert [check.name for check in result.checks if not check.passed] == ["workspace_entries"]
 
 
-@pytest.mark.parametrize("path", ["../escape", "/absolute", ".leonervis-code/state"])
+@pytest.mark.parametrize("path", ["../escape", "/absolute", ".coquo/state"])
 def test_eval_fixture_paths_reject_escape_and_session_state(path: str) -> None:
     with pytest.raises(ValueError, match="Eval fixture path"):
         EvalWorkspaceFile(path, "content")

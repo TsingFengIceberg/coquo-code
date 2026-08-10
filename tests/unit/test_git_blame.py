@@ -3,9 +3,9 @@ import subprocess
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.git_blame import GIT_BLAME_TOOL_NAME, GitBlameTool, _parse_blame
-from leonervis_code.tools.git_repository import GitObservationError
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.git_blame import GIT_BLAME_TOOL_NAME, GitBlameTool, _parse_blame
+from coquo.tools.git_repository import GitObservationError
 
 
 def git(workspace: Path, *arguments: str) -> None:

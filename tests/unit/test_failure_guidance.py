@@ -1,9 +1,9 @@
 import pytest
 
-from leonervis_code.cli.failure_guidance import render_turn_failure, tool_result_guidance
-from leonervis_code.core.orchestration import ProviderFailureKind
-from leonervis_code.providers.errors import adapter_error, output_limit_error
-from leonervis_code.providers.request_context import (
+from coquo.cli.failure_guidance import render_turn_failure, tool_result_guidance
+from coquo.core.orchestration import ProviderFailureKind
+from coquo.providers.errors import adapter_error, output_limit_error
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     ContextPreflightError,

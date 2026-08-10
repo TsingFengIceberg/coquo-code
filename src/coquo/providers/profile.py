@@ -1,0 +1,465 @@
+"""Validated non-secret provider profile inputs and store-owned identities."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+import hashlib
+import json
+import math
+import re
+from uuid import UUID, uuid4, uuid5
+
+from coquo.core.orchestration import OrchestrationError
+from coquo.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
+from coquo.providers.native_search import (
+    NativeSearchAdapterId,
+    NativeSearchManifest,
+)
+from coquo.providers.resolver import (
+    normalize_compatible_base_url,
+    valid_environment_name,
+    validate_base_url,
+)
+
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+MAX_MODEL_LENGTH = 512
+MAX_BASE_URL_LENGTH = 2048
+MAX_ENVIRONMENT_NAME_LENGTH = 128
+MAX_CONTEXT_WINDOW_TOKENS = 100_000_000
+MAX_MODEL_OUTPUT_TOKENS = 100_000_000
+LEGACY_PROFILE_NAMESPACE = UUID("0f18e3f0-ef73-5a77-9f6c-b4e7f75fca2a")
+_PROFILE_SPEC_FIELDS = {
+    "name",
+    "provider_id",
+    "protocol",
+    "model",
+    "base_url",
+    "api_key_env",
+    "max_output_tokens",
+    "context_window_tokens",
+    "model_max_output_tokens",
+    "temperature",
+    "native_search_adapter",
+    "native_search_manifest",
+}
+_PROFILE_IDENTITY_FIELDS = {"profile_id", "revision"}
+_REQUIRED_PROFILE_FIELDS = {"name", "provider_id", "protocol", "model"}
+
+
+class ProviderProfileError(OrchestrationError):
+    """Raised when named provider profile data is invalid or unsafe."""
+
+
+@dataclass(frozen=True)
+class ProviderProfileSpec:
+    """Validated configuration input that contains no persistent store identity."""
+
+    name: str
+    provider_id: str
+    protocol: WireProtocol
+    model: str
+    base_url: str | None = None
+    api_key_env: str | None = None
+    max_output_tokens: int = 1024
+    context_window_tokens: int | None = None
+    model_max_output_tokens: int | None = None
+    temperature: float | None = None
+    native_search_adapter: str | None = None
+    native_search_manifest: NativeSearchManifest | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or _PROFILE_NAME.fullmatch(self.name) is None:
+            raise ProviderProfileError(
+                "profile name must be 1-64 ASCII letters, digits, dots, underscores, or hyphens"
+            )
+        if not isinstance(self.provider_id, str) or not self.provider_id.strip():
+            raise ProviderProfileError("profile provider ID must not be blank")
+        if self.provider_id != self.provider_id.strip().lower():
+            raise ProviderProfileError("profile provider ID must be lowercase without whitespace")
+        if not isinstance(self.protocol, WireProtocol):
+            raise ProviderProfileError("profile protocol is invalid")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ProviderProfileError("profile model must not be blank")
+        if self.model != self.model.strip():
+            raise ProviderProfileError("profile model must not have surrounding whitespace")
+        if len(self.model) > MAX_MODEL_LENGTH:
+            raise ProviderProfileError(
+                f"profile model must not exceed {MAX_MODEL_LENGTH} characters"
+            )
+        if type(self.max_output_tokens) is not int or self.max_output_tokens < 1:
+            raise ProviderProfileError("profile max output tokens must be a positive integer")
+        if self.context_window_tokens is not None and (
+            type(self.context_window_tokens) is not int
+            or not 1 <= self.context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
+        ):
+            raise ProviderProfileError(
+                "profile context window tokens must be a positive integer "
+                f"not exceeding {MAX_CONTEXT_WINDOW_TOKENS}"
+            )
+        if self.model_max_output_tokens is not None and (
+            type(self.model_max_output_tokens) is not int
+            or not 1 <= self.model_max_output_tokens <= MAX_MODEL_OUTPUT_TOKENS
+        ):
+            raise ProviderProfileError(
+                "profile model max output tokens must be a positive integer "
+                f"not exceeding {MAX_MODEL_OUTPUT_TOKENS}"
+            )
+        if (
+            self.model_max_output_tokens is not None
+            and self.max_output_tokens > self.model_max_output_tokens
+        ):
+            raise ProviderProfileError(
+                "profile max output tokens must not exceed model max output tokens"
+            )
+        if self.temperature is not None:
+            if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
+                raise ProviderProfileError("profile temperature must be a number")
+            if not math.isfinite(float(self.temperature)) or not 0.0 <= self.temperature <= 2.0:
+                raise ProviderProfileError("profile temperature must be between 0.0 and 2.0")
+        if self.native_search_adapter is not None:
+            valid_adapters = {
+                "auto",
+                "none",
+                *(adapter.value for adapter in NativeSearchAdapterId),
+            }
+            if self.native_search_adapter not in valid_adapters:
+                raise ProviderProfileError(
+                    f"unsupported native-search adapter: {self.native_search_adapter}"
+                )
+        if self.native_search_manifest is not None and not isinstance(
+            self.native_search_manifest, NativeSearchManifest
+        ):
+            raise ProviderProfileError("profile native-search manifest is invalid")
+        if self.native_search_manifest is not None and self.native_search_adapter not in {
+            None,
+            "auto",
+            NativeSearchAdapterId.CUSTOM_MANIFEST_V1.value,
+        }:
+            raise ProviderProfileError(
+                "profile native-search manifest cannot be combined with another adapter"
+            )
+        if (
+            self.native_search_adapter == NativeSearchAdapterId.CUSTOM_MANIFEST_V1.value
+            and self.native_search_manifest is None
+        ):
+            raise ProviderProfileError("custom-manifest-v1 requires a native-search manifest")
+        if self.protocol == WireProtocol.OPENAI_RESPONSES:
+            if self.native_search_manifest is not None:
+                raise ProviderProfileError(
+                    "native-search manifests are only supported by chat-completions profiles"
+                )
+            if self.native_search_adapter not in {
+                None,
+                "auto",
+                "none",
+                NativeSearchAdapterId.OPENAI_RESPONSES_WEB_SEARCH_V1.value,
+            }:
+                raise ProviderProfileError(
+                    "openai-responses profiles require the Responses native-search adapter"
+                )
+        elif (
+            self.native_search_adapter == NativeSearchAdapterId.OPENAI_RESPONSES_WEB_SEARCH_V1.value
+        ):
+            raise ProviderProfileError(
+                "openai-responses-web-search-v1 requires an openai-responses profile"
+            )
+        if self.api_key_env is not None:
+            if not isinstance(self.api_key_env, str) or not self.api_key_env.strip():
+                raise ProviderProfileError("profile API key environment variable must not be blank")
+            if len(self.api_key_env) > MAX_ENVIRONMENT_NAME_LENGTH:
+                raise ProviderProfileError("profile API key environment variable name is too long")
+            if not valid_environment_name(self.api_key_env):
+                raise ProviderProfileError("profile API key environment variable name is invalid")
+
+        definition = BUILTIN_PROVIDERS.get(self.provider_id)
+        if definition is not None:
+            expected_protocol = definition.protocol
+            if self.provider_id == "deepseek" and self.model == "deepseek-v4-flash":
+                accepted_protocols = {
+                    WireProtocol.OPENAI_CHAT_COMPLETIONS,
+                    WireProtocol.OPENAI_RESPONSES,
+                }
+            else:
+                accepted_protocols = {expected_protocol}
+            if self.protocol not in accepted_protocols:
+                raise ProviderProfileError(
+                    f"profile protocol does not match built-in provider {self.provider_id}"
+                )
+        elif self.provider_id == "custom":
+            if self.base_url is None:
+                raise ProviderProfileError("custom profiles require a base URL")
+        else:
+            raise ProviderProfileError(f"unknown profile provider: {self.provider_id}")
+
+        if self.base_url is not None:
+            if not isinstance(self.base_url, str) or not self.base_url.strip():
+                raise ProviderProfileError("profile base URL must not be blank")
+            if len(self.base_url) > MAX_BASE_URL_LENGTH:
+                raise ProviderProfileError(
+                    f"profile base URL must not exceed {MAX_BASE_URL_LENGTH} characters"
+                )
+            try:
+                if self.protocol in {
+                    WireProtocol.OPENAI_CHAT_COMPLETIONS,
+                    WireProtocol.OPENAI_RESPONSES,
+                }:
+                    normalized = normalize_compatible_base_url(self.base_url)
+                else:
+                    normalized = validate_base_url(self.base_url)
+            except OrchestrationError as error:
+                raise ProviderProfileError(str(error)) from None
+            object.__setattr__(self, "base_url", normalized)
+        if self.temperature is not None:
+            object.__setattr__(self, "temperature", float(self.temperature))
+
+    def to_dict(
+        self,
+        *,
+        include_context_window: bool = True,
+        include_model_max_output: bool = True,
+        include_native_search: bool = True,
+    ) -> dict[str, object]:
+        """Return one closed configuration representation for the selected schema."""
+        data = {
+            "name": self.name,
+            "provider_id": self.provider_id,
+            "protocol": self.protocol.value,
+            "model": self.model,
+            "base_url": self.base_url,
+            "api_key_env": self.api_key_env,
+            "max_output_tokens": self.max_output_tokens,
+            "temperature": self.temperature,
+        }
+        if include_context_window:
+            data["context_window_tokens"] = self.context_window_tokens
+        if include_model_max_output:
+            data["model_max_output_tokens"] = self.model_max_output_tokens
+        if include_native_search:
+            data["native_search_adapter"] = self.native_search_adapter
+            data["native_search_manifest"] = (
+                self.native_search_manifest.to_dict()
+                if self.native_search_manifest is not None
+                else None
+            )
+        return data
+
+    def fingerprint(self) -> str:
+        """Return a canonical SHA-256 over routing-relevant profile configuration."""
+        return profile_fingerprint(self)
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+        *,
+        allow_context_window: bool = True,
+        allow_model_max_output: bool = True,
+        allow_native_search: bool = True,
+    ) -> ProviderProfileSpec:
+        """Decode one closed configuration object without assigning store identity."""
+        values = _decode_profile_mapping(
+            value,
+            allow_identity=False,
+            allow_context_window=allow_context_window,
+            allow_model_max_output=allow_model_max_output,
+            allow_native_search=allow_native_search,
+        )
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class NamedProviderProfile(ProviderProfileSpec):
+    """A store-owned profile with stable canonical UUID identity and revision."""
+
+    profile_id: str = field(default_factory=lambda: str(uuid4()))
+    revision: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_profile_id(self.profile_id)
+        if type(self.revision) is not int or self.revision < 1:
+            raise ProviderProfileError("profile revision must be a positive integer")
+
+    def to_dict(
+        self,
+        *,
+        include_context_window: bool = True,
+        include_model_max_output: bool = True,
+        include_native_search: bool = True,
+    ) -> dict[str, object]:
+        """Return one closed identity-bearing representation."""
+        return {
+            "profile_id": self.profile_id,
+            "revision": self.revision,
+            **super().to_dict(
+                include_context_window=include_context_window,
+                include_model_max_output=include_model_max_output,
+                include_native_search=include_native_search,
+            ),
+        }
+
+    def to_spec(self) -> ProviderProfileSpec:
+        """Drop persistent identity while preserving validated configuration."""
+        return ProviderProfileSpec(
+            name=self.name,
+            provider_id=self.provider_id,
+            protocol=self.protocol,
+            model=self.model,
+            base_url=self.base_url,
+            api_key_env=self.api_key_env,
+            max_output_tokens=self.max_output_tokens,
+            context_window_tokens=self.context_window_tokens,
+            model_max_output_tokens=self.model_max_output_tokens,
+            temperature=self.temperature,
+            native_search_adapter=self.native_search_adapter,
+            native_search_manifest=self.native_search_manifest,
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+        *,
+        allow_context_window: bool = True,
+        allow_model_max_output: bool = True,
+        allow_native_search: bool = True,
+    ) -> NamedProviderProfile:
+        """Decode one closed identity-bearing object."""
+        values = _decode_profile_mapping(
+            value,
+            allow_identity=True,
+            allow_context_window=allow_context_window,
+            allow_model_max_output=allow_model_max_output,
+            allow_native_search=allow_native_search,
+        )
+        return cls(**values)
+
+
+def legacy_profile_id(name: str) -> str:
+    """Map one exact, case-sensitive schema-v1 name to its stable UUIDv5 identity."""
+    if not isinstance(name, str):
+        raise ProviderProfileError("legacy profile name must be text")
+    return str(uuid5(LEGACY_PROFILE_NAMESPACE, name))
+
+
+def profile_fingerprint(profile: ProviderProfileSpec) -> str:
+    """Hash normalized profile configuration without name, identity, or credential state."""
+    payload = {
+        "fingerprint_version": 4,
+        "provider_id": profile.provider_id,
+        "protocol": profile.protocol.value,
+        "model": profile.model,
+        "base_url": profile.base_url,
+        "api_key_env": profile.api_key_env,
+        "max_output_tokens": profile.max_output_tokens,
+        "context_window_tokens": profile.context_window_tokens,
+        "model_max_output_tokens": profile.model_max_output_tokens,
+        "temperature": profile.temperature,
+        "native_search_adapter": profile.native_search_adapter,
+        "native_search_manifest": (
+            profile.native_search_manifest.to_dict()
+            if profile.native_search_manifest is not None
+            else None
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decode_profile_mapping(
+    value: Mapping[str, object],
+    *,
+    allow_identity: bool,
+    allow_context_window: bool,
+    allow_model_max_output: bool,
+    allow_native_search: bool = True,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ProviderProfileError("profile entry must be a JSON object")
+    spec_fields = set(_PROFILE_SPEC_FIELDS)
+    if not allow_context_window:
+        spec_fields.remove("context_window_tokens")
+    if not allow_model_max_output:
+        spec_fields.remove("model_max_output_tokens")
+    if not allow_native_search:
+        spec_fields.remove("native_search_adapter")
+        spec_fields.remove("native_search_manifest")
+    allowed = spec_fields | (_PROFILE_IDENTITY_FIELDS if allow_identity else set())
+    fields = set(value)
+    unknown = fields - allowed
+    if unknown:
+        raise ProviderProfileError(f"profile contains unknown field: {sorted(unknown)[0]}")
+    missing = _REQUIRED_PROFILE_FIELDS - fields
+    if missing:
+        raise ProviderProfileError(f"profile is missing required field: {sorted(missing)[0]}")
+
+    protocol_value = value["protocol"]
+    if not isinstance(protocol_value, str):
+        raise ProviderProfileError("profile protocol must be text")
+    try:
+        protocol = WireProtocol(protocol_value)
+    except ValueError:
+        raise ProviderProfileError(f"unsupported profile protocol: {protocol_value}") from None
+
+    name = value["name"]
+    provider_id = value["provider_id"]
+    model = value["model"]
+    base_url = value.get("base_url")
+    api_key_env = value.get("api_key_env")
+    native_search_adapter = value.get("native_search_adapter")
+    raw_native_search_manifest = value.get("native_search_manifest")
+    if not isinstance(name, str):
+        raise ProviderProfileError("profile name must be text")
+    if not isinstance(provider_id, str):
+        raise ProviderProfileError("profile provider ID must be text")
+    if not isinstance(model, str):
+        raise ProviderProfileError("profile model must be text")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ProviderProfileError("profile base URL must be text or null")
+    if api_key_env is not None and not isinstance(api_key_env, str):
+        raise ProviderProfileError("profile API key environment variable must be text or null")
+    if native_search_adapter is not None and not isinstance(native_search_adapter, str):
+        raise ProviderProfileError("profile native-search adapter must be text or null")
+    native_search_manifest = None
+    if raw_native_search_manifest is not None:
+        if not isinstance(raw_native_search_manifest, Mapping):
+            raise ProviderProfileError("profile native-search manifest must be an object or null")
+        try:
+            native_search_manifest = NativeSearchManifest.from_mapping(raw_native_search_manifest)
+        except ValueError as error:
+            raise ProviderProfileError(str(error)) from None
+
+    values: dict[str, object] = {
+        "name": name,
+        "provider_id": provider_id,
+        "protocol": protocol,
+        "model": model,
+        "base_url": base_url,
+        "api_key_env": api_key_env,
+        "max_output_tokens": value.get("max_output_tokens", 1024),
+        "context_window_tokens": value.get("context_window_tokens"),
+        "model_max_output_tokens": value.get("model_max_output_tokens"),
+        "temperature": value.get("temperature"),
+        "native_search_adapter": native_search_adapter,
+        "native_search_manifest": native_search_manifest,
+    }
+    if allow_identity:
+        if "profile_id" in value:
+            values["profile_id"] = value["profile_id"]
+        if "revision" in value:
+            values["revision"] = value["revision"]
+    return values
+
+
+def _validate_profile_id(value: object) -> None:
+    if not isinstance(value, str):
+        raise ProviderProfileError("profile ID must be a canonical UUID string")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise ProviderProfileError("profile ID must be a canonical UUID string") from None
+    if str(parsed) != value:
+        raise ProviderProfileError("profile ID must be a canonical UUID string")

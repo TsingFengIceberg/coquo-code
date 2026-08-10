@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.move_directory import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.move_directory import (
     MOVE_DIRECTORY_TOOL_NAME,
     MoveDirectoryOutcome,
     MoveDirectoryPreparationError,

@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from leonervis_code.mcp.config import (
+from coquo.mcp.config import (
     MCP_CONFIGURATION_SCHEMA_VERSION,
     MAX_MCP_ARGUMENTS,
     McpConfigurationError,
@@ -32,7 +32,7 @@ def configuration(name: str = "local-tools", **changes) -> McpServerConfiguratio
 def store(tmp_path) -> McpServerStore:
     return McpServerStore(
         tmp_path / "user" / "mcp-servers.json",
-        tmp_path / "workspace" / ".leonervis-code" / "mcp-servers.json",
+        tmp_path / "workspace" / ".coquo" / "mcp-servers.json",
     )
 
 

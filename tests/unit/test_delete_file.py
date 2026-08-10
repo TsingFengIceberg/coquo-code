@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.actions import ActionPrecondition
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.delete_file import (
+from coquo.core.actions import ActionPrecondition
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.delete_file import (
     MAX_DELETE_COMPONENT_BYTES,
     MAX_DELETE_PATH_BYTES,
     MAX_DELETE_PATH_CHARACTERS,
@@ -158,7 +158,7 @@ def test_unlink_failure_reports_failed_and_keeps_file(
     tool = DeleteFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_file.os.unlink",
+        "coquo.tools.delete_file.os.unlink",
         lambda *a, **k: (_ for _ in ()).throw(OSError()),
     )
 
@@ -176,7 +176,7 @@ def test_parent_fsync_failure_reports_deleted_partial(
     tool = DeleteFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.delete_file._fsync_directory",
+        "coquo.tools.delete_file._fsync_directory",
         lambda _fd: (_ for _ in ()).throw(OSError()),
     )
 
