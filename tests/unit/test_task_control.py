@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.agent.task_control import (
+from coquo.agent.task_control import (
     TaskControlDispatchResult,
     TaskControlProposal,
     TaskProposalKind,
     recover_task_control_proposal,
 )
-from leonervis_code.agent.tool_events import ToolDispatchResult, ToolEventStatus
-from leonervis_code.core.contracts import (
+from coquo.agent.tool_events import ToolDispatchResult, ToolEventStatus
+from coquo.core.contracts import (
     AssistantToolBatch,
     AssistantText,
     CommittedTurn,

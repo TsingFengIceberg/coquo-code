@@ -4,26 +4,26 @@ import json
 
 import pytest
 
-from leonervis_code.agent.loop import AgentLoop
-from leonervis_code.core.compaction import EffectiveContextSummary
-from leonervis_code.core.contracts import (
+from coquo.agent.loop import AgentLoop
+from coquo.core.compaction import EffectiveContextSummary
+from coquo.core.contracts import (
     AssistantText,
     ToolArguments,
     ToolResult,
     ToolUse,
     UserMessage,
 )
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.skills import SkillInventoryLoader, SkillSourceKind
-from leonervis_code.skills import import_skill, verify_skill_lock
-from leonervis_code.skills.catalog import MAX_SKILL_RESOURCE_BYTES, SkillCatalogError
-from leonervis_code.core.extensions import ToolExecutionKind
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.catalog import TOOL_REGISTRY_SNAPSHOT
-from leonervis_code.tools.glob import GlobTool
-from leonervis_code.tools.grep import GrepTool
-from leonervis_code.tools.list_directory import ListDirectoryTool
-from leonervis_code.tools.read_file import ReadFileTool
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.skills import SkillInventoryLoader, SkillSourceKind
+from coquo.skills import import_skill, verify_skill_lock
+from coquo.skills.catalog import MAX_SKILL_RESOURCE_BYTES, SkillCatalogError
+from coquo.core.extensions import ToolExecutionKind
+from coquo.core.permissions import PermissionAction
+from coquo.tools.catalog import TOOL_REGISTRY_SNAPSHOT
+from coquo.tools.glob import GlobTool
+from coquo.tools.grep import GrepTool
+from coquo.tools.list_directory import ListDirectoryTool
+from coquo.tools.read_file import ReadFileTool
 
 
 def write_skill(root, name: str, *, allowed: str = "  - read_file\n", body: str = "Read first.\n"):
@@ -69,9 +69,9 @@ def loop_for(
 
 def test_inventory_uses_exact_source_priority_and_keeps_shadowed_candidates(tmp_path) -> None:
     config = tmp_path / "config"
-    write_skill(config / "leonervis-code" / "skills", "release", body="User body.\n")
+    write_skill(config / "coquo" / "skills", "release", body="User body.\n")
     write_skill(tmp_path / ".agents" / "skills", "release", body="Project body.\n")
-    write_skill(tmp_path / ".leonervis-code" / "skills", "release", body="Local body.\n")
+    write_skill(tmp_path / ".coquo" / "skills", "release", body="Local body.\n")
 
     inventory = SkillInventoryLoader(tmp_path, {"XDG_CONFIG_HOME": str(config)}).load()
 
@@ -314,7 +314,7 @@ def test_import_rejects_symlink_and_oversized_resource_without_target_or_lock(tm
 
 
 def test_import_detects_source_drift_and_removes_its_new_target(tmp_path, monkeypatch) -> None:
-    from leonervis_code.skills import authoring
+    from coquo.skills import authoring
 
     source_root = tmp_path / "sources"
     write_skill(source_root, "drifting")
@@ -341,7 +341,7 @@ def test_import_detects_source_drift_and_removes_its_new_target(tmp_path, monkey
 def test_import_detects_target_directory_replacement_without_deleting_replacement(
     tmp_path, monkeypatch
 ) -> None:
-    from leonervis_code.skills import authoring
+    from coquo.skills import authoring
 
     source_root = tmp_path / "sources"
     source = source_root / "replaced"

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.mcp.capabilities import McpCapabilityClient
-from leonervis_code.mcp.client import McpClientError, McpNotificationSummary
+from coquo.mcp.capabilities import McpCapabilityClient
+from coquo.mcp.client import McpClientError, McpNotificationSummary
 
 
 class Session:

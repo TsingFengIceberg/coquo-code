@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
@@ -14,8 +14,8 @@ from leonervis_code.agent.tool_events import (
     ToolRequestStarted,
     ToolResultDetails,
 )
-from leonervis_code.cli.event_sink import TerminalEventSink
-from leonervis_code.cli.presentation import DIM, GREEN, RESET, ToolDetailMode
+from coquo.cli.event_sink import TerminalEventSink
+from coquo.cli.presentation import DIM, GREEN, RESET, ToolDetailMode
 
 
 class FlushingStream(io.StringIO):

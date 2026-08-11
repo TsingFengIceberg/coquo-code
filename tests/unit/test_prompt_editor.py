@@ -9,7 +9,7 @@ from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from leonervis_code.cli.prompt_editor import (
+from coquo.cli.prompt_editor import (
     MAX_PROMPT_BYTES,
     PromptInputError,
     PromptRead,

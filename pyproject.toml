@@ -3,12 +3,12 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "leonervis-code"
+name = "coquo"
 version = "0.1.0"
 description = "A learning-first, local coding-agent CLI Harness prototype."
 readme = "README_en.md"
 requires-python = ">=3.12,<3.14"
-authors = [{ name = "Leonervis Code contributors" }]
+authors = [{ name = "Coquo contributors" }]
 dependencies = [
   "anthropic>=0.116.0",
   "openai>=2.15.0",
@@ -28,8 +28,7 @@ classifiers = [
 ]
 
 [project.scripts]
-leonervis-code = "leonervis_code.cli.main:main"
-leonervis = "leonervis_code.cli.main:main"
+coquo = "coquo.cli.main:main"
 
 [dependency-groups]
 dev = [
@@ -38,7 +37,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/leonervis_code"]
+packages = ["src/coquo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

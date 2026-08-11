@@ -5,24 +5,24 @@ import io
 import json
 from uuid import UUID
 
-from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import AssistantText, ToolTurnLedger, UserMessage
-from leonervis_code.hooks import HookStore
-from leonervis_code.core.hook_contracts import (
+from coquo.cli.main import main
+from coquo.core.contracts import AssistantText, ToolTurnLedger, UserMessage
+from coquo.hooks import HookStore
+from coquo.core.hook_contracts import (
     HookActionOutcome,
     HookAuditEntry,
     HookAuditLedger,
     HookEffect,
     HookEvent,
 )
-from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionStore
-from leonervis_code.task_store import TaskStore
+from coquo.session_records import BindingSnapshot
+from coquo.session_store import SessionStore
+from coquo.task_store import TaskStore
 
 
 def test_hooks_cli_adds_disabled_rule_then_enables_inspects_and_removes(tmp_path) -> None:
     user_path = tmp_path / "config" / "hooks.json"
-    project_path = tmp_path / ".leonervis-code" / "hooks.json"
+    project_path = tmp_path / ".coquo" / "hooks.json"
     common = {
         "cwd": tmp_path,
         "environment": {},

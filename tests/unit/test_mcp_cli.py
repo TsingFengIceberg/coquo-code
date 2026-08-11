@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.cli.main import main
-from leonervis_code.mcp.client import McpClientError, McpStdioClient
-from leonervis_code.mcp.catalog import McpCatalogService
-from leonervis_code.mcp.config import McpServerStore
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
+from coquo.cli.main import main
+from coquo.mcp.client import McpClientError, McpStdioClient
+from coquo.mcp.catalog import McpCatalogService
+from coquo.mcp.config import McpServerStore
+from coquo.tools.command_sandbox import CommandSandboxLaunch
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -40,7 +40,7 @@ def failing_catalog_client_factory(workspace, *, environment):
 
 def test_mcp_cli_configures_disabled_server_then_enables_probes_and_removes(tmp_path) -> None:
     user_path = tmp_path / "config" / "mcp.json"
-    project_path = tmp_path / ".leonervis-code" / "mcp.json"
+    project_path = tmp_path / ".coquo" / "mcp.json"
     common = {
         "cwd": tmp_path,
         "environment": {"HOST_TOKEN": "secret-value"},
@@ -211,9 +211,9 @@ def test_mcp_cli_adds_remote_server_without_persisting_bearer_value(tmp_path) ->
 
 def test_mcp_cli_sets_inspects_and_clears_exact_tool_policy(tmp_path) -> None:
     user_path = tmp_path / "config" / "mcp.json"
-    project_path = tmp_path / ".leonervis-code" / "mcp.json"
+    project_path = tmp_path / ".coquo" / "mcp.json"
     user_policy_path = tmp_path / "config" / "mcp-policy.json"
-    project_policy_path = tmp_path / ".leonervis-code" / "mcp-policy.json"
+    project_policy_path = tmp_path / ".coquo" / "mcp-policy.json"
     common = {
         "cwd": tmp_path,
         "environment": {},
@@ -310,7 +310,7 @@ def test_mcp_cli_sets_inspects_and_clears_exact_tool_policy(tmp_path) -> None:
     prune_output = output.getvalue()
     assert "MCP policy prune dry-run: 1 stale; 0 unresolved excluded" in prune_output
     assert (
-        f"leonervis-code mcp policy clear {candidate.qualified_name} --scope project "
+        f"coquo mcp policy clear {candidate.qualified_name} --scope project "
         "--if-revision 1" in prune_output
     )
     assert "No policy files were modified." in prune_output

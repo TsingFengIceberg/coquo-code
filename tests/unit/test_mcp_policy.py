@@ -4,8 +4,8 @@ import os
 
 import pytest
 
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.mcp.policy import (
+from coquo.core.permissions import PermissionAction
+from coquo.mcp.policy import (
     McpPolicyDisposition,
     McpToolPolicyError,
     McpToolPolicyRule,

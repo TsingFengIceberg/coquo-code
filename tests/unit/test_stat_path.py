@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.stat_path import StatPathTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.stat_path import StatPathTool
 
 
 def request(path: object, **extra: object) -> ToolUse:

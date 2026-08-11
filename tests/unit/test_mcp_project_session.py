@@ -3,21 +3,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from leonervis_code.core.action_coordinator import ApprovalResolution
-from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
-from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
-from leonervis_code.agent.tool_events import (
+from coquo.core.action_coordinator import ApprovalResolution
+from coquo.core.contracts import AssistantText, ToolArguments, ToolUse
+from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from coquo.agent.tool_events import (
     McpNotificationActivityReceived,
     ToolRequestFinished,
 )
-from leonervis_code.mcp.catalog import McpCatalogService
-from leonervis_code.mcp.client import McpStdioClient
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerStore
-from leonervis_code.mcp.policy import McpToolPolicyRule, McpToolPolicyStore
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.session import ProjectSession
-from leonervis_code.session_records import ActionAuditStatus
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
+from coquo.mcp.catalog import McpCatalogService
+from coquo.mcp.client import McpStdioClient
+from coquo.mcp.config import McpServerConfiguration, McpServerStore
+from coquo.mcp.policy import McpToolPolicyRule, McpToolPolicyStore
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.session import ProjectSession
+from coquo.session_records import ActionAuditStatus
+from coquo.tools.command_sandbox import CommandSandboxLaunch
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -38,7 +38,7 @@ def _client_factory(workspace, *, environment):
 
 def _configured(tmp_path):
     user_path = tmp_path / "config" / "mcp.json"
-    project_path = tmp_path / ".leonervis-code" / "mcp-servers-test.json"
+    project_path = tmp_path / ".coquo" / "mcp-servers-test.json"
     store = McpServerStore(user_path, project_path)
     store.add_server(
         McpServerConfiguration(
@@ -137,7 +137,7 @@ def test_project_session_denies_mcp_without_starting_runtime_process(tmp_path) -
 def test_exact_workspace_read_policy_allows_confined_mcp_in_read_only_mode(tmp_path) -> None:
     user_path, project_path, candidate = _configured(tmp_path)
     user_policy_path = tmp_path / "config" / "mcp-policy.json"
-    project_policy_path = tmp_path / ".leonervis-code" / "mcp-policy-test.json"
+    project_policy_path = tmp_path / ".coquo" / "mcp-policy-test.json"
     policies = McpToolPolicyStore(user_policy_path, project_policy_path)
     policies.set_rule(
         McpToolPolicyRule(
@@ -177,7 +177,7 @@ def test_project_session_surfaces_content_free_notifications_and_invalidates_cat
     tmp_path,
 ) -> None:
     user_path = tmp_path / "config" / "mcp.json"
-    project_path = tmp_path / ".leonervis-code" / "mcp-servers-test.json"
+    project_path = tmp_path / ".coquo" / "mcp-servers-test.json"
     store = McpServerStore(user_path, project_path)
     store.add_server(
         McpServerConfiguration(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.orchestration import (
+from coquo.core.orchestration import (
     AmbiguousModelSelectorError,
     CapabilitySet,
     DisabledProviderError,
@@ -26,8 +26,8 @@ from leonervis_code.core.orchestration import (
     UnsupportedCapabilityError,
     UnsupportedParameterError,
 )
-from leonervis_code.providers.request_policy import preview_request
-from leonervis_code.providers.routing import (
+from coquo.providers.request_policy import preview_request
+from coquo.providers.routing import (
     FAKE_MODEL_CATALOG,
     FAKE_PROVIDER_PROFILES,
     fallback_is_permitted,

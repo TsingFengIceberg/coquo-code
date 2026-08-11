@@ -1,11 +1,12 @@
 # Implemented Foundations and Design Evolution
 
-> This document preserves the implementation narrative for Leonervis Code's completed learning slices. The README is intentionally limited to primary commands and usage entry points. The ADRs under [`docs/decisions/`](./decisions/) remain the authoritative records for each slice's rationale, boundaries, and verification evidence.
+> This document preserves the implementation narrative for Coquo's completed learning slices. The README is intentionally limited to primary commands and usage entry points. The ADRs under [`docs/decisions/`](./decisions/) remain the authoritative records for each slice's rationale, boundaries, and verification evidence.
 >
 > [中文](./implemented-foundations.md) | English
 
 ## Contents
 
+- [Coquo Product Identity Migration](#coquo-product-identity-migration)
 - [Canonical model system prompt](#canonical-model-system-prompt)
 - [Foundation 3D: stable profile identity and durable Sessions](#foundation-3d-stable-profile-identity-and-durable-sessions)
 - [Foundation 3C: named provider profiles and a real multi-turn REPL](#foundation-3c-named-provider-profiles-and-a-real-multi-turn-repl)
@@ -90,9 +91,15 @@
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [ADR index](#adr-index)
 
+## Coquo Product Identity Migration
+
+At version `0.1.0` pre-alpha, the project moves its public identity from Leonervis Code to Coquo in one clean transition. The Python distribution, import package, sole CLI, and module entry point are all `coquo`; workspace state moves to `.coquo/`, XDG configuration and cache use `coquo/`, and product-owned environment variables use the `COQUO_` prefix. MCP client metadata, HTTP user agents, temporary files, terminal titles, and the model-visible role use the same identity, while the LEO graphic becomes a deterministic COQ mark.
+
+The transition provides no legacy CLI, import package, or automatic runtime-data compatibility. Coquo neither reads, moves, nor deletes `.leonervis-code/` or old XDG directories. Git ignore rules, the command sandbox, and the independent reviewer continue protecting both old and new state paths so legacy sensitive data is not exposed by the rename. Product-owned fingerprint domains become `coquo-*`, placing old Session, Task, Action, ToolSet, Skill, Hook, and Effective Context identities outside the new runtime contract. Structured record algorithms do not otherwise change; the model system prompt advances to v44, provider adapter contract to v45, and built-in Tool Registry and source generation to 6. Historical ADRs retain the former name. [ADR 0128](./decisions/0128-coquo-product-identity-migration.md) records the complete decision.
+
 ## Canonical model system prompt
 
-Leonervis Code builds a provider-neutral `SystemPromptSnapshot` from `src/leonervis_code/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every provider/tool continuation in that turn:
+Coquo builds a provider-neutral `SystemPromptSnapshot` from `src/coquo/system_prompt.py`. The snapshot contains an explicit version, normalized text, and a domain-separated SHA-256 fingerprint. It is built once at the beginning of each user turn and remains pinned across every provider/tool continuation in that turn:
 
 ```text
 SystemPromptSnapshot + neutral conversation history
@@ -118,22 +125,22 @@ Profile-registry schema v3 uses an immutable UUID as reference identity, while e
 Legacy schema-v1 profiles deterministically map their original names to UUIDs. The reader accepts mixed v1, v2, and v3 user/project files, and a write upgrades only the file it actually changes:
 
 ```bash
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider list --show-ids
-uv run leonervis-code provider rename vendor vendor-new --if-revision 1
-uv run leonervis-code provider replace vendor-new \
+uv run coquo provider show vendor
+uv run coquo provider list --show-ids
+uv run coquo provider rename vendor vendor-new --if-revision 1
+uv run coquo provider replace vendor-new \
   --provider custom \
   --model vendor/model-v2 \
   --protocol openai-compatible \
   --base-url https://gateway.example/v1 \
   --if-revision 2
-uv run leonervis-code provider migrate
+uv run coquo provider migrate
 ```
 
 Every `prompt` or REPL invocation creates or opens:
 
 ```text
-<workspace>/.leonervis-code/sessions/<workspace-fingerprint>/<session-id>.jsonl
+<workspace>/.coquo/sessions/<workspace-fingerprint>/<session-id>.jsonl
 ```
 
 A Session uses append-only JSONL. A successful turn's user message, tool-use/result pairs, and final assistant text are written and fsynced as one complete commit record before in-memory history changes. Each open Session holds an exclusive writer lock.
@@ -141,11 +148,11 @@ A Session uses append-only JSONL. A successful turn's user message, tool-use/res
 Corrupt middle records, unknown schemas, and invalid tool pairing fail closed. Only an incomplete, unterminated crash tail can be truncated under controlled recovery, which also appends a recovery record.
 
 ```bash
-uv run leonervis-code prompt "First turn"
-uv run leonervis-code session list
-uv run leonervis-code session show latest
-uv run leonervis-code --resume latest prompt "Continue the previous turn"
-uv run leonervis-code -C ../another-workspace --resume latest
+uv run coquo prompt "First turn"
+uv run coquo session list
+uv run coquo session show latest
+uv run coquo --resume latest prompt "Continue the previous turn"
+uv run coquo -C ../another-workspace --resume latest
 ```
 
 A bare launch creates a new Session, while `--resume latest` continues the workspace's latest pointer. Inside the REPL, `/session new` starts empty history without changing the current runtime provider, and `/resume <id>` switches to existing history. `[current]` marks the destination of the next REPL prompt, `[latest]` marks the current `latest.json` target, and `open/closed` describes transcript lifecycle rather than lock ownership; a closed Session remains resumable.
@@ -154,7 +161,7 @@ Sessions and runtime providers are decoupled. The transcript records the profile
 
 Sending old history to a newly selected provider is an explicit runtime choice. If the current adapter rejects that history, the failed turn is not committed.
 
-A local Session can contain user input, model responses, source excerpts, and tool results, so `.leonervis-code/` is sensitive runtime state and should not be committed, synchronized, or published. Known configured credential values are never written as binding data, but the system cannot generally detect an unknown secret that appears in user text or a file read by a tool.
+A local Session can contain user input, model responses, source excerpts, and tool results, so `.coquo/` is sensitive runtime state and should not be committed, synchronized, or published. Known configured credential values are never written as binding data, but the system cannot generally detect an unknown secret that appears in user text or a file read by a tool.
 
 `ProjectSession` exposes `session_id`, `transcript_path`, `session_info()`, `list_sessions()`, `new_session()`, `switch_session()`, and `resume=`. Switching Sessions replaces only durable history and preserves the current provider client.
 
@@ -165,45 +172,45 @@ See [0010: stable profile identity and durable Sessions](./decisions/0010-founda
 Profile definitions live at:
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json
+${XDG_CONFIG_HOME:-~/.config}/coquo/providers.json
 ```
 
-A workspace stores only its active profile ID in `.leonervis-code/provider.json`. Neither JSON file stores key values. The workspace directory is local runtime state and should be added to the target project's `.gitignore`.
+A workspace stores only its active profile ID in `.coquo/provider.json`. Neither JSON file stores key values. The workspace directory is local runtime state and should be added to the target project's `.gitignore`.
 
 ```bash
 # Built-in provider: protocol, default endpoint, and credential env come from the catalog
-uv run leonervis-code provider add work-openai \
+uv run coquo provider add work-openai \
   --provider openai \
   --model gpt-5
 
 # Controlled custom OpenAI-compatible endpoint; store only the key's env-variable name
-uv run leonervis-code provider add local-qwen \
+uv run coquo provider add local-qwen \
   --provider custom \
   --model Qwen/Qwen3.5 \
   --protocol openai-compatible \
   --base-url http://127.0.0.1:11434
 
-uv run leonervis-code provider add vendor \
+uv run coquo provider add vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
   --base-url https://gateway.example/v1 \
   --api-key-env VENDOR_API_KEY
 
-uv run leonervis-code provider list
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider use local-qwen
-uv run leonervis-code provider use work-openai --scope user
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider remove vendor
+uv run coquo provider list
+uv run coquo provider show vendor
+uv run coquo provider use local-qwen
+uv run coquo provider use work-openai --scope user
+uv run coquo provider clear --scope project
+uv run coquo provider remove vendor
 ```
 
 Selection precedence is explicit `--profile` → explicit direct `--model` → workspace active → user active → fake/offline. `--profile NAME --model MODEL` uses a process-local model override on that profile endpoint without rewriting the profile:
 
 ```bash
-uv run leonervis-code --profile work-openai --model gpt-5-mini \
+uv run coquo --profile work-openai --model gpt-5-mini \
   prompt "Explain this workspace"
-uv run leonervis-code --profile work-openai
+uv run coquo --profile work-openai
 ```
 
 Both `provider use` and REPL `/provider use` resolve the route, validate the credential, and construct a candidate SDK client before writing active configuration and swapping the current client. On failure, the old active selection and client remain intact. `/model` is likewise atomic and allowed only between turns.
@@ -214,7 +221,7 @@ Other project modules can use the public facade directly:
 
 ```python
 from pathlib import Path
-from leonervis_code import ProjectSession
+from coquo import ProjectSession
 
 with ProjectSession.open(Path.cwd(), profile="work-openai") as session:
     first = session.prompt("Explain the README first")
@@ -232,26 +239,26 @@ With global `--model`, `prompt` resolves a real adapter through the shared resol
 
 ```bash
 export ANTHROPIC_API_KEY='...'
-uv run leonervis-code --model anthropic/claude-opus-4-8 \
+uv run coquo --model anthropic/claude-opus-4-8 \
   prompt "Explain this workspace"
 
 export OPENAI_API_KEY='...'
-uv run leonervis-code --model openai/gpt-5 \
+uv run coquo --model openai/gpt-5 \
   prompt "Explain this workspace"
 
 export XAI_API_KEY='...'
-uv run leonervis-code --model xai/grok-3 \
+uv run coquo --model xai/grok-3 \
   prompt "Explain this workspace"
 
 export DASHSCOPE_API_KEY='...'
-uv run leonervis-code --model dashscope/qwen-plus \
+uv run coquo --model dashscope/qwen-plus \
   prompt "Explain this workspace"
 
-uv run leonervis-code --model ollama/qwen3:8b \
+uv run coquo --model ollama/qwen3:8b \
   prompt "Explain this workspace"
 
 export OPENROUTER_API_KEY='...'
-uv run leonervis-code --model openrouter/anthropic/claude-opus-4-8 \
+uv run coquo --model openrouter/anthropic/claude-opus-4-8 \
   prompt "Explain this workspace"
 ```
 
@@ -263,7 +270,7 @@ A one-shot controlled OpenAI-compatible endpoint can also be supplied without pe
 
 ```bash
 export VENDOR_API_KEY='...'
-uv run leonervis-code \
+uv run coquo \
   --model vendor/model \
   --provider-protocol openai-compatible \
   --base-url https://gateway.example/v1 \
@@ -278,16 +285,16 @@ Route and adapter configuration contain no secret value. A key is read only when
 A real route can be previewed without constructing a client or accessing the network:
 
 ```bash
-uv run leonervis-code --model openai/gpt-5 route
+uv run coquo --model openai/gpt-5 route
 ```
 
 The fake fallback remains unchanged. If a workspace/user active profile exists, `prompt` and the bare REPL use that real profile even without an explicit selector:
 
 ```bash
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider clear --scope user
-uv run leonervis-code prompt "Hello"   # fake with no active profile; no network
-uv run leonervis-code                   # fake REPL with no active profile; no network
+uv run coquo provider clear --scope project
+uv run coquo provider clear --scope user
+uv run coquo prompt "Hello"   # fake with no active profile; no network
+uv run coquo                   # fake REPL with no active profile; no network
 ```
 
 See [0007: non-streaming Anthropic adapter](./decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md) and [0008: local multi-provider runtime](./decisions/0008-foundation-3b-local-multi-provider-runtime.md) for the detailed decisions. Run live smoke checks only when the user explicitly chooses their own credentials, endpoints, and API budget.
@@ -297,14 +304,14 @@ See [0007: non-streaming Anthropic adapter](./decisions/0007-foundation-3a-anthr
 `route` is a deterministic diagnostic surface for the control-plane and adapter-policy boundary:
 
 ```bash
-uv run leonervis-code route
+uv run coquo route
 
-uv run leonervis-code route \
+uv run coquo route \
   --model beta \
   --max-output-tokens 32 \
   --fallback-model default
 
-uv run leonervis-code route \
+uv run coquo route \
   --model beta \
   --temperature 0.2
 ```
@@ -406,7 +413,7 @@ Slices 0–3 intentionally added no executor, process group, CLI presentation, d
 
 ## Foundation 4C Slices 4–6: Bounded Command Execution and Process-group Cleanup
 
-The Host executor now passes prepared argv directly to `subprocess.Popen`, fixes `shell=False` and `stdin=DEVNULL`, and creates a separate process session/group for every command. Leonervis does not parse pipes, redirects, wildcards, variable expansion, or command substitution. An approved executable may itself be a shell and interpret its arguments, so direct argv is still not a sandbox. The executor rechecks every workspace-root/cwd component immediately next to the spawn boundary and returns `command_cwd_invalid` without starting a process if that boundary has become invalid. Ordinary path APIs cannot eliminate the remaining local TOCTOU window completely, so this is not a hostile-concurrency guarantee.
+The Host executor now passes prepared argv directly to `subprocess.Popen`, fixes `shell=False` and `stdin=DEVNULL`, and creates a separate process session/group for every command. Coquo does not parse pipes, redirects, wildcards, variable expansion, or command substitution. An approved executable may itself be a shell and interpret its arguments, so direct argv is still not a sandbox. The executor rechecks every workspace-root/cwd component immediately next to the spawn boundary and returns `command_cwd_invalid` without starting a process if that boundary has become invalid. Ordinary path APIs cannot eliminate the remaining local TOCTOU window completely, so this is not a hostile-concurrency guarantee.
 
 Commands inherit only a closed Host environment allowlist, with `PWD` replaced by the actual cwd; provider API keys and arbitrary project variables are not forwarded automatically. Independent readers continuously drain stdout and stderr to EOF, retain only the first 32 KiB of each, and record captured/total byte counts plus truncation. Valid UTF-8 returns as text; other bytes return as base64, avoiding locale-dependent decoding and pipe-buffer deadlocks.
 
@@ -448,7 +455,7 @@ The persistent TTY connects Ctrl-R to a dedicated prompt_toolkit SearchToolbar f
 
 ## Foundation 5A: Root `AGENTS.md` Project Instructions
 
-Leonervis recognizes only `AGENTS.md` at the workspace root. Missing means no project instructions; an existing entry is opened from the root directory descriptor with no-follow semantics and must retain non-symlink regular-file identity. Content is strict UTF-8, may be empty, preserves exact LF or CRLF bytes, rejects NUL, and is capped at 32 KiB for both characters and UTF-8 bytes. The loader does not search parents, child directories, or a Git root, does not merge a hierarchy, and never automatically reads `CLAUDE.md`, `LEONERVIS.md`, or another compatibility name. An invalid existing file fails clearly before an ordinary provider call instead of being treated as missing.
+Coquo recognizes only `AGENTS.md` at the workspace root. Missing means no project instructions; an existing entry is opened from the root directory descriptor with no-follow semantics and must retain non-symlink regular-file identity. Content is strict UTF-8, may be empty, preserves exact LF or CRLF bytes, rejects NUL, and is capped at 32 KiB for both characters and UTF-8 bytes. The loader does not search parents, child directories, or a Git root, does not merge a hierarchy, and never automatically reads `CLAUDE.md`, `COQUO.md`, or another compatibility name. An invalid existing file fails clearly before an ordinary provider call instead of being treated as missing.
 
 AgentLoop reads one `ProjectInstructionsSnapshot` while preparing each user turn and freezes it with the system prompt, tool catalog, and committed history. Every provider continuation, preflight, and ActionLease recheck in that turn reuses the same snapshot. Even if a tool overwrites `AGENTS.md` during the turn, that turn completes against the old snapshot and only the next turn reloads the new file. Manual and automatic compaction use one snapshot for source and candidate; a concurrent change during manual compaction conflicts under the existing CAS rule. Resume and Session switching do not restore a historical instruction copy and instead screen the next Effective Context against the current workspace file. Instruction text is not written to transcripts, checkpoints, Action Audit, or Session records.
 
@@ -458,7 +465,7 @@ This model-visible change advances the system prompt to v23 with fingerprint `v2
 
 ## Deterministic Offline Host Eval Baseline
 
-`leonervis-code eval` now provides the versioned `host-baseline-v3` suite. Its first four built-in cases cover bounded reading, an auto-policy controlled create, a read-only write denial, and skipping later actions after the first action in a batch fails. A fifth case covers model-proposed Task admission, exact user confirmation, foreground planning and execution, ordinary `skill_search` and `skill_load` inside the execution Stage, human verification, and completion. Each case fixes its prompt, initial UTF-8 files, scripted fake-provider responses, permission/approval modes, and expected Host facts. The runner always opens the real `ProjectSession` in a fresh temporary workspace with isolated provider-configuration paths, so execution crosses the ordinary AgentLoop, PermissionGate, tools, Session commit, and Action Audit without reading user credentials, real-provider configuration, or the network.
+`coquo eval` now provides the versioned `host-baseline-v3` suite. Its first four built-in cases cover bounded reading, an auto-policy controlled create, a read-only write denial, and skipping later actions after the first action in a batch fails. A fifth case covers model-proposed Task admission, exact user confirmation, foreground planning and execution, ordinary `skill_search` and `skill_load` inside the execution Stage, human verification, and completion. Each case fixes its prompt, initial UTF-8 files, scripted fake-provider responses, permission/approval modes, and expected Host facts. The runner always opens the real `ProjectSession` in a fresh temporary workspace with isolated provider-configuration paths, so execution crosses the ordinary AgentLoop, PermissionGate, tools, Session commit, and Action Audit without reading user credentials, real-provider configuration, or the network.
 
 Scoring occurs after the Session closes. The runner strictly replays through `SessionStore` and compares committed-turn count, the complete workspace entry and file-byte identities, chronological durable tool ledgers across all relevant Turns, and Action Audit lifecycles. The Task case also verifies accepted admission, one uniquely sourced Task, final state, and Stage kinds/outcomes. Final assistant text is compared by exact UTF-8 byte count and SHA-256 identity, but cannot override workspace facts: a regression test proves that even a response claiming creation fails when the target file is absent. Text reports expand only failed checks, while stable JSON excludes temporary paths, timestamps, random UUIDs, and original text, making it suitable for local regression and later CI comparison. `eval list` lists cases, `eval run <id>` runs one, and `eval run all --format json` runs the machine-readable baseline.
 
@@ -470,13 +477,13 @@ This is a Host-correctness baseline, not a pytest replacement and not an evaluat
 
 Visible and private tests use fixed `/usr/bin/python3 -m unittest discover ...` commands through the production `RunCommandTool` bubblewrap/seccomp sandbox; Eval has no direct-subprocess bypass. `eval task run TASK --real-provider` additionally requires an explicit `--profile`, `--profile-id`, or `--model`, then runs the ordinary ProjectSession, AgentLoop, PermissionGate, tools, and Action Audit under fixed `danger-full-access + auto` inside a newly created task directory. Without `--output`, that directory is removed after scoring; with `--output`, it remains for inspection. Tool lifecycle events go to stderr, while stdout contains only a stable score without workspace paths, provider text, or random IDs. Host checks cover agent completion, committed turn count, action certainty, workspace shape, protected files, visible tests, and hidden tests, independent of final model prose.
 
-The ordinary command sandbox read-only mounts the Host root, so real-task Eval additionally masks the current Leonervis source checkout inside bubblewrap; an installed build masks at least the evaluator module and bytecode cache before rebinding the task workspace. Hidden tests are generated only in a separate scoring directory after the agent Session closes, so model tools cannot inspect their text. This slice leaves all 21 model-visible tools, system prompt v23, adapter contract v26, `ctx-v5`/`ctx-v6`, ToolArguments, Session, Action Audit, and compaction schemas unchanged. It is not an arbitrary benchmark loader, model leaderboard, retry framework, or unauthorized provider smoke. See [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md).
+The ordinary command sandbox read-only mounts the Host root, so real-task Eval additionally masks the current Coquo source checkout inside bubblewrap; an installed build masks at least the evaluator module and bytecode cache before rebinding the task workspace. Hidden tests are generated only in a separate scoring directory after the agent Session closes, so model tools cannot inspect their text. This slice leaves all 21 model-visible tools, system prompt v23, adapter contract v26, `ctx-v5`/`ctx-v6`, ToolArguments, Session, Action Audit, and compaction schemas unchanged. It is not an arbitrary benchmark loader, model leaderboard, retry framework, or unauthorized provider smoke. See [0085: Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md).
 
 ## Durable Task Identity and Host Management
 
-Leonervis now distinguishes `Task -> Stage -> Turn -> Action`: a Task is a user objective that can survive restart; each future Stage advances one bounded step while retaining the ordinary Turn's 8/32/24 budgets; every Action still passes PermissionGate, approval, tool hard bounds, and Action Audit. This first stage implements only the outer Task identity, not Stage execution.
+Coquo now distinguishes `Task -> Stage -> Turn -> Action`: a Task is a user objective that can survive restart; each future Stage advances one bounded step while retaining the ordinary Turn's 8/32/24 budgets; every Action still passes PermissionGate, approval, tool hard bounds, and Action Audit. This first stage implements only the outer Task identity, not Stage execution.
 
-Each Task has an independent `task_header` schema-v1 transcript at `<workspace>/.leonervis-code/tasks/<workspace-fingerprint>/<task-id>.jsonl`. It stores a canonical UUID4, workspace identity, one existing owner Session, a bounded objective, at most 16 acceptance criteria, and a UTC creation timestamp; its current derived status is `ready`. TaskStore enforces no-follow regular-file reads, closed schemas, strict complete-line replay, bounded scans, and installation through a fsynced temporary file, exclusive hard link, and directory fsync. It does not claim complete non-creation if the final name is visible but durability is uncertain. List and inspect never create or repair state.
+Each Task has an independent `task_header` schema-v1 transcript at `<workspace>/.coquo/tasks/<workspace-fingerprint>/<task-id>.jsonl`. It stores a canonical UUID4, workspace identity, one existing owner Session, a bounded objective, at most 16 acceptance criteria, and a UTC creation timestamp; its current derived status is `ready`. TaskStore enforces no-follow regular-file reads, closed schemas, strict complete-line replay, bounded scans, and installation through a fsynced temporary file, exclusive hard link, and directory fsync. It does not claim complete non-creation if the final name is visible but durability is uncertain. List and inspect never create or repair state.
 
 Standalone commands provide `task create/list/show`, while the REPL provides `/task start/list/show`; REPL creation binds the then-current Session. These are Host-only commands: they invoke neither provider nor tool, consume no Turn budget, write no Session transcript or Action Audit, and do not elevate Task text into system authority or Action authorization. System prompt remains v23, adapter contract remains v26, and the 21 model-visible tools, ToolArguments v1, `ctx-v5`/`ctx-v6`, and Session/compaction/Action Audit schemas remain unchanged. ADR 0087 subsequently adds Stage records and a writer lease; `/task continue` and execution recovery remain future slices. See [0086: Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md).
 
@@ -492,7 +499,7 @@ Task transcripts add closed schema-v1 `stage_started`, `stage_committed`, and `s
 
 `/task continue <task-id> <stage-objective>` now maps one Task Stage to a real `ProjectSession.prompt()`. It therefore reuses the ordinary AgentLoop, 8/32/24 Turn budget, PermissionGate, per-Action approval, tool hard bounds, command sandbox, Action Audit, and atomic Session commit instead of creating a second long-task tool loop. Execution requires the Task's owner Session to be current; a Task is never permission or approval.
 
-The Host first builds one bounded UserMessage beginning `[Leonervis durable Task Stage]`. Its canonical JSON contains only the Task objective, acceptance criteria, accepted plan, the latest 16 redacted Stage summaries, current Stage, cumulative usage, total budget, and remaining allowance. New `stage_started` and `stage_committed` schema v2 records respectively store the Session baseline and complete prompt SHA-256 before provider work, then copy provider/token/tool-ledger counts after a real Turn commit. A normally failed `stage_failed` schema-v2 record also stores content-free provider and tool-attempt counts. None copies dialogue, arguments, results, or audit bodies; legacy Stage v1 continues to replay with accounting explicitly unavailable.
+The Host first builds one bounded UserMessage beginning `[Coquo durable Task Stage]`. Its canonical JSON contains only the Task objective, acceptance criteria, accepted plan, the latest 16 redacted Stage summaries, current Stage, cumulative usage, total budget, and remaining allowance. New `stage_started` and `stage_committed` schema v2 records respectively store the Session baseline and complete prompt SHA-256 before provider work, then copy provider/token/tool-ledger counts after a real Turn commit. A normally failed `stage_failed` schema-v2 record also stores content-free provider and tool-attempt counts. None copies dialogue, arguments, results, or audit bodies; legacy Stage v1 continues to replay with accounting explicitly unavailable.
 
 `/task recover` invokes neither provider nor tool. It searches only after the durable baseline for a committed Turn with an exact user-message digest match. No match fails the Stage as `interrupted`; one match binds the real Turn; multiple matches leave the Task unchanged and fail closed. It can also restore a missing plan or completion record after the Stage committed but before that protocol metadata append. Provider failure, cooperative cancellation, missing Turn commit, and Host failure map to closed Stage failure reasons. If the Turn committed before an exception, the Host binds that evidence before reporting the error and never blindly replays side effects.
 
@@ -514,7 +521,7 @@ A new Task may append a schema-v1 `task_acceptance_contract` before its first St
 
 `/task verify host` invokes no model. It performs no-follow path type checks, creation-time file SHA-256 baselines, owner-Session Action Audit certainty, or bounded command checks. Command checks reuse production `RunCommandTool` bubblewrap, seccomp, environment, timeout, output, and cleanup boundaries, but mount the workspace read-only and fail closed when the sandbox is unavailable. Every Host/reviewer attempt appends a schema-v1 `task_acceptance_checked`; only `passed` appends acceptance verification with the matching source.
 
-`/task review` reuses the current provider/API/model route but constructs a separate no-tools request without Executor Session history. The reviewer sees only explicitly declared regular-file snapshots and bounded Host facts; `.git`, `.leonervis-code`, and every `.env*` component are rejected. Its response must be strict JSON covering every requested criterion. Review usage is counted separately from ordinary Turns and compaction, and neither its response nor an error enters the Executor Session transcript.
+`/task review` reuses the current provider/API/model route but constructs a separate no-tools request without Executor Session history. The reviewer sees only explicitly declared regular-file snapshots and bounded Host facts; `.git`, `.coquo`, and every `.env*` component are rejected. Its response must be strict JSON covering every requested criterion. Review usage is counted separately from ordinary Turns and compaction, and neither its response nor an error enters the Executor Session transcript.
 
 Even `auto-verified` appends `completed` only after a current committed execution Stage has a model completion proposal and every criterion for that proposal has matching verification. A later Stage makes the old proposal, checks, and verifications ineffective for completion without deleting history. The canonical system prompt advances to v25; provider adapter v26, all 21 tool schemas, Session, Action Audit, and Effective Context representations remain unchanged. The no-project-instructions empty full-context ID becomes `ctx-v5-7fefaa42ca4226a17e7312fc723ecb3add2b6e8c96a0ac02671e69048156d401`. See [0090: Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md).
 
@@ -624,7 +631,7 @@ Live events are not written to the append-only transcript, do not participate in
 
 ## Provider-neutral Assistant Tool Text Representation
 
-Leonervis can now accurately represent "assistant text plus one tool call" internally. The existing immutable `ToolUse` has an optional `assistant_text` that atomically binds exact text to the same tool ID, name, and arguments. `None` remains the existing pure tool call; non-empty text is bounded to 32 KiB characters and 32 KiB of UTF-8 and is neither trimmed nor normalized. Effective Context identity and compact source preserve the text, while the tool-use/result causal pair remains indivisible.
+Coquo can now accurately represent "assistant text plus one tool call" internally. The existing immutable `ToolUse` has an optional `assistant_text` that atomically binds exact text to the same tool ID, name, and arguments. `None` remains the existing pure tool call; non-empty text is bounded to 32 KiB characters and 32 KiB of UTF-8 and is neither trimmed nor normalized. Effective Context identity and compact source preserve the text, while the tool-use/result causal pair remains indivisible.
 
 This slice originally defined only the internal representation without enabling real providers to use it. Anthropic and OpenAI-compatible parsers, history serializers, AgentLoop, and `turn_committed` schema v2 all failed closed so text could not be silently lost during execution, audit, or persistence. ADRs 0043–0046 have since completed inbound normalization, Session v3, history projection, and runtime/terminal integration in sequence.
 
@@ -706,7 +713,7 @@ The Host still enforces six calls per turn. The 17-tool schema/order, `parallel_
 
 ## Bounded Multi-tool Response Batches
 
-Leonervis now accepts a bounded ordered batch of tool calls in one provider response. The neutral `AssistantToolBatch` stores response-wide companion text and multiple `ToolUse` values with unique IDs; one call retains the legacy `ToolUse` shape. The OpenAI-compatible adapter assembles calls from `tool_calls[]` or independent stream indexes, while Anthropic assembles content blocks. The complete response must pass count, ID, JSON, closed-schema, and causal validation before any action in that batch can run; one invalid call rejects the whole batch.
+Coquo now accepts a bounded ordered batch of tool calls in one provider response. The neutral `AssistantToolBatch` stores response-wide companion text and multiple `ToolUse` values with unique IDs; one call retains the legacy `ToolUse` shape. The OpenAI-compatible adapter assembles calls from `tool_calls[]` or independent stream indexes, while Anthropic assembles content blocks. The complete response must pass count, ID, JSON, closed-schema, and causal validation before any action in that batch can run; one invalid call rejects the whole batch.
 
 The Host remains sequential. Each admitted call enters PermissionGate, approval, Action Audit, and execution in provider order. A non-successful action causes later calls in the same batch to receive explicit skipped errors without execution. The three layers permit at most eight calls per response, 32 admitted requests per user turn, and 24 provider invocations with a final text-only invocation. A batch that cannot fit the remaining request budget gets zero execution and matching budget errors. Earlier successful side effects are not rolled back after later failure, while candidate history still waits for final assistant text and durable turn commit.
 
@@ -934,7 +941,7 @@ The default `ScriptedFakeProvider` retains visible echo behavior and does not re
 
 The `prompt` command remains one-shot, but every successful turn is auto-saved. Within one REPL, `/history <count>` shows only completed user/final-assistant turns from the current Session, never internal tool data.
 
-Foundation 1B originally proved only process-local atomic history. Foundation 3D now persists each complete turn to workspace JSONL. A bare `leonervis-code` invocation in a noninteractive terminal explains that automation should use `leonervis-code prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
+Foundation 1B originally proved only process-local atomic history. Foundation 3D now persists each complete turn to workspace JSONL. A bare `coquo` invocation in a noninteractive terminal explains that automation should use `coquo prompt "..."` and exits nonzero, avoiding accidental hangs in pipes or CI.
 
 See [0001: single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md), [0002: deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md), [0003: in-memory text history](./decisions/0003-foundation-1a-in-memory-text-history.md), and [0004: bounded read_file tool loop](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md) for the detailed decisions.
 
@@ -1034,20 +1041,20 @@ The runtime can resolve the current exact endpoint/model context window without 
 The official Anthropic endpoint reuses the same official SDK client for the Models API. Generic OpenAI-compatible `/models` responses do not share a context-metadata contract and are therefore not probed blindly.
 
 ```bash
-uv run leonervis-code provider add local-qwen \
+uv run coquo provider add local-qwen \
   --provider custom \
   --model Qwen/Qwen3.5 \
   --protocol openai-compatible \
   --base-url http://127.0.0.1:11434 \
   --context-window-tokens 131072
-uv run leonervis-code provider show local-qwen
-uv run leonervis-code --profile local-qwen route
+uv run coquo provider show local-qwen
+uv run coquo --profile local-qwen route
 ```
 
 `provider show` labels user configuration as a `context window override`; offline `route` and runtime `/status` show the resolved value and source. Successful discovery is stored only at:
 
 ```text
-${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json
+${XDG_CACHE_HOME:-~/.cache}/coquo/model-context-capabilities.json
 ```
 
 The cache contains no credential value, raw provider body, or Session content. Profile-registry schema v3 reads v1/v2/v3, upgrades only the layer written, and supports explicit `provider migrate`.
@@ -1140,11 +1147,11 @@ The item codec now expresses inheritance at each capability's introduction bound
 
 ## Bounded Independent Brave/Tavily Web Search
 
-`web_search(query, max_results)` adds Leonervis's first Host-owned public-web search path. The model supplies only a unified query and result count; the Host selects a fixed Brave or Tavily Search API. It accepts no model-selected endpoint and does not read result pages, so its causality and provenance remain distinct from future provider-native search, MCP search, and general `web_fetch`. The tool is available to ordinary Prompts and Task planning, execution, and correction Stages, but not reflection Stages.
+`web_search(query, max_results)` adds Coquo's first Host-owned public-web search path. The model supplies only a unified query and result count; the Host selects a fixed Brave or Tavily Search API. It accepts no model-selected endpoint and does not read result pages, so its causality and provenance remain distinct from future provider-native search, MCP search, and general `web_fetch`. The tool is available to ordinary Prompts and Task planning, execution, and correction Stages, but not reflection Stages.
 
 Brave uses a fixed GET request and subscription-token header. Tavily uses a fixed Bearer-authenticated POST with basic search, one chunk per source, and automatic parameters, generated answers, raw content, and images disabled; Tavily documents this as one basic-search credit. The Host limits queries to 512 characters/2 KiB and results to 1 through 10, with a 15-second timeout, 256 KiB response, 32 KiB JSONL output, and at most 100 parsed raw results. Both responses normalize into provider-ordered title, URL, snippet, domain, and explicit backend fields after unsafe or duplicate URLs are filtered. Third-party results remain untrusted data.
 
-Search uses the new `network-read` action: `read-only` and `workspace-write` deny it, while only `danger-full-access` proceeds under `ask | auto`. The low-level `WebSearchTool` can resolve one valid credential and use `LEONERVIS_WEB_SEARCH_BACKEND` to disambiguate two, but ADR 0103 later requires every ordinary ProjectSession to start with independent sources disabled. Only explicit REPL `/search use brave|tavily` activates one. `/search status|sources` inspects state and `/search reset` restores the Provider-native default or disables every source. The first active source is the only currently executed primary; additional sources establish the future fan-out interface but are not requested or billed. Command configuration is process-local, does not write Session state, and invokes no provider. Ask displays the complete query, count, actual backend, and backend-specific quota disclosure. The query and a credential-free backend-configuration fingerprint participate in exact ActionIdentity, approval binding, and durable Action Audit, while routine live and `/actions` views redact query text. Credentials never enter model arguments, ActionIdentity, ToolResult, Session, or audit. Timeout or transport uncertainty returns `partial` and prohibits automatic retry.
+Search uses the new `network-read` action: `read-only` and `workspace-write` deny it, while only `danger-full-access` proceeds under `ask | auto`. The low-level `WebSearchTool` can resolve one valid credential and use `COQUO_WEB_SEARCH_BACKEND` to disambiguate two, but ADR 0103 later requires every ordinary ProjectSession to start with independent sources disabled. Only explicit REPL `/search use brave|tavily` activates one. `/search status|sources` inspects state and `/search reset` restores the Provider-native default or disables every source. The first active source is the only currently executed primary; additional sources establish the future fan-out interface but are not requested or billed. Command configuration is process-local, does not write Session state, and invokes no provider. Ask displays the complete query, count, actual backend, and backend-specific quota disclosure. The query and a credential-free backend-configuration fingerprint participate in exact ActionIdentity, approval binding, and durable Action Audit, while routine live and `/actions` views redact query text. Credentials never enter model arguments, ActionIdentity, ToolResult, Session, or audit. Timeout or transport uncertainty returns `partial` and prohibits automatic retry.
 
 The catalog now contains 22 ordinary tools and 30 definitions total. Canonical system prompt advances to v30, provider adapter contract advances to v32, and the empty full-context identity becomes `ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`; ToolArguments v1, ActionIdentity v1, `ctx-v5`/`ctx-v6` representations, and all Session, Task, and Action Audit schemas remain unchanged, and old transcripts are not rewritten. Non-persistent ApprovalPreview advances to v2 to carry the selected backend; ActionPrecondition adds a credential-free configuration SHA-256 kind without changing ActionIdentity's version. Deterministic injected-transport tests cover both wire protocols, selection, policy, approval, audit, truncation, malformed responses, and uncertain failures without real network access or API quota. See [0102: Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md).
 
@@ -1152,7 +1159,7 @@ The catalog now contains 22 ordinary tools and 30 definitions total. Canonical s
 
 Provider preset, message protocol, and native-search adapter are now modeled separately. Profile schema advances to v5 and can select `auto`, `none`, one implemented adapter, or an imported `custom-manifest-v1`. The catalog now presets Anthropic, OpenAI, xAI, DashScope, OpenRouter, DeepSeek, Zhipu, Moonshot, Ark, Hunyuan, Qianfan, Ollama, and local routes. Anthropic, DashScope, and OpenRouter declare native search; OpenAI declares it only for model names containing `search-preview`; other presets and custom profiles default to unavailable. Custom profiles may select either OpenAI-compatible or Anthropic-messages protocol. Old Profiles need not be retained and may be rebuilt under v5, although the store keeps low-cost legacy-schema reading.
 
-At Session startup, a route with declared native search activates `provider`; otherwise no source is active. Brave and Tavily always remain disabled even when credentials exist. `/search use provider|brave|tavily [...]` explicitly changes process-local ordered sources, `/search reset` restores the Provider default, and Provider/model switches also reset to the new route default. Only the first primary executes. Provider-native search is part of provider generation rather than a Leonervis ToolUse: it consumes no ordinary tool request and enters no PermissionGate, Action lease, or Action Audit. Selecting an independent source disables Provider search and re-exposes Host `web_search`.
+At Session startup, a route with declared native search activates `provider`; otherwise no source is active. Brave and Tavily always remain disabled even when credentials exist. `/search use provider|brave|tavily [...]` explicitly changes process-local ordered sources, `/search reset` restores the Provider default, and Provider/model switches also reset to the new route default. Only the first primary executes. Provider-native search is part of provider generation rather than a Coquo ToolUse: it consumes no ordinary tool request and enters no PermissionGate, Action lease, or Action Audit. Selecting an independent source disables Provider search and re-exposes Host `web_search`.
 
 Fixed adapters project an Anthropic server tool, OpenAI `web_search_options`, DashScope `extra_body.enable_search`, and an OpenRouter server tool. Supported citations append as a bounded Markdown `Sources:` section in final assistant text and therefore persist through ordinary Session history. To avoid misclassifying vendor server-tool stream events as Host calls, native search currently uses a buffered provider invocation followed by one complete terminal text delta. A custom manifest allows only bounded `extra_body`, one non-function server tool, and a predefined citation format. It rejects protected request and credential-shaped fields, endpoints, headers, code, custom parsers, and oversized structures. The CLI reads it only while creating or replacing a Profile, stores canonical content, and does not retain the source path.
 
@@ -1160,7 +1167,7 @@ Canonical system prompt advances to v31, provider adapter contract advances to v
 
 ## OpenAI Responses Protocol and Provider-owned History
 
-Leonervis now treats `openai_responses` as a first-class wire protocol beside Anthropic Messages and OpenAI Chat Completions. Built-in OpenAI routes use Responses. DeepSeek selects by model: `deepseek-v4-flash` uses Responses and declares official Provider-native `web_search`, while other DeepSeek models retain Chat Completions without inferred search. Custom Profiles may also select `openai-responses`. Existing V4 Flash Chat Profiles remain readable with their Chat semantics and do not silently gain native search.
+Coquo now treats `openai_responses` as a first-class wire protocol beside Anthropic Messages and OpenAI Chat Completions. Built-in OpenAI routes use Responses. DeepSeek selects by model: `deepseek-v4-flash` uses Responses and declares official Provider-native `web_search`, while other DeepSeek models retain Chat Completions without inferred search. Custom Profiles may also select `openai-responses`. Existing V4 Flash Chat Profiles remain readable with their Chat semantics and do not silently gain native search.
 
 The Responses adapter sends stateless full history with system policy separated into `instructions`, fixes `store=false`, and projects Host function tools beside optional Provider `web_search`. Host ToolUse and ToolResult become `function_call` and `function_call_output` with one matching `call_id`. Provider `reasoning` and `web_search_call` instead become bounded `ProviderOwnedItem` values carried by `ProviderResponseEnvelope`: AgentLoop persists and returns them unchanged on later turns but never sends them through Host dispatch, PermissionGate, tool budgets, or Action Audit. Unknown hosted tools, duplicate IDs, incomplete items, and malformed shapes fail closed.
 
@@ -1168,7 +1175,7 @@ Responses streaming treats the semantic terminal response object as authoritativ
 
 ## Provider Search Resilience, Controls, and Observability
 
-A real DeepSeek Responses invocation may finish as `response.completed` while retaining a `web_search_call` with `status=failed`, such as a Provider-owned `open_page` blocked by `SSRF_BLOCKED`. Compatible relays may return optional `annotations` as null, one object, or nested `url_citation`. Leonervis now preserves a failed search call as a valid terminal Provider-owned fact while continuing to reject nonterminal states inside a completed Response. Citations accept those bounded shapes; one malformed or unsafe citation is discarded with a content-free warning instead of invalidating valid assistant text. Unknown hosted tools, duplicate IDs, malformed required content, and incomplete Responses remain fail closed.
+A real DeepSeek Responses invocation may finish as `response.completed` while retaining a `web_search_call` with `status=failed`, such as a Provider-owned `open_page` blocked by `SSRF_BLOCKED`. Compatible relays may return optional `annotations` as null, one object, or nested `url_citation`. Coquo now preserves a failed search call as a valid terminal Provider-owned fact while continuing to reject nonterminal states inside a completed Response. Citations accept those bounded shapes; one malformed or unsafe citation is discarded with a content-free warning instead of invalidating valid assistant text. Unknown hosted tools, duplicate IDs, malformed required content, and incomplete Responses remain fail closed.
 
 Process-local Provider search adds `auto|required`, up to 20 canonical allowed domains, and optional `low|medium|high` context size. OpenAI Responses supports all three; Anthropic supports domains and OpenAI Chat search supports context size. Unsupported adapter/option combinations reject explicitly. `/search mode|domains|context` changes only the current runtime and resets with search reset or a Provider/model switch. Independent low-intensity `Provider search:` traces show lifecycle and terminal call, failure, action-type, source, accepted-citation, and discarded-citation counts. `/session preview` and `/session turns` derive the same body-free summary from existing v9 Provider-owned items without exposing queries, URLs, page bodies, or reasoning.
 
@@ -1264,7 +1271,7 @@ The real TTY reserves the physical final column and caps automatically selected 
 
 ## Bounded declarative Skills and ToolSet restriction
 
-Skill v1 uses one strict `<name>/SKILL.md` package whose frontmatter accepts only `manifest-version`, `name`, `description`, and optional `allowed-tools`; exact bounded metadata and body share one stable fingerprint. The Host scans only the workspace-local `.leonervis-code/skills`, project-shared `.agents/skills`, and XDG user `leonervis-code/skills` roots, in that priority order, while retaining shadowed and invalid diagnostics. Symlinks, non-UTF-8, CRLF, unknown fields, YAML errors, read drift, and all size bounds fail closed. `skills list|show|doctor` are read-only inspections with no provider, Session, or Action Audit effects.
+Skill v1 uses one strict `<name>/SKILL.md` package whose frontmatter accepts only `manifest-version`, `name`, `description`, and optional `allowed-tools`; exact bounded metadata and body share one stable fingerprint. The Host scans only the workspace-local `.coquo/skills`, project-shared `.agents/skills`, and XDG user `coquo/skills` roots, in that priority order, while retaining shadowed and invalid diagnostics. Symlinks, non-UTF-8, CRLF, unknown fields, YAML errors, read drift, and all size bounds fail closed. `skills list|show|doctor` are read-only inspections with no provider, Session, or Action Audit effects.
 
 Each ordinary Turn pins one SkillInventorySnapshot whose identity enters Effective Context and ActionLease identity. The model first calls `skill_search` in an isolated response over frozen active metadata, then calls `skill_load` in another isolated response with the exact same-Turn name and fingerprint. The Host reloads inventory before returning the body and stale-rejects any change. A successful ToolResult contains complete bounded instructions without an absolute path; Skill guidance remains untrusted procedure, not system authority, permission, approval, tool implementation, or execution evidence.
 
@@ -1292,7 +1299,7 @@ A package script remains only a resource: there is no `skill_run_script`, dynami
 
 Ordinary Prompts add two isolated commit-coupled coordination tools. The model may call `skill_propose_create` with one complete bounded declaration only when the current user explicitly asks to preserve a workflow as a Skill; the Host writes an inactive candidate only after final assistant text and the Session Turn commit. The model may call `skill_accept_create` only after direct user approval of that exact candidate. The Host then recovers successful ToolUse/ToolResult/ledger causality from the committed Turn, rechecks owner Session, pending status, fingerprint, fixed scope, and non-read-only mode, and reuses `import_skill()` plus its lock. The system does not learn Skills automatically from incidental success, repetition, or experience.
 
-Generated and downloaded candidates live under `.leonervis-code/skill-candidates/v1/`, outside inventory scanning, with a private immutable package, closed metadata, and an append-only `created -> installed|rejected` event sequence. `skills fetch` and `/skills fetch` reuse PinnedWebGetTransport and accept only query-free public HTTPS raw `SKILL.md` or bounded ZIP content. Every redirect retains public-address validation. ZIP validation rejects traversal, duplicate or case-fold-colliding paths, multiple package roots, symlink/special/encrypted entries, and count, size, expanded-size, or compression-ratio overflow. Download never installs or activates; candidate list/show exposes complete bounded instructions and resources before explicit install or reject, and installation still creates an exact import lock.
+Generated and downloaded candidates live under `.coquo/skill-candidates/v1/`, outside inventory scanning, with a private immutable package, closed metadata, and an append-only `created -> installed|rejected` event sequence. `skills fetch` and `/skills fetch` reuse PinnedWebGetTransport and accept only query-free public HTTPS raw `SKILL.md` or bounded ZIP content. Every redirect retains public-address validation. ZIP validation rejects traversal, duplicate or case-fold-colliding paths, multiple package roots, symlink/special/encrypted entries, and count, size, expanded-size, or compression-ratio overflow. Download never installs or activates; candidate list/show exposes complete bounded instructions and resources before explicit install or reject, and installation still creates an exact import lock.
 
 Each prepared Turn still freezes its SkillInventorySnapshot. Installation cannot hot-mutate that Turn's ToolSet and becomes discoverable only in a later Turn. The Registry advances to generation 5, system prompt to v40, provider adapter to v41, and full/compacted Effective Context to v15/v16 while retaining legacy v13/v14 reads. Skill inventory remains v2, and Session, Task, Action Audit, and import-lock schemas do not change. See [0124](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md).
 

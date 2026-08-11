@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="./docs/assets/leo-mark.png" alt="LEO mark" width="240">
+<img src="./docs/assets/coquo-mark.png" alt="Coquo COQ mark" width="240">
 
-# Leonervis Code
+# Coquo
 
 English | [中文](./README.md)
 
@@ -13,7 +13,9 @@ English | [中文](./README.md)
 
 </div>
 
-Leonervis Code is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
+Coquo is a learning-first coding-agent CLI prototype for local, single-user use. The model makes decisions, the host executes controlled tools within an explicit workspace boundary, and structured results return to the model.
+
+The name comes from Latin *coquō*, “I cook”: requirements, context, tools, and model decisions are prepared into verified software changes.
 
 > **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and 35 ordinary bounded tools are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP tool execution, and declarative Skill loading. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
 
@@ -34,12 +36,12 @@ Leonervis Code is a learning-first coding-agent CLI prototype for local, single-
 
 ## Quick start
 
-Leonervis Code requires Python 3.12 or 3.13, the latest stable [uv](https://docs.astral.sh/uv/), and Git. The project uses `uv.lock` for a reproducible environment. Model use of `run_command` additionally requires Linux, `/usr/bin/bwrap`, and `libseccomp.so.2`; independent web search requires `BRAVE_SEARCH_API_KEY` or `TAVILY_API_KEY` in the process environment. Other features remain available when these optional prerequisites are missing, and the corresponding tool fails closed.
+Coquo requires Python 3.12 or 3.13, the latest stable [uv](https://docs.astral.sh/uv/), and Git. The project uses `uv.lock` for a reproducible environment. Model use of `run_command` additionally requires Linux, `/usr/bin/bwrap`, and `libseccomp.so.2`; independent web search requires `BRAVE_SEARCH_API_KEY` or `TAVILY_API_KEY` in the process environment. Other features remain available when these optional prerequisites are missing, and the corresponding tool fails closed.
 
 ```bash
-cd leonervis-code
+cd coquo
 uv sync
-uv run leonervis-code
+uv run coquo
 ```
 
 A bare invocation starts the REPL in a real terminal. Without a selected real provider, it uses the deterministic fake provider and performs no network access:
@@ -47,14 +49,14 @@ A bare invocation starts the REPL in a real terminal. Without a selected real pr
 ```text
 ›
 
-  fake · ~/Projects/leonervis-code
+  fake · ~/Projects/coquo
 ```
 
-The formal command is `leonervis-code`; `leonervis` is a shorthand. A module entry point is also available:
+The formal command is `coquo`; `coquo` is a shorthand. A module entry point is also available:
 
 ```bash
-uv run leonervis --version
-uv run python -m leonervis_code --help
+uv run coquo --version
+uv run python -m coquo --help
 ```
 
 ## Main commands
@@ -62,39 +64,39 @@ uv run python -m leonervis_code --help
 The command's own help is always the authoritative parameter reference:
 
 ```bash
-uv run leonervis-code --help
-uv run leonervis-code provider --help
-uv run leonervis-code session --help
-uv run leonervis-code task --help
+uv run coquo --help
+uv run coquo provider --help
+uv run coquo session --help
+uv run coquo task --help
 ```
 
 ### Run tasks and start the REPL
 
 | Purpose | Command |
 | --- | --- |
-| Start a REPL with a new Session | `uv run leonervis-code` |
-| Resume the workspace's latest Session | `uv run leonervis-code --resume latest` |
-| Run one prompt | `uv run leonervis-code prompt "Explain this workspace"` |
-| Run in another workspace | `uv run leonervis-code -C ../project prompt "Explain the project structure"` |
-| Use a named profile | `uv run leonervis-code --profile work prompt "Explain the README"` |
-| Temporarily override this process's output budget | `uv run leonervis-code --profile work --max-output-tokens 8192 prompt "Generate a detailed report"` |
-| Override a profile's model temporarily | `uv run leonervis-code --profile work --model model-v2 prompt "Continue"` |
-| Use a direct model route | `uv run leonervis-code --model anthropic/claude-opus-4-8 prompt "Explain the README"` |
-| Approve workspace writes interactively in the REPL | `uv run leonervis-code --permission-mode workspace-write --approval ask` |
-| Allow automatic workspace writes in one-shot mode | `uv run leonervis-code --permission-mode workspace-write --approval auto prompt "Create note.txt"` |
-| Approve local commands interactively in the REPL | `uv run leonervis-code --permission-mode danger-full-access --approval ask` |
-| Allow approved commands automatically in one-shot mode | `uv run leonervis-code --permission-mode danger-full-access --approval auto prompt "Run the project tests"` |
-| Start a REPL that can explicitly select Tavily | `TAVILY_API_KEY=... uv run leonervis-code --permission-mode danger-full-access --approval ask`, then run `/search use tavily` |
-| Use Profile-declared Provider-native search | `uv run leonervis-code --profile search-provider prompt "Search for the official Python 3.14 release notes and list the sources"` |
-| Show the version | `uv run leonervis-code --version` |
+| Start a REPL with a new Session | `uv run coquo` |
+| Resume the workspace's latest Session | `uv run coquo --resume latest` |
+| Run one prompt | `uv run coquo prompt "Explain this workspace"` |
+| Run in another workspace | `uv run coquo -C ../project prompt "Explain the project structure"` |
+| Use a named profile | `uv run coquo --profile work prompt "Explain the README"` |
+| Temporarily override this process's output budget | `uv run coquo --profile work --max-output-tokens 8192 prompt "Generate a detailed report"` |
+| Override a profile's model temporarily | `uv run coquo --profile work --model model-v2 prompt "Continue"` |
+| Use a direct model route | `uv run coquo --model anthropic/claude-opus-4-8 prompt "Explain the README"` |
+| Approve workspace writes interactively in the REPL | `uv run coquo --permission-mode workspace-write --approval ask` |
+| Allow automatic workspace writes in one-shot mode | `uv run coquo --permission-mode workspace-write --approval auto prompt "Create note.txt"` |
+| Approve local commands interactively in the REPL | `uv run coquo --permission-mode danger-full-access --approval ask` |
+| Allow approved commands automatically in one-shot mode | `uv run coquo --permission-mode danger-full-access --approval auto prompt "Run the project tests"` |
+| Start a REPL that can explicitly select Tavily | `TAVILY_API_KEY=... uv run coquo --permission-mode danger-full-access --approval ask`, then run `/search use tavily` |
+| Use Profile-declared Provider-native search | `uv run coquo --profile search-provider prompt "Search for the official Python 3.14 release notes and list the sources"` |
+| Show the version | `uv run coquo --version` |
 
 Common permission modes:
 
 ```bash
-uv run leonervis-code                                      # read-only REPL
-uv run leonervis-code --permission-mode workspace-write --approval ask
-uv run leonervis-code --permission-mode danger-full-access --approval ask
-uv run leonervis-code --permission-mode workspace-write --approval auto prompt "Modify and verify the project"
+uv run coquo                                      # read-only REPL
+uv run coquo --permission-mode workspace-write --approval ask
+uv run coquo --permission-mode danger-full-access --approval ask
+uv run coquo --permission-mode workspace-write --approval auto prompt "Modify and verify the project"
 ```
 
 ### Configure providers
@@ -103,7 +105,7 @@ A built-in provider gets its protocol, default endpoint, and credential environm
 
 ```bash
 export ANTHROPIC_API_KEY='...'
-uv run leonervis-code provider add work \
+uv run coquo provider add work \
   --provider anthropic \
   --model claude-opus-4-8
 ```
@@ -112,7 +114,7 @@ A custom OpenAI-compatible endpoint requires an explicit protocol and base URL. 
 
 ```bash
 export VENDOR_API_KEY='...'
-uv run leonervis-code provider add vendor \
+uv run coquo provider add vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
@@ -124,7 +126,7 @@ uv run leonervis-code provider add vendor \
 Official DeepSeek V4 Flash automatically selects Responses and enables Provider-native search by default; other DeepSeek models retain Chat Completions:
 
 ```bash
-uv run leonervis-code provider add deepseek-flash \
+uv run coquo provider add deepseek-flash \
   --provider deepseek \
   --model deepseek-v4-flash \
   --api-key-env DEEPSEEK_API_KEY \
@@ -134,7 +136,7 @@ uv run leonervis-code provider add deepseek-flash \
 A custom endpoint that implements Responses can select `openai-responses` explicitly:
 
 ```bash
-uv run leonervis-code provider add responses-gateway \
+uv run coquo provider add responses-gateway \
   --provider custom \
   --model vendor/model \
   --protocol openai-responses \
@@ -145,7 +147,7 @@ uv run leonervis-code provider add responses-gateway \
 Provider preset, message protocol, and native-search adapter are independent. Built-in Profiles default to `auto` and enable only catalog-declared capability; custom Profiles default to `none`. A compatible endpoint can explicitly select an implemented adapter:
 
 ```bash
-uv run leonervis-code provider add search-provider \
+uv run coquo provider add search-provider \
   --provider custom \
   --model vendor/search-model \
   --protocol openai-compatible \
@@ -173,14 +175,14 @@ The bounded declarative manifest permits only restricted `extra_body`, a non-fun
 Common profile-management commands:
 
 ```bash
-uv run leonervis-code provider list
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider use vendor              # workspace scope
-uv run leonervis-code provider use vendor --scope user
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider rename vendor vendor-new --if-revision 1
-uv run leonervis-code provider remove vendor-new
-uv run leonervis-code provider migrate
+uv run coquo provider list
+uv run coquo provider show vendor
+uv run coquo provider use vendor              # workspace scope
+uv run coquo provider use vendor --scope user
+uv run coquo provider clear --scope project
+uv run coquo provider rename vendor vendor-new --if-revision 1
+uv run coquo provider remove vendor-new
+uv run coquo provider migrate
 ```
 
 Selection precedence is explicit `--profile` → explicit direct `--model` → workspace active → user active → fake/offline. `provider use` prepares the candidate route, credential, and client before atomically switching; failure preserves the old configuration and client.
@@ -190,14 +192,14 @@ Selection precedence is explicit `--profile` → explicit direct `--model` → w
 `route` is an offline diagnostic command. It constructs no provider client, reads no key value, and sends no network request.
 
 ```bash
-uv run leonervis-code --profile vendor route
-uv run leonervis-code --model openai/gpt-5 route
+uv run coquo --profile vendor route
+uv run coquo --model openai/gpt-5 route
 ```
 
 A named profile can configure the context window for its exact endpoint/model:
 
 ```bash
-uv run leonervis-code provider replace vendor \
+uv run coquo provider replace vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
@@ -206,8 +208,8 @@ uv run leonervis-code provider replace vendor \
   --context-window-tokens 1000000 \
   --if-revision 1
 
-uv run leonervis-code provider show vendor
-uv run leonervis-code --profile vendor route
+uv run coquo provider show vendor
+uv run coquo --profile vendor route
 ```
 
 Use `route` for offline resolution results and `/status` plus `/context` in the REPL for the current runtime and context state. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete capability-resolution, request-preflight, automatic-compaction, and pre-switch screening rules.
@@ -215,14 +217,14 @@ Use `route` for offline resolution results and `/status` plus `/context` in the 
 ### Manage Sessions
 
 ```bash
-uv run leonervis-code prompt "First turn"
-uv run leonervis-code session list
-uv run leonervis-code session show latest
-uv run leonervis-code session actions latest
-uv run leonervis-code session tools latest
-uv run leonervis-code session tools latest --limit 5 --details
-uv run leonervis-code --resume latest prompt "Continue the previous turn"
-uv run leonervis-code --resume <session-uuid>
+uv run coquo prompt "First turn"
+uv run coquo session list
+uv run coquo session show latest
+uv run coquo session actions latest
+uv run coquo session tools latest
+uv run coquo session tools latest --limit 5 --details
+uv run coquo --resume latest prompt "Continue the previous turn"
+uv run coquo --resume <session-uuid>
 ```
 
 A Session is workspace-bound and stores successful turns in append-only JSONL. New turns also persist a per-request Host tool ledger for actual successes, errors, skips, and budget rejections without relying on model self-reporting. Use the `session` and `--resume` commands above to inspect, audit, and restore it; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete replay, screening, and durability semantics.
@@ -230,15 +232,15 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 ### Manage Tasks
 
 ```bash
-uv run leonervis-code task create "Implement resumable multi-stage work" \
+uv run coquo task create "Implement resumable multi-stage work" \
   --name "Task runtime" \
   --accept "A human confirms the change meets the objective" \
   --criterion '{"kind":"path-exists","description":"The test file exists","path":"tests/test_app.py","path_type":"file"}' \
   --completion-policy auto-verified \
   --max-stages 12 --max-provider-invocations 288 --max-tool-requests 384
-uv run leonervis-code task list --status ready --archive active --name runtime
-uv run leonervis-code task show <task-uuid>
-uv run leonervis-code task timeline <task-uuid>
+uv run coquo task list --status ready --archive active --name runtime
+uv run coquo task show <task-uuid>
+uv run coquo task timeline <task-uuid>
 ```
 
 Tasks manage recoverable foreground multi-stage work. They can begin through natural-language interaction or be inspected and controlled through `task` and `/task`; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the Task ADRs for the complete lifecycle, acceptance, and recovery boundaries.
@@ -373,15 +375,15 @@ The table above is the usage reference for REPL input, presentation, Session man
 For a deterministic view of the bounded tool loop:
 
 ```bash
-uv run leonervis-code demo-read README.md
-uv run leonervis-code demo-read ../outside.txt   # verify workspace-escape rejection
+uv run coquo demo-read README.md
+uv run coquo demo-read ../outside.txt   # verify workspace-escape rejection
 ```
 
 `demo-read` is not a real model interface. It does not write files, execute shell commands, or access the network.
 
 MCP tools are `dangerous` by default. Run `mcp catalog` to obtain the exact qualified name and schema fingerprint, then use `mcp policy set <qualified-name> --schema-fingerprint <fingerprint> --action workspace-read` to declare one exact local stdio version read-only; remote tools always remain `dangerous`. `mcp catalog explain <reason-code>` explains quarantine reasons, `mcp policy stale` inspects invalid or currently unresolved policies, and `mcp policy prune --dry-run` only previews revision-bound cleanup commands. `mcp add-http`, `mcp oauth`, `mcp resources`, `mcp prompts`, and `mcp doctor` cover remote setup, authorization, non-Tool capability inspection, and interoperability diagnostics.
 
-Declarative Skills may live under workspace `.leonervis-code/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills init|check|search|import|lock` for local packages, `skills fetch|candidate|install` to quarantine, inspect, and install public raw or ZIP packages, or `/skills` in the REPL for current activation and candidates. The model proposes preserving a workflow only after an explicit user request and does not learn automatically from experience. Implemented-foundations defines the exact format, budgets, and authority boundary.
+Declarative Skills may live under workspace `.coquo/skills` or `.agents/skills`, or the XDG user configuration directory. Use `skills init|check|search|import|lock` for local packages, `skills fetch|candidate|install` to quarantine, inspect, and install public raw or ZIP packages, or `/skills` in the REPL for current activation and candidates. The model proposes preserving a workflow only after an explicit user request and does not learn automatically from experience. Implemented-foundations defines the exact format, budgets, and authority boundary.
 
 Hooks can add local restrictions before the normal PermissionGate and observe terminal actions plus selected Turn or Task lifecycle events. An optional pinned local handler runs only as a separate dangerous Action through approval, Action Audit, and the command sandbox, never as a privileged callback. Use `hooks add|fingerprint|template|import|list|show|doctor|enable|disable|remove|runs` to manage and inspect disabled-by-default user or project rules; implemented-foundations and ADRs 0125-0127 define the detailed boundaries.
 
@@ -389,20 +391,20 @@ Hooks can add local restrictions before the normal PermissionGate and observe te
 
 | Path | Contents |
 | --- | --- |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json` | user provider profiles and active selection |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-servers.json` | user MCP definitions; endpoints, client metadata, and environment names, never credential values |
-| `<workspace>/.leonervis-code/mcp-servers.json` | project MCP server definitions; new servers default to disabled |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-tool-policies.json` | exact user MCP tool permission policies |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/mcp-oauth.json` | user remote-MCP OAuth pending state and tokens; private mode-`0600` file |
-| `<workspace>/.leonervis-code/mcp-tool-policies.json` | exact project MCP tool permission policies |
-| `${XDG_CONFIG_HOME:-~/.config}/leonervis-code/hooks.json` | user declarative Hook configuration; new rules default to disabled |
-| `<workspace>/.leonervis-code/hooks.json` | project declarative Hook configuration; applied through frozen Turn snapshots |
-| `<workspace>/.leonervis-code/provider.json` | workspace active profile |
-| `<workspace>/.leonervis-code/sessions/.../*.jsonl` | Session transcripts |
-| `<workspace>/.leonervis-code/tasks/.../*.jsonl` | independent Task transcripts |
-| `${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json` | private context-capability discovery cache |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/providers.json` | user provider profiles and active selection |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-servers.json` | user MCP definitions; endpoints, client metadata, and environment names, never credential values |
+| `<workspace>/.coquo/mcp-servers.json` | project MCP server definitions; new servers default to disabled |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-tool-policies.json` | exact user MCP tool permission policies |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/mcp-oauth.json` | user remote-MCP OAuth pending state and tokens; private mode-`0600` file |
+| `<workspace>/.coquo/mcp-tool-policies.json` | exact project MCP tool permission policies |
+| `${XDG_CONFIG_HOME:-~/.config}/coquo/hooks.json` | user declarative Hook configuration; new rules default to disabled |
+| `<workspace>/.coquo/hooks.json` | project declarative Hook configuration; applied through frozen Turn snapshots |
+| `<workspace>/.coquo/provider.json` | workspace active profile |
+| `<workspace>/.coquo/sessions/.../*.jsonl` | Session transcripts |
+| `<workspace>/.coquo/tasks/.../*.jsonl` | independent Task transcripts |
+| `${XDG_CACHE_HOME:-~/.cache}/coquo/model-context-capabilities.json` | private context-capability discovery cache |
 
-`.leonervis-code/` can contain user input, model responses, source excerpts, and tool results. Add it to the target project's `.gitignore`; do not commit, synchronize, or publish it. Configuration and the capability cache do not store known credential values, but the system cannot detect an unknown secret that appears in user text or source code.
+`.coquo/` can contain user input, model responses, source excerpts, and tool results. Add it to the target project's `.gitignore`; do not commit, synchronize, or publish it. Configuration and the capability cache do not store known credential values, but the system cannot detect an unknown secret that appears in user text or source code.
 
 ## Development and verification
 
@@ -412,16 +414,16 @@ uv run ruff check .
 uv run ruff format --check .
 uv lock --check
 git diff --check
-uv run leonervis-code eval list
-uv run leonervis-code eval run all
-uv run leonervis-code eval run all --format json
-uv run leonervis-code eval task list
+uv run coquo eval list
+uv run coquo eval run all
+uv run coquo eval run all --format json
+uv run coquo eval task list
 tmp=$(mktemp -d)
-uv run leonervis-code eval task prepare inventory-validation "$tmp/task"
-uv run leonervis-code eval task score inventory-validation "$tmp/task"
+uv run coquo eval task prepare inventory-validation "$tmp/task"
+uv run coquo eval task score inventory-validation "$tmp/task"
 ```
 
-`pytest` verifies functions, modules, and protocol boundaries, while `eval run` sends fixed scripted-fake trajectories through the complete Host path. `eval task prepare/score` instead creates a small code task offline and scores actual outcomes outside the candidate directory with visible and Host-private tests. Only `eval task run` with both `--real-provider` and an explicit profile/model may invoke a real vendor; it runs in a newly created isolated task directory, writes tool events to stderr, and reserves stdout for the stable Host score. After changing dependencies, run `uv lock` before checking the lockfile. Leonervis Code does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
+`pytest` verifies functions, modules, and protocol boundaries, while `eval run` sends fixed scripted-fake trajectories through the complete Host path. `eval task prepare/score` instead creates a small code task offline and scores actual outcomes outside the candidate directory with visible and Host-private tests. Only `eval task run` with both `--real-provider` and an explicit profile/model may invoke a real vendor; it runs in a newly created isolated task directory, writes tool events to stderr, and reserves stdout for the stable Host score. After changing dependencies, run `uv lock` before checking the lockfile. Coquo does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
 
 ## Detailed documentation
 
@@ -512,11 +514,11 @@ uv run leonervis-code eval task score inventory-validation "$tmp/task"
 - [Provider-owned model context capability](./docs/decisions/0013-provider-owned-model-context-capabilities.md): context/model-output limit resolution and cache design.
 - [Canonical model system prompt](./docs/decisions/0012-first-canonical-model-system-prompt.md): model-visible contract, version, and fingerprint.
 - [Stable profile identity and durable Sessions](./docs/decisions/0010-foundation-3d-stable-profile-identity-and-durable-sessions.md): profile UUID/revision and Session persistence.
-- [Claw-Code prompt study map](./docs/references/claw-code-prompts/README.md): read-only reference structure and Leonervis-specific differences.
+- [Claw-Code prompt study map](./docs/references/claw-code-prompts/README.md): read-only reference structure and Coquo-specific differences.
 - [Harness-study](https://github.com/TsingFengIceberg/Harness-study): related Harness reading and learning notes.
 
 ## Current scope and next step
 
-Leonervis Code currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
+Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
 The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Executable Skills, a marketplace, browser automation, and background or parallel agents are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

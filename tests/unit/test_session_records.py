@@ -6,18 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.hook_contracts import (
+from coquo.core.hook_contracts import (
     HookAuditEntry,
     HookAuditLedger,
     HookEffect,
     HookEvent,
 )
-from leonervis_code.core.compaction import (
+from coquo.core.compaction import (
     CompactionTrigger,
     EffectiveContextSummary,
     build_compact_prompt,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantToolBatch,
     AssistantText,
     ProviderOwnedItem,
@@ -29,13 +29,13 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.task_admission import (
+from coquo.core.task_admission import (
     TASK_PROPOSE_START_TOOL_NAME,
     TaskAdmissionOutcome,
     TaskAdmissionProposal,
     task_admission_receipt,
 )
-from leonervis_code.session_records import (
+from coquo.session_records import (
     BindingSnapshot,
     CompactionFailed,
     ContextCompacted,
@@ -72,7 +72,7 @@ from leonervis_code.session_records import (
     replay_records,
     workspace_fingerprint,
 )
-from leonervis_code.providers.usage import (
+from coquo.providers.usage import (
     ProviderInvocationKind,
     ProviderInvocationUsage,
     ProviderTokenUsage,

@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.system_prompt import (
+from coquo.system_prompt import (
     SYSTEM_PROMPT_VERSION,
     _fingerprint_prompt,
     _render_sections,
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v43-1f9dfea8581b14188ef3ef269047f534ebea1a31a4f7a85766cebe7337227896"
+EXPECTED_FINGERPRINT = "v44-17058b05c69bedaa66f247bb1334da63a4d898ae4d17cde4ca90335da318cd71"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 43
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 44
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text
@@ -69,7 +69,7 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
     assert "workspace-root `AGENTS.md`" in prompt.text
     assert "current direct user request" in prompt.text
     assert "cannot grant permissions" in prompt.text
-    assert "[Leonervis durable Task Stage]" in prompt.text
+    assert "[Coquo durable Task Stage]" in prompt.text
     assert "`task_propose_plan`" in prompt.text
     assert "`task_report_reflection`" in prompt.text
     assert "`task_report_blocker`" in prompt.text

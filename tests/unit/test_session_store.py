@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ProviderOwnedItem,
@@ -21,7 +21,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.session_records import (
+from coquo.session_records import (
     SESSION_HEADER_SCHEMA_VERSION,
     TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION,
     TURN_COMMITTED_ASSISTANT_TEXT_SCHEMA_VERSION,
@@ -38,7 +38,7 @@ from leonervis_code.session_records import (
     replay_records,
     workspace_fingerprint,
 )
-from leonervis_code.session_store import (
+from coquo.session_store import (
     AtomicJsonWriteError,
     MAX_SESSION_PREVIEW_TURNS,
     SessionDiagnosisStatus,
@@ -97,7 +97,7 @@ def test_create_append_release_open_latest_round_trip_and_list(tmp_path: Path) -
 
     assert writer.path == session_store.root / f"{SESSION_ONE}.jsonl"
     assert writer.path.parent == (
-        tmp_path / ".leonervis-code" / "sessions" / session_store.workspace_fingerprint
+        tmp_path / ".coquo" / "sessions" / session_store.workspace_fingerprint
     )
     writer.append_turn(committed_items(), binding=binding, tool_ledger=committed_ledger())
     persisted_turn = writer.path.read_text(encoding="utf-8").splitlines()[-1]
@@ -277,7 +277,7 @@ def test_show_and_preview_do_not_create_state_in_empty_workspace(tmp_path: Path)
     with pytest.raises(SessionStoreError, match="does not exist"):
         session_store.preview("latest", 1)
 
-    assert not (tmp_path / ".leonervis-code").exists()
+    assert not (tmp_path / ".coquo").exists()
 
 
 def test_turn_range_search_and_export_are_bounded_read_only_projections(tmp_path: Path) -> None:
@@ -1172,7 +1172,7 @@ def test_workspace_mismatch_filename_mismatch_symlink_and_nonregular_are_rejecte
 def test_session_directory_symlink_is_rejected(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    control = tmp_path / ".leonervis-code"
+    control = tmp_path / ".coquo"
     control.mkdir()
     (control / "sessions").symlink_to(outside, target_is_directory=True)
 
@@ -1185,8 +1185,8 @@ def test_storage_permissions_are_private(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())
 
-    assert mode(tmp_path / ".leonervis-code") == 0o700
-    assert mode(tmp_path / ".leonervis-code" / "sessions") == 0o700
+    assert mode(tmp_path / ".coquo") == 0o700
+    assert mode(tmp_path / ".coquo" / "sessions") == 0o700
     assert mode(session_store.root) == 0o700
     assert mode(writer.path) == 0o600
     assert mode(writer.lock_path) == 0o600

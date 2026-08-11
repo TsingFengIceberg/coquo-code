@@ -1,11 +1,12 @@
 # 已实现 Foundation 与设计演进
 
-> 本文集中保存 Leonervis Code 已完成学习切片的实现说明。README 只保留主要命令和使用入口；每个切片的决策依据、边界与验证细节仍以 [`docs/decisions/`](./decisions/) 下的 ADR 为准。
+> 本文集中保存 Coquo 已完成学习切片的实现说明。README 只保留主要命令和使用入口；每个切片的决策依据、边界与验证细节仍以 [`docs/decisions/`](./decisions/) 下的 ADR 为准。
 >
 > 中文 | [English](./implemented-foundations_en.md)
 
 ## 文档导航
 
+- [Coquo 产品身份迁移](#coquo-产品身份迁移)
 - [Canonical model system prompt](#canonical-model-system-prompt)
 - [Foundation 3D：稳定 Profile Identity 与可恢复 Session](#foundation-3d稳定-profile-identity-与可恢复-session)
 - [Foundation 3C：命名 Provider Profile 与真实多轮 REPL](#foundation-3c命名-provider-profile-与真实多轮-repl)
@@ -90,9 +91,15 @@
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [ADR 索引](#adr-索引)
 
+## Coquo 产品身份迁移
+
+项目在`0.1.0` Pre-Alpha阶段将公开身份从Leonervis Code一次性迁移为Coquo。Python distribution、import package、唯一CLI与module入口统一为`coquo`；workspace状态改为`.coquo/`，XDG配置与cache改为`coquo/`，产品自有环境变量使用`COQUO_`前缀。MCP client metadata、HTTP User-Agent、临时文件、终端标题和模型可见角色同步采用新身份；LEO图形替换为确定性的COQ字标。
+
+迁移不提供旧CLI、旧import package或旧运行数据的自动兼容。Coquo不读取、不搬运也不删除`.leonervis-code/`及旧XDG目录；Git ignore、command sandbox和independent reviewer继续保护旧、新两个状态目录，避免遗留敏感数据因改名暴露。产品自有fingerprint domain改为`coquo-*`，因此旧Session、Task、Action、ToolSet、Skill、Hook和Effective Context identity不属于新runtime兼容合同。结构化record算法没有变化；model system prompt升级到v44，provider adapter contract升级到v45，builtin Tool Registry与source generation升级到6。历史ADR保持原名，完整决策见[ADR 0128](./decisions/0128-coquo-product-identity-migration.md)。
+
 ## Canonical model system prompt
 
-Leonervis Code 从 `src/leonervis_code/system_prompt.py` 构建 provider-neutral `SystemPromptSnapshot`。Snapshot 包含显式版本、规范化文本和 domain-separated SHA-256 fingerprint；每个 user turn 开始时只构建一次，并在该 turn 的全部provider/tool continuation中固定不变：
+Coquo 从 `src/coquo/system_prompt.py` 构建 provider-neutral `SystemPromptSnapshot`。Snapshot 包含显式版本、规范化文本和 domain-separated SHA-256 fingerprint；每个 user turn 开始时只构建一次，并在该 turn 的全部provider/tool continuation中固定不变：
 
 ```text
 SystemPromptSnapshot + neutral conversation history
@@ -118,22 +125,22 @@ Profile registry schema v3 使用不可变 UUID 作为引用身份，名称只�
 旧 schema v1 profile 会由原始名称确定性映射到 UUID。Reader 支持 user/project v1、v2、v3 混合状态，写操作只升级实际写入的文件：
 
 ```bash
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider list --show-ids
-uv run leonervis-code provider rename vendor vendor-new --if-revision 1
-uv run leonervis-code provider replace vendor-new \
+uv run coquo provider show vendor
+uv run coquo provider list --show-ids
+uv run coquo provider rename vendor vendor-new --if-revision 1
+uv run coquo provider replace vendor-new \
   --provider custom \
   --model vendor/model-v2 \
   --protocol openai-compatible \
   --base-url https://gateway.example/v1 \
   --if-revision 2
-uv run leonervis-code provider migrate
+uv run coquo provider migrate
 ```
 
 每次 `prompt` 或 REPL 会创建或打开：
 
 ```text
-<workspace>/.leonervis-code/sessions/<workspace-fingerprint>/<session-id>.jsonl
+<workspace>/.coquo/sessions/<workspace-fingerprint>/<session-id>.jsonl
 ```
 
 Session 使用 append-only JSONL。成功 turn 的 user message、tool use/result 和最终 assistant text 会作为一条完整 commit record 写入并 fsync，成功后才更新内存历史。每个打开的 Session 持有独占 writer lock。
@@ -141,11 +148,11 @@ Session 使用 append-only JSONL。成功 turn 的 user message、tool use/resul
 损坏的中间 record、未知 schema 和错误 tool pairing 都 fail closed；只有进程崩溃形成的无换行不完整尾部可以受控截断，并追加 recovery record。
 
 ```bash
-uv run leonervis-code prompt "第一轮"
-uv run leonervis-code session list
-uv run leonervis-code session show latest
-uv run leonervis-code --resume latest prompt "继续上一轮"
-uv run leonervis-code -C ../another-workspace --resume latest
+uv run coquo prompt "第一轮"
+uv run coquo session list
+uv run coquo session show latest
+uv run coquo --resume latest prompt "继续上一轮"
+uv run coquo -C ../another-workspace --resume latest
 ```
 
 裸启动会创建新 Session，`--resume latest` 会继续该 workspace 的 latest 指针。REPL 中，`/session new` 保留当前 runtime provider 并开始空白历史，`/resume <id>` 切换到已有历史。列表中的 `[current]` 表示下一条 REPL prompt 的写入目标，`[latest]` 表示 `latest.json` 当前指向；`open/closed` 是 transcript 生命周期记录，不代表当前锁状态，closed Session 仍可恢复。
@@ -154,7 +161,7 @@ Session 与 runtime provider 解耦。Transcript 记录每个历史 turn 当时�
 
 把旧历史发送给新的当前 provider 属于显式运行选择。若当前 adapter 拒绝这段历史，失败 turn 不会提交。
 
-本地 Session 可能包含用户输入、模型回答、源码片段和工具结果，属于敏感运行状态；`.leonervis-code/` 不应提交、同步或公开。系统保证已知配置 credential value 不作为 binding 写入，但无法通用识别用户文本或被读取文件中自行包含的未知 secret。
+本地 Session 可能包含用户输入、模型回答、源码片段和工具结果，属于敏感运行状态；`.coquo/` 不应提交、同步或公开。系统保证已知配置 credential value 不作为 binding 写入，但无法通用识别用户文本或被读取文件中自行包含的未知 secret。
 
 `ProjectSession` 对外提供 `session_id`、`transcript_path`、`session_info()`、`list_sessions()`、`new_session()`、`switch_session()` 和 `resume=`。Session 切换只替换 durable history，保持当前 provider client。
 
@@ -165,45 +172,45 @@ Session 与 runtime provider 解耦。Transcript 记录每个历史 turn 当时�
 Profile 定义保存在：
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/leonervis-code/providers.json
+${XDG_CONFIG_HOME:-~/.config}/coquo/providers.json
 ```
 
-Workspace 只在 `.leonervis-code/provider.json` 保存 active profile ID。两个 JSON 都不保存 key value；workspace 目录是本地运行状态，应加入目标项目的 `.gitignore`。
+Workspace 只在 `.coquo/provider.json` 保存 active profile ID。两个 JSON 都不保存 key value；workspace 目录是本地运行状态，应加入目标项目的 `.gitignore`。
 
 ```bash
 # 内置 provider：protocol、默认 endpoint 与默认 credential env 由 catalog 提供
-uv run leonervis-code provider add work-openai \
+uv run coquo provider add work-openai \
   --provider openai \
   --model gpt-5
 
 # 受控 custom OpenAI-compatible endpoint：只保存 key 的环境变量名
-uv run leonervis-code provider add local-qwen \
+uv run coquo provider add local-qwen \
   --provider custom \
   --model Qwen/Qwen3.5 \
   --protocol openai-compatible \
   --base-url http://127.0.0.1:11434
 
-uv run leonervis-code provider add vendor \
+uv run coquo provider add vendor \
   --provider custom \
   --model vendor/model \
   --protocol openai-compatible \
   --base-url https://gateway.example/v1 \
   --api-key-env VENDOR_API_KEY
 
-uv run leonervis-code provider list
-uv run leonervis-code provider show vendor
-uv run leonervis-code provider use local-qwen
-uv run leonervis-code provider use work-openai --scope user
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider remove vendor
+uv run coquo provider list
+uv run coquo provider show vendor
+uv run coquo provider use local-qwen
+uv run coquo provider use work-openai --scope user
+uv run coquo provider clear --scope project
+uv run coquo provider remove vendor
 ```
 
 选择优先级为：显式 `--profile` → 显式 direct `--model` → workspace active → user active → fake/offline。`--profile NAME --model MODEL` 在该 profile endpoint 上使用当前进程的 model override，不改写 profile：
 
 ```bash
-uv run leonervis-code --profile work-openai --model gpt-5-mini \
+uv run coquo --profile work-openai --model gpt-5-mini \
   prompt "解释这个 workspace"
-uv run leonervis-code --profile work-openai
+uv run coquo --profile work-openai
 ```
 
 `provider use` 和 REPL `/provider use` 都先解析 route、检查 credential、构造候选 SDK client，再写 active 配置并交换当前 client；失败时旧 active 和旧 client 不变。`/model` 同样只在两个 turn 之间原子切换。
@@ -214,7 +221,7 @@ uv run leonervis-code --profile work-openai
 
 ```python
 from pathlib import Path
-from leonervis_code import ProjectSession
+from coquo import ProjectSession
 
 with ProjectSession.open(Path.cwd(), profile="work-openai") as session:
     first = session.prompt("先解释 README")
@@ -232,26 +239,26 @@ with ProjectSession.open(Path.cwd(), profile="work-openai") as session:
 
 ```bash
 export ANTHROPIC_API_KEY='...'
-uv run leonervis-code --model anthropic/claude-opus-4-8 \
+uv run coquo --model anthropic/claude-opus-4-8 \
   prompt "解释这个 workspace"
 
 export OPENAI_API_KEY='...'
-uv run leonervis-code --model openai/gpt-5 \
+uv run coquo --model openai/gpt-5 \
   prompt "解释这个 workspace"
 
 export XAI_API_KEY='...'
-uv run leonervis-code --model xai/grok-3 \
+uv run coquo --model xai/grok-3 \
   prompt "解释这个 workspace"
 
 export DASHSCOPE_API_KEY='...'
-uv run leonervis-code --model dashscope/qwen-plus \
+uv run coquo --model dashscope/qwen-plus \
   prompt "解释这个 workspace"
 
-uv run leonervis-code --model ollama/qwen3:8b \
+uv run coquo --model ollama/qwen3:8b \
   prompt "解释这个 workspace"
 
 export OPENROUTER_API_KEY='...'
-uv run leonervis-code --model openrouter/anthropic/claude-opus-4-8 \
+uv run coquo --model openrouter/anthropic/claude-opus-4-8 \
   prompt "解释这个 workspace"
 ```
 
@@ -263,7 +270,7 @@ Adapter当前声明固定顺序的`read_file(path)`、`glob(pattern)`与`grep(qu
 
 ```bash
 export VENDOR_API_KEY='...'
-uv run leonervis-code \
+uv run coquo \
   --model vendor/model \
   --provider-protocol openai-compatible \
   --base-url https://gateway.example/v1 \
@@ -278,16 +285,16 @@ Route 与 adapter config 不保存 secret value；key 只在 factory 构造所�
 真实 route 可在不构造 client、不访问网络的情况下预览：
 
 ```bash
-uv run leonervis-code --model openai/gpt-5 route
+uv run coquo --model openai/gpt-5 route
 ```
 
 默认 fake fallback 保持不变；若 workspace/user 已有 active profile，未带显式 selector 的 `prompt` 与裸 REPL 会使用该真实 profile：
 
 ```bash
-uv run leonervis-code provider clear --scope project
-uv run leonervis-code provider clear --scope user
-uv run leonervis-code prompt "Hello"   # 无 active 时 fake，不联网
-uv run leonervis-code                   # 无 active 时 fake REPL，不联网
+uv run coquo provider clear --scope project
+uv run coquo provider clear --scope user
+uv run coquo prompt "Hello"   # 无 active 时 fake，不联网
+uv run coquo                   # 无 active 时 fake REPL，不联网
 ```
 
 详细决策见 [0007：Anthropic 非流式 Adapter](./decisions/0007-foundation-3a-anthropic-non-streaming-adapter.md) 与 [0008：本地多 Provider Runtime](./decisions/0008-foundation-3b-local-multi-provider-runtime.md)。真实 smoke test 只应在用户明确愿意使用自己的 credential、endpoint 和 API 费用时手动运行。
@@ -297,14 +304,14 @@ uv run leonervis-code                   # 无 active 时 fake REPL，不联网
 `route` 是确定性的 control-plane 与 adapter-policy 边界诊断入口：
 
 ```bash
-uv run leonervis-code route
+uv run coquo route
 
-uv run leonervis-code route \
+uv run coquo route \
   --model beta \
   --max-output-tokens 32 \
   --fallback-model default
 
-uv run leonervis-code route \
+uv run coquo route \
   --model beta \
   --temperature 0.2
 ```
@@ -406,7 +413,7 @@ Slices 0–3当时故意不增加executor、process group、CLI presentation、d
 
 ## Foundation 4C Slice 4–6：Bounded Command Execution与Process-group Cleanup
 
-Host executor现在使用`subprocess.Popen`直接执行prepared argv，固定`shell=False`、`stdin=DEVNULL`并为每次命令建立独立process session/group。Leonervis不解析pipe、redirect、wildcard、variable expansion或command substitution；如果获批的executable自身是shell，它仍可自行解释参数，因此direct argv并不等于sandbox。Executor在紧贴spawn的边界再次逐段检查workspace root/cwd，失效时以`command_cwd_invalid`拒绝启动；普通path API无法完全消除剩余local TOCTOU窗口，因此不声称hostile-concurrency安全。
+Host executor现在使用`subprocess.Popen`直接执行prepared argv，固定`shell=False`、`stdin=DEVNULL`并为每次命令建立独立process session/group。Coquo不解析pipe、redirect、wildcard、variable expansion或command substitution；如果获批的executable自身是shell，它仍可自行解释参数，因此direct argv并不等于sandbox。Executor在紧贴spawn的边界再次逐段检查workspace root/cwd，失效时以`command_cwd_invalid`拒绝启动；普通path API无法完全消除剩余local TOCTOU窗口，因此不声称hostile-concurrency安全。
 
 Command只继承closed Host environment allowlist，并按实际cwd覆盖`PWD`；provider API key与任意project环境变量不自动转发。Stdout和stderr由独立reader持续drain到EOF，各只保留前32 KiB，同时记录captured/total bytes与truncated。合法UTF-8以text返回，其他bytes以base64返回，避免locale-dependent decode和pipe buffer deadlock。
 
@@ -448,7 +455,7 @@ PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内
 
 ## Foundation 5A：根 `AGENTS.md` 项目指令
 
-Leonervis现在只识别workspace根目录的`AGENTS.md`。Missing表示没有项目指令；现有entry必须经root directory descriptor以no-follow方式打开，并保持non-symlink regular-file identity。内容使用strict UTF-8，允许空文件并保留原始LF或CRLF bytes，不允许NUL，characters和UTF-8 bytes均最多32 KiB。它不向parent、child directory或Git root搜索，不合并层级，也不自动读取`CLAUDE.md`、`LEONERVIS.md`或其他兼容名称。Invalid existing file会在普通provider调用前明确失败，而不是静默当作missing。
+Coquo现在只识别workspace根目录的`AGENTS.md`。Missing表示没有项目指令；现有entry必须经root directory descriptor以no-follow方式打开，并保持non-symlink regular-file identity。内容使用strict UTF-8，允许空文件并保留原始LF或CRLF bytes，不允许NUL，characters和UTF-8 bytes均最多32 KiB。它不向parent、child directory或Git root搜索，不合并层级，也不自动读取`CLAUDE.md`、`COQUO.md`或其他兼容名称。Invalid existing file会在普通provider调用前明确失败，而不是静默当作missing。
 
 AgentLoop在每个user turn准备时读取一次`ProjectInstructionsSnapshot`，并和system prompt、tool catalog及committed history一起冻结。该turn内所有provider continuation、preflight和ActionLease复查都复用同一快照；即使工具在回合中重写`AGENTS.md`，当前回合仍完成于旧快照，下一回合才读取新内容。Manual/automatic compaction的source和candidate使用同一快照，变更中的manual compaction会按既有CAS规则冲突；resume和Session切换不会恢复历史指令副本，而是用当前workspace文件筛查下一次Effective Context。指令正文不写transcript、checkpoint、Action Audit或Session record。
 
@@ -458,7 +465,7 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 
 ## 确定性离线 Host Eval 基线
 
-`leonervis-code eval`当前提供版本化考试集`host-baseline-v3`。前四个内置案例覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作；第五个案例覆盖模型提议Task、用户精确确认、前台planning/execution、执行Stage中的普通`skill_search`与`skill_load`、人工验收与完成。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
+`coquo eval`当前提供版本化考试集`host-baseline-v3`。前四个内置案例覆盖受限读取、auto policy受控创建、read-only写入拒绝和同批首动作失败后跳过后续动作；第五个案例覆盖模型提议Task、用户精确确认、前台planning/execution、执行Stage中的普通`skill_search`与`skill_load`、人工验收与完成。每个案例固定prompt、初始UTF-8文件、scripted fake provider回复、permission/approval模式及预期Host事实；runner总是在新的temporary workspace和独立provider配置路径中启动真实`ProjectSession`，因此会经过普通AgentLoop、PermissionGate、工具执行、Session commit和Action Audit，但不会读取用户credential、真实provider配置或网络。
 
 评分发生在Session关闭后：runner通过`SessionStore`严格replay并比较committed turn数量、完整workspace entry与文件bytes摘要、跨全部相关Turn按时间排序的durable tool ledger和Action Audit lifecycle。Task案例还验证accepted admission、唯一且来源匹配的Task、最终状态及Stage kind/outcome。最终assistant文字也按UTF-8 byte count与SHA-256 identity精确比较，但不能覆盖workspace事实；测试明确证明模型即使声称“已创建”，缺失目标文件仍会让案例失败。文本报告只展开失败check，稳定JSON报告不含temporary path、时间戳、随机UUID或原文内容，适合本地回归与后续CI比较。`eval list`列出案例，`eval run <id>`执行单例，`eval run all --format json`执行完整机器可读基线。
 
@@ -470,13 +477,13 @@ Provider-neutral `ConversationRequest`保留独立project-instructions字段。A
 
 可见测试和私有测试都使用固定`/usr/bin/python3 -m unittest discover ...`命令，并经过生产`RunCommandTool`的bubblewrap/seccomp沙箱；不存在“为了Eval直接subprocess”的旁路。`eval task run TASK --real-provider`还要求显式`--profile`、`--profile-id`或`--model`，固定在新建任务目录中以`danger-full-access + auto`运行普通ProjectSession/AgentLoop/PermissionGate/tool/Action Audit链。无`--output`时目录在评分后删除，有`--output`时保留供人工检查；工具生命周期写stderr，stdout只输出不含workspace path、provider正文或随机ID的稳定评分。Host按agent turn、committed turn、action certainty、workspace shape、protected files、visible tests和hidden tests评分，不依赖模型最终文字。
 
-普通command sandbox会只读挂载Host根目录，因此real-task Eval额外在bubblewrap中遮蔽当前Leonervis源码checkout；安装态至少遮蔽evaluator模块与bytecode cache，然后再挂载任务workspace。隐藏测试也只在agent Session关闭后的独立评分目录中生成，模型工具无法读取其正文。该切片没有改变21个model-visible tools、system prompt v23、adapter contract v26、`ctx-v5`/`ctx-v6`、ToolArguments、Session、Action Audit或compaction schema；它不是任意benchmark loader、模型排行榜、重试框架或无授权的provider smoke。详见[0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)。
+普通command sandbox会只读挂载Host根目录，因此real-task Eval额外在bubblewrap中遮蔽当前Coquo源码checkout；安装态至少遮蔽evaluator模块与bytecode cache，然后再挂载任务workspace。隐藏测试也只在agent Session关闭后的独立评分目录中生成，模型工具无法读取其正文。该切片没有改变21个model-visible tools、system prompt v23、adapter contract v26、`ctx-v5`/`ctx-v6`、ToolArguments、Session、Action Audit或compaction schema；它不是任意benchmark loader、模型排行榜、重试框架或无授权的provider smoke。详见[0085：Actual Coding Task Eval](./decisions/0085-actual-coding-task-eval.md)。
 
 ## Durable Task Identity 与 Host Management
 
-Leonervis现在明确区分`Task -> Stage -> Turn -> Action`：Task表示可跨重启继续的用户目标；未来每个Stage只推进一个有界步骤并继续使用普通Turn的8/32/24预算；每个Action仍经过PermissionGate、approval、工具硬边界与Action Audit。当前第一阶段只实现最外层Task身份，不实现Stage执行。
+Coquo现在明确区分`Task -> Stage -> Turn -> Action`：Task表示可跨重启继续的用户目标；未来每个Stage只推进一个有界步骤并继续使用普通Turn的8/32/24预算；每个Action仍经过PermissionGate、approval、工具硬边界与Action Audit。当前第一阶段只实现最外层Task身份，不实现Stage执行。
 
-每个Task以独立`task_header` schema v1保存在`<workspace>/.leonervis-code/tasks/<workspace-fingerprint>/<task-id>.jsonl`，包含canonical UUID4、workspace identity、一个已有owner Session、受限目标、最多16条验收条件和UTC创建时间，当前派生状态为`ready`。TaskStore执行no-follow普通文件读取、closed schema、严格完整行replay、有界扫描，以及temporary file fsync后exclusive hard-link安装和directory fsync；最终名称已可见但durability不确定时不会误报为完全未创建。List/inspect不创建或修复状态。
+每个Task以独立`task_header` schema v1保存在`<workspace>/.coquo/tasks/<workspace-fingerprint>/<task-id>.jsonl`，包含canonical UUID4、workspace identity、一个已有owner Session、受限目标、最多16条验收条件和UTC创建时间，当前派生状态为`ready`。TaskStore执行no-follow普通文件读取、closed schema、严格完整行replay、有界扫描，以及temporary file fsync后exclusive hard-link安装和directory fsync；最终名称已可见但durability不确定时不会误报为完全未创建。List/inspect不创建或修复状态。
 
 Standalone提供`task create/list/show`，REPL提供`/task start/list/show`；REPL创建固定绑定当时的current Session。它们都是Host-only命令，不调用provider或工具、不消耗Turn预算、不写Session transcript或Action Audit，也不把Task目标提升为system authority或Action授权。System prompt保持v23、adapter contract保持v26，21个model-visible tools、ToolArguments v1、`ctx-v5`/`ctx-v6`以及Session/compaction/Action Audit schema均不变。ADR 0087随后增加Stage record与writer lease；`/task continue`和恢复执行仍是后续slice。详见[0086：Durable Task Identity and Host Management](./decisions/0086-durable-task-identity-and-host-management.md)。
 
@@ -492,7 +499,7 @@ Task transcript新增closed schema-v1 `stage_started`、`stage_committed`和`sta
 
 `/task continue <task-id> <stage-objective>`现在把一个Task Stage映射为一个真实`ProjectSession.prompt()`，因此直接复用普通AgentLoop、8/32/24 Turn预算、PermissionGate、逐Action approval、tool hard bounds、command sandbox、Action Audit和atomic Session commit，不存在第二套“长任务工具循环”。执行前必须切换到Task的owner Session；Task本身不是权限或approval。
 
-Host先生成以`[Leonervis durable Task Stage]`开头的有界UserMessage，其中canonical JSON只携带Task目标、验收条件、accepted plan、最近16个脱敏Stage摘要、当前Stage、累计usage、总预算和剩余额度。新`stage_started`与`stage_committed` schema v2分别在provider调用前保存Session baseline和完整prompt SHA-256，并在真实Turn提交后复制provider/token/tool ledger计数；正常失败的`stage_failed` schema v2也保存不含内容的provider/tool-attempt计数。它们都不复制对话、参数、结果或审计正文；旧Stage v1继续replay并明确显示accounting unavailable。
+Host先生成以`[Coquo durable Task Stage]`开头的有界UserMessage，其中canonical JSON只携带Task目标、验收条件、accepted plan、最近16个脱敏Stage摘要、当前Stage、累计usage、总预算和剩余额度。新`stage_started`与`stage_committed` schema v2分别在provider调用前保存Session baseline和完整prompt SHA-256，并在真实Turn提交后复制provider/token/tool ledger计数；正常失败的`stage_failed` schema v2也保存不含内容的provider/tool-attempt计数。它们都不复制对话、参数、结果或审计正文；旧Stage v1继续replay并明确显示accounting unavailable。
 
 `/task recover`不调用provider或工具：它只在durable baseline之后查找user-message digest精确匹配的committed Turn。零匹配会把Stage记为`interrupted`失败；唯一匹配绑定真实Turn；多匹配保持原Task并fail closed。它还能补上“Stage已经commit、但plan/completion proposal尚未append”窗口中的协议记录。Provider failure、cooperative cancellation、未提交Turn和Host failure分别落入closed Stage failure reason；若异常发生前Turn已经提交，则先绑定证据再报错，绝不盲目重放副作用。
 
@@ -514,7 +521,7 @@ Task默认Stage/provider/tool累计额度为32/768/1024，并可配置input/outp
 
 `/task verify host`不调用模型：它执行no-follow路径类型、创建时文件SHA-256基线、owner Session Action Audit certainty或受限命令检查。命令检查复用生产`RunCommandTool`的bubblewrap、seccomp、环境、timeout、输出与cleanup边界，但workspace改为只读挂载；沙箱不可用时fail closed。每次Host/reviewer尝试写入schema-v1 `task_acceptance_checked`，只有`passed`才写匹配source的acceptance verification。
 
-`/task review`复用current provider/API/model route，但构造独立、无工具、没有Executor Session history的request。Reviewer只能看到Task显式声明的普通文件快照与有界Host事实，`.git`、`.leonervis-code`和任意`.env*` component被拒绝；返回必须是覆盖全部目标条件的严格JSON verdict。Review用量与普通Turn/compaction分开计量，response或错误不进入Executor Session transcript。
+`/task review`复用current provider/API/model route，但构造独立、无工具、没有Executor Session history的request。Reviewer只能看到Task显式声明的普通文件快照与有界Host事实，`.git`、`.coquo`和任意`.env*` component被拒绝；返回必须是覆盖全部目标条件的严格JSON verdict。Review用量与普通Turn/compaction分开计量，response或错误不进入Executor Session transcript。
 
 `auto-verified`也只有在current committed execution Stage已有model completion proposal，且当前proposal的全部条件都由规定来源验证后，Host才追加`completed`。后续Stage会让旧proposal、check与verification失去完成效力，但不会删除历史。Canonical system prompt升级为v25；provider adapter保持v26，21个tool schema、Session、Action Audit与Effective Context representation不变。无项目指令的empty full-context ID更新为`ctx-v5-7fefaa42ca4226a17e7312fc723ecb3add2b6e8c96a0ac02671e69048156d401`。详见[0090：Structured Task Acceptance and Independent Review](./decisions/0090-structured-task-acceptance-and-independent-review.md)。
 
@@ -624,7 +631,7 @@ Live events不写append-only transcript、不参与resume/compaction、不进入
 
 ## Provider-neutral Assistant Tool Text Representation
 
-Leonervis现在能在内部准确表达“assistant文字与一个tool call同时出现”：既有immutable `ToolUse`新增可选`assistant_text`，把原始文字与同一tool ID、name和arguments原子绑定。`None`仍是既有纯工具调用；非空文字最多32 KiB characters和32 KiB UTF-8 bytes，不做trim或normalization。Effective Context identity与compact source会保留该文字，tool-use/result因果对仍不可拆分。
+Coquo现在能在内部准确表达“assistant文字与一个tool call同时出现”：既有immutable `ToolUse`新增可选`assistant_text`，把原始文字与同一tool ID、name和arguments原子绑定。`None`仍是既有纯工具调用；非空文字最多32 KiB characters和32 KiB UTF-8 bytes，不做trim或normalization。Effective Context identity与compact source会保留该文字，tool-use/result因果对仍不可拆分。
 
 这一步当时只定义内部表示，尚未让真实provider使用。Anthropic与OpenAI-compatible parser、history serializer、AgentLoop和`turn_committed` schema v2都明确fail closed，确保文字不会在执行、审计或持久化过程中被静默丢弃。后续ADR 0043–0046现已依次完成入站normalization、Session v3、history projection及runtime/terminal接入。
 
@@ -706,7 +713,7 @@ Host仍强制每turn六次调用，17工具schema/order、`parallel_tool_calls=f
 
 ## Bounded Multi-tool Response Batches
 
-Leonervis现在接受provider一次回复中的有界有序工具batch。统一内部`AssistantToolBatch`保存整份回复的companion text和多个唯一ID的`ToolUse`；单调用仍沿用旧`ToolUse`。OpenAI-compatible parser按`tool_calls[]`或stream index分别组装每个call，Anthropic按content blocks组装。整份回复必须先通过数量、ID、JSON、closed schema和因果校验，任一call无效都会在该batch任何动作前整体拒绝。
+Coquo现在接受provider一次回复中的有界有序工具batch。统一内部`AssistantToolBatch`保存整份回复的companion text和多个唯一ID的`ToolUse`；单调用仍沿用旧`ToolUse`。OpenAI-compatible parser按`tool_calls[]`或stream index分别组装每个call，Anthropic按content blocks组装。整份回复必须先通过数量、ID、JSON、closed schema和因果校验，任一call无效都会在该batch任何动作前整体拒绝。
 
 Host仍不并行。可接纳batch按provider顺序逐项进入PermissionGate、approval、Action Audit和executor；一个动作非成功会让同批后续项返回明确skipped error而不执行。三层预算为每response最多8个calls、每user turn最多32个admitted requests、最多24次provider invocations且最后一次text-only。无法装入剩余请求预算的整批零执行并返回匹配的budget errors。已成功副作用不因后项失败回滚，最终assistant text和durable turn commit前candidate history仍不提交。
 
@@ -934,7 +941,7 @@ Provider 的一次响应只能是最终 assistant 文本或一个 `read_file` �
 
 `prompt` 是一次性命令，但每次成功 turn 都会自动保存。同一 REPL 中，`/history <count>` 只显示当前 Session 已完成的 user/final-assistant 回合，不显示内部工具数据。
 
-Foundation 1B 原始切片只验证了进程内原子历史；Foundation 3D 进一步将完整 turn 持久化到 workspace JSONL。若在非交互终端中直接运行 `leonervis-code`，程序会提示使用 `leonervis-code prompt "..."` 并以非零状态退出，避免管道或 CI 意外卡住。
+Foundation 1B 原始切片只验证了进程内原子历史；Foundation 3D 进一步将完整 turn 持久化到 workspace JSONL。若在非交互终端中直接运行 `coquo`，程序会提示使用 `coquo prompt "..."` 并以非零状态退出，避免管道或 CI 意外卡住。
 
 详细决策见 [0001：单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)、[0002：确定性 REPL](./decisions/0002-foundation-0-deterministic-repl.md)、[0003：内存文本历史](./decisions/0003-foundation-1a-in-memory-text-history.md) 和 [0004：受限 read_file 工具循环](./decisions/0004-foundation-1b-bounded-read-file-tool-loop.md)。
 
@@ -1034,20 +1041,20 @@ Runtime 现在能在不伪造未知限制的前提下解析当前 exact endpoint
 Anthropic 官方 endpoint 复用同一个官方 SDK client 的 Models API。Generic OpenAI-compatible `/models` 不存在统一 context metadata contract，因此不会被盲目探测。
 
 ```bash
-uv run leonervis-code provider add local-qwen \
+uv run coquo provider add local-qwen \
   --provider custom \
   --model Qwen/Qwen3.5 \
   --protocol openai-compatible \
   --base-url http://127.0.0.1:11434 \
   --context-window-tokens 131072
-uv run leonervis-code provider show local-qwen
-uv run leonervis-code --profile local-qwen route
+uv run coquo provider show local-qwen
+uv run coquo --profile local-qwen route
 ```
 
 `provider show` 将用户配置标为 `context window override`；离线 `route` 和 runtime `/status` 显示 resolved value 与 source。成功 discovery 只进入：
 
 ```text
-${XDG_CACHE_HOME:-~/.cache}/leonervis-code/model-context-capabilities.json
+${XDG_CACHE_HOME:-~/.cache}/coquo/model-context-capabilities.json
 ```
 
 Cache 不保存 credential value、raw provider body 或 Session 内容。Profile registry schema v3 reader 兼容 v1/v2/v3，写操作只升级实际写入层，`provider migrate` 可显式升级。
@@ -1140,11 +1147,11 @@ Item codec现在按能力引入版本表达继承：所有已支持的v3及以�
 
 ## 有界独立 Brave/Tavily 网页搜索
 
-`web_search(query, max_results)`为Leonervis增加第一条Host拥有的公共网页搜索路径。模型只提供统一query和结果数；Host选择固定Brave或Tavily Search API，不接受模型指定endpoint，也不读取结果页面。因此它和后续Provider原生搜索、MCP搜索及通用`web_fetch`保持不同的调用因果与来源标识。普通Prompt以及Task planning、execution、correction Stage可使用该工具，reflection Stage不开放。
+`web_search(query, max_results)`为Coquo增加第一条Host拥有的公共网页搜索路径。模型只提供统一query和结果数；Host选择固定Brave或Tavily Search API，不接受模型指定endpoint，也不读取结果页面。因此它和后续Provider原生搜索、MCP搜索及通用`web_fetch`保持不同的调用因果与来源标识。普通Prompt以及Task planning、execution、correction Stage可使用该工具，reflection Stage不开放。
 
 Brave走固定GET与subscription-token header；Tavily走固定Bearer POST，并固定basic search、单来源一个chunk、关闭自动参数、生成答案、raw content和images，Tavily官方将其计为一次basic-search credit。Host把query限制为512字符/2 KiB、结果数限制为1至10，固定15秒timeout、256 KiB response和32 KiB JSONL输出，并最多解析100条原始结果。Transport禁止redirect且只接受JSON；两种返回都归一为保留provider顺序的title、URL、snippet、domain和显式backend，过滤非HTTP(S)、带credential、含控制字符、畸形、超长及重复URL。第三方结果始终是不可信数据。
 
-搜索属于新的`network-read` action：`read-only`和`workspace-write`拒绝，只有`danger-full-access`按正交的`ask | auto`策略继续。底层`WebSearchTool`可从一个有效key解析backend，两个key时可用`LEONERVIS_WEB_SEARCH_BACKEND`消歧；ADR 0103随后规定普通ProjectSession启动时总是关闭独立来源，只有REPL的显式`/search use brave|tavily`才激活。`/search status|sources`只读检查，`/search reset`恢复Provider原生默认或关闭全部来源。第一个激活来源是当前唯一执行的primary；额外来源只建立未来fan-out接口，不会被请求或计费。命令配置仅在当前进程生效，不写Session，也不调用provider。Ask在网络请求前显示完整query、数量、实际backend及对应额度提示；query和不含credential的backend配置fingerprint参与exact ActionIdentity、approval binding和durable Action Audit，普通live摘要及`/actions`列表隐藏query正文。凭据绝不进入模型参数、ActionIdentity、ToolResult、Session或审计。Timeout或transport不确定返回`partial`并禁止自动retry，因为请求或计费可能已发生。
+搜索属于新的`network-read` action：`read-only`和`workspace-write`拒绝，只有`danger-full-access`按正交的`ask | auto`策略继续。底层`WebSearchTool`可从一个有效key解析backend，两个key时可用`COQUO_WEB_SEARCH_BACKEND`消歧；ADR 0103随后规定普通ProjectSession启动时总是关闭独立来源，只有REPL的显式`/search use brave|tavily`才激活。`/search status|sources`只读检查，`/search reset`恢复Provider原生默认或关闭全部来源。第一个激活来源是当前唯一执行的primary；额外来源只建立未来fan-out接口，不会被请求或计费。命令配置仅在当前进程生效，不写Session，也不调用provider。Ask在网络请求前显示完整query、数量、实际backend及对应额度提示；query和不含credential的backend配置fingerprint参与exact ActionIdentity、approval binding和durable Action Audit，普通live摘要及`/actions`列表隐藏query正文。凭据绝不进入模型参数、ActionIdentity、ToolResult、Session或审计。Timeout或transport不确定返回`partial`并禁止自动retry，因为请求或计费可能已发生。
 
 Catalog现在包含22个ordinary tools和30个总定义。Canonical system prompt升级v30、provider adapter contract升级v32，empty full-context identity变为`ctx-v5-468d2b764f1b20902080a07d4a00f027eb531ea5651cc90c74b681956bbc80b9`；ToolArguments v1、ActionIdentity v1、`ctx-v5`/`ctx-v6`representation及Session、Task、Action Audit schema均不变，旧transcript不重写。非持久化ApprovalPreview升级v2以携带所选backend；ActionPrecondition增加不含secret的configuration SHA-256种类而不改变ActionIdentity版本。确定性测试通过注入transport覆盖双后端协议、选择、权限、审批、审计、截断、坏响应和不确定失败，不访问真实网络或消耗API额度。详见[0102：Bounded Independent Web Search](./decisions/0102-bounded-independent-web-search.md)。
 
@@ -1152,7 +1159,7 @@ Catalog现在包含22个ordinary tools和30个总定义。Canonical system promp
 
 Provider preset、消息protocol与原生搜索adapter现在分别建模。Profile schema升级v5，并可选择`auto`、`none`、一个已实现adapter，或导入`custom-manifest-v1`。Catalog目前预置Anthropic、OpenAI、xAI、DashScope、OpenRouter、DeepSeek、Zhipu、Moonshot、Ark、Hunyuan、Qianfan、Ollama与local；Anthropic、DashScope、OpenRouter声明原生搜索，OpenAI只对名称含`search-preview`的model声明，其他preset和custom默认不可用。Custom可选择OpenAI-compatible或Anthropic-messages protocol。旧Profile无需保留，可按v5重建；store仍提供低成本旧schema读取。
 
-Session启动时，当前route声明原生搜索就默认激活`provider`，否则不激活任何来源；Brave和Tavily即使存在key也始终默认关闭。`/search use provider|brave|tavily [...]`显式切换进程内有序来源，`/search reset`恢复Provider默认，Provider/model切换也重置为新route默认。当前只执行第一个primary。Provider原生搜索属于provider generation，不是Leonervis ToolUse，不消费普通tool request，不进入PermissionGate、Action lease或Action Audit；选择独立来源时会关闭Provider搜索并重新曝光Host `web_search`。
+Session启动时，当前route声明原生搜索就默认激活`provider`，否则不激活任何来源；Brave和Tavily即使存在key也始终默认关闭。`/search use provider|brave|tavily [...]`显式切换进程内有序来源，`/search reset`恢复Provider默认，Provider/model切换也重置为新route默认。当前只执行第一个primary。Provider原生搜索属于provider generation，不是Coquo ToolUse，不消费普通tool request，不进入PermissionGate、Action lease或Action Audit；选择独立来源时会关闭Provider搜索并重新曝光Host `web_search`。
 
 固定adapter投影Anthropic server tool、OpenAI `web_search_options`、DashScope `extra_body.enable_search`及OpenRouter server tool；已支持citation会追加为最终assistant正文的有界Markdown `Sources:`，从而随Session普通历史持久化。为避免把厂商server-tool stream事件误解析为Host调用，原生搜索当前采用buffered provider invocation，再向终端发送一个完整text delta。Custom manifest只允许有界`extra_body`、一个非function server tool及预置citation格式，拒绝protected request字段、credential形字段、endpoint/header、代码、自定义parser与超限结构；CLI只在Profile创建/替换时读取并规范保存内容，不保存源path。
 
@@ -1160,7 +1167,7 @@ Canonical system prompt升级v31、provider adapter contract升级v33，Profile 
 
 ## OpenAI Responses protocol 与 Provider-owned history
 
-Leonervis现在把`openai_responses`作为与Anthropic Messages、OpenAI Chat Completions并列的一等wire protocol。OpenAI内置route使用Responses；DeepSeek按model选择，`deepseek-v4-flash`使用Responses并声明官方Provider原生`web_search`，其他DeepSeek model继续使用Chat Completions且不猜测搜索能力。Custom Profile也可显式选择`openai-responses`。旧V4 Flash Chat Profile仍可读取并保持Chat语义，但不会静默获得原生搜索。
+Coquo现在把`openai_responses`作为与Anthropic Messages、OpenAI Chat Completions并列的一等wire protocol。OpenAI内置route使用Responses；DeepSeek按model选择，`deepseek-v4-flash`使用Responses并声明官方Provider原生`web_search`，其他DeepSeek model继续使用Chat Completions且不猜测搜索能力。Custom Profile也可显式选择`openai-responses`。旧V4 Flash Chat Profile仍可读取并保持Chat语义，但不会静默获得原生搜索。
 
 Responses adapter发送stateless完整history，以`instructions`和`input`分离system policy与消息，固定`store=false`，并同时投影Host function tools及可选Provider `web_search`。Host `ToolUse/ToolResult`分别映射为使用同一`call_id`的`function_call/function_call_output`；Provider返回的`reasoning`和`web_search_call`则进入新的有界`ProviderOwnedItem`，由`ProviderResponseEnvelope`交给AgentLoop随turn保存和后续原样回传，但绝不进入Host dispatch、PermissionGate、工具预算或Action Audit。未知hosted tool、重复ID、未完成item及坏结构均fail closed。
 
@@ -1168,7 +1175,7 @@ Responses stream以语义event的terminal response object为最终真相，增�
 
 ## Provider Search Resilience、Controls 与 Observability
 
-真实DeepSeek Responses可能在整体`response.completed`时保留一个`status=failed`的`web_search_call`，例如Provider内部`open_page`被`SSRF_BLOCKED`；兼容中转也可能把可选`annotations`返回为null、单个对象或嵌套`url_citation`。Leonervis现在把failed搜索调用作为合法Provider-owned终局事实原样保存，仍拒绝completed Response里的非终局状态；citation兼容上述有界形状，危险或畸形单条只丢弃并显示内容无关warning，不再推翻有效正文。未知hosted tool、重复ID、坏required content和不完整Response继续fail closed。
+真实DeepSeek Responses可能在整体`response.completed`时保留一个`status=failed`的`web_search_call`，例如Provider内部`open_page`被`SSRF_BLOCKED`；兼容中转也可能把可选`annotations`返回为null、单个对象或嵌套`url_citation`。Coquo现在把failed搜索调用作为合法Provider-owned终局事实原样保存，仍拒绝completed Response里的非终局状态；citation兼容上述有界形状，危险或畸形单条只丢弃并显示内容无关warning，不再推翻有效正文。未知hosted tool、重复ID、坏required content和不完整Response继续fail closed。
 
 进程内Provider搜索新增`auto|required`模式、最多20个canonical allowed domains及`low|medium|high` context size。OpenAI Responses支持三者；Anthropic只支持domain，OpenAI Chat search只支持context，不支持的adapter/option组合明确拒绝。`/search mode|domains|context`只修改当前runtime，并在reset或Provider/model切换时恢复默认。终端以独立低强度`Provider search:`轨迹显示阶段与调用数、失败数、动作类型、来源数、接受/丢弃citation数；`/session preview`与`/session turns`从既有v9 Provider-owned item派生相同的无正文摘要，不显示query、URL、页面内容或reasoning。
 
@@ -1264,7 +1271,7 @@ MCP ToolResult的已知失败码会生成保守的`Next:`建议，区分缩小/�
 
 ## 有界声明式Skills与ToolSet收窄
 
-Skill v1使用严格的`<name>/SKILL.md`包，frontmatter只接受`manifest-version`、`name`、`description`和可选`allowed-tools`，正文与元数据共同进入稳定fingerprint。Host只扫描workspace-local `.leonervis-code/skills`、project-shared `.agents/skills`及XDG user `leonervis-code/skills`三个精确根，按该顺序选择active候选并保留shadowed与invalid诊断；symlink、非UTF-8、CRLF、未知字段、YAML错误、读取漂移和全部大小边界均fail closed。`skills list|show|doctor`是无provider、无Session、无Action Audit的只读检查。
+Skill v1使用严格的`<name>/SKILL.md`包，frontmatter只接受`manifest-version`、`name`、`description`和可选`allowed-tools`，正文与元数据共同进入稳定fingerprint。Host只扫描workspace-local `.coquo/skills`、project-shared `.agents/skills`及XDG user `coquo/skills`三个精确根，按该顺序选择active候选并保留shadowed与invalid诊断；symlink、非UTF-8、CRLF、未知字段、YAML错误、读取漂移和全部大小边界均fail closed。`skills list|show|doctor`是无provider、无Session、无Action Audit的只读检查。
 
 每个普通Turn固定一个SkillInventorySnapshot，其identity进入Effective Context与ActionLease。模型先以独占回复调用`skill_search`查询冻结的active metadata，再用同Turn返回的精确name+fingerprint独占调用`skill_load`；Host在加载正文前重新读取inventory，任何变化都stale reject。成功ToolResult包含完整有界instructions但不含绝对路径，且Skill只是不受信任的流程指导，不是system authority、permission、approval、tool implementation或执行证据。
 
@@ -1292,7 +1299,7 @@ SessionStore可从严格replay的committed Turn只读投影`skill_load`请求身
 
 普通Prompt新增两个必须独占回复的commit-coupled协调工具。只有当前用户明确要求把流程保存为Skill时，模型才可调用`skill_propose_create`提交完整有界声明；Host在最终assistant正文与Session Turn成功落盘后，才把它写为inactive候选。只有用户直接批准该精确候选后，模型才可调用`skill_accept_create`；Host再次从committed Turn恢复成功ToolUse/ToolResult/ledger因果，核对owner Session、pending状态、fingerprint、固定scope与非只读模式，再复用`import_skill()`及lock完成安装。系统不会从偶然成功、重复行为或经验中自动学习Skill。
 
-生成或下载的候选位于不参与inventory扫描的`.leonervis-code/skill-candidates/v1/`，保存private immutable package、闭合metadata及只允许`created -> installed|rejected`的append-only事件。`skills fetch`与`/skills fetch`复用PinnedWebGetTransport，只接受无query的public HTTPS raw `SKILL.md`或有界ZIP；每次redirect继续校验public address，ZIP拒绝路径逃逸、重复/case-fold冲突、多package root、symlink/special/encrypted entry及count、size、expanded size与compression ratio越界。下载不会安装或激活，必须先用candidate list/show检查完整instructions与resource，再显式install或reject；安装仍生成精确import lock。
+生成或下载的候选位于不参与inventory扫描的`.coquo/skill-candidates/v1/`，保存private immutable package、闭合metadata及只允许`created -> installed|rejected`的append-only事件。`skills fetch`与`/skills fetch`复用PinnedWebGetTransport，只接受无query的public HTTPS raw `SKILL.md`或有界ZIP；每次redirect继续校验public address，ZIP拒绝路径逃逸、重复/case-fold冲突、多package root、symlink/special/encrypted entry及count、size、expanded size与compression ratio越界。下载不会安装或激活，必须先用candidate list/show检查完整instructions与resource，再显式install或reject；安装仍生成精确import lock。
 
 每个prepared Turn继续冻结SkillInventorySnapshot，新安装不会热改当前Turn的ToolSet，只在后续Turn可发现。Registry升级generation 5，system prompt升级v40，provider adapter升级v41，full/compacted Effective Context升级v15/v16并继续读取legacy v13/v14；Skill inventory v2及Session、Task、Action Audit、import lock schema不变。详见[0124](./decisions/0124-explicit-skill-authoring-and-quarantined-remote-install.md)。
 

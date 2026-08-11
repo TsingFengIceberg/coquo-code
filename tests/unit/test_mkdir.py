@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.actions import ActionPreconditionKind
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.mkdir import (
+from coquo.core.actions import ActionPreconditionKind
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.mkdir import (
     MAX_MKDIR_COMPONENT_BYTES,
     MAX_MKDIR_PATH_BYTES,
     MAX_MKDIR_PATH_CHARACTERS,
@@ -227,7 +227,7 @@ def test_directory_fsync_failure_reports_visible_partial_effect(
     def fail_fsync(_directory: Path) -> None:
         raise OSError("injected")
 
-    monkeypatch.setattr("leonervis_code.tools.mkdir._fsync_directory", fail_fsync)
+    monkeypatch.setattr("coquo.tools.mkdir._fsync_directory", fail_fsync)
 
     result = tool.execute_detailed(prepared)
 

@@ -7,14 +7,14 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.core.actions import (
+from coquo.core.actions import (
     ActionIdentity,
     ActionLease,
     ActionPrecondition,
 )
-from leonervis_code.core.compaction import EffectiveContextSummary, build_compact_prompt
-from leonervis_code.core.contracts import AssistantText, ToolArguments, UserMessage
-from leonervis_code.core.permissions import (
+from coquo.core.compaction import EffectiveContextSummary, build_compact_prompt
+from coquo.core.contracts import AssistantText, ToolArguments, UserMessage
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionDecision,
@@ -23,7 +23,7 @@ from leonervis_code.core.permissions import (
     PermissionReason,
     PermissionRequest,
 )
-from leonervis_code.session_records import (
+from coquo.session_records import (
     ActionAuditStatus,
     ActionAuthorization,
     ActionExecutionFinished,
@@ -48,7 +48,7 @@ from leonervis_code.session_records import (
     replay_records,
     workspace_fingerprint,
 )
-from leonervis_code.session_store import (
+from coquo.session_store import (
     ActionOutcomeAuditError,
     SessionStore,
 )
@@ -829,7 +829,7 @@ def test_finish_audit_failure_reports_known_outcome_without_retrying_effect(
         grant_id=None,
     )
 
-    import leonervis_code.session_store as session_store_module
+    import coquo.session_store as session_store_module
 
     def fail_append(*args, **kwargs):
         raise OSError("fsync failed")

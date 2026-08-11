@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from leonervis_code.core.compaction import (
+from coquo.core.compaction import (
     AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MIN_EFFECTIVE_TURNS,
     COMPACT_RETAINED_TURNS,
@@ -19,7 +19,7 @@ from leonervis_code.core.compaction import (
     plan_compaction,
     summary_continuation_fingerprint,
 )
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantToolBatch,
     ToolArguments,
     AssistantText,
@@ -28,7 +28,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.providers.request_context import (
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     RequestTokenCount,

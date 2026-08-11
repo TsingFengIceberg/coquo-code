@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
-from leonervis_code.core.session_title import (
+from coquo.core.contracts import AssistantText, ToolArguments, ToolUse
+from coquo.core.session_title import (
     SESSION_TITLE_MAX_OUTPUT_TOKENS,
     SESSION_TITLE_SOURCE_MAX_BYTES,
     SessionTitleCandidateError,

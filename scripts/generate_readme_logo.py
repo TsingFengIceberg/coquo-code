@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the transparent README PNG for the Leonervis LEO mark."""
+"""Generate the transparent README PNG for the Coquo COQ mark."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from pathlib import Path
 import struct
 import zlib
 
-from leonervis_code.cli.brand import BODY, E_GLYPH, HEAD, L_GLYPH, O_GLYPH, TAIL
+from coquo.cli.brand import C_GLYPH, DEEP, LIGHT, O_GLYPH, Q_GLYPH, WARM
 
-OUTPUT_PATH = Path(__file__).parents[1] / "docs" / "assets" / "leo-mark.png"
+OUTPUT_PATH = Path(__file__).parents[1] / "docs" / "assets" / "coquo-mark.png"
 CELL_SIZE = 28
 PADDING = 20
 
@@ -25,15 +25,15 @@ def chunk(kind: bytes, data: bytes) -> bytes:
 
 
 def mark_rows() -> list[list[tuple[int, int, int] | None]]:
-    """Return the colored LEO pixel grid from the terminal-banner source."""
+    """Return the colored COQ pixel grid from the terminal-banner source."""
     rows: list[list[tuple[int, int, int] | None]] = []
-    for row in range(len(L_GLYPH)):
+    for row in range(len(C_GLYPH)):
         cells: list[tuple[int, int, int] | None] = []
         for glyph, color in (
-            (L_GLYPH[row], TAIL),
-            (E_GLYPH[row], BODY),
+            (C_GLYPH[row], DEEP),
+            (O_GLYPH[row], WARM),
             (" ", None),
-            (O_GLYPH[row], HEAD),
+            (Q_GLYPH[row], LIGHT),
         ):
             cells.extend(color if character != " " else None for character in glyph)
         rows.append(cells)
@@ -41,7 +41,7 @@ def mark_rows() -> list[list[tuple[int, int, int] | None]]:
 
 
 def png_bytes() -> bytes:
-    """Build a transparent RGBA PNG containing the scaled LEO mark."""
+    """Build a transparent RGBA PNG containing the scaled COQ mark."""
     cells = mark_rows()
     grid_height = len(cells)
     grid_width = len(cells[0])

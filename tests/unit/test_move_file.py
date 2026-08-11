@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.actions import ActionPrecondition
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.move_file import (
+from coquo.core.actions import ActionPrecondition
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.move_file import (
     MAX_MOVE_COMPONENT_BYTES,
     MAX_MOVE_PATH_BYTES,
     MAX_MOVE_PATH_CHARACTERS,
@@ -224,7 +224,7 @@ def test_destination_creation_race_never_overwrites(
         destination.write_text("external", encoding="utf-8")
         return real_link(*args, **kwargs)
 
-    monkeypatch.setattr("leonervis_code.tools.move_file.os.link", race)
+    monkeypatch.setattr("coquo.tools.move_file.os.link", race)
     result = tool.execute_detailed(prepared)
     assert result.outcome == MoveFileOutcome.FAILED
     assert source.read_text(encoding="utf-8") == "source"
@@ -238,7 +238,7 @@ def test_link_failure_before_effect_is_failed(
     tool = MoveFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.move_file.os.link",
+        "coquo.tools.move_file.os.link",
         lambda *a, **k: (_ for _ in ()).throw(PermissionError()),
     )
     result = tool.execute_detailed(prepared)
@@ -255,7 +255,7 @@ def test_destination_fsync_failure_reports_two_names_partial(
     tool = MoveFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.move_file.os.fsync", lambda _fd: (_ for _ in ()).throw(OSError())
+        "coquo.tools.move_file.os.fsync", lambda _fd: (_ for _ in ()).throw(OSError())
     )
     result = tool.execute_detailed(prepared)
     assert result.outcome == MoveFileOutcome.PARTIAL
@@ -270,7 +270,7 @@ def test_unlink_failure_reports_two_names_partial(
     tool = MoveFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.move_file.os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError())
+        "coquo.tools.move_file.os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError())
     )
     result = tool.execute_detailed(prepared)
     assert result.outcome == MoveFileOutcome.PARTIAL
@@ -294,7 +294,7 @@ def test_source_parent_fsync_failure_reports_moved_partial(
             raise OSError
         real_fsync(fd)
 
-    monkeypatch.setattr("leonervis_code.tools.move_file.os.fsync", fail_second)
+    monkeypatch.setattr("coquo.tools.move_file.os.fsync", fail_second)
     result = tool.execute_detailed(prepared)
     assert result.outcome == MoveFileOutcome.PARTIAL
     assert result.result_code == "file_moved_durability_unknown"

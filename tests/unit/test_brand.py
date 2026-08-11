@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import io
 
-from leonervis_code.cli.brand import BODY, HEAD, TAIL, display_path, render_banner, render_mark
+from coquo.cli.brand import DEEP, LIGHT, WARM, display_path, render_banner, render_mark
 
 
 def test_mark_has_five_rows_without_color() -> None:
     mark = render_mark(color=False)
 
     assert len(mark) == 5
-    assert mark[0] == "█    █████  ███ "
+    assert mark[0] == " ████ ███   ███ "
     assert all("\x1b[" not in row for row in mark)
 
 
@@ -20,23 +20,23 @@ def test_colored_mark_resets_each_colored_character() -> None:
     assert "\x1b[38;2;230;154;43m█\x1b[0m" in mark[0]
     assert "\x1b[38;2;255;224;154m█\x1b[0m" in mark[0]
     assert mark[0].endswith(" ")
-    assert (TAIL, BODY, HEAD) == ((166, 90, 24), (230, 154, 43), (255, 224, 154))
+    assert (DEEP, WARM, LIGHT) == ((166, 90, 24), (230, 154, 43), (255, 224, 154))
 
 
 def test_path_inside_home_uses_tilde(monkeypatch, tmp_path) -> None:
     home = tmp_path / "home"
-    project = home / "Projects" / "leonervis-code"
+    project = home / "Projects" / "coquo"
     project.mkdir(parents=True)
-    monkeypatch.setattr("leonervis_code.cli.brand.Path.home", lambda: home)
+    monkeypatch.setattr("coquo.cli.brand.Path.home", lambda: home)
 
-    assert display_path(project) == "~/Projects/leonervis-code"
+    assert display_path(project) == "~/Projects/coquo"
 
 
 def test_banner_has_version_status_and_display_path(tmp_path) -> None:
     banner = render_banner(version="0.1.0", cwd=tmp_path, color=False)
 
-    assert "LEONERVIS CODE v0.1.0" in banner
-    assert "Foundation 3D · durable workspace Sessions" in banner
+    assert "COQUO v0.1.0" in banner
+    assert "Bounded · auditable · durable agent harness" in banner
     assert str(tmp_path) in banner
     assert "\x1b[" not in banner
 
@@ -46,13 +46,13 @@ def test_banner_uses_vertical_hanging_layout_when_terminal_is_narrow(tmp_path) -
 
     lines = banner.splitlines()
     assert lines[:5] == [
-        "  █    █████  ███",
-        "  █    █     █   █",
-        "  █    █████ █   █",
-        "  █    █     █   █",
-        "  ██████████  ███",
+        "   ████ ███   ███",
+        "  █    █   █ █   █",
+        "  █    █   █ █   █",
+        "  █    █   █ █  ██",
+        "   ████ ███   ████",
     ]
-    assert "  LEONERVIS CODE v0.1.0" in lines
+    assert "  COQUO v0.1.0" in lines
     assert all(line.startswith("  ") for line in lines if line)
     assert all(len(line) <= 40 for line in lines)
 
@@ -63,7 +63,7 @@ class InteractiveStream(io.StringIO):
 
 
 def test_color_respects_injected_environment() -> None:
-    color_enabled = __import__("leonervis_code.cli.brand", fromlist=["color_enabled"]).color_enabled
+    color_enabled = __import__("coquo.cli.brand", fromlist=["color_enabled"]).color_enabled
 
     assert color_enabled(InteractiveStream(), {})
     assert not color_enabled(InteractiveStream(), {"NO_COLOR": "1"})
@@ -72,6 +72,6 @@ def test_color_respects_injected_environment() -> None:
 def test_color_is_disabled_for_noninteractive_output(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
 
-    assert not __import__("leonervis_code.cli.brand", fromlist=["color_enabled"]).color_enabled(
+    assert not __import__("coquo.cli.brand", fromlist=["color_enabled"]).color_enabled(
         io.StringIO()
     )

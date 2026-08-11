@@ -1,8 +1,8 @@
 import hashlib
 from pathlib import Path
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
 
 
 def test_checksum_file_hashes_binary_content(tmp_path: Path) -> None:

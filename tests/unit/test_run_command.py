@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import (
+from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionDecision,
@@ -17,7 +17,7 @@ from leonervis_code.core.permissions import (
     PermissionRequest,
     PermissionResult,
 )
-from leonervis_code.tools.run_command import (
+from coquo.tools.run_command import (
     COMMAND_ENVIRONMENT_ALLOWLIST,
     MAX_COMMAND_ARGUMENTS,
     MAX_COMMAND_ARGUMENT_BYTES,

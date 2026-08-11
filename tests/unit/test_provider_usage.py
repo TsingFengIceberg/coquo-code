@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.providers.request_context import (
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.providers.usage import (
+from coquo.providers.usage import (
     ProviderInvocationKind,
     ProviderTokenUsage,
     ProviderUsageTotals,

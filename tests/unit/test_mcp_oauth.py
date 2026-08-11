@@ -7,14 +7,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from leonervis_code.mcp.config import (
+from coquo.mcp.config import (
     McpServerConfiguration,
     McpServerEntry,
     McpTransport,
     McpTrustMode,
 )
-from leonervis_code.mcp.oauth import McpOAuthError, McpOAuthManager
-from leonervis_code.tools.web_transport import WebHttpResponse
+from coquo.mcp.oauth import McpOAuthError, McpOAuthManager
+from coquo.tools.web_transport import WebHttpResponse
 
 
 class OAuthTransport:

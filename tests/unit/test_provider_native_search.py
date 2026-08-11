@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ConversationRequest, UserMessage
-from leonervis_code.providers.anthropic import (
+from coquo.core.contracts import AssistantText, ConversationRequest, UserMessage
+from coquo.providers.anthropic import (
     AnthropicProviderConfig,
     build_request as build_anthropic_request,
     parse_response as parse_anthropic_response,
 )
-from leonervis_code.providers.native_search import (
+from coquo.providers.native_search import (
     NativeSearchAdapterId,
     NativeSearchCitationFormat,
     NativeSearchConfigurationError,
@@ -22,20 +22,20 @@ from leonervis_code.providers.native_search import (
     canonical_native_search_domain,
     validate_native_search_runtime_options,
 )
-from leonervis_code.providers.openai_compat import (
+from coquo.providers.openai_compat import (
     build_request as build_openai_request,
 )
-from leonervis_code.providers.openai_responses import (
+from coquo.providers.openai_responses import (
     build_request as build_responses_request,
     parse_response as parse_responses_response,
 )
-from leonervis_code.providers.profile import ProviderProfileSpec
-from leonervis_code.providers.profile_store import ProviderProfileStore
-from leonervis_code.providers.resolver import resolve_profile_route
-from leonervis_code.session import ProjectSession
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.tools.web_search import TAVILY_SEARCH_API_KEY_ENV
+from coquo.providers.profile import ProviderProfileSpec
+from coquo.providers.profile_store import ProviderProfileStore
+from coquo.providers.resolver import resolve_profile_route
+from coquo.session import ProjectSession
+from coquo.system_prompt import build_system_prompt
+from coquo.providers.definitions import WireProtocol
+from coquo.tools.web_search import TAVILY_SEARCH_API_KEY_ENV
 
 
 def conversation() -> ConversationRequest:

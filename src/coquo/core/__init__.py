@@ -1,0 +1,1 @@
+"""Neutral contracts for Coquo."""

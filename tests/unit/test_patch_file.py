@@ -6,10 +6,10 @@ import stat
 
 import pytest
 
-from leonervis_code.core.actions import ActionPreconditionKind
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.patch_file import (
+from coquo.core.actions import ActionPreconditionKind
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.patch_file import (
     MAX_PATCH_FILE_EDITS,
     MAX_PATCH_FILE_RESULT_BYTES,
     PatchFileOutcome,
@@ -31,7 +31,7 @@ def edit(old_text: object, new_text: object, **extra: object) -> dict[str, objec
 
 
 def temporary_files(workspace: Path) -> list[Path]:
-    return list(workspace.rglob("*.leonervis-*.tmp"))
+    return list(workspace.rglob("*.coquo-*.tmp"))
 
 
 def test_prepare_builds_all_edits_from_one_snapshot_without_side_effects(tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ def test_directory_fsync_failure_reports_visible_partial_effect(
     prepared = tool.prepare(request("note.txt", [edit("before", "after")]))
 
     monkeypatch.setattr(
-        "leonervis_code.tools.write_file._fsync_directory",
+        "coquo.tools.write_file._fsync_directory",
         lambda _directory: (_ for _ in ()).throw(OSError("injected")),
     )
     result = tool.execute_detailed(prepared)

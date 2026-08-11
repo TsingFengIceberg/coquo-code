@@ -6,10 +6,10 @@ import stat
 
 import pytest
 
-from leonervis_code.core.actions import ActionPreconditionKind
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.write_file import (
+from coquo.core.actions import ActionPreconditionKind
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.write_file import (
     MAX_OVERWRITE_SOURCE_BYTES,
     MAX_WRITE_CONTENT_BYTES,
     WriteFileOutcome,
@@ -27,7 +27,7 @@ def request(path: str, content: str = "new text\n", *, tool_use_id: str = "write
 
 
 def temporary_files(workspace: Path) -> list[Path]:
-    return list(workspace.rglob("*.leonervis-*.tmp"))
+    return list(workspace.rglob("*.coquo-*.tmp"))
 
 
 def test_prepare_classifies_absent_target_as_create_and_execute_is_deterministic(
@@ -205,7 +205,7 @@ def test_create_failure_before_install_leaves_no_target_or_temporary_file(
     def fail_write(_descriptor: int, _content: bytes) -> None:
         raise OSError("injected")
 
-    monkeypatch.setattr("leonervis_code.tools.write_file._write_all", fail_write)
+    monkeypatch.setattr("coquo.tools.write_file._write_all", fail_write)
 
     result = tool.execute_detailed(prepared)
 
@@ -243,7 +243,7 @@ def test_create_directory_fsync_failure_reports_visible_durability_unknown(
     def fail_fsync(_directory: Path) -> None:
         raise OSError("injected")
 
-    monkeypatch.setattr("leonervis_code.tools.write_file._fsync_directory", fail_fsync)
+    monkeypatch.setattr("coquo.tools.write_file._fsync_directory", fail_fsync)
 
     result = tool.execute_detailed(prepared)
 
@@ -266,7 +266,7 @@ def test_overwrite_directory_fsync_failure_reports_visible_durability_unknown(
     def fail_fsync(_directory: Path) -> None:
         raise OSError("injected")
 
-    monkeypatch.setattr("leonervis_code.tools.write_file._fsync_directory", fail_fsync)
+    monkeypatch.setattr("coquo.tools.write_file._fsync_directory", fail_fsync)
 
     result = tool.execute_detailed(prepared)
 

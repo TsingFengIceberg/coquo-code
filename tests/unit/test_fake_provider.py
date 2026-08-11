@@ -1,14 +1,14 @@
 import pytest
 
-from leonervis_code.core.contracts import (
+from coquo.core.contracts import (
     AssistantText,
     ConversationRequest,
     ToolArguments,
     ToolUse,
     UserMessage,
 )
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.system_prompt import build_system_prompt
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.system_prompt import build_system_prompt
 
 
 def request(*history):

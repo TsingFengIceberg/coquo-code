@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Render a temporary ANSI-color Leonervis Code startup-banner sample."""
+"""Render a temporary ANSI-color Coquo startup-banner sample."""
 
 from __future__ import annotations
 
 import argparse
 import os
 
-from leonervis_code.cli.brand import BODY, E_GLYPH, HEAD, L_GLYPH, O_GLYPH, TAIL, paint
+from coquo.cli.brand import C_GLYPH, DEEP, LIGHT, O_GLYPH, Q_GLYPH, WARM, paint
 
 RESET = "\x1b[0m"
 BOLD_WHITE = "\x1b[1;97m"
@@ -14,17 +14,17 @@ DIM = "\x1b[2m"
 
 
 def build_mark(*, color: bool) -> list[str]:
-    """Render LEO as joined L/E modules and a one-cell gap before O."""
+    """Render COQ with a one-cell gap before Q."""
     return [
-        f"{paint(L_GLYPH[row], TAIL, enabled=color)}"
-        f"{paint(E_GLYPH[row], BODY, enabled=color)} "
-        f"{paint(O_GLYPH[row], HEAD, enabled=color)}"
+        f"{paint(C_GLYPH[row], DEEP, enabled=color)}"
+        f"{paint(O_GLYPH[row], WARM, enabled=color)} "
+        f"{paint(Q_GLYPH[row], LIGHT, enabled=color)}"
         for row in range(5)
     ]
 
 
 def main() -> int:
-    """Print a sample banner; it is not part of the Leonervis CLI yet."""
+    """Print a sample banner; it is not part of the Coquo CLI yet."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--no-color",
@@ -35,11 +35,11 @@ def main() -> int:
     color = not arguments.no_color and not os.environ.get("NO_COLOR")
 
     mark = build_mark(color=color)
-    title = f"{BOLD_WHITE}LEONERVIS CODE{RESET}" if color else "LEONERVIS CODE"
+    title = f"{BOLD_WHITE}COQUO{RESET}" if color else "COQUO"
     details = [
         f"{title} v0.1.0",
         "sample startup banner · color study",
-        "/root/Projects/leonervis-code",
+        "/root/Projects/coquo",
         "temporary preview — not part of the CLI",
     ]
 

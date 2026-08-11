@@ -7,10 +7,10 @@ import stat
 
 import pytest
 
-from leonervis_code.core.actions import ActionPrecondition
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.copy_file import (
+from coquo.core.actions import ActionPrecondition
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.copy_file import (
     MAX_COPY_SOURCE_BYTES,
     CopyFileOutcome,
     CopyFilePreparationError,
@@ -174,11 +174,11 @@ def test_link_destination_race_does_not_overwrite(tmp_path: Path, monkeypatch) -
         (tmp_path / "destination.bin").write_bytes(b"external")
         return real_link(*args, **kwargs)
 
-    monkeypatch.setattr("leonervis_code.tools.copy_file.os.link", race_link)
+    monkeypatch.setattr("coquo.tools.copy_file.os.link", race_link)
     result = tool.execute_detailed(prepared)
     assert result.outcome == CopyFileOutcome.FAILED
     assert (tmp_path / "destination.bin").read_bytes() == b"external"
-    assert not tuple(tmp_path.glob(".*.leonervis-*.tmp"))
+    assert not tuple(tmp_path.glob(".*.coquo-*.tmp"))
 
 
 def test_temporary_file_fsync_failure_has_no_destination(tmp_path: Path, monkeypatch) -> None:
@@ -186,13 +186,13 @@ def test_temporary_file_fsync_failure_has_no_destination(tmp_path: Path, monkeyp
     tool = CopyFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.copy_file._fsync",
+        "coquo.tools.copy_file._fsync",
         lambda _fd: (_ for _ in ()).throw(OSError("injected")),
     )
     result = tool.execute_detailed(prepared)
     assert result.outcome == CopyFileOutcome.FAILED
     assert not (tmp_path / "destination.bin").exists()
-    assert not tuple(tmp_path.glob(".*.leonervis-*.tmp"))
+    assert not tuple(tmp_path.glob(".*.coquo-*.tmp"))
 
 
 def test_preinstall_failure_with_cleanup_failure_reports_partial(
@@ -202,18 +202,18 @@ def test_preinstall_failure_with_cleanup_failure_reports_partial(
     tool = CopyFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.copy_file._fsync",
+        "coquo.tools.copy_file._fsync",
         lambda _fd: (_ for _ in ()).throw(OSError("injected fsync")),
     )
     monkeypatch.setattr(
-        "leonervis_code.tools.copy_file.os.unlink",
+        "coquo.tools.copy_file.os.unlink",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected cleanup")),
     )
     result = tool.execute_detailed(prepared)
     assert result.outcome == CopyFileOutcome.PARTIAL
     assert result.result_code == "temporary_cleanup_failed_destination_absent"
     assert not (tmp_path / "destination.bin").exists()
-    assert tuple(tmp_path.glob(".*.leonervis-*.tmp"))
+    assert tuple(tmp_path.glob(".*.coquo-*.tmp"))
 
 
 def test_directory_fsync_failure_reports_copied_partial(tmp_path: Path, monkeypatch) -> None:
@@ -230,7 +230,7 @@ def test_directory_fsync_failure_reports_copied_partial(tmp_path: Path, monkeypa
             raise OSError("injected")
         real_fsync(fd)
 
-    monkeypatch.setattr("leonervis_code.tools.copy_file._fsync", fail_second)
+    monkeypatch.setattr("coquo.tools.copy_file._fsync", fail_second)
     result = tool.execute_detailed(prepared)
     assert result.outcome == CopyFileOutcome.PARTIAL
     assert result.result_code == "file_copied_durability_unknown"
@@ -243,14 +243,14 @@ def test_temporary_cleanup_failure_reports_durable_partial(tmp_path: Path, monke
     tool = CopyFileTool(tmp_path)
     prepared = tool.prepare(request())
     monkeypatch.setattr(
-        "leonervis_code.tools.copy_file.os.unlink",
+        "coquo.tools.copy_file.os.unlink",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected")),
     )
     result = tool.execute_detailed(prepared)
     assert result.outcome == CopyFileOutcome.PARTIAL
     assert result.result_code == "copied_with_temporary_cleanup_failure"
     assert (tmp_path / "destination.bin").read_bytes() == b"source"
-    assert tuple(tmp_path.glob(".*.leonervis-*.tmp"))
+    assert tuple(tmp_path.glob(".*.coquo-*.tmp"))
 
 
 def test_execute_rejects_invalid_precondition(tmp_path: Path) -> None:

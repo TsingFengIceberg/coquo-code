@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from leonervis_code.core.permissions import (
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionDecision,

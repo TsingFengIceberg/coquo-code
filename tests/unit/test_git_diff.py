@@ -5,8 +5,8 @@ import subprocess
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.git_diff import GitDiffTool
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.git_diff import GitDiffTool
 
 
 def _git(workspace: Path, *arguments: str) -> None:
@@ -25,7 +25,7 @@ def _repository(tmp_path: Path) -> Path:
     workspace.mkdir()
     _git(workspace, "init", "-q")
     _git(workspace, "config", "user.email", "tests@example.invalid")
-    _git(workspace, "config", "user.name", "Leonervis Tests")
+    _git(workspace, "config", "user.name", "Coquo Tests")
     (workspace / "tracked.txt").write_text("before\n", encoding="utf-8")
     _git(workspace, "add", "tracked.txt")
     _git(workspace, "commit", "-qm", "initial")

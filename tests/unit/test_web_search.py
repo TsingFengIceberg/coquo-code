@@ -5,10 +5,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from leonervis_code.tools import web_search as web_search_module
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.core.permissions import PermissionAction
-from leonervis_code.tools.web_search import (
+from coquo.tools import web_search as web_search_module
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.permissions import PermissionAction
+from coquo.tools.web_search import (
     BRAVE_SEARCH_API_KEY_ENV,
     BRAVE_SEARCH_ENDPOINT,
     MAX_WEB_SEARCH_RESPONSE_BYTES,

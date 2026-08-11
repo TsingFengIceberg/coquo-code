@@ -5,17 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.cancellation import TurnCancellation
-from leonervis_code.mcp.catalog import McpCatalogService
-from leonervis_code.mcp.client import McpStdioClient
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerStore
-from leonervis_code.mcp.runtime import (
+from coquo.core.cancellation import TurnCancellation
+from coquo.mcp.catalog import McpCatalogService
+from coquo.mcp.client import McpStdioClient
+from coquo.mcp.config import McpServerConfiguration, McpServerStore
+from coquo.mcp.runtime import (
     McpCallPreparationError,
     McpProcessManager,
     McpRuntimeOutcome,
     prepare_mcp_call,
 )
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
+from coquo.tools.command_sandbox import CommandSandboxLaunch
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -105,7 +105,7 @@ def test_runtime_classifies_server_and_normalization_outcomes(
 
 
 def test_runtime_timeout_is_partial_and_retires_process(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("leonervis_code.mcp.client.MCP_CALL_TOOL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("coquo.mcp.client.MCP_CALL_TOOL_TIMEOUT_SECONDS", 0.05)
     manager, catalog, candidate = _runtime(tmp_path, "call-timeout")
 
     result = manager.execute(prepare_mcp_call(candidate, catalog.catalog_id, {"widget": "blue"}))

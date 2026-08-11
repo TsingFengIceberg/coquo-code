@@ -11,7 +11,7 @@ def run_cli(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]
     environment = dict(os.environ)
     environment["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     return subprocess.run(
-        [sys.executable, "-m", "leonervis_code", *arguments],
+        [sys.executable, "-m", "coquo", *arguments],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -71,7 +71,7 @@ def test_module_entry_profile_configuration_never_renders_key_value(tmp_path) ->
         [
             sys.executable,
             "-m",
-            "leonervis_code",
+            "coquo",
             "provider",
             "add",
             "vendor",
@@ -95,7 +95,7 @@ def test_module_entry_profile_configuration_never_renders_key_value(tmp_path) ->
     assert added.returncode == 0
 
     shown = subprocess.run(
-        [sys.executable, "-m", "leonervis_code", "provider", "show", "vendor"],
+        [sys.executable, "-m", "coquo", "provider", "show", "vendor"],
         capture_output=True,
         check=False,
         cwd=tmp_path,
@@ -171,9 +171,7 @@ def test_module_entry_profile_native_search_defaults_and_explicit_adapter(tmp_pa
     assert "native search adapter: openai-chat-web-search-options-v1" in shown_explicit.stdout
     assert "native search source: profile" in shown_explicit.stdout
 
-    stored = json.loads(
-        (tmp_path / "xdg" / "leonervis-code" / "providers.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "xdg" / "coquo" / "providers.json").read_text(encoding="utf-8"))
     assert stored["schema_version"] == 5
     stored_profiles = list(stored["profiles"].values())
     custom_search = next(
@@ -246,9 +244,7 @@ def test_module_entry_accepts_bounded_native_search_manifest(tmp_path) -> None:
     assert "native search manifest: future-vendor-search-v1" in shown.stdout
     assert "native search manifest digest: sha256:" in shown.stdout
 
-    stored = json.loads(
-        (tmp_path / "xdg" / "leonervis-code" / "providers.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "xdg" / "coquo" / "providers.json").read_text(encoding="utf-8"))
     stored_profile = next(iter(stored["profiles"].values()))
     assert stored_profile["native_search_adapter"] is None
     assert stored_profile["native_search_manifest"]["id"] == "future-vendor-search-v1"

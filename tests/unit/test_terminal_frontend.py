@@ -15,7 +15,7 @@ from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.base import Size
 from rich.cells import cell_len
 
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
     ProviderInvocationPreflighted,
@@ -24,8 +24,8 @@ from leonervis_code.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestStarted,
 )
-from leonervis_code.cli.approval import TerminalApprovalBroker
-from leonervis_code.cli.frontend import (
+from coquo.cli.approval import TerminalApprovalBroker
+from coquo.cli.frontend import (
     ApprovalPending,
     CancellationRequested,
     FrontendEventQueue,
@@ -37,30 +37,30 @@ from leonervis_code.cli.frontend import (
     TurnSubmitted,
     reduce_terminal_state,
 )
-from leonervis_code.cli.terminal_app import TerminalApplication, _QueuedPromptRenderer
-from leonervis_code.cli.presentation import CLEAR_SCREEN
-from leonervis_code.core.action_coordinator import (
+from coquo.cli.terminal_app import TerminalApplication, _QueuedPromptRenderer
+from coquo.cli.presentation import CLEAR_SCREEN
+from coquo.core.action_coordinator import (
     ApprovalResolution,
     HumanApprovalRequest,
 )
-from leonervis_code.core.approval_preview import build_file_change_preview
-from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
-from leonervis_code.core.cancellation import TurnCancellation, TurnCancelled
-from leonervis_code.core.contracts import ToolArguments
-from leonervis_code.core.permissions import (
+from coquo.core.approval_preview import build_file_change_preview
+from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
+from coquo.core.contracts import ToolArguments
+from coquo.core.permissions import (
     PermissionAction,
     PermissionDecision,
     PermissionReason,
     PermissionResult,
 )
-from leonervis_code.providers.request_context import (
+from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
     RequestTokenCount,
     RequestTokenCountMethod,
 )
-from leonervis_code.session import SessionTitlePrepared, TurnCommitStarted
-from leonervis_code.session_records import SessionNameSource
+from coquo.session import SessionTitlePrepared, TurnCommitStarted
+from coquo.session_records import SessionNameSource
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 

@@ -8,19 +8,19 @@ import time
 
 import pytest
 
-from leonervis_code.cli.approval import TerminalApprovalBroker
-from leonervis_code.cli.main import main, terminal_approval_handler
-from leonervis_code.cli.repl import run_repl
-from leonervis_code.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
-from leonervis_code.core.approval_preview import (
+from coquo.cli.approval import TerminalApprovalBroker
+from coquo.cli.main import main, terminal_approval_handler
+from coquo.cli.repl import run_repl
+from coquo.core.action_coordinator import ApprovalResolution, HumanApprovalRequest
+from coquo.core.approval_preview import (
     ApprovalPreviewKind,
     build_file_change_preview,
     build_metadata_preview,
 )
-from leonervis_code.core.actions import ActionIdentity, ActionLease, ActionPrecondition
-from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
-from leonervis_code.core.cancellation import TurnCancellation
-from leonervis_code.core.permissions import (
+from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from coquo.core.contracts import AssistantText, ToolArguments, ToolUse
+from coquo.core.cancellation import TurnCancellation
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionMode,
@@ -28,8 +28,8 @@ from leonervis_code.core.permissions import (
     PermissionReason,
     PermissionResult,
 )
-from leonervis_code.providers.request_context import RequestTokenCount, RequestTokenCountMethod
-from leonervis_code.session import ProjectSession
+from coquo.providers.request_context import RequestTokenCount, RequestTokenCountMethod
+from coquo.session import ProjectSession
 
 
 class ToolProvider:
@@ -783,6 +783,6 @@ def test_terminal_hook_handler_approval_is_redacted_and_describes_sandbox() -> N
     )
     assert "pinned direct-argv Hook handler" in rendered
     assert "no sockets" in rendered
-    assert "--leonervis-hook-event-v1" not in rendered
+    assert "--coquo-hook-event-v1" not in rendered
     assert "tool-use-1" not in rendered
     assert "aaaa" not in rendered

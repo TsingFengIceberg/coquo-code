@@ -6,22 +6,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from leonervis_code.core.contracts import AssistantText, ToolTurnLedger, UserMessage
-from leonervis_code.session_records import BindingSnapshot
-from leonervis_code.session_store import SessionStore
-from leonervis_code.task_records import (
+from coquo.core.contracts import AssistantText, ToolTurnLedger, UserMessage
+from coquo.session_records import BindingSnapshot
+from coquo.session_store import SessionStore
+from coquo.task_records import (
     AcceptanceCheckOutcome,
     AcceptanceCriterionKind,
     TaskCompletionPolicy,
 )
-from leonervis_code.task_store import TaskInfo, TaskStore
-from leonervis_code.task_verification import (
+from coquo.task_store import TaskInfo, TaskStore
+from coquo.task_verification import (
     TaskVerificationError,
     build_task_review_request,
     parse_task_review_response,
     run_host_acceptance_checks,
 )
-from leonervis_code.tools.run_command import (
+from coquo.tools.run_command import (
     RunCommandExecutionStatus,
     RunCommandOutcome,
 )
@@ -151,7 +151,10 @@ def test_reviewer_request_is_no_tools_independent_and_includes_only_selected_pat
     assert payload["files"]["second.txt"]["content"] == "second\n"
 
 
-@pytest.mark.parametrize("path", (".env", "nested/.env.local", ".git/config"))
+@pytest.mark.parametrize(
+    "path",
+    (".env", "nested/.env.local", ".git/config", ".coquo/state", ".leonervis-code/state"),
+)
 def test_reviewer_rejects_private_or_credential_paths(tmp_path: Path, path: str) -> None:
     target = tmp_path / path
     target.parent.mkdir(parents=True, exist_ok=True)

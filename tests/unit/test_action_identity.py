@@ -5,20 +5,20 @@ from threading import Barrier, Thread
 
 import pytest
 
-from leonervis_code.core.actions import (
+from coquo.core.actions import (
     ACTION_IDENTITY_VERSION,
     ActionIdentity,
     ActionLease,
     ActionPrecondition,
     ActionPreconditionKind,
 )
-from leonervis_code.core.approvals import (
+from coquo.core.approvals import (
     ApprovalGrant,
     ApprovalGrantError,
     ApprovalGrantRejection,
 )
-from leonervis_code.core.contracts import ToolArguments
-from leonervis_code.core.permissions import (
+from coquo.core.contracts import ToolArguments
+from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
     PermissionDecision,
@@ -85,7 +85,7 @@ def test_action_identity_is_canonical_round_trippable_and_has_stable_digest() ->
     assert first.canonical_json == reordered.canonical_json
     assert ActionIdentity.from_mapping(first.as_mapping()) == first
     assert first.digest == (
-        "act-v1-65861399d86d6c67fb4dee2860053ebabe469cf7a1325f1daaf65f3b681984b0"
+        "act-v1-21ab76015d7cefdf84bbf710487cef20cbf604e4b36bb4f040baa4fafe31c15c"
     )
 
 

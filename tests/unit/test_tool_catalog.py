@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.catalog import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.catalog import (
     TOOL_CATALOG,
     model_tool_definitions,
     select_tool_definitions,

@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.cli.main import main
-from leonervis_code.core.contracts import AssistantText, ToolArguments, ToolUse
-import leonervis_code.evals.coding_tasks as coding_tasks_module
-from leonervis_code.evals.coding_tasks import (
+from coquo.cli.main import main
+from coquo.core.contracts import AssistantText, ToolArguments, ToolUse
+import coquo.evals.coding_tasks as coding_tasks_module
+from coquo.evals.coding_tasks import (
     CODING_TASK_SUITE_ID,
     MAX_CODING_TASK_FILE_BYTES,
     builtin_coding_tasks,
@@ -19,9 +19,9 @@ from leonervis_code.evals.coding_tasks import (
     run_coding_task,
     score_coding_task,
 )
-from leonervis_code.providers.fake import ScriptedFakeProvider
-from leonervis_code.tools.command_sandbox import CommandSandboxLaunch
-from leonervis_code.tools.run_command import RunCommandTool
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.tools.command_sandbox import CommandSandboxLaunch
+from coquo.tools.run_command import RunCommandTool
 
 
 class _DirectTestSandbox:
@@ -114,7 +114,7 @@ def test_correct_solution_passes_visible_and_hidden_host_checks(
     assert first.passed is True
     assert render_coding_task_result_json(first) == render_coding_task_result_json(second)
     assert json.loads(render_coding_task_result_json(first))["suite_id"] == CODING_TASK_SUITE_ID
-    assert not (workspace / ".leonervis-eval-tests").exists()
+    assert not (workspace / ".coquo-eval-tests").exists()
 
 
 def test_protected_changes_and_extra_entries_fail_host_facts(tmp_path: Path) -> None:

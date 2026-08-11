@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.mcp.client import McpClientError
-from leonervis_code.mcp.config import McpServerConfiguration, McpServerEntry
-from leonervis_code.mcp.reverse import (
+from coquo.mcp.client import McpClientError
+from coquo.mcp.config import McpServerConfiguration, McpServerEntry
+from coquo.mcp.reverse import (
     McpElicitationResponse,
     McpReverseRequestCoordinator,
     McpSamplingResponse,

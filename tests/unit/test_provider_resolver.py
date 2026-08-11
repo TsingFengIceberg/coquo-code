@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.providers.definitions import ADAPTER_CONTRACT_VERSION, WireProtocol
-from leonervis_code.providers.profile import NamedProviderProfile, ProviderProfileSpec
-from leonervis_code.providers.resolver import (
+from coquo.providers.definitions import ADAPTER_CONTRACT_VERSION, WireProtocol
+from coquo.providers.profile import NamedProviderProfile, ProviderProfileSpec
+from coquo.providers.resolver import (
     RuntimeRouteError,
     resolve_profile_route,
     resolve_runtime_route,
@@ -189,7 +189,7 @@ def test_route_fingerprint_is_canonical_and_credential_state_independent() -> No
         environment={"OPENAI_API_KEY": "first", "OPENAI_BASE_URL": "https://proxy.test/v1"},
     )
 
-    assert ADAPTER_CONTRACT_VERSION == 44
+    assert ADAPTER_CONTRACT_VERSION == 45
     assert first.fingerprint() == second.fingerprint()
     assert len(first.fingerprint()) == 64
     assert first.fingerprint() != overridden.fingerprint()

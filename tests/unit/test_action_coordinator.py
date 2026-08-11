@@ -5,22 +5,22 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.core.action_coordinator import (
+from coquo.core.action_coordinator import (
     ActionCoordinator,
     ActionExecutionResult,
     ActionIdentityChangedError,
     ApprovalResolution,
 )
-from leonervis_code.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
-from leonervis_code.core.actions import (
+from coquo.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
+from coquo.core.actions import (
     ActionIdentity,
     ActionLease,
     ActionPrecondition,
 )
-from leonervis_code.core.approvals import ApprovalGrantError, ApprovalGrantRejection
-from leonervis_code.core.contracts import ToolArguments, ToolResult
-from leonervis_code.core.permissions import ApprovalMode, PermissionAction, PermissionMode
-from leonervis_code.session_records import (
+from coquo.core.approvals import ApprovalGrantError, ApprovalGrantRejection
+from coquo.core.contracts import ToolArguments, ToolResult
+from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from coquo.session_records import (
     ActionAuthorization,
     ActionExecutionOutcome,
     ApprovalAuditOutcome,

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.read_file_lines import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.read_file_lines import (
     MAX_READ_FILE_LINES_COUNT,
     MAX_READ_FILE_LINES_OUTPUT_BYTES,
     MAX_READ_FILE_LINES_SOURCE_BYTES,

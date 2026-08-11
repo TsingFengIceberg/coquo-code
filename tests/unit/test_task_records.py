@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from leonervis_code.core.hook_contracts import (
+from coquo.core.hook_contracts import (
     HookAuditEntry,
     HookAuditLedger,
     HookEffect,
     HookEvent,
 )
-from leonervis_code.session_records import workspace_fingerprint
-from leonervis_code.task_records import (
+from coquo.session_records import workspace_fingerprint
+from coquo.task_records import (
     MAX_ACCEPTANCE_CRITERIA,
     MAX_TASK_OBJECTIVE_CHARACTERS,
     AcceptanceCriterionKind,

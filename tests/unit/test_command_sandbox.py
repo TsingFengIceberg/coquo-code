@@ -10,15 +10,15 @@ import time
 
 import pytest
 
-import leonervis_code.tools.command_sandbox as sandbox_module
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.command_sandbox import (
+import coquo.tools.command_sandbox as sandbox_module
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.command_sandbox import (
     CommandSandboxUnavailable,
     LinuxBubblewrapCommandSandbox,
     SANDBOX_PRIVATE_HOME,
     sandbox_activation_succeeded,
 )
-from leonervis_code.tools.run_command import (
+from coquo.tools.run_command import (
     RunCommandExecutionStatus,
     RunCommandOutcome,
     RunCommandTool,
@@ -52,6 +52,8 @@ def test_bubblewrap_launch_has_fixed_mount_namespace_environment_and_seccomp_ord
     home = tmp_path / "home"
     workspace.mkdir()
     (home / ".ssh").mkdir(parents=True)
+    (home / ".coquo").mkdir()
+    (home / ".leonervis-code").mkdir()
     (home / ".netrc").write_text("secret", encoding="utf-8")
     bwrap = tmp_path / "bwrap"
     bwrap.write_text("", encoding="utf-8")
@@ -90,6 +92,8 @@ def test_bubblewrap_launch_has_fixed_mount_namespace_environment_and_seccomp_ord
         assert _subsequence(argv, ("--tmpfs", "/run"))
         assert _subsequence(argv, ("--tmpfs", "/tmp"))
         assert _subsequence(argv, ("--tmpfs", str(home / ".ssh")))
+        assert _subsequence(argv, ("--tmpfs", str(home / ".coquo")))
+        assert _subsequence(argv, ("--tmpfs", str(home / ".leonervis-code")))
         assert _subsequence(argv, ("--ro-bind", "/dev/null", str(home / ".netrc")))
         assert _subsequence(argv, ("--setenv", "HOME", SANDBOX_PRIVATE_HOME))
         assert _subsequence(argv, ("--setenv", "PWD", str(workspace)))
@@ -340,7 +344,7 @@ def test_real_sandbox_allows_workspace_write_but_blocks_host_write_and_network(
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    outside = Path("/etc/leonervis-command-sandbox-test")
+    outside = Path("/etc/coquo-command-sandbox-test")
     code = (
         "from pathlib import Path; import socket; "
         "Path('inside.txt').write_text('inside', encoding='utf-8'); "

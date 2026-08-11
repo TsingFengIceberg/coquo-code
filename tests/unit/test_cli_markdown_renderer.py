@@ -6,7 +6,7 @@ import re
 import pytest
 from rich.cells import cell_len
 
-from leonervis_code.cli.markdown_renderer import (
+from coquo.cli.markdown_renderer import (
     TerminalMarkdownRenderer,
     escape_terminal_controls,
     render_markdown_document,

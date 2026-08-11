@@ -4,8 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from leonervis_code.core.compaction import EffectiveContextSummary
-from leonervis_code.core.contracts import (
+from coquo.core.compaction import EffectiveContextSummary
+from coquo.core.contracts import (
     AssistantToolBatch,
     AssistantText,
     SystemPromptSnapshot,
@@ -14,7 +14,7 @@ from leonervis_code.core.contracts import (
     ToolUse,
     UserMessage,
 )
-from leonervis_code.core.effective_context import (
+from coquo.core.effective_context import (
     COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_REPRESENTATION_VERSION,
     EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
@@ -23,12 +23,12 @@ from leonervis_code.core.effective_context import (
     EffectiveContextSnapshot,
     validate_complete_history,
 )
-from leonervis_code.system_prompt import build_system_prompt
-from leonervis_code.core.project_instructions import ProjectInstructionsLoader
-from leonervis_code.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
-from leonervis_code.tools.read_file import read_file_model_definition
-from leonervis_code.skills import SkillInventorySnapshot
-from leonervis_code.hooks import HookSetSnapshot
+from coquo.system_prompt import build_system_prompt
+from coquo.core.project_instructions import ProjectInstructionsLoader
+from coquo.tools.catalog import TOOL_CATALOG, TOOL_REGISTRY_SNAPSHOT
+from coquo.tools.read_file import read_file_model_definition
+from coquo.skills import SkillInventorySnapshot
+from coquo.hooks import HookSetSnapshot
 
 
 SKILL_INVENTORY_ID = SkillInventorySnapshot((), ()).snapshot_id
@@ -57,7 +57,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v21-34a004e3bd5cb867f19de3a05f03c641537e557edac19dbfead67a7b249a47ad"
+        == "ctx-v21-6fd01fe9f1ff8e598e32bc50d76b9b970a2048defde1e63525bf9ecdf6703037"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0

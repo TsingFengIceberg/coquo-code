@@ -6,15 +6,15 @@ from uuid import UUID
 
 import pytest
 
-from leonervis_code.providers.definitions import WireProtocol
-from leonervis_code.providers.profile import (
+from coquo.providers.definitions import WireProtocol
+from coquo.providers.profile import (
     NamedProviderProfile,
     ProviderProfileError,
     ProviderProfileSpec,
     legacy_profile_id,
     profile_fingerprint,
 )
-from leonervis_code.providers.profile_store import ProviderProfileStore
+from coquo.providers.profile_store import ProviderProfileStore
 
 
 def profile(name: str = "local-dev") -> NamedProviderProfile:

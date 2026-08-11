@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools.web_fetch import WEB_FETCH_TOOL_NAME, WebFetchOutcome, WebFetchTool
-from leonervis_code.tools.web_transport import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.web_fetch import WEB_FETCH_TOOL_NAME, WebFetchOutcome, WebFetchTool
+from coquo.tools.web_transport import (
     WebHttpResponse,
     WebTransportError,
     canonical_public_web_url,

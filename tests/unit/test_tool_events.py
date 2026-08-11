@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from leonervis_code.agent.tool_events import (
+from coquo.agent.tool_events import (
     AssistantToolTextReceived,
     MAX_TOOL_EVENT_ARGV_LINE_BYTES,
     MAX_TOOL_EVENT_DETAIL_BYTES,
@@ -19,8 +19,8 @@ from leonervis_code.agent.tool_events import (
     safe_tool_request_details,
     safe_tool_request_summary,
 )
-from leonervis_code.core.contracts import ToolArguments, ToolResult, ToolUse
-from leonervis_code.mcp.client import McpNotificationKind
+from coquo.core.contracts import ToolArguments, ToolResult, ToolUse
+from coquo.mcp.client import McpNotificationKind
 
 
 def request(name: str, arguments: dict[str, object]) -> ToolUse:

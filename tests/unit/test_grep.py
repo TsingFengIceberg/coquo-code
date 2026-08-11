@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from leonervis_code.core.contracts import ToolArguments, ToolUse
-from leonervis_code.tools import grep as grep_module
-from leonervis_code.tools.grep import (
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools import grep as grep_module
+from coquo.tools.grep import (
     GREP_TRUNCATION_SENTINEL,
     MAX_GREP_MATCHES,
     GrepTool,
