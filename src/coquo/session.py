@@ -20,6 +20,8 @@ from coquo.agent.runtime import (
     AgentTurnRequest,
 )
 from coquo.child_run_store import ChildRunInfo, ChildRunStore
+from coquo.child_supervisor import ChildRunSupervisor
+from coquo.child_runtime import build_child_runtime_spec
 from coquo.agent.task_control import (
     TASK_LIFECYCLE_KIND_BY_TOOL,
     TASK_PROPOSAL_KIND_BY_TOOL,
@@ -872,13 +874,16 @@ class ProjectSession:
         mcp_process_manager: McpProcessManager | None = None,
         hook_store: HookStore | None = None,
         startup_resume_result: SessionResumeResult | None = None,
+        child_mode: bool = False,
     ) -> None:
         self.workspace = workspace
+        self._child_mode = child_mode
         self._store = store
         self._manager = manager
         self._session_store = session_store
         self._task_store = TaskStore(workspace)
         self._child_run_store = ChildRunStore(workspace)
+        self._child_supervisor: ChildRunSupervisor | None = None
         self._writer = writer
         self._read_file = read_file
         self._glob = glob
@@ -974,7 +979,7 @@ class ProjectSession:
             )
         )
         self._loop = self._runtime.loop
-        if loop is not None:
+        if loop is not None and not self._child_mode:
             self._loop.install_action_dispatcher(self._dispatch_action)
             self._loop.install_task_control_dispatcher(
                 _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
@@ -1003,7 +1008,9 @@ class ProjectSession:
             self._checksum_file,
             self._archive_list,
             self._project_instructions_loader.load,
-            self._mcp_catalog_service.registry_snapshot,
+            (lambda: TOOL_REGISTRY_SNAPSHOT)
+            if self._child_mode
+            else self._mcp_catalog_service.registry_snapshot,
             self._skill_inventory_loader.load,
             self._hook_store.snapshot,
             self._skill_inventory_loader.read_resource,
@@ -1013,17 +1020,19 @@ class ProjectSession:
     def _runtime_callbacks(self, writer: SessionWriter) -> AgentRuntimeCallbacks:
         return AgentRuntimeCallbacks(
             commit_turn=lambda turn: self._commit_turn(writer, turn),
-            action_dispatcher=self._dispatch_action,
-            task_control_names=_COMMIT_CONTROL_TOOL_NAMES,
-            task_control_dispatcher=self._dispatch_task_control,
-            tool_set_transition_dispatcher=self._transition_tool_set,
+            action_dispatcher=None if self._child_mode else self._dispatch_action,
+            task_control_names=() if self._child_mode else _COMMIT_CONTROL_TOOL_NAMES,
+            task_control_dispatcher=None if self._child_mode else self._dispatch_task_control,
+            tool_set_transition_dispatcher=None if self._child_mode else self._transition_tool_set,
             activate_turn=self._activate_runtime_turn,
             bind_provider=self._bind_runtime_provider,
             issue_action_lease=self._issue_runtime_action_lease,
             auto_compact_turn=self._auto_compact_turn,
             emit_usage=self._emit_runtime_usage,
             record_failure=self._record_runtime_failure,
-            prepare_first_response_hook=self._prepare_runtime_first_response_hook,
+            prepare_first_response_hook=None
+            if self._child_mode
+            else self._prepare_runtime_first_response_hook,
             binding_for_provider=lambda status: binding_from_status(status),
         )
 
@@ -1115,6 +1124,8 @@ class ProjectSession:
         project_hooks_path: Path | None = None,
         provider_factory: Callable[..., ConversationProvider] | None = None,
         fake_provider_factory: Callable[[], ConversationProvider] | None = None,
+        publish_latest: bool = True,
+        child_mode: bool = False,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
@@ -1291,6 +1302,7 @@ class ProjectSession:
                     mcp_client=mcp_client,
                     mcp_policy_store=mcp_policy_store,
                     hook_store=hook_store,
+                    child_mode=child_mode,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -1325,7 +1337,11 @@ class ProjectSession:
                         writer_holder["writer"], turn
                     ),
                     project_instructions_factory=project_instructions_loader.load,
-                    tool_registry_factory=resume_mcp_catalog.registry_snapshot,
+                    tool_registry_factory=(
+                        (lambda: TOOL_REGISTRY_SNAPSHOT)
+                        if child_mode
+                        else resume_mcp_catalog.registry_snapshot
+                    ),
                     skill_inventory_factory=skill_inventory_loader.load,
                     hook_set_factory=hook_store.snapshot,
                     skill_resource_reader=skill_inventory_loader.read_resource,
@@ -1336,7 +1352,10 @@ class ProjectSession:
                     report = assessment.fit_report
                     if report is not None and rejects_context_transition(report.decision):
                         raise SessionResumeContextError(prepared.info, snapshot.context_id, report)
-                    committed = prepared.commit(binding=binding_from_status(runtime.status))
+                    committed = prepared.commit(
+                        binding=binding_from_status(runtime.status),
+                        publish_latest=publish_latest,
+                    )
                 writer = committed.writer
                 writer_holder["writer"] = writer
                 result = _resume_result(
@@ -1397,6 +1416,7 @@ class ProjectSession:
                     mcp_policy_store=mcp_policy_store,
                     hook_store=hook_store,
                     startup_resume_result=result,
+                    child_mode=child_mode,
                 )
                 session_holder["session"] = session
                 return session
@@ -1585,6 +1605,56 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             return self._child_run_store.create(objective, parent_session=self._writer.session_id)
+
+    def prepare_child_run(self, child_run_id: str) -> ChildRunInfo:
+        """Freeze a read-only Child envelope and bind its detached Session without Provider work."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._child_run_store.inspect(child_run_id)
+            status = self._manager.status()
+            child_session_id = info.child_session_id or str(uuid4())
+            spec = build_child_runtime_spec(
+                child_run_id=info.child_run_id,
+                parent_session_id=self._writer.session_id,
+                child_session_id=child_session_id,
+                objective=info.objective,
+                status=status,
+            )
+            return self._child_run_store.prepare(
+                info.child_run_id,
+                runtime_spec=spec,
+                session_store=self._session_store,
+                binding=binding_from_status(status),
+            )
+
+    def run_child_run(self, child_run_id: str) -> ChildRunInfo:
+        """Run one prepared Child in its detached Session without changing this parent."""
+        from coquo.child_runtime import ChildRunExecutor
+
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return ChildRunExecutor(self.workspace).run(child_run_id)
+
+    def start_child_run(self, child_run_id: str) -> ChildRunInfo:
+        """Submit one ready Child to the process-local bounded supervisor."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if self._child_supervisor is None:
+                self._child_supervisor = ChildRunSupervisor(
+                    self.workspace,
+                    parent_session_id=self._writer.session_id,
+                )
+            return self._child_supervisor.submit(child_run_id)
+
+    def child_notifications(self):
+        with self._lock:
+            self._ensure_open()
+            if self._child_supervisor is None:
+                return ()
+            return self._child_supervisor.drain_notifications()
 
     def list_child_runs(self, *, status=None) -> tuple[ChildRunInfo, ...]:
         """List Child Run control-plane metadata without changing Session state."""
@@ -4135,6 +4205,10 @@ class ProjectSession:
                 return
             self._ensure_not_compacting()
             self._closed = True
+            supervisor = self._child_supervisor
+            self._child_supervisor = None
+            if supervisor is not None:
+                supervisor.close()
             mcp_cleanup_complete = self._mcp_process_manager.close()
             try:
                 self._writer.close()

@@ -20,7 +20,13 @@ from coquo.child_run_records import (
     MAX_CHILD_RUN_RECORDS,
     MAX_CHILD_RUN_TRANSCRIPT_BYTES,
     ChildRunCancelled,
+    ChildRunAdmitted,
     ChildRunHeader,
+    ChildSessionBound,
+    ChildRunPreparationFailed,
+    ChildRunStarted,
+    ChildRunCompleted,
+    ChildRunFailed,
     ChildRunRecord,
     ChildRunRecordError,
     ChildRunReplayState,
@@ -34,6 +40,7 @@ from coquo.child_run_records import (
     utc_now,
 )
 from coquo.session_records import canonical_session_id, workspace_fingerprint
+from coquo.session_records import BindingSnapshot
 from coquo.session_store import SessionStore, SessionStoreError
 
 MAX_CHILD_RUN_DIRECTORY_ENTRIES = 10_000
@@ -55,6 +62,10 @@ class ChildRunAppendCommitError(ChildRunStoreError):
         super().__init__(message)
 
 
+class ChildRunExecutionLeaseError(ChildRunStoreError):
+    """Raised when another process or thread owns one Child execution lease."""
+
+
 @dataclass(frozen=True)
 class ChildRunInfo:
     child_run_id: str
@@ -68,10 +79,21 @@ class ChildRunInfo:
     record_count: int
     cancelled_at: str | None = None
     cancellation_reason: str | None = None
+    child_session_id: str | None = None
+    tool_set_id: str | None = None
+    tool_names: tuple[str, ...] = ()
+    provider_binding: dict[str, object] | None = None
+    preparation_failure: str | None = None
+    execution_id: str | None = None
+    assistant_text_sha256: str | None = None
+    session_record_sequence: int | None = None
+    failure_result_code: str | None = None
 
 
 _ACTIVE_WRITERS: set[str] = set()
 _ACTIVE_WRITERS_GUARD = Lock()
+_ACTIVE_EXECUTION_LEASES: set[str] = set()
+_ACTIVE_EXECUTION_GUARD = Lock()
 
 
 class ChildRunStore:
@@ -90,7 +112,9 @@ class ChildRunStore:
         try:
             resolved = requested.resolve(strict=True)
         except OSError:
-            raise ChildRunStoreError(f"workspace does not exist or is inaccessible: {requested}") from None
+            raise ChildRunStoreError(
+                f"workspace does not exist or is inaccessible: {requested}"
+            ) from None
         if not resolved.is_dir():
             raise ChildRunStoreError(f"workspace is not a directory: {resolved}")
         self.workspace = resolved
@@ -151,7 +175,9 @@ class ChildRunStore:
             info = _child_run_info(path, self._load_state(path))
             if status is None or info.status is status:
                 runs.append(info)
-        return tuple(sorted(runs, key=lambda item: (item.created_at, item.child_run_id), reverse=True))
+        return tuple(
+            sorted(runs, key=lambda item: (item.created_at, item.child_run_id), reverse=True)
+        )
 
     def open(self, child_run_id: str) -> ChildRunWriter:
         canonical = _store_child_run_id(child_run_id)
@@ -176,6 +202,173 @@ class ChildRunStore:
             os.close(descriptor)
             raise
 
+    def prepare(
+        self,
+        child_run_id: str,
+        *,
+        runtime_spec,
+        session_store: SessionStore,
+        binding,
+    ) -> ChildRunInfo:
+        """Durably admit one Child and bind one detached Session without latest mutation."""
+        from coquo.child_runtime import ChildRuntimeSpec
+        from coquo.session_store import SessionCreationRequest
+
+        if type(runtime_spec) is not ChildRuntimeSpec:
+            raise ChildRunStoreError("Child runtime specification is invalid")
+        if type(binding) is not BindingSnapshot:
+            raise ChildRunStoreError("Child Session binding is invalid")
+        with self.open(child_run_id) as writer:
+            state = writer.state
+            if state.header.child_run_id != runtime_spec.child_run_id:
+                raise ChildRunStoreError("Child Run runtime specification ID does not match header")
+            if state.header.parent_session_id != runtime_spec.parent_session_id:
+                raise ChildRunStoreError(
+                    "Child Run runtime specification owner does not match header"
+                )
+            if state.status is ChildRunStatus.QUEUED:
+                admitted = ChildRunAdmitted(
+                    sequence=len(state.records),
+                    child_run_id=runtime_spec.child_run_id,
+                    parent_session_id=runtime_spec.parent_session_id,
+                    child_session_id=runtime_spec.child_session_id,
+                    permission_mode=runtime_spec.permission_mode,
+                    approval_mode=runtime_spec.approval_mode,
+                    provider_binding=dict(runtime_spec.provider_binding),
+                    tool_registry_id=runtime_spec.tool_registry_id,
+                    tool_registry_generation=runtime_spec.tool_registry_generation,
+                    tool_set_id=runtime_spec.tool_set_id,
+                    tool_names=runtime_spec.tool_names,
+                    role_contract_version=runtime_spec.role_contract_version,
+                    role_prompt_fingerprint=runtime_spec.role_prompt_fingerprint,
+                    max_provider_invocations=runtime_spec.max_provider_invocations,
+                    max_tool_requests=runtime_spec.max_tool_requests,
+                    max_output_tokens=runtime_spec.max_output_tokens,
+                    deadline_seconds=runtime_spec.deadline_seconds,
+                    admitted_at=self._clock(),
+                )
+                writer._append_transition(admitted)
+            elif state.status is ChildRunStatus.ADMITTED:
+                admitted = state.admitted
+                assert admitted is not None
+                if (
+                    admitted.child_session_id != runtime_spec.child_session_id
+                    or admitted.tool_set_id != runtime_spec.tool_set_id
+                    or admitted.provider_binding != dict(runtime_spec.provider_binding)
+                ):
+                    raise ChildRunStoreError(
+                        "Child Run admission does not match the requested runtime"
+                    )
+            elif state.status is ChildRunStatus.READY:
+                admitted = state.admitted
+                bound = state.session_bound
+                assert admitted is not None and bound is not None
+                if (
+                    admitted.child_session_id != runtime_spec.child_session_id
+                    or admitted.tool_set_id != runtime_spec.tool_set_id
+                    or admitted.provider_binding != dict(runtime_spec.provider_binding)
+                    or bound.child_session_id != runtime_spec.child_session_id
+                ):
+                    raise ChildRunStoreError(
+                        "Child Run binding does not match the requested runtime"
+                    )
+                return writer.info
+            else:
+                raise ChildRunStoreError("Child Run is not queued or partially admitted")
+            child_writer = None
+            try:
+                if writer.state.session_bound is not None:
+                    bound = writer.state.session_bound
+                    if bound.child_session_id != runtime_spec.child_session_id:
+                        raise ChildRunStoreError("Child Session binding does not match admission")
+                    return writer.info
+                try:
+                    child_info = session_store.inspect(runtime_spec.child_session_id)
+                except SessionStoreError:
+                    child_path = session_store.root / f"{runtime_spec.child_session_id}.jsonl"
+                    try:
+                        child_path.lstat()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        raise ChildRunStoreError(
+                            "existing Child Session is inaccessible"
+                        ) from error
+                    else:
+                        raise ChildRunStoreError(
+                            "existing Child Session is unsafe or invalid"
+                        ) from None
+                    child_writer = session_store.create(
+                        binding,
+                        creation=SessionCreationRequest(
+                            session_id=runtime_spec.child_session_id,
+                            publish_latest=False,
+                            name=f"Child {runtime_spec.child_run_id[:8]}",
+                        ),
+                    )
+                    child_info = child_writer.info
+                    child_writer.release()
+                    child_writer = None
+                if child_info.binding != binding:
+                    raise ChildRunStoreError(
+                        "existing Child Session binding does not match admission"
+                    )
+                bound = ChildSessionBound(
+                    sequence=len(writer.state.records),
+                    child_run_id=runtime_spec.child_run_id,
+                    child_session_id=runtime_spec.child_session_id,
+                    session_header_sequence=0,
+                    session_path=str(child_info.path),
+                    bound_at=self._clock(),
+                )
+                writer._append_transition(bound)
+            except BaseException as error:
+                if child_writer is not None:
+                    child_writer.release()
+                if isinstance(error, (ChildRunAppendCommitError, ChildRunCreateCommitError)):
+                    raise
+                failure = ChildRunPreparationFailed(
+                    sequence=len(writer.state.records),
+                    child_run_id=runtime_spec.child_run_id,
+                    phase="child_session",
+                    result_code="session_create_failed",
+                    message=str(error)[:1024] or "Child Session creation failed",
+                    failed_at=self._clock(),
+                )
+                writer._append_transition(failure)
+                raise ChildRunStoreError(str(error)) from None
+            return writer.info
+
+    def acquire_execution(self, child_run_id: str):
+        """Acquire a no-follow process-local execution lease for one Child Run."""
+        info = self.inspect(child_run_id)
+        if info.status is not ChildRunStatus.READY:
+            raise ChildRunStoreError("Child Run is not ready for execution")
+        path = self.root / f"{info.child_run_id}.execution.lock"
+        self._ensure_root()
+        descriptor: int | None = None
+        key = str(path)
+        with _ACTIVE_EXECUTION_GUARD:
+            if key in _ACTIVE_EXECUTION_LEASES:
+                raise ChildRunExecutionLeaseError("Child Run already has an active execution lease")
+            _ACTIVE_EXECUTION_LEASES.add(key)
+        try:
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags, 0o600)
+            os.write(descriptor, b"child-execution-lease-v1\n")
+            os.fsync(descriptor)
+            return ChildRunExecutionLease(path, descriptor, key)
+        except FileExistsError:
+            raise ChildRunExecutionLeaseError(
+                "Child Run already has an active execution lease"
+            ) from None
+        except OSError as error:
+            raise ChildRunStoreError("could not acquire Child Run execution lease") from error
+        finally:
+            if descriptor is None:
+                with _ACTIVE_EXECUTION_GUARD:
+                    _ACTIVE_EXECUTION_LEASES.discard(key)
+
     def _ensure_root(self) -> None:
         _ensure_directory(self.workspace / ".coquo", self.workspace)
         _ensure_directory(self.workspace / ".coquo" / "child-runs", self.workspace)
@@ -192,7 +385,9 @@ class ChildRunStore:
         if len(data) > MAX_CHILD_RUN_TRANSCRIPT_BYTES:
             raise ChildRunStoreError("Child Run transcript is oversized")
         if not data.endswith(b"\n"):
-            raise ChildRunStoreError("Child Run transcript does not end at a durable record boundary")
+            raise ChildRunStoreError(
+                "Child Run transcript does not end at a durable record boundary"
+            )
         lines = data.splitlines()
         if len(lines) > MAX_CHILD_RUN_RECORDS:
             raise ChildRunStoreError("Child Run transcript exceeds record limit")
@@ -209,7 +404,10 @@ class ChildRunStore:
             raise ChildRunStoreError(f"invalid Child Run transcript {path}: {error}") from None
         if state.header.child_run_id != path.stem:
             raise ChildRunStoreError("Child Run filename does not match its record ID")
-        if state.header.workspace != str(self.workspace) or state.header.workspace_fingerprint != self.workspace_fingerprint:
+        if (
+            state.header.workspace != str(self.workspace)
+            or state.header.workspace_fingerprint != self.workspace_fingerprint
+        ):
             raise ChildRunStoreError("Child Run transcript belongs to another workspace")
         return state
 
@@ -217,7 +415,14 @@ class ChildRunStore:
 class ChildRunWriter:
     """Exclusive append-only writer for one queued Child Run."""
 
-    def __init__(self, store: ChildRunStore, path: Path, descriptor: int, state: ChildRunReplayState, key: str) -> None:
+    def __init__(
+        self,
+        store: ChildRunStore,
+        path: Path,
+        descriptor: int,
+        state: ChildRunReplayState,
+        key: str,
+    ) -> None:
         self._store = store
         self._path = path
         self._descriptor = descriptor
@@ -254,6 +459,78 @@ class ChildRunWriter:
         except ChildRunAppendCommitError:
             # The append may have reached the filesystem without a durable
             # commit.  This writer must never issue a second append blindly.
+            self._poisoned = True
+            raise
+        self._state = state
+        return record
+
+    def start(self, *, child_session_id: str, execution_id: str) -> ChildRunStarted:
+        if self._closed or self._poisoned:
+            raise ChildRunStoreError("Child Run writer is not writable")
+        if self._state.status is not ChildRunStatus.READY:
+            raise ChildRunStoreError("Child Run is not ready for execution")
+        record = ChildRunStarted(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            child_session_id=child_session_id,
+            execution_id=execution_id,
+            started_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def complete(
+        self,
+        *,
+        execution_id: str,
+        session_record_sequence: int,
+        assistant_text_sha256: str,
+    ) -> ChildRunCompleted:
+        if self._state.status is not ChildRunStatus.RUNNING:
+            raise ChildRunStoreError("Child Run is not running")
+        record = ChildRunCompleted(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            execution_id=execution_id,
+            session_record_sequence=session_record_sequence,
+            assistant_text_sha256=assistant_text_sha256,
+            completed_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def fail(
+        self,
+        *,
+        execution_id: str | None,
+        phase: str,
+        result_code: str,
+        message: str,
+    ) -> ChildRunFailed:
+        if self._state.status not in {ChildRunStatus.READY, ChildRunStatus.RUNNING}:
+            raise ChildRunStoreError("Child Run is already terminal")
+        record = ChildRunFailed(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            execution_id=execution_id,
+            phase=phase,
+            result_code=result_code,
+            message=message,
+            failed_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def _append_transition(self, record: ChildRunRecord) -> ChildRunRecord:
+        if self._closed:
+            raise ChildRunStoreError("Child Run writer is closed")
+        if self._poisoned:
+            raise ChildRunStoreError("Child Run writer durability is uncertain")
+        candidate = list(self._state.records) + [record]
+        state = self._store._replay(self._path, candidate)
+        try:
+            _append_record(self._descriptor, self._path, record)
+        except ChildRunAppendCommitError:
             self._poisoned = True
             raise
         self._state = state
@@ -299,6 +576,8 @@ def _path_child_run_id(path: Path) -> str:
 
 def _child_run_info(path: Path, state: ChildRunReplayState) -> ChildRunInfo:
     cancelled = state.cancelled
+    admitted = state.admitted
+    preparation_failed = state.preparation_failed
     return ChildRunInfo(
         child_run_id=state.header.child_run_id,
         path=path,
@@ -311,7 +590,69 @@ def _child_run_info(path: Path, state: ChildRunReplayState) -> ChildRunInfo:
         record_count=len(state.records),
         cancelled_at=cancelled.cancelled_at if cancelled else None,
         cancellation_reason=cancelled.reason if cancelled else None,
+        child_session_id=(
+            state.session_bound.child_session_id
+            if state.session_bound is not None
+            else (admitted.child_session_id if admitted is not None else None)
+        ),
+        tool_set_id=admitted.tool_set_id if admitted is not None else None,
+        tool_names=admitted.tool_names if admitted is not None else (),
+        provider_binding=dict(admitted.provider_binding) if admitted is not None else None,
+        preparation_failure=(
+            f"{preparation_failed.result_code}: {preparation_failed.message}"
+            if preparation_failed is not None
+            else None
+        ),
+        execution_id=(
+            state.started.execution_id
+            if state.started is not None
+            else (
+                state.completed.execution_id
+                if state.completed is not None
+                else state.failed.execution_id
+                if state.failed is not None
+                else None
+            )
+        ),
+        assistant_text_sha256=state.completed.assistant_text_sha256
+        if state.completed is not None
+        else None,
+        session_record_sequence=state.completed.session_record_sequence
+        if state.completed is not None
+        else None,
+        failure_result_code=state.failed.result_code if state.failed is not None else None,
     )
+
+
+class ChildRunExecutionLease:
+    """Lifetime lock distinct from the append writer lock."""
+
+    def __init__(self, path: Path, descriptor: int, key: str) -> None:
+        self.path = path
+        self._descriptor = descriptor
+        self._key = key
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            os.close(self._descriptor)
+        finally:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            finally:
+                with _ACTIVE_EXECUTION_GUARD:
+                    _ACTIVE_EXECUTION_LEASES.discard(self._key)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def _claim_writer(key: str) -> None:
@@ -383,9 +724,16 @@ def _read_descriptor(descriptor: int, path: Path) -> bytes:
         data = b"".join(chunks)
         after = os.fstat(descriptor)
         pathname = path.lstat()
-        if len(data) != before.st_size or (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        if len(data) != before.st_size or (after.st_dev, after.st_ino, after.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
             raise ChildRunStoreError("Child Run transcript changed while it was being read")
-        if path.is_symlink() or (pathname.st_dev, pathname.st_ino) != (before.st_dev, before.st_ino):
+        if path.is_symlink() or (pathname.st_dev, pathname.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
             raise ChildRunStoreError("Child Run transcript path changed while it was being read")
         return data
     except ChildRunStoreError:
@@ -436,7 +784,9 @@ def _install_child_run_transcript(path: Path, payload: bytes) -> None:
     linked = False
     try:
         _ensure_directory(path.parent, path.parent.parent.parent.parent)
-        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".child-run.", suffix=".tmp")
+        descriptor, temporary = tempfile.mkstemp(
+            dir=path.parent, prefix=".child-run.", suffix=".tmp"
+        )
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = None
@@ -500,10 +850,14 @@ def _validate_directory(path: Path, boundary: Path) -> None:
 def _fsync_directory(path: Path) -> None:
     descriptor: int | None = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         os.fsync(descriptor)
     except OSError:
-        raise ChildRunStoreError(f"could not confirm Child Run directory durability: {path}") from None
+        raise ChildRunStoreError(
+            f"could not confirm Child Run directory durability: {path}"
+        ) from None
     finally:
         if descriptor is not None:
             os.close(descriptor)

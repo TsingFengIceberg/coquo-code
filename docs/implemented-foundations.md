@@ -1335,6 +1335,9 @@ Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks templat
 128. [0128：Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
 129. [0129：Shared Agent Runtime Assembly Boundary](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
 130. [0130：Durable Child Run Identity and State](./decisions/0130-durable-child-run-identity-and-state.md)
+131. [0131：Child Admission and Detached Session Binding](./decisions/0131-child-admission-and-detached-session.md)
+132. [0132：One-Shot Child Foreground Execution](./decisions/0132-child-foreground-execution.md)
+133. [0133：Process-Local Child Run Supervision](./decisions/0133-child-process-local-supervision.md)
 
 ## Shared Agent Runtime 与 Durable Child Run Foundation
 
@@ -1344,13 +1347,29 @@ Action Audit、Session/Task 持久化、Hook、标题与 compaction 仍由
 `ProjectSession` 通过显式 callback 保持 Host 所有权。恢复、切换、新建和 fork
 都成对安装 writer/runtime，未增加线程或并行 Provider 使用。
 
-Child Run 已有独立 workspace-bound JSONL ledger。Host 可以创建、查看、列出和
-取消一个已有 Session 下的 bounded objective；当前仅能证明 `queued` 与
-`cancelled`，并且命令不调用 Provider、不写 Session、不产生 Action Audit。
-后台线程、Child Session、`running/completed/failed`、handoff、wait/join、消息和
-Team 仍属于后续执行切片。详见
-[ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md) 与
-[ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md)。
+Child Run 已有独立 workspace-bound JSONL ledger。Host 可以创建、查看、列出、
+取消并准备一个已有 Session 下的 bounded objective。`child prepare` 会冻结
+脱敏的只读执行 envelope，创建不改变 `latest` 的 detached Child Session，
+并将状态推进到 `ready`；它不调用 Provider，也不写入父 Session。准备失败会
+以有界原因持久化为 `failed`，精确的部分创建状态可安全重试。
+
+`child run <id>` 现在会为 `ready` Child 获取独立执行租约，重建脱敏 Provider 路由，
+通过同一 `AgentRuntimeFactory -> AgentRuntime -> AgentLoop` 路径执行一个只读 Turn，
+并在 Child Session Turn durable commit 后记录 `completed`；路由/构造/执行失败会
+记录有界 `failed`，不会伪造完成。Child Session 不更新 `latest`，父 Session 与
+父 runtime 保持不变。
+
+REPL现在可用`/child start <id>`将`ready` Child提交到当前进程内的bounded FIFO。
+Supervisor最多启动4个daemon worker、最多保留32个排队项，并按父Session绑定校验归属；
+每个worker继续调用同一个A4 executor且不共享父writer、Provider manager或runtime状态。
+父Session可以在Child运行时继续提交自己的prompt。worker失败只隔离到该Child并发布有界
+volatile notification，durable Child ledger仍是唯一状态来源；关闭时只做短暂bounded join，
+不承诺进程退出后继续运行。取消/wait/join、restart recovery、handoff、消息和Team仍属于后续执行切片。详见
+[ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md)、
+[ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md) 与
+[ADR 0131](./decisions/0131-child-admission-and-detached-session.md)、
+[ADR 0132](./decisions/0132-child-foreground-execution.md) 与
+[ADR 0133](./decisions/0133-child-process-local-supervision.md)。
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002：Foundation 0 确定性 REPL](./decisions/0002-foundation-0-deterministic-repl.md)

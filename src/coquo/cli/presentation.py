@@ -143,11 +143,14 @@ HELP_TEXT = (
 CHILD_HELP = (
     "Child Run commands:\n"
     "  /child create <objective>\n"
-    "  /child list [1-100] [status=queued|cancelled]\n"
+    "  /child prepare <child-run-id>\n"
+    "  /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]\n"
+    "  /child run <child-run-id>\n"
+    "  /child start <child-run-id>\n"
     "  /child show <child-run-id>\n"
     "  /child cancel <child-run-id> <reason>\n"
-    "Child Runs are durable queued/cancelled metadata only. This version starts no Provider, "
-    "thread, Child Session, or background execution."
+    "Preparation freezes a read-only envelope and detached Child Session; run executes one foreground "
+    "turn through the shared Agent runtime."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -1532,6 +1535,22 @@ def render_child_run_info(info) -> str:
         f"Created: {info.created_at}",
         f"Records: {info.record_count}",
     ]
+    if getattr(info, "child_session_id", None) is not None:
+        lines.extend(
+            (
+                f"Child Session: {info.child_session_id}",
+                f"Tool Set: {info.tool_set_id or 'unavailable'}",
+                f"Tools: {', '.join(info.tool_names) if info.tool_names else 'unavailable'}",
+            )
+        )
+    if getattr(info, "preparation_failure", None) is not None:
+        lines.append(f"Preparation failure: {_safe_inline(info.preparation_failure)}")
+    if getattr(info, "execution_id", None) is not None:
+        lines.append(f"Execution: {info.execution_id}")
+    if getattr(info, "session_record_sequence", None) is not None:
+        lines.append(f"Child Turn record: {info.session_record_sequence}")
+    if getattr(info, "failure_result_code", None) is not None:
+        lines.append(f"Execution failure: {_safe_inline(info.failure_result_code)}")
     if info.cancelled_at is not None:
         lines.extend(
             (
@@ -1540,6 +1559,15 @@ def render_child_run_info(info) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def render_child_supervisor_notification(notification) -> str:
+    """Render one bounded process-local Child lifecycle hint."""
+    child_run_id = _safe_inline(getattr(notification, "child_run_id", "<unknown>"))
+    status = getattr(getattr(notification, "status", None), "value", "unavailable")
+    message = getattr(notification, "message", None)
+    suffix = f": {_safe_inline(message)}" if message else ""
+    return f"Child Run {child_run_id}: {status}{suffix}"
 
 
 def render_task_admission_summary(info) -> str:

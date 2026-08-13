@@ -54,6 +54,7 @@ from coquo.cli.presentation import (
     ToolDetailMode,
     render_activity_line,
     render_assistant_prefix,
+    render_child_supervisor_notification,
     render_host_message,
     render_message_separator,
     render_prompt,
@@ -294,7 +295,25 @@ class TerminalApplication:
                 await self._handle_event(event)
             except Exception:
                 self._renderer.reset()
+        self._drain_child_notifications()
         self._application.invalidate()
+
+    def _drain_child_notifications(self) -> None:
+        drain = getattr(self._session, "child_notifications", None)
+        if not callable(drain):
+            return
+        try:
+            notifications = drain()
+        except Exception:
+            return
+        for notification in notifications:
+            self._schedule_write(
+                self._render_slash_block(
+                    "/child",
+                    render_child_supervisor_notification(notification),
+                    "info",
+                )
+            )
 
     async def _handle_event(self, event: FrontendEvent) -> None:
         previous = self._state

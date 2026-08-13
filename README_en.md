@@ -252,10 +252,12 @@ Tasks manage recoverable foreground multi-stage work. They can begin through nat
 uv run coquo child create "Inspect the workspace" --parent-session latest
 uv run coquo child list --status queued
 uv run coquo child show <child-run-uuid>
+uv run coquo child prepare <child-run-uuid>
+uv run coquo child run <child-run-uuid>
 uv run coquo child cancel <child-run-uuid> "Defer execution"
 ```
 
-Child Runs currently provide only workspace-bound durable `queued`/`cancelled` metadata; they do not start threads, call a Provider, or create a Child Session.
+`child prepare` freezes a bounded redacted read-only execution envelope and creates a detached Child Session without changing `latest`; `child run` then executes one foreground read-only Turn through the shared Agent runtime. In the REPL, `/child start <id>` submits a ready Child to up to four daemon workers in the current process; it does not promise survival after process exit. Cancellation, wait/join, restart recovery, and handoff remain deferred.
 
 ### REPL commands
 
@@ -533,4 +535,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Child Runs currently provide only durable `queued`/`cancelled` metadata; background threads, Child Sessions, handoff, wait/join, messaging, and Teams are not implemented. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Child Runs currently provide durable preparation, one-shot foreground read-only execution, and bounded process-local background supervision, but live cancellation, wait/join, restart recovery, handoff, messaging, and Teams are not implemented. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

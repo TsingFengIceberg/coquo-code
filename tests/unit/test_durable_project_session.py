@@ -175,6 +175,32 @@ def test_project_session_projects_one_exact_private_tool_subset(tmp_path: Path) 
     session.close()
 
 
+def test_project_session_prepares_read_only_child_without_provider_call_or_latest_switch(
+    tmp_path: Path,
+) -> None:
+    provider = RecordingProvider("must-not-run")
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE, SESSION_TWO),
+    )
+    parent_id = session.session_id
+    latest_before = (SessionStore(tmp_path).root / "latest.json").read_bytes()
+    info = session.create_child_run("Inspect the repository")
+    prepared = session.prepare_child_run(info.child_run_id)
+    assert prepared.status.value == "ready"
+    assert prepared.child_session_id is not None
+    assert provider.requests == []
+    assert session.session_id == parent_id
+    assert (SessionStore(tmp_path).root / "latest.json").read_bytes() == latest_before
+    assert (
+        SessionStore(tmp_path).inspect(prepared.child_session_id).session_id
+        == prepared.child_session_id
+    )
+    session.close()
+
+
 def test_explicit_skill_authoring_commits_candidate_then_installs_for_next_turn(
     tmp_path: Path,
 ) -> None:

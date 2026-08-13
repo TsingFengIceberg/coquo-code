@@ -331,7 +331,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task timeline", "Show the complete Task timeline"),
     SlashCompletionSpec("/task derive", "Derive a new Task with provenance"),
     SlashCompletionSpec("/child create", "Queue Child Run metadata"),
-    SlashCompletionSpec("/child list", "List queued or cancelled Child Runs"),
+    SlashCompletionSpec("/child prepare", "Admit and bind a Child Session"),
+    SlashCompletionSpec("/child run", "Run one Child in the foreground"),
+    SlashCompletionSpec("/child start", "Queue one Child on local background workers"),
+    SlashCompletionSpec("/child list", "List Child Runs by durable state"),
     SlashCompletionSpec("/child show", "Show one Child Run"),
     SlashCompletionSpec("/child cancel", "Cancel one queued Child Run"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
@@ -450,6 +453,10 @@ class ReplSession(Protocol):
     def list_tasks(self): ...
 
     def create_child_run(self, objective: str): ...
+
+    def prepare_child_run(self, child_run_id: str): ...
+
+    def run_child_run(self, child_run_id: str): ...
 
     def list_child_runs(self, *, status=None): ...
 
@@ -891,6 +898,12 @@ def dispatch_slash(
         return SlashResult(handled=True, message=CHILD_HELP, kind="info")
     if command == "/child create" or command.startswith("/child create "):
         return _child_create(command, session)
+    if command == "/child prepare" or command.startswith("/child prepare "):
+        return _child_prepare(command, session)
+    if command == "/child run" or command.startswith("/child run "):
+        return _child_run(command, session)
+    if command == "/child start" or command.startswith("/child start "):
+        return _child_start(command, session)
     if command == "/child list" or command.startswith("/child list "):
         return _child_list(command, session)
     if command == "/child show" or command.startswith("/child show "):
@@ -899,7 +912,9 @@ def dispatch_slash(
         return _child_cancel(command, session)
     if command.startswith("/child "):
         subcommand = command.split(maxsplit=2)[1]
-        suggestion = _suggest_token(subcommand, ("create", "list", "show", "cancel"))
+        suggestion = _suggest_token(
+            subcommand, ("create", "prepare", "run", "start", "list", "show", "cancel")
+        )
         return _usage(
             f"Unknown Child Run command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Type /help child for commands."
@@ -1742,10 +1757,63 @@ def _child_create(command: str, session: ReplSession) -> SlashResult:
     )
 
 
+def _child_prepare(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child prepare <child-run-id>")
+    prepare = getattr(session, "prepare_child_run", None)
+    if not callable(prepare):
+        return _command_error(
+            RuntimeError("Child preparation is unavailable"),
+            failure_prefix="Child Run preparation failed",
+        )
+    return _call(
+        lambda: render_child_run_info(prepare(parts[2])),
+        kind="success",
+        failure_prefix="Child Run preparation failed",
+    )
+
+
+def _child_run(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child run <child-run-id>")
+    run = getattr(session, "run_child_run", None)
+    if not callable(run):
+        return _command_error(
+            RuntimeError("Child execution is unavailable"),
+            failure_prefix="Child Run execution failed",
+        )
+    return _call(
+        lambda: render_child_run_info(run(parts[2])),
+        kind="success",
+        failure_prefix="Child Run execution failed",
+    )
+
+
+def _child_start(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child start <child-run-id>")
+    start = getattr(session, "start_child_run", None)
+    if not callable(start):
+        return _command_error(
+            RuntimeError("Child background supervision is unavailable"),
+            failure_prefix="Child Run start failed",
+        )
+    return _call(
+        lambda: render_child_run_info(start(parts[2])),
+        kind="success",
+        failure_prefix="Child Run start failed",
+    )
+
+
 def _child_list(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) > 4:
-        return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
+        return _usage(
+            "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+        )
     limit = 20
     status = None
     for part in parts[2:]:
@@ -1754,9 +1822,15 @@ def _child_list(command: str, session: ReplSession) -> SlashResult:
         elif part.startswith("status=") and status is None:
             status = part.removeprefix("status=")
         else:
-            return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
-    if not 1 <= limit <= 100 or (status is not None and status not in {item.value for item in ChildRunStatus}):
-        return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
+            return _usage(
+                "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+            )
+    if not 1 <= limit <= 100 or (
+        status is not None and status not in {item.value for item in ChildRunStatus}
+    ):
+        return _usage(
+            "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+        )
     return _call(
         lambda: _render_child_list(session, limit, status),
         kind="info",

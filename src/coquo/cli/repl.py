@@ -25,6 +25,7 @@ from coquo.cli.presentation import (
     ToolDetailMode,
     render_message,
     render_host_message,
+    render_child_supervisor_notification,
     render_prompt,
     render_prompt_toolbar,
     render_runtime_status,
@@ -114,6 +115,7 @@ def run_repl(
     session_switch = SessionSwitchCatalog()
 
     while True:
+        _drain_child_notifications(session, stdout, color=color)
         status = _snapshot(session, "status")
         session_info = _snapshot(session, "session_info")
         prompt_text = render_prompt(
@@ -277,6 +279,22 @@ def run_repl(
         except Exception as error:
             _report_aborted_stream(active_event_sink, stdout, color=color)
             stdout.write(f"{render_message(render_turn_failure(error), 'error', color=color)}\n")
+        stdout.flush()
+
+
+def _drain_child_notifications(session: object, stdout: TextIO, *, color: bool) -> None:
+    drain = getattr(session, "child_notifications", None)
+    if not callable(drain):
+        return
+    try:
+        notifications = drain()
+    except Exception:
+        return
+    for notification in notifications:
+        stdout.write(
+            f"{render_message(render_child_supervisor_notification(notification), 'info', color=color)}\n"
+        )
+    if notifications:
         stdout.flush()
 
 

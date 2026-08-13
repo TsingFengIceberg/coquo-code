@@ -468,6 +468,7 @@ class ResumeDurableStage(StrEnum):
 
 
 class LatestUpdateStatus(StrEnum):
+    NOT_REQUESTED = "not_requested"
     UPDATED = "updated"
     FAILED_UNCHANGED = "failed_unchanged"
     REPLACED_DURABILITY_UNKNOWN = "replaced_durability_unknown"
@@ -529,6 +530,30 @@ class SessionInfo:
     title_fallback_reason: SessionTitleFallbackReason | None = None
     forked_from_session_id: str | None = None
     forked_from_turn: int | None = None
+
+
+@dataclass(frozen=True)
+class SessionCreationRequest:
+    """Optional creation controls for detached, workspace-bound Sessions."""
+
+    session_id: str | None = None
+    publish_latest: bool = True
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.session_id is not None:
+            try:
+                canonical_session_id(self.session_id)
+            except SessionRecordError as error:
+                raise ValueError(f"session creation ID is invalid: {error}") from None
+        if type(self.publish_latest) is not bool:
+            raise ValueError("session creation latest flag is invalid")
+        if self.name is not None:
+            try:
+                if canonical_session_name(self.name) != self.name:
+                    raise ValueError("session creation name is not canonical")
+            except SessionRecordError as error:
+                raise ValueError(f"session creation name is invalid: {error}") from None
 
 
 @dataclass(frozen=True)
@@ -622,11 +647,22 @@ class SessionStore:
         self._uuid_factory = uuid_factory
         self._clock = clock
 
-    def create(self, binding: BindingSnapshot) -> SessionWriter:
+    def create(
+        self,
+        binding: BindingSnapshot,
+        *,
+        creation: SessionCreationRequest | None = None,
+    ) -> SessionWriter:
         """Create a collision-safe transcript, update latest, and keep its writer lock."""
+        if creation is not None and type(creation) is not SessionCreationRequest:
+            raise SessionStoreError("session creation request is invalid")
         self._ensure_root()
         with self._directory_lock():
-            session_id = _factory_session_id(self._uuid_factory)
+            session_id = (
+                _factory_session_id(self._uuid_factory)
+                if creation is None or creation.session_id is None
+                else creation.session_id
+            )
             transcript_path = self.root / f"{session_id}.jsonl"
             lock_path = self.root / f"{session_id}.lock"
             if transcript_path.exists() or transcript_path.is_symlink():
@@ -640,11 +676,16 @@ class SessionStore:
                     workspace_fingerprint=self.workspace_fingerprint,
                     created_at=self._clock(),
                     binding=binding,
-                    name=_next_default_session_name(self.root),
+                    name=(
+                        _next_default_session_name(self.root)
+                        if creation is None or creation.name is None
+                        else creation.name
+                    ),
                     schema_version=SESSION_HEADER_SCHEMA_VERSION,
                 )
                 _create_transcript(transcript_path, encode_record(header))
-                self._write_latest(session_id)
+                if creation is None or creation.publish_latest:
+                    self._write_latest(session_id)
             except AtomicJsonWriteError as error:
                 lock_stream.close()
                 _release_active_writer(lock_path)
@@ -1558,10 +1599,17 @@ class PreparedSessionResume:
     def info(self) -> SessionInfo:
         return _info(self.path, self.state)
 
-    def commit(self, *, binding: BindingSnapshot | None = None) -> CommittedSessionResume:
+    def commit(
+        self,
+        *,
+        binding: BindingSnapshot | None = None,
+        publish_latest: bool = True,
+    ) -> CommittedSessionResume:
         """Revalidate, durably resume, update latest, and transfer ownership."""
         if not self._live:
             raise SessionResumeStaleError("prepared resume is no longer active")
+        if type(publish_latest) is not bool:
+            raise ValueError("publish latest flag is invalid")
         current_binding = self.state.binding if binding is None else binding
         if type(current_binding) is not BindingSnapshot:
             raise ValueError("resume runtime binding is invalid")
@@ -1607,17 +1655,19 @@ class PreparedSessionResume:
                     recovery_applied=recovery_applied,
                     session_resumed_applied=False,
                 ) from error
-            latest_status = LatestUpdateStatus.UPDATED
+            latest_status = LatestUpdateStatus.NOT_REQUESTED
             latest_diagnostic = None
-            try:
-                self._store._write_latest(self.session_id)
-            except AtomicJsonWriteError as error:
-                latest_status = (
-                    LatestUpdateStatus.REPLACED_DURABILITY_UNKNOWN
-                    if error.replaced
-                    else LatestUpdateStatus.FAILED_UNCHANGED
-                )
-                latest_diagnostic = str(error)
+            if publish_latest:
+                latest_status = LatestUpdateStatus.UPDATED
+                try:
+                    self._store._write_latest(self.session_id)
+                except AtomicJsonWriteError as error:
+                    latest_status = (
+                        LatestUpdateStatus.REPLACED_DURABILITY_UNKNOWN
+                        if error.replaced
+                        else LatestUpdateStatus.FAILED_UNCHANGED
+                    )
+                    latest_diagnostic = str(error)
             writer = SessionWriter(
                 self._store,
                 self.path,

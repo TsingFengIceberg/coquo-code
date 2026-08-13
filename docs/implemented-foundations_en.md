@@ -1335,6 +1335,9 @@ Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks t
 128. [0128: Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
 129. [0129: Shared Agent Runtime Assembly Boundary](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
 130. [0130: Durable Child Run Identity and State](./decisions/0130-durable-child-run-identity-and-state.md)
+131. [0131: Child Admission and Detached Session Binding](./decisions/0131-child-admission-and-detached-session.md)
+132. [0132: One-Shot Child Foreground Execution](./decisions/0132-child-foreground-execution.md)
+133. [0133: Process-Local Child Run Supervision](./decisions/0133-child-process-local-supervision.md)
 
 ## Shared Agent Runtime and Durable Child Run Foundation
 
@@ -1347,12 +1350,34 @@ install writer/runtime pairs together, with no worker threads or parallel
 Provider use added.
 
 Child Runs now have an independent workspace-bound JSONL ledger. The Host can
-create, inspect, list, and cancel a bounded objective under an existing
-Session. This slice can prove only `queued` and `cancelled`; commands invoke no
-Provider, write no Session record, and create no Action Audit. Background
-threads, Child Sessions, `running/completed/failed`, handoff, wait/join,
-messaging, and Teams remain later execution slices. See [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
-and [ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md).
+create, inspect, list, cancel, and prepare a bounded objective under an existing
+Session. `child prepare` freezes a redacted read-only execution envelope,
+creates a detached Child Session without changing `latest`, and derives
+`ready`; it invokes no Provider and writes no parent Session record. Preparation
+failures are bounded and durable, and exact partial creation states are safe to
+retry.
+
+`child run <id>` now acquires an independent execution lease for a `ready`
+Child, reconstructs its redacted Provider route, and runs one read-only Turn
+through the same `AgentRuntimeFactory -> AgentRuntime -> AgentLoop` path. A
+durable Child Session Turn commit precedes `completed`; route, construction,
+and execution failures derive bounded `failed` evidence. The detached Child
+Session never updates `latest`, and the parent Session/runtime remain unchanged.
+
+The REPL now exposes `/child start <id>` to submit a `ready` Child to a
+process-local bounded FIFO. The supervisor starts at most four daemon workers,
+keeps at most 32 queued IDs, and validates ownership against the parent
+Session. Each worker calls the same A4 executor without sharing the parent
+writer, Provider manager, or runtime state. The parent can commit its own
+prompt while Children run. Worker failures are isolated and publish only a
+bounded volatile notification; the durable Child ledger remains authoritative.
+Close performs only a short bounded join and does not promise work survives
+process exit. Cancellation/wait/join, restart recovery, handoff, messaging,
+and Teams remain later execution slices. See [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md),
+[ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md), and
+[ADR 0131](./decisions/0131-child-admission-and-detached-session.md),
+[ADR 0132](./decisions/0132-child-foreground-execution.md), and
+[ADR 0133](./decisions/0133-child-process-local-supervision.md).
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002: Foundation 0 deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md)

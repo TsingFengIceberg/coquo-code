@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TextIO
+from uuid import uuid4
 
 from coquo import ProjectSession, __version__
 from coquo.agent.loop import AgentLoop
@@ -58,6 +59,7 @@ from coquo.cli.presentation import (
     render_child_run_info,
     render_child_run_summary,
 )
+from coquo.child_runtime import ChildRunExecutor, build_child_runtime_spec_from_binding
 from coquo.cli.repl import run_repl
 from coquo.core.action_coordinator import ActionIdentityChangedError
 from coquo.core.approvals import ApprovalGrantError
@@ -841,6 +843,10 @@ def build_parser() -> argparse.ArgumentParser:
     child_list.add_argument("--status", choices=[item.value for item in ChildRunStatus])
     child_show = child_commands.add_parser("show", help="show one Child Run")
     child_show.add_argument("child_run_id")
+    child_prepare = child_commands.add_parser("prepare", help="admit and bind one Child Session")
+    child_prepare.add_argument("child_run_id")
+    child_run = child_commands.add_parser("run", help="run one prepared Child Run")
+    child_run.add_argument("child_run_id")
     child_cancel = child_commands.add_parser("cancel", help="cancel one queued Child Run")
     child_cancel.add_argument("child_run_id")
     child_cancel.add_argument("reason", type=nonblank_prompt)
@@ -2319,6 +2325,29 @@ def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout:
         return 0
     if arguments.child_command == "show":
         stdout.write(f"{render_child_run_info(store.inspect(arguments.child_run_id))}\n")
+        return 0
+    if arguments.child_command == "prepare":
+        info = store.inspect(arguments.child_run_id)
+        parent = SessionStore(workspace).inspect(info.parent_session_id)
+        child_session_id = info.child_session_id or str(uuid4())
+        spec = build_child_runtime_spec_from_binding(
+            child_run_id=info.child_run_id,
+            parent_session_id=info.parent_session_id,
+            child_session_id=child_session_id,
+            objective=info.objective,
+            binding=parent.binding,
+        )
+        prepared = store.prepare(
+            info.child_run_id,
+            runtime_spec=spec,
+            session_store=SessionStore(workspace),
+            binding=parent.binding,
+        )
+        stdout.write(f"{render_child_run_info(prepared)}\n")
+        return 0
+    if arguments.child_command == "run":
+        info = ChildRunExecutor(workspace).run(arguments.child_run_id)
+        stdout.write(f"{render_child_run_info(info)}\n")
         return 0
     if arguments.child_command == "cancel":
         with store.open(arguments.child_run_id) as writer:
