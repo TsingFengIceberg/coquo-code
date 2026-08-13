@@ -28,6 +28,7 @@ from coquo.cli.presentation import (
     SEARCH_HELP,
     SESSION_HELP,
     TASK_HELP,
+    CHILD_HELP,
     MessageKind,
     ToolDetailMode,
     render_compact_result,
@@ -85,6 +86,8 @@ from coquo.cli.presentation import (
     render_task_admission_summary,
     render_task_next_action,
     render_task_summary,
+    render_child_run_info,
+    render_child_run_summary,
     render_task_timeline,
     render_task_verification_result,
     render_switch_rejection,
@@ -115,6 +118,7 @@ from coquo.session_records import (
     canonical_session_id,
 )
 from coquo.task_records import TaskRecordError, TaskStatus, canonical_task_id
+from coquo.child_run_records import ChildRunStatus
 from coquo.task_store import TaskAdmissionConfiguration
 from coquo.tools.git_repository import GitObservationError
 from coquo.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
@@ -149,6 +153,7 @@ TOP_LEVEL_COMMANDS = (
     "/model",
     "/session",
     "/task",
+    "/child",
     "/resume",
     "/clear",
 )
@@ -222,6 +227,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/model", "Override the current model", True),
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
+    SlashCompletionSpec("/child", "Durable Child Run control", True),
     SlashCompletionSpec("/resume", "Resume a Session", True),
     SlashCompletionSpec("/clear", "Clear terminal output", True),
     SlashCompletionSpec("/exit", "Exit the REPL", True),
@@ -324,6 +330,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task unarchive", "Unarchive a Task"),
     SlashCompletionSpec("/task timeline", "Show the complete Task timeline"),
     SlashCompletionSpec("/task derive", "Derive a new Task with provenance"),
+    SlashCompletionSpec("/child create", "Queue Child Run metadata"),
+    SlashCompletionSpec("/child list", "List queued or cancelled Child Runs"),
+    SlashCompletionSpec("/child show", "Show one Child Run"),
+    SlashCompletionSpec("/child cancel", "Cancel one queued Child Run"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -438,6 +448,14 @@ class ReplSession(Protocol):
     def create_task(self, objective: str, acceptance_criteria: tuple[str, ...] = ()): ...
 
     def list_tasks(self): ...
+
+    def create_child_run(self, objective: str): ...
+
+    def list_child_runs(self, *, status=None): ...
+
+    def inspect_child_run(self, child_run_id: str): ...
+
+    def cancel_child_run(self, child_run_id: str, reason: str): ...
 
     def inspect_task(self, task_id: str): ...
 
@@ -869,6 +887,23 @@ def dispatch_slash(
         return _tools(command, session)
     if command == "/task":
         return SlashResult(handled=True, message=TASK_HELP, kind="info")
+    if command == "/child":
+        return SlashResult(handled=True, message=CHILD_HELP, kind="info")
+    if command == "/child create" or command.startswith("/child create "):
+        return _child_create(command, session)
+    if command == "/child list" or command.startswith("/child list "):
+        return _child_list(command, session)
+    if command == "/child show" or command.startswith("/child show "):
+        return _child_show(command, session)
+    if command == "/child cancel" or command.startswith("/child cancel "):
+        return _child_cancel(command, session)
+    if command.startswith("/child "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(subcommand, ("create", "list", "show", "cancel"))
+        return _usage(
+            f"Unknown Child Run command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help child for commands."
+        )
     if command == "/task start" or command.startswith("/task start "):
         return _task_start(command, session)
     if command == "/task proposals" or command.startswith("/task proposals "):
@@ -1693,6 +1728,69 @@ def _task_start(command: str, session: ReplSession) -> SlashResult:
         lambda: "Created durable Task:\n" + render_task_info(session.create_task(objective)),
         kind="success",
         failure_prefix="Task creation failed",
+    )
+
+
+def _child_create(command: str, session: ReplSession) -> SlashResult:
+    objective = command.removeprefix("/child create").strip()
+    if not objective:
+        return _usage("Usage: /child create <objective>")
+    return _call(
+        lambda: render_child_run_info(session.create_child_run(objective)),
+        kind="success",
+        failure_prefix="Child Run creation failed",
+    )
+
+
+def _child_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) > 4:
+        return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
+    limit = 20
+    status = None
+    for part in parts[2:]:
+        if part.isascii() and part.isdigit() and limit == 20:
+            limit = int(part)
+        elif part.startswith("status=") and status is None:
+            status = part.removeprefix("status=")
+        else:
+            return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
+    if not 1 <= limit <= 100 or (status is not None and status not in {item.value for item in ChildRunStatus}):
+        return _usage("Usage: /child list [1-100] [status=queued|cancelled]")
+    return _call(
+        lambda: _render_child_list(session, limit, status),
+        kind="info",
+        failure_prefix="Child Run listing failed",
+    )
+
+
+def _render_child_list(session: ReplSession, limit: int, status: str | None) -> str:
+    selected = None if status is None else ChildRunStatus(status)
+    runs = session.list_child_runs(status=selected)[:limit]
+    if not runs:
+        return "No durable Child Runs found."
+    return "\n".join(render_child_run_summary(run) for run in runs)
+
+
+def _child_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child show <child-run-id>")
+    return _call(
+        lambda: render_child_run_info(session.inspect_child_run(parts[2])),
+        kind="info",
+        failure_prefix="Child Run inspection failed",
+    )
+
+
+def _child_cancel(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=3)
+    if len(parts) != 4:
+        return _usage("Usage: /child cancel <child-run-id> <reason>")
+    return _call(
+        lambda: render_child_run_info(session.cancel_child_run(parts[2], parts[3])),
+        kind="success",
+        failure_prefix="Child Run cancellation failed",
     )
 
 

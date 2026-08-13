@@ -55,6 +55,8 @@ from coquo.cli.presentation import (
     render_task_summary,
     render_task_timeline,
     render_tool_ledgers,
+    render_child_run_info,
+    render_child_run_summary,
 )
 from coquo.cli.repl import run_repl
 from coquo.core.action_coordinator import ActionIdentityChangedError
@@ -162,6 +164,8 @@ from coquo.skills import (
 )
 from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
+from coquo.child_run_records import ChildRunStatus
+from coquo.child_run_store import ChildRunStore
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
@@ -827,6 +831,19 @@ def build_parser() -> argparse.ArgumentParser:
         "skills", help="show Skill loads from committed Task Stage Turns"
     )
     task_skills.add_argument("task_id")
+    child_parser = subcommands.add_parser("child", help="queue and inspect durable Child Runs")
+    child_commands = child_parser.add_subparsers(dest="child_command", required=True)
+    child_create = child_commands.add_parser("create", help="queue one Child Run objective")
+    child_create.add_argument("objective", type=nonblank_prompt)
+    child_create.add_argument("--parent-session", default="latest")
+    child_list = child_commands.add_parser("list", help="list durable Child Runs")
+    child_list.add_argument("--limit", type=task_list_limit, default=100)
+    child_list.add_argument("--status", choices=[item.value for item in ChildRunStatus])
+    child_show = child_commands.add_parser("show", help="show one Child Run")
+    child_show.add_argument("child_run_id")
+    child_cancel = child_commands.add_parser("cancel", help="cancel one queued Child Run")
+    child_cancel.add_argument("child_run_id")
+    child_cancel.add_argument("reason", type=nonblank_prompt)
     return parser
 
 
@@ -2293,6 +2310,31 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     return 0
 
 
+def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Manage Child Run control-plane metadata without invoking a Provider."""
+    store = ChildRunStore(workspace)
+    if arguments.child_command == "create":
+        info = store.create(arguments.objective, parent_session=arguments.parent_session)
+        stdout.write(f"{render_child_run_info(info)}\n")
+        return 0
+    if arguments.child_command == "show":
+        stdout.write(f"{render_child_run_info(store.inspect(arguments.child_run_id))}\n")
+        return 0
+    if arguments.child_command == "cancel":
+        with store.open(arguments.child_run_id) as writer:
+            writer.cancel(arguments.reason)
+            stdout.write(f"{render_child_run_info(writer.info)}\n")
+        return 0
+    status = None if arguments.status is None else ChildRunStatus(arguments.status)
+    runs = store.list(status=status)[: arguments.limit]
+    if not runs:
+        stdout.write("No durable Child Runs found.\n")
+        return 0
+    for info in runs:
+        stdout.write(f"{render_child_run_summary(info)}\n")
+    return 0
+
+
 def _eval_path(value: str, invocation_workspace: Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else invocation_workspace / path
@@ -2598,6 +2640,16 @@ def main(
                     "provider selection options cannot be combined with task management"
                 )
             return handle_task_command(arguments, workspace, output)
+        if arguments.command == "child":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with Child Run management"
+                )
+            return handle_child_command(arguments, workspace, output)
         if arguments.command == "demo-read":
             if (
                 arguments.profile is not None

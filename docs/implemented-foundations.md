@@ -89,6 +89,7 @@
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation 与 Audit](#durable-hook-observation-与-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
+- [Shared Agent Runtime 与 Durable Child Run Foundation](#shared-agent-runtime-与-durable-child-run-foundation)
 - [ADR 索引](#adr-索引)
 
 ## Coquo 产品身份迁移
@@ -1330,6 +1331,26 @@ Hook配置及HookSetSnapshot升级为v3，同时严格读取v1/v2并只写v3。�
 Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks template local-handler`、strict workspace-local `hooks import`、readiness-aware `hooks doctor`及`hooks runs [session]`；REPL新增`/hooks runs [count]`。Import始终落为disabled revision 1；enable前必须匹配固定指纹。approval preview升级到v6，system prompt为v43，provider adapter为v44，HookSet为`hooks-v3`，Effective Context为v21/v22并保留v19/v20 legacy Hook-v2；Registry及Session/Task record schema不变。见[0127](./decisions/0127-audited-pinned-local-hook-handlers.md)。
 
 ## ADR 索引
+
+128. [0128：Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
+129. [0129：Shared Agent Runtime Assembly Boundary](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
+130. [0130：Durable Child Run Identity and State](./decisions/0130-durable-child-run-identity-and-state.md)
+
+## Shared Agent Runtime 与 Durable Child Run Foundation
+
+`AgentRuntimeFactory -> AgentRuntime -> AgentLoop` 现在是父 Session 的统一
+组装和单回合编排路径。Runtime 只持有一个 loop 和一份易失 turn state；权限、
+Action Audit、Session/Task 持久化、Hook、标题与 compaction 仍由
+`ProjectSession` 通过显式 callback 保持 Host 所有权。恢复、切换、新建和 fork
+都成对安装 writer/runtime，未增加线程或并行 Provider 使用。
+
+Child Run 已有独立 workspace-bound JSONL ledger。Host 可以创建、查看、列出和
+取消一个已有 Session 下的 bounded objective；当前仅能证明 `queued` 与
+`cancelled`，并且命令不调用 Provider、不写 Session、不产生 Action Audit。
+后台线程、Child Session、`running/completed/failed`、handoff、wait/join、消息和
+Team 仍属于后续执行切片。详见
+[ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md) 与
+[ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md)。
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002：Foundation 0 确定性 REPL](./decisions/0002-foundation-0-deterministic-repl.md)

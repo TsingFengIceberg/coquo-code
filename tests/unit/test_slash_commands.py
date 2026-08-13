@@ -844,7 +844,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert "Skill inspection commands:" in dispatch_slash("/help skills", session).message
     assert "Hook inspection commands:" in dispatch_slash("/help hooks", session).message
     assert dispatch_slash("/help unknown", session).message == (
-        "Usage: /help [session|task|tools|git|context|provider|search|mcp|skills|hooks|policy|input]"
+        "Usage: /help [session|task|child|tools|git|context|provider|search|mcp|skills|hooks|policy|input]"
     )
     unknown = dispatch_slash("/session wat", session)
     assert unknown.kind == "warning"

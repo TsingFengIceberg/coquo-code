@@ -12,6 +12,14 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from coquo.agent.loop import AgentLoop, PreparedAgentTurn
+from coquo.agent.runtime import (
+    AgentRuntime,
+    AgentRuntimeCallbacks,
+    AgentRuntimeFactory,
+    AgentRuntimeServices,
+    AgentTurnRequest,
+)
+from coquo.child_run_store import ChildRunInfo, ChildRunStore
 from coquo.agent.task_control import (
     TASK_LIFECYCLE_KIND_BY_TOOL,
     TASK_PROPOSAL_KIND_BY_TOOL,
@@ -77,7 +85,6 @@ from coquo.core.compaction import (
     EffectiveContextSummary,
     build_compact_prompt,
     build_compact_source_text,
-    decide_auto_compaction,
     plan_compaction,
 )
 from coquo.core.cancellation import TurnCancellation, TurnCancelled
@@ -436,6 +443,7 @@ from coquo.tools.catalog import (
     MAX_TOOL_CALLS_PER_RESPONSE,
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_CATALOG,
+    TOOL_REGISTRY_SNAPSHOT,
 )
 
 _COMMIT_CONTROL_TOOL_NAMES = TASK_CONTROL_TOOL_NAMES + SKILL_AUTHORING_CONTROL_TOOL_NAMES
@@ -870,6 +878,7 @@ class ProjectSession:
         self._manager = manager
         self._session_store = session_store
         self._task_store = TaskStore(workspace)
+        self._child_run_store = ChildRunStore(workspace)
         self._writer = writer
         self._read_file = read_file
         self._glob = glob
@@ -951,7 +960,20 @@ class ProjectSession:
         self._lock = RLock()
         self._closed = False
         self._active_compaction: _PreparedCompaction | None = None
-        self._loop = loop or self._new_loop(writer)
+        self._runtime = (
+            AgentRuntimeFactory.create(
+                writer.state,
+                self._runtime_services(),
+                self._runtime_callbacks(writer),
+            )
+            if loop is None
+            else AgentRuntime(
+                loop,
+                self._runtime_services(),
+                self._runtime_callbacks(writer),
+            )
+        )
+        self._loop = self._runtime.loop
         if loop is not None:
             self._loop.install_action_dispatcher(self._dispatch_action)
             self._loop.install_task_control_dispatcher(
@@ -959,6 +981,115 @@ class ProjectSession:
             )
             self._loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         self._startup_resume_result = startup_resume_result
+
+    def _runtime_services(self) -> AgentRuntimeServices:
+        return AgentRuntimeServices(
+            self._read_file,
+            self._glob,
+            self._grep,
+            self._list_directory,
+            self._read_file_lines,
+            self._stat_path,
+            self._list_tree,
+            self._grep_regex,
+            self._git_status,
+            self._git_diff,
+            self._git_log,
+            self._git_show,
+            self._compare_files,
+            self._git_blame,
+            self._git_refs,
+            self._json_query,
+            self._checksum_file,
+            self._archive_list,
+            self._project_instructions_loader.load,
+            self._mcp_catalog_service.registry_snapshot,
+            self._skill_inventory_loader.load,
+            self._hook_store.snapshot,
+            self._skill_inventory_loader.read_resource,
+            provider_manager=self._manager,
+        )
+
+    def _runtime_callbacks(self, writer: SessionWriter) -> AgentRuntimeCallbacks:
+        return AgentRuntimeCallbacks(
+            commit_turn=lambda turn: self._commit_turn(writer, turn),
+            action_dispatcher=self._dispatch_action,
+            task_control_names=_COMMIT_CONTROL_TOOL_NAMES,
+            task_control_dispatcher=self._dispatch_task_control,
+            tool_set_transition_dispatcher=self._transition_tool_set,
+            activate_turn=self._activate_runtime_turn,
+            bind_provider=self._bind_runtime_provider,
+            issue_action_lease=self._issue_runtime_action_lease,
+            auto_compact_turn=self._auto_compact_turn,
+            emit_usage=self._emit_runtime_usage,
+            record_failure=self._record_runtime_failure,
+            prepare_first_response_hook=self._prepare_runtime_first_response_hook,
+            binding_for_provider=lambda status: binding_from_status(status),
+        )
+
+    def _activate_runtime_turn(self, state, clear: bool) -> None:
+        if clear:
+            self._active_action_lease = None
+            self._active_turn_context = None
+            self._active_action_binding = None
+            self._active_tool_set_snapshot = None
+            self._active_hook_set_snapshot = None
+            self._active_hook_audit_entries = []
+            self._active_hook_handler_executions = 0
+            self._active_usage_cursor = None
+            self._active_turn_runtime = None
+            self._active_cancellation = None
+            self._active_event_sink = None
+            self._active_session_title_source_text = None
+            self._active_prepared_session_title = None
+            return
+        self._active_hook_set_snapshot = state.hook_set_snapshot
+        self._active_hook_audit_entries = []
+        self._active_hook_handler_executions = 0
+        self._active_usage_cursor = state.usage_cursor
+        self._active_cancellation = state.cancellation
+        self._active_event_sink = state.event_sink
+        self._active_session_title_source_text = state.session_title_source_text
+        self._active_prepared_session_title = None
+
+    def _bind_runtime_provider(self, state) -> None:
+        self._active_turn_runtime = state.provider_runtime
+        self._active_action_binding = state.binding
+
+    def _issue_runtime_action_lease(self, prepared, provider, binding):
+        lease = ActionLease(
+            session_id=self._writer.session_id,
+            lease_id=_uuid4_text(self._action_uuid_factory(), "action lease ID"),
+            runtime_generation=provider.status.generation,
+            context_id=prepared.context.context_id,
+        )
+        prepared = prepared.with_action_lease(lease)
+        self._active_action_lease = lease
+        self._active_turn_context = prepared.context
+        self._active_action_binding = binding
+        self._active_tool_set_snapshot = prepared.tool_set_snapshot
+        self._active_hook_set_snapshot = prepared.hook_set_snapshot
+        return prepared
+
+    def _emit_runtime_usage(self, usage, event_sink) -> None:
+        if usage.latest_invocation is not None:
+            self._emit_prompt_event(event_sink, TurnUsageCompleted(usage))
+
+    def _record_runtime_failure(self, binding, error, provider_usage) -> None:
+        self._record_failure(
+            binding or binding_from_status(self._manager.status()),
+            error,
+            provider_usage=provider_usage,
+        )
+
+    def _prepare_runtime_first_response_hook(self, runtime, usage_cursor, title_source_text):
+        if self._writer.state.turns or self._writer.state.latest_name is not None:
+            return None
+        return lambda: self._prepare_first_turn_session_title(
+            runtime,
+            usage_cursor,
+            title_source_text,
+        )
 
     @classmethod
     def open(
@@ -1447,6 +1578,34 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._task_store.list()
+
+    def create_child_run(self, objective: str) -> ChildRunInfo:
+        """Queue Child Run metadata under the current Session without invoking a Provider."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._child_run_store.create(objective, parent_session=self._writer.session_id)
+
+    def list_child_runs(self, *, status=None) -> tuple[ChildRunInfo, ...]:
+        """List Child Run control-plane metadata without changing Session state."""
+        with self._lock:
+            self._ensure_open()
+            return self._child_run_store.list(status=status)
+
+    def inspect_child_run(self, child_run_id: str) -> ChildRunInfo:
+        """Inspect one Child Run without invoking a Provider."""
+        with self._lock:
+            self._ensure_open()
+            return self._child_run_store.inspect(child_run_id)
+
+    def cancel_child_run(self, child_run_id: str, reason: str) -> ChildRunInfo:
+        """Durably cancel a queued Child Run; no live work exists in this slice."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            with self._child_run_store.open(child_run_id) as writer:
+                writer.cancel(reason)
+                return writer.info
 
     def inspect_task(self, task_id: str) -> TaskInfo:
         """Strictly inspect one workspace Task without changing current state."""
@@ -2747,6 +2906,11 @@ class ProjectSession:
             old = self._writer
             self._writer = candidate
             self._loop = loop
+            self._runtime = AgentRuntime(
+                loop,
+                self._runtime_services(),
+                self._runtime_callbacks(candidate),
+            )
             old.release()
             return candidate.info
 
@@ -2768,6 +2932,11 @@ class ProjectSession:
             old = self._writer
             self._writer = candidate
             self._loop = loop
+            self._runtime = AgentRuntime(
+                loop,
+                self._runtime_services(),
+                self._runtime_callbacks(candidate),
+            )
             old.release()
             return candidate.info
 
@@ -2866,6 +3035,11 @@ class ProjectSession:
                 writer_holder["writer"] = committed.writer
                 self._writer = committed.writer
                 self._loop = loop
+                self._runtime = AgentRuntime(
+                    loop,
+                    self._runtime_services(),
+                    self._runtime_callbacks(committed.writer),
+                )
                 old.release()
                 return _resume_result(
                     committed.writer.info,
@@ -2919,126 +3093,22 @@ class ProjectSession:
                 enabled_tool_names = tuple(
                     name for name in enabled_tool_names if name != WEB_SEARCH_TOOL_NAME
                 )
-            prepared = self._loop.prepare_turn(
-                text,
+            request = AgentTurnRequest(
+                text=text,
+                event_sink=event_sink,
+                include_tool_details=include_tool_details,
+                cancellation=cancellation,
                 allow_tools=_allow_tools,
                 enabled_tool_names=(enabled_tool_names if _allow_tools else None),
+                session_title_source_text=session_title_source_text,
+                task_proposal_sink=(
+                    _task_proposal_sink
+                    if _task_proposal_sink is not None
+                    else self._capture_task_admission_proposal
+                ),
+                failure_usage_sink=_failure_usage_sink,
             )
-            self._active_hook_set_snapshot = prepared.hook_set_snapshot
-            self._active_hook_audit_entries = []
-            self._active_hook_handler_executions = 0
-            loop = self._loop
-            binding: BindingSnapshot | None = None
-            usage_cursor = self._manager.begin_turn_usage()
-            tool_attempt_usage = ToolAttemptUsage()
-
-            def observe_tool_usage(usage: ToolAttemptUsage) -> None:
-                nonlocal tool_attempt_usage
-                tool_attempt_usage = usage
-
-            self._active_usage_cursor = usage_cursor
-            self._active_cancellation = cancellation
-            self._active_event_sink = event_sink
-            self._active_session_title_source_text = session_title_source_text
-            self._active_prepared_session_title = None
-            try:
-                if cancellation is not None:
-                    cancellation.check()
-                with self._manager.provider_for_turn() as runtime:
-                    self._active_turn_runtime = runtime
-                    binding = binding_from_status(runtime.status)
-                    assessment = runtime.assess_context(prepared.initial_request)
-                    if cancellation is not None:
-                        cancellation.check()
-                    report = assessment.fit_report
-                    if (
-                        report is not None
-                        and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
-                    ):
-                        raise_for_context_fit(report)
-                    decision = decide_auto_compaction(report)
-                    if decision.trigger is not None:
-                        prepared = self._auto_compact_turn(
-                            prepared,
-                            loop=loop,
-                            runtime=runtime,
-                            trigger=decision.trigger,
-                            mandatory=decision.mandatory,
-                            source_report=report,
-                            event_sink=event_sink,
-                            cancellation=cancellation,
-                        )
-                    lease = ActionLease(
-                        session_id=self._writer.session_id,
-                        lease_id=_uuid4_text(self._action_uuid_factory(), "action lease ID"),
-                        runtime_generation=runtime.status.generation,
-                        context_id=prepared.context.context_id,
-                    )
-                    prepared = prepared.with_action_lease(lease)
-                    self._active_action_lease = lease
-                    self._active_turn_context = prepared.context
-                    self._active_action_binding = binding
-                    self._active_tool_set_snapshot = prepared.tool_set_snapshot
-                    self._active_hook_set_snapshot = prepared.hook_set_snapshot
-                    response = loop.run_prepared(
-                        prepared,
-                        provider=runtime,
-                        event_sink=event_sink,
-                        include_tool_details=include_tool_details,
-                        cancellation=cancellation,
-                        tool_usage_sink=(
-                            observe_tool_usage if _failure_usage_sink is not None else None
-                        ),
-                        task_proposal_sink=(
-                            _task_proposal_sink
-                            if _task_proposal_sink is not None
-                            else self._capture_task_admission_proposal
-                        ),
-                        first_provider_response_hook=(
-                            lambda: self._prepare_first_turn_session_title(
-                                runtime,
-                                usage_cursor,
-                                session_title_source_text or text,
-                            )
-                        )
-                        if not self._writer.state.turns and self._writer.state.latest_name is None
-                        else None,
-                    )
-                usage = self._manager.finish_turn_usage(usage_cursor)
-                if usage.latest_invocation is not None:
-                    self._emit_prompt_event(event_sink, TurnUsageCompleted(usage))
-                return response
-            except BaseException as error:
-                self._manager.finish_turn_usage(usage_cursor)
-                provider_usage = self._manager.usage_since(
-                    usage_cursor,
-                    kind=ProviderInvocationKind.TURN,
-                )
-                if _failure_usage_sink is not None:
-                    try:
-                        _failure_usage_sink(provider_usage, tool_attempt_usage)
-                    except Exception:
-                        pass
-                self._record_failure(
-                    binding or binding_from_status(self._manager.status()),
-                    error,
-                    provider_usage=provider_usage,
-                )
-                raise
-            finally:
-                self._active_action_lease = None
-                self._active_turn_context = None
-                self._active_action_binding = None
-                self._active_tool_set_snapshot = None
-                self._active_hook_set_snapshot = None
-                self._active_hook_audit_entries = []
-                self._active_hook_handler_executions = 0
-                self._active_usage_cursor = None
-                self._active_turn_runtime = None
-                self._active_cancellation = None
-                self._active_event_sink = None
-                self._active_session_title_source_text = None
-                self._active_prepared_session_title = None
+            return self._runtime.run_turn(request)
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -4109,8 +4179,7 @@ class ProjectSession:
         hook_set_factory=None,
         skill_resource_reader=None,
     ) -> AgentLoop:
-        return AgentLoop(
-            None,
+        services = AgentRuntimeServices(
             read_file,
             glob,
             grep,
@@ -4119,39 +4188,27 @@ class ProjectSession:
             stat_path,
             list_tree,
             grep_regex,
-            git_status=git_status,
-            git_diff=git_diff,
-            git_log=git_log,
-            git_show=git_show,
-            compare_files=compare_files,
-            git_blame=git_blame,
-            git_refs=git_refs,
-            json_query=json_query,
-            checksum_file=checksum_file,
-            archive_list=archive_list,
-            initial_history=state.history,
-            initial_effective_history=state.effective_history,
-            initial_effective_summary=state.effective_summary,
-            initial_effective_source=state.effective_source,
-            commit_turn=commit_turn,
-            project_instructions_factory=project_instructions_factory,
-            **(
-                {}
-                if tool_registry_factory is None
-                else {"tool_registry_factory": tool_registry_factory}
-            ),
-            **(
-                {}
-                if skill_inventory_factory is None
-                else {"skill_inventory_factory": skill_inventory_factory}
-            ),
-            **({} if hook_set_factory is None else {"hook_set_factory": hook_set_factory}),
-            **(
-                {}
-                if skill_resource_reader is None
-                else {"skill_resource_reader": skill_resource_reader}
-            ),
+            git_status,
+            git_diff,
+            git_log,
+            git_show,
+            compare_files,
+            git_blame,
+            git_refs,
+            json_query,
+            checksum_file,
+            archive_list,
+            project_instructions_factory,
+            tool_registry_factory or (lambda: TOOL_REGISTRY_SNAPSHOT),
+            skill_inventory_factory or (lambda: SkillInventorySnapshot((), ())),
+            hook_set_factory or (lambda: HookSetSnapshot(())),
+            skill_resource_reader or (lambda *_args, **_kwargs: ""),
         )
+        return AgentRuntimeFactory.create(
+            state,
+            services,
+            AgentRuntimeCallbacks(commit_turn=commit_turn),
+        ).loop
 
     def _new_loop(self, writer: SessionWriter) -> AgentLoop:
         loop = self._loop_from_state(

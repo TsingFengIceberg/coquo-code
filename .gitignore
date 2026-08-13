@@ -5,6 +5,7 @@ CLAUDE.md
 # Local cross-agent instructions and handoff package
 AGENTS.md
 /.handoff/
+/.agent-plans/
 
 # Local configuration and current or legacy runtime state
 .env

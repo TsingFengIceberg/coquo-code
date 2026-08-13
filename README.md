@@ -27,7 +27,8 @@ Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI
   - [配置 Provider](#配置-provider)
   - [检查 Route 与 Context Window](#检查-route-与-context-window)
   - [管理 Session](#管理-session)
-  - [管理 Task](#管理-task)
+- [管理 Task](#管理-task)
+- [管理 Child Run](#管理-child-run)
   - [REPL 命令](#repl-命令)
 - [配置与本地状态](#配置与本地状态)
 - [开发与验证](#开发与验证)
@@ -245,11 +246,22 @@ uv run coquo task timeline <task-uuid>
 
 Task用于管理可恢复的前台多阶段工作，既可由自然语言交互发起，也可通过`task`与`/task`命令检查和控制。完整状态机、验收与恢复边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)及Task相关ADR。
 
+### 管理 Child Run
+
+```bash
+uv run coquo child create "检查 workspace" --parent-session latest
+uv run coquo child list --status queued
+uv run coquo child show <child-run-uuid>
+uv run coquo child cancel <child-run-uuid> "暂不执行"
+```
+
+Child Run 当前只是 workspace-bound 的可恢复 `queued/cancelled` 元数据，不会启动线程、调用 Provider 或创建 Child Session。
+
 ### REPL 命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help [session\|task\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`hooks`显示声明式策略检查入口 |
+| `/help [session\|task\|child\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`child`显示Child Run元数据入口 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
 | `/tools catalog [tool-name]` | 显示39个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
@@ -521,4 +533,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。可执行Skill、市场、浏览器自动化及后台或并行智能体尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。Child Run目前仅提供可恢复的`queued/cancelled`元数据管理，尚无后台线程、Child Session、handoff、wait/join、消息或Team执行。可执行Skill、市场及浏览器自动化也尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

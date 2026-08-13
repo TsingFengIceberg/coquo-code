@@ -27,7 +27,8 @@ The name comes from Latin *coquō*, “I cook”: requirements, context, tools, 
   - [Configure providers](#configure-providers)
   - [Inspect routes and context windows](#inspect-routes-and-context-windows)
   - [Manage Sessions](#manage-sessions)
-  - [Manage Tasks](#manage-tasks)
+- [Manage Tasks](#manage-tasks)
+- [Manage Child Runs](#manage-child-runs)
   - [REPL commands](#repl-commands)
 - [Configuration and local state](#configuration-and-local-state)
 - [Development and verification](#development-and-verification)
@@ -245,11 +246,22 @@ uv run coquo task timeline <task-uuid>
 
 Tasks manage recoverable foreground multi-stage work. They can begin through natural-language interaction or be inspected and controlled through `task` and `/task`; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the Task ADRs for the complete lifecycle, acceptance, and recovery boundaries.
 
+### Manage Child Runs
+
+```bash
+uv run coquo child create "Inspect the workspace" --parent-session latest
+uv run coquo child list --status queued
+uv run coquo child show <child-run-uuid>
+uv run coquo child cancel <child-run-uuid> "Defer execution"
+```
+
+Child Runs currently provide only workspace-bound durable `queued`/`cancelled` metadata; they do not start threads, call a Provider, or create a Child Session.
+
 ### REPL commands
 
 | Command | Purpose |
 | --- | --- |
-| `/help [session\|task\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points and `hooks` shows declarative policy inspection |
+| `/help [session\|task\|child\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points and `child` shows Child Run metadata entry points |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 39 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -521,4 +533,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Executable Skills, a marketplace, browser automation, and background or parallel agents are not implemented. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Child Runs currently provide only durable `queued`/`cancelled` metadata; background threads, Child Sessions, handoff, wait/join, messaging, and Teams are not implemented. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

@@ -111,6 +111,7 @@ class ToolDetailMode(StrEnum):
 HELP_TOPICS = (
     "session",
     "task",
+    "child",
     "tools",
     "git",
     "context",
@@ -138,6 +139,15 @@ HELP_TEXT = (
     "  /help input     Prompt editing, cancellation, and exit\n"
     "Use /help <group> for commands. Slash commands are Host-parsed; only explicit Task Stage "
     "execution commands call the provider."
+)
+CHILD_HELP = (
+    "Child Run commands:\n"
+    "  /child create <objective>\n"
+    "  /child list [1-100] [status=queued|cancelled]\n"
+    "  /child show <child-run-id>\n"
+    "  /child cancel <child-run-id> <reason>\n"
+    "Child Runs are durable queued/cancelled metadata only. This version starts no Provider, "
+    "thread, Child Session, or background execution."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -291,6 +301,7 @@ INPUT_HELP = (
 HELP_BY_TOPIC = {
     "session": SESSION_HELP,
     "task": TASK_HELP,
+    "child": CHILD_HELP,
     "tools": TOOLS_HELP,
     "git": GIT_HELP,
     "context": CONTEXT_HELP,
@@ -1498,6 +1509,37 @@ def render_task_summary(info: TaskInfoView) -> str:
         f"{name!r} ({info.task_id}): {info.status.value}{archived}, {len(info.stages)} stages"
         f"{progress}, completion {policy}, owner {info.owner_session_id}, created {info.created_at}"
     )
+
+
+def render_child_run_summary(info) -> str:
+    """Render bounded Child Run metadata without terminal control injection."""
+    objective = _safe_inline(info.objective)
+    return (
+        f"{info.child_run_id}: {info.status.value}, objective {objective!r}, "
+        f"parent Session {info.parent_session_id}, created {info.created_at}"
+    )
+
+
+def render_child_run_info(info) -> str:
+    """Render one Child Run control-plane record."""
+    lines = [
+        f"Child Run ID: {info.child_run_id}",
+        f"Status: {info.status.value}",
+        f"Objective: {_safe_inline(info.objective)}",
+        f"Parent Session: {info.parent_session_id}",
+        f"Workspace: {info.workspace}",
+        f"Transcript: {info.path}",
+        f"Created: {info.created_at}",
+        f"Records: {info.record_count}",
+    ]
+    if info.cancelled_at is not None:
+        lines.extend(
+            (
+                f"Cancelled: {info.cancelled_at}",
+                f"Cancellation reason: {_safe_inline(info.cancellation_reason or '')}",
+            )
+        )
+    return "\n".join(lines)
 
 
 def render_task_admission_summary(info) -> str:

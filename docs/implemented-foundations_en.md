@@ -89,6 +89,7 @@
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation and Audit](#durable-hook-observation-and-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
+- [Shared Agent Runtime and Durable Child Run Foundation](#shared-agent-runtime-and-durable-child-run-foundation)
 - [ADR index](#adr-index)
 
 ## Coquo Product Identity Migration
@@ -1330,6 +1331,28 @@ A successful handler accepts only one closed JSON stdout result whose effect is 
 Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks template local-handler`, strict workspace-local `hooks import`, readiness-aware `hooks doctor`, and `hooks runs [session]`; the REPL adds `/hooks runs [count]`. Import always creates disabled revision 1, and enablement requires the pinned fingerprint to match. Approval preview advances to v6, system prompt to v43, provider adapter to v44, HookSet identity to `hooks-v3`, and Effective Context to v21/v22 with v19/v20 retained as legacy Hook-v2; Registry and Session/Task record schemas remain unchanged. See [0127](./decisions/0127-audited-pinned-local-hook-handlers.md).
 
 ## ADR index
+
+128. [0128: Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
+129. [0129: Shared Agent Runtime Assembly Boundary](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
+130. [0130: Durable Child Run Identity and State](./decisions/0130-durable-child-run-identity-and-state.md)
+
+## Shared Agent Runtime and Durable Child Run Foundation
+
+`AgentRuntimeFactory -> AgentRuntime -> AgentLoop` is now the unified assembly
+and one-turn orchestration path for parent Sessions. The runtime owns one loop
+and one volatile turn state; permissions, Action Audit, Session/Task
+persistence, hooks, titles, and compaction remain Host-owned by
+`ProjectSession` through explicit callbacks. Resume, switch, new, and fork
+install writer/runtime pairs together, with no worker threads or parallel
+Provider use added.
+
+Child Runs now have an independent workspace-bound JSONL ledger. The Host can
+create, inspect, list, and cancel a bounded objective under an existing
+Session. This slice can prove only `queued` and `cancelled`; commands invoke no
+Provider, write no Session record, and create no Action Audit. Background
+threads, Child Sessions, `running/completed/failed`, handoff, wait/join,
+messaging, and Teams remain later execution slices. See [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md)
+and [ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md).
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002: Foundation 0 deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md)
