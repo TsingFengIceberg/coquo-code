@@ -63,8 +63,17 @@ from coquo.cli.presentation import (
     render_team_summary,
     render_team_assignment_info,
     render_team_assignment_summary,
+    render_team_message,
+    render_team_message_summary,
+    render_team_work_item,
+    render_team_work_summary,
 )
-from coquo.child_runtime import ChildRunExecutor, build_child_runtime_spec_from_binding
+from coquo.child_runtime import (
+    ChildRunExecutor,
+    TEAM_CHILD_ROLE_CONTRACT_VERSION,
+    build_child_runtime_spec_from_binding,
+    team_child_role_prompt_fingerprint,
+)
 from coquo.cli.repl import run_repl
 from coquo.core.action_coordinator import ActionIdentityChangedError
 from coquo.core.approvals import ApprovalGrantError
@@ -173,8 +182,10 @@ from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
 from coquo.child_run_records import ChildRunStatus
 from coquo.child_run_store import ChildRunStore, ChildRunStoreError
-from coquo.team_records import TeamStatus
+from coquo.team_records import TeamMessageStatus, TeamStatus, TeamWorkStatus
 from coquo.team_store import TeamStore, TeamStoreError
+from coquo.team_messaging import TeamMessageError, TeamMessagingService
+from coquo.team_work import TeamWorkError, TeamWorkService
 from coquo.team_service import TeamAssignmentError, TeamAssignmentService
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
@@ -939,6 +950,63 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--timeout", type=float, default=30.0)
         if command_name == "cancel":
             command.add_argument("reason", type=nonblank_prompt)
+    team_message = team_commands.add_parser("message", help="manage Team mailbox messages")
+    team_message_commands = team_message.add_subparsers(dest="team_message_command", required=True)
+    team_message_send = team_message_commands.add_parser(
+        "send", help="send one owner-to-member message"
+    )
+    team_message_send.add_argument("team_id")
+    team_message_send.add_argument("member_id")
+    team_message_send.add_argument("body", type=nonblank_prompt)
+    team_message_list = team_message_commands.add_parser("list", help="list Team messages")
+    team_message_list.add_argument("team_id")
+    team_message_list.add_argument("--limit", type=task_list_limit, default=100)
+    team_message_list.add_argument("--member")
+    team_message_list.add_argument("--status", choices=[item.value for item in TeamMessageStatus])
+    team_message_show = team_message_commands.add_parser("show", help="show one Team message")
+    team_message_show.add_argument("team_id")
+    team_message_show.add_argument("message_id")
+    team_message_read = team_message_commands.add_parser("read", help="mark one reply read")
+    team_message_read.add_argument("team_id")
+    team_message_read.add_argument("message_id")
+    team_message_cancel = team_message_commands.add_parser(
+        "cancel", help="cancel one pending message"
+    )
+    team_message_cancel.add_argument("team_id")
+    team_message_cancel.add_argument("message_id")
+    team_message_cancel.add_argument("reason", type=nonblank_prompt)
+    team_work = team_commands.add_parser("work", help="manage Team work items")
+    team_work_commands = team_work.add_subparsers(dest="team_work_command", required=True)
+    team_work_create = team_work_commands.add_parser("create", help="create one work item")
+    team_work_create.add_argument("team_id")
+    team_work_create.add_argument("title", type=nonblank_prompt)
+    team_work_create.add_argument("objective", type=nonblank_prompt)
+    team_work_create.add_argument(
+        "--depends-on", dest="dependency_ids", action="append", default=[]
+    )
+    team_work_list = team_work_commands.add_parser("list", help="list Team work items")
+    team_work_list.add_argument("team_id")
+    team_work_list.add_argument("--limit", type=task_list_limit, default=100)
+    team_work_list.add_argument("--status", choices=[item.value for item in TeamWorkStatus])
+    team_work_show = team_work_commands.add_parser("show", help="show one work item")
+    team_work_show.add_argument("team_id")
+    team_work_show.add_argument("work_item_id")
+    team_work_cancel = team_work_commands.add_parser("cancel", help="cancel one work item")
+    team_work_cancel.add_argument("team_id")
+    team_work_cancel.add_argument("work_item_id")
+    team_work_cancel.add_argument("reason", type=nonblank_prompt)
+    team_work_assign = team_work_commands.add_parser("assign", help="manually assign ready work")
+    team_work_assign.add_argument("team_id")
+    team_work_assign.add_argument("work_item_id")
+    team_work_assign.add_argument("member_id")
+    team_work_complete = team_work_commands.add_parser("complete", help="complete reviewed work")
+    team_work_complete.add_argument("team_id")
+    team_work_complete.add_argument("work_item_id")
+    team_work_complete.add_argument("evidence", type=nonblank_prompt)
+    team_work_release = team_work_commands.add_parser("release", help="release reviewed work")
+    team_work_release.add_argument("team_id")
+    team_work_release.add_argument("work_item_id")
+    team_work_release.add_argument("reason", type=nonblank_prompt)
     return parser
 
 
@@ -2582,11 +2650,97 @@ def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: 
             stdout.write(f"{render_team_member(member)}\n")
             return 0
         raise TeamStoreError("unknown Team member command")
+    if arguments.team_command == "message":
+        service = TeamMessagingService(workspace)
+        if arguments.team_message_command == "send":
+            stdout.write(
+                f"{render_team_message(service.send_owner(arguments.team_id, arguments.member_id, arguments.body))}\n"
+            )
+            return 0
+        if arguments.team_message_command == "list":
+            status = None if arguments.status is None else TeamMessageStatus(arguments.status)
+            result = service.list(
+                arguments.team_id,
+                limit=arguments.limit,
+                member_id=arguments.member,
+                status=status,
+            )
+            if not result.messages:
+                stdout.write("No Team messages found.\n")
+                return 0
+            for message in result.messages:
+                stdout.write(f"{render_team_message_summary(message)}\n")
+            return 0
+        if arguments.team_message_command == "show":
+            stdout.write(
+                f"{render_team_message(service.show(arguments.team_id, arguments.message_id))}\n"
+            )
+            return 0
+        if arguments.team_message_command == "read":
+            stdout.write(
+                f"{render_team_message(service.read(arguments.team_id, arguments.message_id))}\n"
+            )
+            return 0
+        if arguments.team_message_command == "cancel":
+            stdout.write(
+                f"{render_team_message(service.cancel(arguments.team_id, arguments.message_id, arguments.reason))}\n"
+            )
+            return 0
+        raise TeamStoreError("unknown Team message command")
+    if arguments.team_command == "work":
+        service = TeamWorkService(workspace)
+        if arguments.team_work_command == "create":
+            item = service.create(
+                arguments.team_id,
+                arguments.title,
+                arguments.objective,
+                tuple(arguments.dependency_ids),
+            )
+            stdout.write(f"{render_team_work_item(item)}\n")
+            return 0
+        if arguments.team_work_command == "list":
+            status = None if arguments.status is None else TeamWorkStatus(arguments.status)
+            result = service.list(arguments.team_id, limit=arguments.limit, status=status)
+            if not result.items:
+                stdout.write("No Team work items found.\n")
+                return 0
+            for item in result.items:
+                stdout.write(f"{render_team_work_summary(item)}\n")
+            return 0
+        if arguments.team_work_command == "show":
+            stdout.write(
+                f"{render_team_work_item(service.show(arguments.team_id, arguments.work_item_id))}\n"
+            )
+            return 0
+        if arguments.team_work_command == "cancel":
+            stdout.write(
+                f"{render_team_work_item(service.cancel(arguments.team_id, arguments.work_item_id, arguments.reason))}\n"
+            )
+            return 0
+        if arguments.team_work_command == "assign":
+            assignment = service.assign(
+                arguments.team_id, arguments.work_item_id, arguments.member_id
+            )
+            stdout.write(f"{render_team_assignment_info(assignment)}\n")
+            return 0
+        if arguments.team_work_command == "complete":
+            stdout.write(
+                f"{render_team_work_item(service.complete(arguments.team_id, arguments.work_item_id, arguments.evidence))}\n"
+            )
+            return 0
+        if arguments.team_work_command == "release":
+            stdout.write(
+                f"{render_team_work_item(service.release(arguments.team_id, arguments.work_item_id, arguments.reason))}\n"
+            )
+            return 0
+        raise TeamWorkError("unknown Team work command")
     service = TeamAssignmentService(workspace)
     if arguments.team_assignment_command == "prepare":
         info = service.inspect(arguments.team_id, arguments.assignment_id)
         if info.child is None:
             raise TeamAssignmentError(info.child_error or "Team assignment Child is unavailable")
+        TeamMessagingService(workspace).bind_assignment(arguments.team_id, arguments.assignment_id)
+        info = service.inspect(arguments.team_id, arguments.assignment_id)
         parent = SessionStore(workspace).inspect(info.team.owner_session_id)
         child_store = ChildRunStore(workspace)
         child_session_id = info.child.child_session_id or str(uuid4())
@@ -2596,6 +2750,8 @@ def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: 
             child_session_id=child_session_id,
             objective=info.child.objective,
             binding=parent.binding,
+            role_contract_version=TEAM_CHILD_ROLE_CONTRACT_VERSION,
+            role_prompt_fingerprint=team_child_role_prompt_fingerprint(),
         )
         child_store.prepare(
             info.child.child_run_id,
@@ -3239,6 +3395,12 @@ def main(
         return 2
     except TeamStoreError as error:
         print(f"team error: {error}", file=errors)
+        return 2
+    except TeamMessageError as error:
+        print(f"team message error: {error}", file=errors)
+        return 2
+    except TeamWorkError as error:
+        print(f"team work error: {error}", file=errors)
         return 2
     except TeamAssignmentError as error:
         print(f"team assignment error: {error}", file=errors)

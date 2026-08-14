@@ -66,6 +66,12 @@ def test_team_close_and_member_leave_require_terminal_observation(tmp_path) -> N
     session.run_team_assignment(team.team_id, assignment.assignment.assignment_id)
     left = session.leave_team_member(team.team_id, member.member_id, "done")
     assert left.status.value == "left"
+    reply = next(
+        message
+        for message in session.inspect_team(team.team_id).messages
+        if message.sender_member_id == member.member_id
+    )
+    session.read_team_message(team.team_id, reply.message_id)
     closed = session.close_team(team.team_id)
     assert closed.status.value == "closed"
     session.close()

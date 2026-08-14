@@ -258,6 +258,13 @@ uv run coquo team member enable <team-uuid> <member-uuid>
 uv run coquo team member leave <team-uuid> <member-uuid> "Finished"
 uv run coquo team show <team-uuid>
 uv run coquo team close <team-uuid>
+uv run coquo team message send <team-uuid> <member-uuid> "Inspect the config"
+uv run coquo team message list <team-uuid> --status unread
+uv run coquo team message read <team-uuid> <message-uuid>
+uv run coquo team work create <team-uuid> "Inspect config" "Inspect the config files"
+uv run coquo team work list <team-uuid> --status ready
+uv run coquo team work assign <team-uuid> <work-uuid> <member-uuid>
+uv run coquo team work complete <team-uuid> <work-uuid> "Host verified the handoff"
 uv run coquo team assignment create <team-uuid> <member-uuid> "Inspect the workspace"
 uv run coquo team assignment prepare <team-uuid> <assignment-uuid>
 uv run coquo team assignment run <team-uuid> <assignment-uuid>
@@ -266,7 +273,7 @@ uv run coquo team assignment handoff <team-uuid> <assignment-uuid>
 uv run coquo team assignment recover <team-uuid>
 ```
 
-Teams and members are workspace-bound durable Host identities with append-only audit records. B1 provides identity lifecycle and B2 provides recoverable Host assignment binding and execution through a fresh read-only Child Run and detached Session for every objective. A member can execute sequential assignments, while different members can use the bounded REPL workers in parallel. Team records retain only exact terminal coordinates and a handoff digest; member bodies never enter the parent Session or model context. B2 adds no messaging, shared task board, scheduling, write permissions, recursive delegation, or long-lived workers.
+Teams and members are workspace-bound durable Host identities with append-only audit records. B1 provides identity lifecycle, B2 provides recoverable Host assignment binding and execution through a fresh read-only Child Run and detached Session, B3 provides a bounded owner/member mailbox, and B4 provides a durable dependency work board. A new Team Child freezes its inbox before admission; exact Turn and handoff evidence is required for delivery and one member reply. Manual work assignment reuses the existing Child saga, Child terminal state enters review, and only an explicit Host complete or release changes work state; dependencies can reference only earlier work items. A member can execute sequential assignments, while different members can use the bounded REPL workers in parallel. Team data never enters the parent Session or model context, and scheduling, write permissions, recursive delegation, and long-lived workers remain out of scope.
 
 ### Manage Child Runs
 
@@ -293,6 +300,8 @@ uv run coquo child deliver <child-run-uuid>
 | `/team create <name>`, `/team list`, `/team show <id>`, `/team close <id>` | Host-only durable Team identity management |
 | `/team member add|list|show|disable|enable|leave ...` | Host-only fixed read-only member lifecycle management |
 | `/team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...` | Host-only Team assignment binding, execution, observation, and recovery; every assignment uses a new Child Run/Session |
+| `/team message send|list|show|read|cancel ...` | Host-only durable owner/member mailbox; reading never deletes and replies require explicit read |
+| `/team work create|list|show|assign|complete|release|cancel ...` | Host-only dependency work board with manual assignment, review, completion/release, and close gates |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 39 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -477,6 +486,8 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 - [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md): the Task/Stage/Turn/Action hierarchy, independent durable identity, and Host-only management boundary.
 - [Durable Team Identity and Member Registry](./docs/decisions/0138-durable-team-identity-and-members.md): durable Team/member identity, owner Session, strict replay, and Host-only lifecycle.
 - [Recoverable Team Member Child Assignments](./docs/decisions/0139-recoverable-team-member-child-assignments.md): the two-ledger assignment saga, fresh Child/Session execution, terminal handoff observation, supervisor reuse, and Session-switch boundaries.
+- [Durable Team Mailbox and Assignment Delivery](./docs/decisions/0140-durable-team-mailbox-and-assignment-delivery.md): append-only owner/member mailbox records, one-shot inbox binding, Team Child role v2, and evidence-backed reply/delivery observation.
+- [Durable Team Work Board and Manual Review](./docs/decisions/0141-durable-team-work-board-and-manual-review.md): immutable dependency work items, manual assignment, Child review, Host completion/release, and close gates.
 - [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md): the Stage start/terminal state machine, exclusive writer, restart interruption semantics, and Session Turn evidence.
 - [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md): ordinary AgentLoop reuse, Task framing, exact crash recovery, failure mapping, and terminal integration.
 - [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md): plan execution, cumulative inter-Stage budgets, completion proposals, human acceptance, and lifecycle management.
@@ -566,4 +577,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can now use four model tools to delegate to at most four independent Children and observe, wait for, or cooperatively cancel them; each Child remains read-only, one-Turn, depth-one, and process-local, and its handoff returns as an untrusted ToolResult. Team B1/B2 now provide durable Team/member identities, recoverable assignment binding, fresh Child/Session execution, terminal observation, and bounded REPL parallelism; messaging, shared tasks, scheduling, and model-visible Team tools remain deferred. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can now use four model tools to delegate to at most four independent Children and observe, wait for, or cooperatively cancel them; each Child remains read-only, one-Turn, depth-one, and process-local, and its handoff returns as an untrusted ToolResult. Team B3 adds durable owner/member mailbox records, one-shot inbox delivery, and evidence-backed member replies; B4 adds a durable dependency work board with manual review, completion, release, and close gates. Scheduling and model-visible Team tools remain deferred. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

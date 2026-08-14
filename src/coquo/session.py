@@ -26,6 +26,9 @@ from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreErro
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
+from coquo.team_messaging import TeamMessagingService
+from coquo.team_records import TeamWorkItemState
+from coquo.team_work import TeamWorkList, TeamWorkService
 from coquo.team_service import TeamAssignmentInfo, TeamAssignmentService, TeamRecoveryResult
 from coquo.child_runtime import (
     CHILD_DEADLINE_SECONDS,
@@ -34,6 +37,8 @@ from coquo.child_runtime import (
     CHILD_MAX_TOOL_REQUESTS,
     CHILD_TOOL_NAMES,
     build_child_runtime_spec,
+    TEAM_CHILD_ROLE_CONTRACT_VERSION,
+    team_child_role_prompt_fingerprint,
     child_tool_set,
 )
 from coquo.agent.task_control import (
@@ -915,6 +920,8 @@ class ProjectSession:
         self._child_run_store = ChildRunStore(workspace)
         self._team_store = TeamStore(workspace)
         self._team_service = TeamAssignmentService(workspace)
+        self._team_messaging = TeamMessagingService(workspace)
+        self._team_work = TeamWorkService(workspace)
         self._child_supervisor: ChildRunSupervisor | None = None
         self._writer = writer
         self._read_file = read_file
@@ -1705,6 +1712,96 @@ class ProjectSession:
             self._ensure_team_owner(team_id)
             return self._team_service.leave_member(team_id, member_id, reason)
 
+    def send_team_message(self, team_id: str, member_id: str, body: str):
+        """Persist one owner-to-member message without changing the Session."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_messaging.send_owner(team_id, member_id, body)
+
+    def list_team_messages(
+        self, team_id: str, *, limit: int = 100, member_id: str | None = None, status=None
+    ):
+        """List durable Team messages without consuming them."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_messaging.list(
+                team_id, limit=limit, member_id=member_id, status=status
+            )
+
+    def inspect_team_message(self, team_id: str, message_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_messaging.show(team_id, message_id)
+
+    def read_team_message(self, team_id: str, message_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_messaging.read(team_id, message_id)
+
+    def cancel_team_message(self, team_id: str, message_id: str, reason: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_messaging.cancel(team_id, message_id, reason)
+
+    def create_team_work(
+        self, team_id: str, title: str, objective: str, dependency_ids: tuple[str, ...] = ()
+    ) -> TeamWorkItemState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_work.create(team_id, title, objective, dependency_ids)
+
+    def list_team_work(self, team_id: str, *, limit: int = 100, status=None) -> TeamWorkList:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_work.list(team_id, limit=limit, status=status)
+
+    def inspect_team_work(self, team_id: str, work_item_id: str) -> TeamWorkItemState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_work.show(team_id, work_item_id)
+
+    def cancel_team_work(self, team_id: str, work_item_id: str, reason: str) -> TeamWorkItemState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_work.cancel(team_id, work_item_id, reason)
+
+    def assign_team_work(self, team_id: str, work_item_id: str, member_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_work.assign(team_id, work_item_id, member_id)
+
+    def release_team_work(self, team_id: str, work_item_id: str, reason: str) -> TeamWorkItemState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_work.release(team_id, work_item_id, reason)
+
+    def complete_team_work(
+        self, team_id: str, work_item_id: str, evidence: str
+    ) -> TeamWorkItemState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_work.complete(team_id, work_item_id, evidence)
+
     def _ensure_team_owner(self, team_id: str) -> TeamInfo:
         info = self._team_store.inspect(team_id)
         if info.owner_session_id != self._writer.session_id:
@@ -1748,7 +1845,29 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            self.prepare_child_run(info.assignment.child_run_id)
+            self._team_messaging.bind_assignment(team_id, assignment_id)
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            status = self._manager.status()
+            child_info = self._child_run_store.inspect(info.assignment.child_run_id)
+            child_session_id = child_info.child_session_id or str(uuid4())
+            spec = build_child_runtime_spec(
+                child_run_id=child_info.child_run_id,
+                parent_session_id=self._writer.session_id,
+                child_session_id=child_session_id,
+                objective=child_info.objective,
+                status=status,
+            )
+            spec = replace(
+                spec,
+                role_contract_version=TEAM_CHILD_ROLE_CONTRACT_VERSION,
+                role_prompt_fingerprint=team_child_role_prompt_fingerprint(),
+            )
+            self._child_run_store.prepare(
+                child_info.child_run_id,
+                runtime_spec=spec,
+                session_store=self._session_store,
+                binding=binding_from_status(status),
+            )
             return self._team_service.inspect(team_id, assignment_id)
 
     def run_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:

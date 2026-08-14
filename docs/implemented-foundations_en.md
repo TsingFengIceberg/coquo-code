@@ -1346,6 +1346,8 @@ Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks t
 137. [0137: Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)
 138. [0138: Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)
 139. [0139: Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)
+140. [0140: Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)
+141. [0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)
 
 ## Durable Team Identity and Member Registry
 
@@ -1370,25 +1372,25 @@ Session turn, change no `latest` pointer, and alter no Effective Context. REPL
 mutations require the current Session to be the immutable Team owner; standalone
 commands address an exact Team without silently switching a Session.
 
-B1 intentionally excludes assignments, handoffs, mailboxes, messaging, shared
-task boards, scheduling, write permissions, recursive delegation, long-lived
-workers, and model-visible Team tools. B2 now binds every assignment to a fresh
-Child Run and detached Session. The Team ledger records
-`pending_child -> child_bound -> terminal_observed`, while the Child ledger
-remains execution authority. Creation uses a deterministic two-ledger saga with
-exact-ID recovery for partial metadata. Execution reuses the existing Child
-prepare/run/start/wait/cancel/recovery/handoff APIs and the same bounded
-supervisor. One member can complete multiple sequential assignments, each with
-a new Child and Session; different members can use the existing worker pool in
-parallel while the parent Session continues working. Team records contain only
-terminal Child/Session coordinates and the handoff digest, never the handoff
-body or model context. Session identity changes reject queued/active Child work
-and retire a quiescent supervisor before switching. Team close/leave require
-exact terminal observation and never cancel implicitly. B2 still excludes
-mailboxes, messages, shared task boards, scheduling, write permissions,
-recursive delegation, long-lived workers, and model-visible Team tools. See
-[0138: Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)
-and [0139: Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md).
+B1 intentionally excluded assignments, handoffs, mailboxes, messaging, shared task
+boards, scheduling, write permissions, recursive delegation, long-lived workers,
+and model-visible Team tools. B2 now binds every assignment to a fresh Child Run
+and detached Session. B3 builds on that ledger with an append-only owner/member
+mailbox: before a new Team Child is admitted, the Host freezes at most eight inbox
+messages and preallocates delivery and reply IDs; only an exact committed Child
+Turn and published handoff can create one member reply and mark the inbox
+delivered. B4 adds an append-only work-item board: dependencies point only
+backward, Host assignment moves ready work through the existing Child saga,
+terminal Child evidence enters review, and explicit Host completion or release
+controls the work result. Team close requires terminal work, assignment, mailbox,
+and reply-read gates. Reading never deletes evidence, failed or interrupted work
+does not consume pending messages, and generic or already-admitted v1 Children
+keep their old contract. Scheduling, write permissions, recursive delegation,
+long-lived workers, and model-visible Team tools remain deferred. See [0138:
+Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md),
+[0139: Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md),
+[0140: Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md),
+and [0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md).
 
 ## Shared Agent Runtime and Durable Child Run Foundation
 

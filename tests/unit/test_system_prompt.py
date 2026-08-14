@@ -9,19 +9,21 @@ from coquo.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v45-aabc7454d69b8f97063aac1e92cb23863ba7ea875b2bc9bd3549c1ca4df48b2a"
+EXPECTED_FINGERPRINT = "v46-bd4f71962bb9e3fec56d0a30d70d9515b94e5541586a888109aa2f8f7e25dc56"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 45
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 46
     for text in (
         "`child_spawn`",
         "read-only Child Turn",
         "process-local",
         "additional Provider calls and cost",
         "untrusted tool results",
+        "Team assignment mailbox boundary",
+        "Generic and already-admitted legacy Children keep their frozen role contract",
     ):
         assert text in prompt.text
     assert prompt.fingerprint == EXPECTED_FINGERPRINT

@@ -69,6 +69,38 @@ class ReplTeamSession:
 
         return TeamAssignmentService(self.workspace).recover(team_id, assignment_id, limit=limit)
 
+    def send_team_message(self, team_id: str, member_id: str, body: str):
+        from coquo.team_messaging import TeamMessagingService
+
+        return TeamMessagingService(self.workspace).send_owner(team_id, member_id, body)
+
+    def list_team_messages(self, team_id: str, *, limit: int = 100, member_id=None, status=None):
+        from coquo.team_messaging import TeamMessagingService
+
+        return TeamMessagingService(self.workspace).list(
+            team_id, limit=limit, member_id=member_id, status=status
+        )
+
+    def cancel_team_message(self, team_id: str, message_id: str, reason: str):
+        from coquo.team_messaging import TeamMessagingService
+
+        return TeamMessagingService(self.workspace).cancel(team_id, message_id, reason)
+
+    def create_team_work(self, team_id: str, title: str, objective: str, dependency_ids=()):
+        from coquo.team_work import TeamWorkService
+
+        return TeamWorkService(self.workspace).create(team_id, title, objective, dependency_ids)
+
+    def list_team_work(self, team_id: str, *, limit: int = 100, status=None):
+        from coquo.team_work import TeamWorkService
+
+        return TeamWorkService(self.workspace).list(team_id, limit=limit, status=status)
+
+    def inspect_team_work(self, team_id: str, work_item_id: str):
+        from coquo.team_work import TeamWorkService
+
+        return TeamWorkService(self.workspace).show(team_id, work_item_id)
+
 
 def invoke(workspace: Path, arguments: list[str]) -> tuple[int, str, str]:
     stdout = io.StringIO()
@@ -106,6 +138,13 @@ def _assignment_id(output: str) -> str:
         if line.startswith("Assignment ID:"):
             return line.split(":", 1)[1].strip()
     raise AssertionError(f"missing assignment ID in {output!r}")
+
+
+def _work_id(output: str) -> str:
+    for line in output.splitlines():
+        if line.startswith("Work Item ID:"):
+            return line.split(":", 1)[1].strip()
+    raise AssertionError(f"missing work item ID in {output!r}")
 
 
 def test_standalone_team_member_lifecycle_is_host_only(tmp_path: Path) -> None:
@@ -203,3 +242,61 @@ def test_standalone_and_slash_assignment_metadata_are_provider_free(tmp_path: Pa
     session = ReplTeamSession(tmp_path)
     slash = dispatch_slash(f"/team assignment show {team_id} {assignment_id}", session)
     assert slash.handled and "Phase: child_bound" in slash.message
+
+
+def test_standalone_team_message_and_work_commands_are_durable(tmp_path: Path) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    writer.release()
+    status, output, errors = invoke(tmp_path, ["team", "create", "Board"])
+    assert status == 0 and errors == ""
+    team_id = _team_id(output)
+    status, output, errors = invoke(tmp_path, ["team", "member", "add", team_id, "Worker"])
+    assert status == 0 and errors == ""
+    member_id = _member_id(output)
+
+    status, output, errors = invoke(
+        tmp_path, ["team", "message", "send", team_id, member_id, "Inspect config"]
+    )
+    assert status == 0 and errors == "" and "pending" in output
+    message_id = output.split("Message ID:", 1)[1].splitlines()[0].strip()
+    status, output, errors = invoke(
+        tmp_path, ["team", "message", "cancel", team_id, message_id, "superseded"]
+    )
+    assert status == 0 and errors == "" and "cancelled" in output
+
+    status, output, errors = invoke(
+        tmp_path, ["team", "work", "create", team_id, "Inspect", "Inspect config"]
+    )
+    assert status == 0 and errors == ""
+    work_id = _work_id(output)
+    status, output, errors = invoke(tmp_path, ["team", "work", "list", team_id])
+    assert status == 0 and errors == "" and work_id in output
+    status, output, errors = invoke(
+        tmp_path, ["team", "work", "assign", team_id, work_id, member_id]
+    )
+    assert status == 0 and errors == "" and "Assignment ID:" in output
+
+
+def test_slash_team_message_and_work_commands_are_host_only(tmp_path: Path) -> None:
+    session = ReplTeamSession(tmp_path)
+    created = dispatch_slash("/team create Board", session)
+    assert created.handled
+    team_id = session.list_teams()[0].team_id
+    added = dispatch_slash(f"/team member add {team_id} Worker", session)
+    assert added.handled
+    member_id = session.list_team_members(team_id)[0].member_id
+    sent = dispatch_slash(f"/team message send {team_id} {member_id} Inspect", session)
+    assert sent.handled and "pending" in sent.message
+    assert "pending" in dispatch_slash(f"/team message list {team_id}", session).message
+    message_id = session.list_team_messages(team_id).messages[0].message_id
+    cancelled = dispatch_slash(f"/team message cancel {team_id} {message_id} superseded", session)
+    assert cancelled.handled and "cancelled" in cancelled.message
+    work = dispatch_slash(f"/team work create {team_id} Inspect Config", session)
+    assert work.handled and "ready" in work.message
+    work_id = session.list_team_work(team_id).items[0].work_item_id
+    assert "ready" in dispatch_slash(f"/team work list {team_id}", session).message
+    assert work_id in dispatch_slash(f"/team work show {team_id} {work_id}", session).message
+    assert (
+        session.transcript_before
+        == SessionStore(tmp_path).inspect(session.session_id).path.read_bytes()
+    )

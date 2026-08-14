@@ -258,6 +258,13 @@ uv run coquo team member enable <team-uuid> <member-uuid>
 uv run coquo team member leave <team-uuid> <member-uuid> "完成"
 uv run coquo team show <team-uuid>
 uv run coquo team close <team-uuid>
+uv run coquo team message send <team-uuid> <member-uuid> "检查配置"
+uv run coquo team message list <team-uuid> --status unread
+uv run coquo team message read <team-uuid> <message-uuid>
+uv run coquo team work create <team-uuid> "检查配置" "检查配置文件"
+uv run coquo team work list <team-uuid> --status ready
+uv run coquo team work assign <team-uuid> <work-uuid> <member-uuid>
+uv run coquo team work complete <team-uuid> <work-uuid> "Host已核验handoff"
 uv run coquo team assignment create <team-uuid> <member-uuid> "检查 workspace"
 uv run coquo team assignment prepare <team-uuid> <assignment-uuid>
 uv run coquo team assignment run <team-uuid> <assignment-uuid>
@@ -266,7 +273,7 @@ uv run coquo team assignment handoff <team-uuid> <assignment-uuid>
 uv run coquo team assignment recover <team-uuid>
 ```
 
-Team与成员是workspace-bound的持久Host身份和append-only审计记录；B1提供身份生命周期，B2提供Host assignment到全新只读Child Run与detached Session的可恢复绑定和执行。每个assignment都不会复用成员对话或线程；同一member可以顺序执行，不同member可在REPL的有界后台worker中并行。Team只记录精确终态坐标与handoff digest，不把成员正文注入父Session或模型上下文。B2不提供消息、共享任务板、调度、写权限、递归委派或长驻worker。
+Team与成员是workspace-bound的持久Host身份和append-only审计记录；B1提供身份生命周期，B2提供Host assignment到全新只读Child Run与detached Session的可恢复绑定和执行。B3增加有界owner/member mailbox：新Team Child准入前冻结inbox，精确Turn/handoff才会delivery并生成一次member reply。B4增加持久依赖work board：人工assign复用既有Child saga，Child终态只进入review，只有Host明确complete或release；依赖只允许指向较早work item。每个assignment都不会复用成员对话或线程；同一member可以顺序执行，不同member可在REPL的有界后台worker中并行。Team数据不进入父Session或模型上下文，不提供调度、写权限、递归委派或长驻worker。
 
 ### 管理 Child Run
 
@@ -293,6 +300,8 @@ uv run coquo child deliver <child-run-uuid>
 | `/team create <name>`、`/team list`、`/team show <id>`、`/team close <id>` | Host-only管理持久Team身份 |
 | `/team member add|list|show|disable|enable|leave ...` | Host-only管理固定只读角色成员生命周期 |
 | `/team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...` | Host-only绑定、执行、观察和恢复Team assignment；每个assignment使用新的Child Run/Session |
+| `/team message send|list|show|read|cancel ...` | Host-only持久owner/member mailbox；读取不删除消息，回复必须显式read |
+| `/team work create|list|show|assign|complete|release|cancel ...` | Host-only依赖work board；人工assign、review、complete/release和关闭门禁 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
 | `/tools catalog [tool-name]` | 显示39个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
@@ -477,6 +486,8 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 - [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md)：Task/Stage/Turn/Action层次、独立持久身份与Host-only管理边界。
 - [Durable Team Identity and Member Registry](./docs/decisions/0138-durable-team-identity-and-members.md)：持久Team/member身份、owner Session、严格replay与Host-only生命周期。
 - [Recoverable Team Member Child Assignments](./docs/decisions/0139-recoverable-team-member-child-assignments.md)：双账assignment saga、全新Child/Session执行、终态handoff观察、supervisor复用与Session切换边界。
+- [Durable Team Mailbox and Assignment Delivery](./docs/decisions/0140-durable-team-mailbox-and-assignment-delivery.md)：append-only owner/member mailbox、一次性inbox绑定、Team Child role-v2与证据约束的reply/delivery观察。
+- [Durable Team Work Board and Manual Review](./docs/decisions/0141-durable-team-work-board-and-manual-review.md)：不可变依赖work item、人工assignment、Child终态review、Host complete/release与关闭门禁。
 - [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md)：Stage start/terminal状态机、独占writer、重启中断语义与Session Turn证据。
 - [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md)：普通AgentLoop复用、Task framing、精确崩溃恢复、失败映射与终端接入。
 - [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md)：计划执行、累计Stage间预算、完成提议、人工验收与生命周期管理。
@@ -566,4 +577,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent现在可以通过四个模型工具委派最多四个独立Child，并观察、等待或协作取消；Child仍固定为只读、单Turn、depth-one和process-local，handoff作为非可信ToolResult返回。Team B1/B2已实现持久Team/member身份、可恢复assignment绑定、全新Child/Session执行、终态观察及REPL内有界并行；消息、共享任务、调度和模型可见Team工具仍未实现。可执行Skill、市场及浏览器自动化也尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent现在可以通过四个模型工具委派最多四个独立Child，并观察、等待或协作取消；Child仍固定为只读、单Turn、depth-one和process-local，handoff作为非可信ToolResult返回。Team B3已增加持久owner/member mailbox、一次性inbox delivery与证据约束的member reply，B4已增加持久依赖work board与人工review/complete/release；调度和模型可见Team工具仍未实现。可执行Skill、市场及浏览器自动化也尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

@@ -128,7 +128,7 @@ HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
     "  /help task      Durable Task execution and lifecycle\n"
-    "  /help team      Durable Team and member identity\n"
+    "  /help team      Durable Team, members, mailbox, and work board\n"
     "  /help tools     Action Audit and durable tool outcomes\n"
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
@@ -165,6 +165,8 @@ TEAM_HELP = (
     "  /team show <team-id> | /team close <team-id>\n"
     "  /team member add|list|show|disable|enable|leave ...\n"
     "  /team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...\n"
+    "  /team message send|list|show|read|cancel ...\n"
+    "  /team work create|list|show|assign|complete|release|cancel ...\n"
     "Members are durable identities over fresh bounded read-only Child Runs. Each assignment "
     "uses a new detached Child Session; background start is process-local and does not survive restart."
 )
@@ -1620,6 +1622,60 @@ def render_team_info(info) -> str:
     if info.closed_at is not None:
         lines.append(f"Closed: {info.closed_at}")
     lines.extend(render_team_member(member) for member in info.members)
+    return "\n".join(lines)
+
+
+def render_team_message_summary(message) -> str:
+    direction = "member -> owner" if message.sender_member_id is not None else "owner -> member"
+    endpoint = message.sender_member_id or message.recipient_member_id or "unknown"
+    return (
+        f"{message.message_id}: {direction}, member {endpoint}, status {message.status.value}, "
+        f"sent {message.sent_at}"
+    )
+
+
+def render_team_message(message) -> str:
+    direction = "member -> owner" if message.sender_member_id is not None else "owner -> member"
+    lines = [
+        f"Message ID: {message.message_id}",
+        f"Direction: {direction}",
+        f"Sender Member: {message.sender_member_id or 'owner'}",
+        f"Recipient Member: {message.recipient_member_id or 'owner'}",
+        f"Status: {message.status.value}",
+        f"Body SHA-256: {message.body_sha256}",
+        f"Sent: {message.sent_at}",
+        f"Body: {_safe_inline(message.body)}",
+    ]
+    if message.read_at is not None:
+        lines.append(f"Read: {message.read_at}")
+    if message.cancelled_at is not None:
+        lines.append(f"Cancelled: {message.cancelled_at}")
+    if message.source_assignment_id is not None:
+        lines.append(f"Source Assignment: {message.source_assignment_id}")
+    return "\n".join(lines)
+
+
+def render_team_work_summary(item) -> str:
+    blocked = (
+        f", blocked by {','.join(item.blocked_dependency_ids)}"
+        if item.blocked_dependency_ids
+        else ""
+    )
+    return f"{item.work_item_id}: {item.status.value}, {item.title!r}{blocked}"
+
+
+def render_team_work_item(item) -> str:
+    lines = [
+        f"Work Item ID: {item.work_item_id}",
+        f"Title: {_safe_inline(item.title)}",
+        f"Objective: {_safe_inline(item.objective)}",
+        f"Status: {item.status.value}",
+        f"Dependencies: {', '.join(item.dependency_ids) if item.dependency_ids else 'none'}",
+        f"Blocked By: {', '.join(item.blocked_dependency_ids) if item.blocked_dependency_ids else 'none'}",
+        f"Created: {item.created_at}",
+    ]
+    if item.terminal_reason is not None:
+        lines.append(f"Reason: {_safe_inline(item.terminal_reason)}")
     return "\n".join(lines)
 
 

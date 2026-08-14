@@ -16,11 +16,13 @@ from coquo.team_records import (
     TeamMemberStatus,
     TeamRecordError,
     TeamStatus,
+    TeamWorkStatus,
     canonical_team_assignment_objective,
     canonical_team_id,
     utc_now,
 )
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
+from coquo.team_messaging import TeamMessageError, TeamMessagingService
 
 
 class TeamAssignmentError(RuntimeError):
@@ -81,8 +83,16 @@ class TeamAssignmentService:
         self._clock = clock
         self.teams = TeamStore(self.workspace, clock=clock)
         self.children = ChildRunStore(self.workspace, clock=clock)
+        self.messaging = TeamMessagingService(self.workspace)
 
-    def create(self, team_id: str, member_id: str, objective: str) -> TeamAssignmentInfo:
+    def create(
+        self,
+        team_id: str,
+        member_id: str,
+        objective: str,
+        *,
+        work_item_id: str | None = None,
+    ) -> TeamAssignmentInfo:
         team = self._inspect_team(team_id)
         canonical_team = team.team_id
         canonical_member = self._canonical_id(member_id, "member ID")
@@ -103,6 +113,14 @@ class TeamAssignmentService:
             raise TeamAssignmentError(
                 "Team member already has a pending assignment", team_id=canonical_team
             )
+        canonical_work: str | None = None
+        if work_item_id is not None:
+            canonical_work = self._canonical_id(work_item_id, "work item ID")
+            work = next(
+                (item for item in team.work_items if item.work_item_id == canonical_work), None
+            )
+            if work is None or work.status.value != "ready":
+                raise TeamAssignmentError("Team work item is not ready", team_id=canonical_team)
         assignment_id = self._new_id("assignment ID")
         child_run_id = self._new_id("Child Run ID")
         try:
@@ -112,6 +130,7 @@ class TeamAssignmentService:
                 canonical_member,
                 child_run_id,
                 objective,
+                work_item_id=canonical_work,
             )
         except TeamStoreError as error:
             raise TeamAssignmentError(
@@ -267,7 +286,20 @@ class TeamAssignmentService:
                         TeamRecoveryDiagnostic(assignment.assignment_id, "blocked", str(error))
                     )
             else:
-                recovered.append(self.inspect(team.team_id, assignment.assignment_id))
+                try:
+                    info = self.inspect(team.team_id, assignment.assignment_id)
+                    if (
+                        info.assignment.delivery_id is not None
+                        and info.assignment.child_outcome == "completed"
+                        and info.assignment.mailbox_observed_at is None
+                    ):
+                        self.observe_terminal(team.team_id, assignment.assignment_id)
+                        info = self.inspect(team.team_id, assignment.assignment_id)
+                    recovered.append(info)
+                except (TeamAssignmentError, TeamMessageError, TeamStoreError, OSError) as error:
+                    diagnostics.append(
+                        TeamRecoveryDiagnostic(assignment.assignment_id, "blocked", str(error))
+                    )
         return TeamRecoveryResult(tuple(recovered), tuple(diagnostics))
 
     def close(self, team_id: str) -> TeamInfo:
@@ -275,6 +307,12 @@ class TeamAssignmentService:
         team = self._inspect_team(team_id)
         for assignment in team.assignments:
             if assignment.phase is TeamAssignmentPhase.TERMINAL_OBSERVED:
+                if (
+                    assignment.delivery_id is not None
+                    and assignment.child_outcome == "completed"
+                    and assignment.mailbox_observed_at is None
+                ):
+                    self.observe_terminal(team.team_id, assignment.assignment_id)
                 continue
             info = self.inspect(team.team_id, assignment.assignment_id)
             if info.child is None or info.child.status not in {
@@ -289,6 +327,19 @@ class TeamAssignmentService:
                     assignment_id=assignment.assignment_id,
                 )
             self.observe_terminal(team.team_id, assignment.assignment_id)
+        team = self._inspect_team(team_id)
+        work_blockers = [
+            f"work item {item.work_item_id} is {item.status.value}"
+            for item in team.work_items
+            if item.status not in {TeamWorkStatus.COMPLETED, TeamWorkStatus.CANCELLED}
+        ]
+        mailbox_blockers = list(self.messaging.close_blockers(team.team_id))
+        if work_blockers or mailbox_blockers:
+            details = "; ".join((*work_blockers, *mailbox_blockers))
+            raise TeamAssignmentError(
+                f"Team cannot close while coordination items are pending: {details}",
+                team_id=team.team_id,
+            )
         try:
             return self.teams.close(team.team_id)
         except TeamStoreError as error:
@@ -299,10 +350,15 @@ class TeamAssignmentService:
         team = self._inspect_team(team_id)
         member = self._member(team, self._canonical_id(member_id, "member ID"))
         for assignment in team.assignments:
-            if (
-                assignment.member_id != member.member_id
-                or assignment.phase is TeamAssignmentPhase.TERMINAL_OBSERVED
-            ):
+            if assignment.member_id != member.member_id:
+                continue
+            if assignment.phase is TeamAssignmentPhase.TERMINAL_OBSERVED:
+                if (
+                    assignment.delivery_id is not None
+                    and assignment.child_outcome == "completed"
+                    and assignment.mailbox_observed_at is None
+                ):
+                    self.observe_terminal(team.team_id, assignment.assignment_id)
                 continue
             info = self.inspect(team.team_id, assignment.assignment_id)
             if info.child is None or info.child.status not in {
@@ -317,6 +373,13 @@ class TeamAssignmentService:
                     assignment_id=assignment.assignment_id,
                 )
             self.observe_terminal(team.team_id, assignment.assignment_id)
+        blockers = self.messaging.leave_blockers(team.team_id, member.member_id)
+        if blockers:
+            raise TeamAssignmentError(
+                "Team member cannot leave while mailbox messages are pending: "
+                + "; ".join(blockers),
+                team_id=team.team_id,
+            )
         try:
             return self.teams.leave_member(team.team_id, member.member_id, reason)
         except TeamStoreError as error:
@@ -363,7 +426,35 @@ class TeamAssignmentService:
                     assignment_id=info.assignment.assignment_id,
                     child_run_id=info.assignment.child_run_id,
                 )
+            if (
+                info.assignment.delivery_id is not None
+                and handoff.outcome == "completed"
+                and info.assignment.mailbox_observed_at is None
+            ):
+                try:
+                    self.messaging.publish_reply_and_delivery(
+                        info.team.team_id, info.assignment.assignment_id, handoff
+                    )
+                except TeamMessageError as error:
+                    raise TeamAssignmentError(
+                        f"Team mailbox observation requires recovery: {error}",
+                        team_id=info.team.team_id,
+                        assignment_id=info.assignment.assignment_id,
+                        child_run_id=info.assignment.child_run_id,
+                    ) from None
             return handoff
+        if info.assignment.delivery_id is not None and handoff.outcome == "completed":
+            try:
+                self.messaging.publish_reply_and_delivery(
+                    info.team.team_id, info.assignment.assignment_id, handoff
+                )
+            except TeamMessageError as error:
+                raise TeamAssignmentError(
+                    f"Team mailbox observation requires recovery: {error}",
+                    team_id=info.team.team_id,
+                    assignment_id=info.assignment.assignment_id,
+                    child_run_id=info.assignment.child_run_id,
+                ) from None
         try:
             self.teams.observe_assignment(
                 info.team.team_id,

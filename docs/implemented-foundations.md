@@ -1346,6 +1346,8 @@ Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks templat
 137. [0137：Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)
 138. [0138：Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)
 139. [0139：Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)
+140. [0140：Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)
+141. [0141：Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)
 
 ## Durable Team Identity 与 Member Registry
 
@@ -1353,7 +1355,7 @@ B1现在提供workspace-bound的持久Team与成员身份，但不把身份误�
 
 成员记录保留固定角色`read-only-investigator-v1`与不可变UUID/名称，名称在Team完整历史中casefold唯一并最多64名。状态只允许`active <-> disabled -> left`；disable仅阻止未来assignment，left保留历史身份且不可重新加入。`coquo team ...`与REPL `/team ...`是Host-only的创建、列出、查看、关闭和成员状态管理入口，不调用Provider、不创建Child、不写owner Session transcript、不改变latest或Effective Context。REPL mutation要求当前Session是Team immutable owner；standalone命令按精确Team管理而不隐式切换Session。
 
-B1明确不包含assignment、handoff、mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。B2现在把每个assignment绑定到全新的Child Run和detached Session：Team ledger按`pending_child -> child_bound -> terminal_observed`记录关系，Child ledger继续是执行状态权威。创建使用确定性的双账saga，部分状态可按精确ID恢复；执行复用现有Child prepare/run/start/wait/cancel/recovery/handoff与同一个有界supervisor。一个member可以顺序完成多个assignment，但每次都是新Child和新Session；不同member可通过现有worker池并行，父Session仍可继续工作。Team只保存终态Child/Session坐标和handoff digest，不保存正文，不向父历史或模型上下文注入。Session identity在有queued/active Child时拒绝变更，supervisor quiescent后才退休并切换。Team close/leave要求精确终态观察，不隐式取消。B2仍不包含mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。详见[0138：Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)与[0139：Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)。
+B1明确不包含assignment、handoff、mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。B2现在把每个assignment绑定到全新的Child Run和detached Session：Team ledger按`pending_child -> child_bound -> terminal_observed`记录关系，Child ledger继续是执行状态权威。B3在此基础上增加append-only owner/member mailbox；新Team Child准入前冻结最多8条inbox消息并预分配delivery/reply ID，精确提交的Child Turn与handoff才允许发布一次member reply并观察delivery。B4增加append-only work item board：依赖只能指向较早item，ready work由Host手动assign，Child终态进入review，Host以明确evidence complete或release；Team close要求work、mailbox、assignment和reply门禁全部满足。消息读取不删除证据，失败或中断不消耗pending消息，generic和已准入v1 Child保持旧契约。scheduler、写权限、递归委派、长驻worker和model-visible Team tool仍未实现。详见[0138：Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)、[0139：Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)、[0140：Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)与[0141：Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)。
 
 ## Shared Agent Runtime 与 Durable Child Run Foundation
 

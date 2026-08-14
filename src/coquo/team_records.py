@@ -22,8 +22,18 @@ TEAM_MEMBER_DISABLED_SCHEMA_VERSION = 1
 TEAM_MEMBER_ENABLED_SCHEMA_VERSION = 1
 TEAM_MEMBER_LEFT_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION = 1
+TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION = 2
 TEAM_ASSIGNMENT_CHILD_BOUND_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_OBSERVED_SCHEMA_VERSION = 1
+TEAM_MESSAGE_SENT_SCHEMA_VERSION = 1
+TEAM_MESSAGE_READ_SCHEMA_VERSION = 1
+TEAM_MESSAGE_CANCELLED_SCHEMA_VERSION = 1
+TEAM_ASSIGNMENT_MAILBOX_BOUND_SCHEMA_VERSION = 1
+TEAM_ASSIGNMENT_MAILBOX_OBSERVED_SCHEMA_VERSION = 1
+TEAM_WORK_ITEM_CREATED_SCHEMA_VERSION = 1
+TEAM_WORK_ITEM_RELEASED_SCHEMA_VERSION = 1
+TEAM_WORK_ITEM_COMPLETED_SCHEMA_VERSION = 1
+TEAM_WORK_ITEM_CANCELLED_SCHEMA_VERSION = 1
 MAX_TEAM_RECORD_BYTES = 64 * 1024
 MAX_TEAM_RECORDS = 10_000
 MAX_TEAM_NAME_CHARACTERS = 80
@@ -34,6 +44,12 @@ MAX_TEAM_MEMBERS = 64
 TEAM_MEMBER_ROLE_CONTRACT = "read-only-investigator-v1"
 MAX_TEAM_ASSIGNMENT_OBJECTIVE_CHARACTERS = 4096
 MAX_TEAM_ASSIGNMENT_OBJECTIVE_BYTES = 16 * 1024
+MAX_TEAM_MESSAGE_BODY_CHARACTERS = 32 * 1024
+MAX_TEAM_MESSAGE_BODY_BYTES = 32 * 1024
+MAX_TEAM_OWNER_MESSAGE_CHARACTERS = 4096
+MAX_TEAM_OWNER_MESSAGE_BYTES = 8 * 1024
+MAX_TEAM_WORK_ITEMS = 1024
+MAX_TEAM_WORK_DEPENDENCIES = 16
 
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
@@ -58,6 +74,23 @@ class TeamAssignmentPhase(StrEnum):
     PENDING_CHILD = "pending_child"
     CHILD_BOUND = "child_bound"
     TERMINAL_OBSERVED = "terminal_observed"
+
+
+class TeamMessageStatus(StrEnum):
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    UNREAD = "unread"
+    READ = "read"
+
+
+class TeamWorkStatus(StrEnum):
+    BLOCKED = "blocked"
+    READY = "ready"
+    ASSIGNED = "assigned"
+    REVIEW = "review"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -136,6 +169,7 @@ class TeamAssignmentCreated:
     objective: str
     objective_sha256: str
     created_at: str
+    work_item_id: str | None = None
     record_type: str = "team_assignment_created"
     schema_version: int = TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION
 
@@ -168,6 +202,123 @@ class TeamAssignmentObserved:
     schema_version: int = TEAM_ASSIGNMENT_OBSERVED_SCHEMA_VERSION
 
 
+@dataclass(frozen=True)
+class TeamAssignmentMailboxBound:
+    sequence: int
+    team_id: str
+    assignment_id: str
+    child_run_id: str
+    member_id: str
+    delivery_id: str
+    inbox_message_ids: tuple[str, ...]
+    reply_message_id: str
+    bound_at: str
+    record_type: str = "team_assignment_mailbox_bound"
+    schema_version: int = TEAM_ASSIGNMENT_MAILBOX_BOUND_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamAssignmentMailboxObserved:
+    sequence: int
+    team_id: str
+    assignment_id: str
+    delivery_id: str
+    child_session_id: str
+    child_turn_record_sequence: int
+    child_user_message_sha256: str
+    observed_at: str
+    record_type: str = "team_assignment_mailbox_observed"
+    schema_version: int = TEAM_ASSIGNMENT_MAILBOX_OBSERVED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamWorkItemCreated:
+    sequence: int
+    team_id: str
+    work_item_id: str
+    title: str
+    objective: str
+    dependency_ids: tuple[str, ...]
+    created_at: str
+    record_type: str = "team_work_item_created"
+    schema_version: int = TEAM_WORK_ITEM_CREATED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamWorkItemReleased:
+    sequence: int
+    team_id: str
+    work_item_id: str
+    assignment_id: str
+    reason: str
+    released_at: str
+    record_type: str = "team_work_item_released"
+    schema_version: int = TEAM_WORK_ITEM_RELEASED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamWorkItemCompleted:
+    sequence: int
+    team_id: str
+    work_item_id: str
+    assignment_id: str
+    handoff_sha256: str
+    evidence: str
+    completed_at: str
+    record_type: str = "team_work_item_completed"
+    schema_version: int = TEAM_WORK_ITEM_COMPLETED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamWorkItemCancelled:
+    sequence: int
+    team_id: str
+    work_item_id: str
+    reason: str
+    cancelled_at: str
+    record_type: str = "team_work_item_cancelled"
+    schema_version: int = TEAM_WORK_ITEM_CANCELLED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamMessageSent:
+    sequence: int
+    team_id: str
+    message_id: str
+    sender_member_id: str | None
+    recipient_member_id: str | None
+    body: str
+    body_sha256: str
+    source_assignment_id: str | None
+    source_child_session_id: str | None
+    source_turn_record_sequence: int | None
+    source_handoff_sha256: str | None
+    sent_at: str
+    record_type: str = "team_message_sent"
+    schema_version: int = TEAM_MESSAGE_SENT_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamMessageRead:
+    sequence: int
+    team_id: str
+    message_id: str
+    read_at: str
+    record_type: str = "team_message_read"
+    schema_version: int = TEAM_MESSAGE_READ_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamMessageCancelled:
+    sequence: int
+    team_id: str
+    message_id: str
+    reason: str
+    cancelled_at: str
+    record_type: str = "team_message_cancelled"
+    schema_version: int = TEAM_MESSAGE_CANCELLED_SCHEMA_VERSION
+
+
 TeamRecord: TypeAlias = (
     TeamHeader
     | TeamClosed
@@ -178,6 +329,15 @@ TeamRecord: TypeAlias = (
     | TeamAssignmentCreated
     | TeamAssignmentChildBound
     | TeamAssignmentObserved
+    | TeamAssignmentMailboxBound
+    | TeamAssignmentMailboxObserved
+    | TeamWorkItemCreated
+    | TeamWorkItemReleased
+    | TeamWorkItemCompleted
+    | TeamWorkItemCancelled
+    | TeamMessageSent
+    | TeamMessageRead
+    | TeamMessageCancelled
 )
 
 
@@ -209,6 +369,46 @@ class TeamAssignmentState:
     child_terminal_sequence: int | None = None
     handoff_sha256: str | None = None
     observed_at: str | None = None
+    work_item_id: str | None = None
+    delivery_id: str | None = None
+    inbox_message_ids: tuple[str, ...] = ()
+    reply_message_id: str | None = None
+    mailbox_bound_at: str | None = None
+    mailbox_observed_at: str | None = None
+    child_user_message_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class TeamWorkItemState:
+    work_item_id: str
+    title: str
+    objective: str
+    dependency_ids: tuple[str, ...]
+    status: TeamWorkStatus
+    blocked_dependency_ids: tuple[str, ...] = ()
+    assignment_ids: tuple[str, ...] = ()
+    current_assignment_id: str | None = None
+    handoff_sha256: str | None = None
+    completion_evidence: str | None = None
+    terminal_reason: str | None = None
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class TeamMessageState:
+    message_id: str
+    sender_member_id: str | None
+    recipient_member_id: str | None
+    body: str
+    body_sha256: str
+    source_assignment_id: str | None
+    source_child_session_id: str | None
+    source_turn_record_sequence: int | None
+    source_handoff_sha256: str | None
+    sent_at: str
+    status: TeamMessageStatus
+    read_at: str | None = None
+    cancelled_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +418,8 @@ class TeamReplayState:
     closed: TeamClosed | None = None
     members: tuple[TeamMemberState, ...] = ()
     assignments: tuple[TeamAssignmentState, ...] = ()
+    messages: tuple[TeamMessageState, ...] = ()
+    work_items: tuple[TeamWorkItemState, ...] = ()
 
     @property
     def status(self) -> TeamStatus:
@@ -256,6 +458,10 @@ def canonical_team_assignment_objective(value: object) -> str:
 
 def team_assignment_objective_sha256(objective: str) -> str:
     return hashlib.sha256(objective.encode("utf-8")).hexdigest()
+
+
+def team_message_body_sha256(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def canonical_team_timestamp(value: object, label: str = "Team timestamp") -> str:
@@ -335,6 +541,8 @@ def encode_team_record(record: TeamRecord) -> bytes:
             "sequence": record.sequence,
             "team_id": record.team_id,
         }
+        if record.schema_version == TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION:
+            value["work_item_id"] = record.work_item_id
     elif isinstance(record, TeamAssignmentChildBound):
         value = {
             "assignment_id": record.assignment_id,
@@ -356,6 +564,114 @@ def encode_team_record(record: TeamRecord) -> bytes:
             "child_terminal_sequence": record.child_terminal_sequence,
             "handoff_sha256": record.handoff_sha256,
             "observed_at": record.observed_at,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamAssignmentMailboxBound):
+        value = {
+            "assignment_id": record.assignment_id,
+            "bound_at": record.bound_at,
+            "child_run_id": record.child_run_id,
+            "delivery_id": record.delivery_id,
+            "inbox_message_ids": list(record.inbox_message_ids),
+            "member_id": record.member_id,
+            "record_type": record.record_type,
+            "reply_message_id": record.reply_message_id,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamAssignmentMailboxObserved):
+        value = {
+            "assignment_id": record.assignment_id,
+            "child_session_id": record.child_session_id,
+            "child_turn_record_sequence": record.child_turn_record_sequence,
+            "child_user_message_sha256": record.child_user_message_sha256,
+            "delivery_id": record.delivery_id,
+            "observed_at": record.observed_at,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamWorkItemCreated):
+        value = {
+            "created_at": record.created_at,
+            "dependency_ids": list(record.dependency_ids),
+            "objective": record.objective,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+            "title": record.title,
+            "work_item_id": record.work_item_id,
+        }
+    elif isinstance(record, TeamWorkItemReleased):
+        value = {
+            "assignment_id": record.assignment_id,
+            "reason": record.reason,
+            "record_type": record.record_type,
+            "released_at": record.released_at,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+            "work_item_id": record.work_item_id,
+        }
+    elif isinstance(record, TeamWorkItemCompleted):
+        value = {
+            "assignment_id": record.assignment_id,
+            "completed_at": record.completed_at,
+            "evidence": record.evidence,
+            "handoff_sha256": record.handoff_sha256,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+            "work_item_id": record.work_item_id,
+        }
+    elif isinstance(record, TeamWorkItemCancelled):
+        value = {
+            "cancelled_at": record.cancelled_at,
+            "reason": record.reason,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+            "work_item_id": record.work_item_id,
+        }
+    elif isinstance(record, TeamMessageSent):
+        value = {
+            "body": record.body,
+            "body_sha256": record.body_sha256,
+            "message_id": record.message_id,
+            "recipient_member_id": record.recipient_member_id,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sender_member_id": record.sender_member_id,
+            "sent_at": record.sent_at,
+            "sequence": record.sequence,
+            "source_assignment_id": record.source_assignment_id,
+            "source_child_session_id": record.source_child_session_id,
+            "source_handoff_sha256": record.source_handoff_sha256,
+            "source_turn_record_sequence": record.source_turn_record_sequence,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamMessageRead):
+        value = {
+            "message_id": record.message_id,
+            "read_at": record.read_at,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamMessageCancelled):
+        value = {
+            "cancelled_at": record.cancelled_at,
+            "message_id": record.message_id,
+            "reason": record.reason,
             "record_type": record.record_type,
             "schema_version": record.schema_version,
             "sequence": record.sequence,
@@ -526,9 +842,8 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             schema_version=value["schema_version"],
         )
     elif record_type == "team_assignment_created":
-        _require_fields(
-            value,
-            "team_assignment_created",
+        schema_version = value.get("schema_version")
+        expected = {
             "assignment_id",
             "child_run_id",
             "created_at",
@@ -539,7 +854,11 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             "schema_version",
             "sequence",
             "team_id",
-        )
+        }
+        if schema_version == TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION:
+            expected.add("work_item_id")
+        if set(value) != expected:
+            raise TeamRecordError("team_assignment_created has unknown or missing fields")
         record = TeamAssignmentCreated(
             sequence=value["sequence"],
             team_id=value["team_id"],
@@ -551,6 +870,7 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             created_at=value["created_at"],
             record_type=value["record_type"],
             schema_version=value["schema_version"],
+            work_item_id=value.get("work_item_id"),
         )
     elif record_type == "team_assignment_child_bound":
         _require_fields(
@@ -606,6 +926,231 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )
+    elif record_type == "team_assignment_mailbox_bound":
+        _require_fields(
+            value,
+            "team_assignment_mailbox_bound",
+            "assignment_id",
+            "bound_at",
+            "child_run_id",
+            "delivery_id",
+            "inbox_message_ids",
+            "member_id",
+            "record_type",
+            "reply_message_id",
+            "schema_version",
+            "sequence",
+            "team_id",
+        )
+        record = TeamAssignmentMailboxBound(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            assignment_id=value["assignment_id"],
+            child_run_id=value["child_run_id"],
+            member_id=value["member_id"],
+            delivery_id=value["delivery_id"],
+            inbox_message_ids=tuple(value["inbox_message_ids"]),
+            reply_message_id=value["reply_message_id"],
+            bound_at=value["bound_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_assignment_mailbox_observed":
+        _require_fields(
+            value,
+            "team_assignment_mailbox_observed",
+            "assignment_id",
+            "child_session_id",
+            "child_turn_record_sequence",
+            "child_user_message_sha256",
+            "delivery_id",
+            "observed_at",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+        )
+        record = TeamAssignmentMailboxObserved(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            assignment_id=value["assignment_id"],
+            delivery_id=value["delivery_id"],
+            child_session_id=value["child_session_id"],
+            child_turn_record_sequence=value["child_turn_record_sequence"],
+            child_user_message_sha256=value["child_user_message_sha256"],
+            observed_at=value["observed_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_work_item_created":
+        _require_fields(
+            value,
+            "team_work_item_created",
+            "created_at",
+            "dependency_ids",
+            "objective",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+            "title",
+            "work_item_id",
+        )
+        record = TeamWorkItemCreated(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            work_item_id=value["work_item_id"],
+            title=value["title"],
+            objective=value["objective"],
+            dependency_ids=tuple(value["dependency_ids"]),
+            created_at=value["created_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_work_item_released":
+        _require_fields(
+            value,
+            "team_work_item_released",
+            "assignment_id",
+            "reason",
+            "record_type",
+            "released_at",
+            "schema_version",
+            "sequence",
+            "team_id",
+            "work_item_id",
+        )
+        record = TeamWorkItemReleased(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            work_item_id=value["work_item_id"],
+            assignment_id=value["assignment_id"],
+            reason=value["reason"],
+            released_at=value["released_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_work_item_completed":
+        _require_fields(
+            value,
+            "team_work_item_completed",
+            "assignment_id",
+            "completed_at",
+            "evidence",
+            "handoff_sha256",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+            "work_item_id",
+        )
+        record = TeamWorkItemCompleted(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            work_item_id=value["work_item_id"],
+            assignment_id=value["assignment_id"],
+            handoff_sha256=value["handoff_sha256"],
+            evidence=value["evidence"],
+            completed_at=value["completed_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_work_item_cancelled":
+        _require_fields(
+            value,
+            "team_work_item_cancelled",
+            "cancelled_at",
+            "reason",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+            "work_item_id",
+        )
+        record = TeamWorkItemCancelled(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            work_item_id=value["work_item_id"],
+            reason=value["reason"],
+            cancelled_at=value["cancelled_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_message_sent":
+        _require_fields(
+            value,
+            "team_message_sent",
+            "body",
+            "body_sha256",
+            "message_id",
+            "recipient_member_id",
+            "record_type",
+            "schema_version",
+            "sender_member_id",
+            "sent_at",
+            "sequence",
+            "source_assignment_id",
+            "source_child_session_id",
+            "source_handoff_sha256",
+            "source_turn_record_sequence",
+            "team_id",
+        )
+        record = TeamMessageSent(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            message_id=value["message_id"],
+            sender_member_id=value["sender_member_id"],
+            recipient_member_id=value["recipient_member_id"],
+            body=value["body"],
+            body_sha256=value["body_sha256"],
+            source_assignment_id=value["source_assignment_id"],
+            source_child_session_id=value["source_child_session_id"],
+            source_turn_record_sequence=value["source_turn_record_sequence"],
+            source_handoff_sha256=value["source_handoff_sha256"],
+            sent_at=value["sent_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_message_read":
+        _require_fields(
+            value,
+            "team_message_read",
+            "message_id",
+            "read_at",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+        )
+        record = TeamMessageRead(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            message_id=value["message_id"],
+            read_at=value["read_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_message_cancelled":
+        _require_fields(
+            value,
+            "team_message_cancelled",
+            "cancelled_at",
+            "message_id",
+            "reason",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+        )
+        record = TeamMessageCancelled(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            message_id=value["message_id"],
+            reason=value["reason"],
+            cancelled_at=value["cancelled_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
     else:
         raise TeamRecordError("unknown Team record type")
     _validate_record(record)
@@ -642,8 +1187,13 @@ def replay_team_records(
     members: dict[str, TeamMemberState] = {}
     member_names: set[str] = set()
     assignments: dict[str, TeamAssignmentState] = {}
+    work_items: dict[str, TeamWorkItemState] = {}
     assignment_children: set[str] = set()
     active_member_assignments: set[str] = set()
+    messages: dict[str, TeamMessageState] = {}
+    delivery_ids: set[str] = set()
+    reply_ids: set[str] = set()
+    bound_message_ids: set[str] = set()
     previous_timestamp = header.created_at
     for expected_sequence, record in enumerate(records[1:], start=1):
         if type(record) is TeamHeader:
@@ -693,6 +1243,12 @@ def replay_team_records(
                 raise TeamRecordError("Team assignment requires an active member")
             if record.member_id in active_member_assignments:
                 raise TeamRecordError("Team member already has a pending assignment")
+            work_item = (
+                work_items.get(record.work_item_id) if record.work_item_id is not None else None
+            )
+            if record.work_item_id is not None:
+                if work_item is None or work_item.status is not TeamWorkStatus.READY:
+                    raise TeamRecordError("Team assignment work item is not ready")
             assignments[record.assignment_id] = TeamAssignmentState(
                 assignment_id=record.assignment_id,
                 member_id=record.member_id,
@@ -701,9 +1257,90 @@ def replay_team_records(
                 objective_sha256=record.objective_sha256,
                 created_at=record.created_at,
                 phase=TeamAssignmentPhase.PENDING_CHILD,
+                work_item_id=record.work_item_id,
             )
             assignment_children.add(record.child_run_id)
             active_member_assignments.add(record.member_id)
+            if work_item is not None:
+                work_items[work_item.work_item_id] = TeamWorkItemState(
+                    **{
+                        **work_item.__dict__,
+                        "status": TeamWorkStatus.ASSIGNED,
+                        "assignment_ids": (*work_item.assignment_ids, record.assignment_id),
+                        "current_assignment_id": record.assignment_id,
+                    }
+                )
+            continue
+        if isinstance(record, TeamWorkItemCreated):
+            if record.work_item_id in work_items:
+                raise TeamRecordError("Team work item ID is duplicated")
+            if len(work_items) >= MAX_TEAM_WORK_ITEMS:
+                raise TeamRecordError(f"Team exceeds {MAX_TEAM_WORK_ITEMS} work items")
+            if len(record.dependency_ids) > MAX_TEAM_WORK_DEPENDENCIES or len(
+                set(record.dependency_ids)
+            ) != len(record.dependency_ids):
+                raise TeamRecordError("Team work item dependencies are invalid")
+            for dependency_id in record.dependency_ids:
+                if dependency_id not in work_items:
+                    raise TeamRecordError(
+                        "Team work item dependency must reference an earlier item"
+                    )
+            work_items[record.work_item_id] = TeamWorkItemState(
+                work_item_id=record.work_item_id,
+                title=record.title,
+                objective=record.objective,
+                dependency_ids=record.dependency_ids,
+                status=TeamWorkStatus.READY,
+                created_at=record.created_at,
+            )
+            continue
+        if isinstance(record, TeamWorkItemCancelled):
+            item = work_items.get(record.work_item_id)
+            if item is None or item.status in {TeamWorkStatus.COMPLETED, TeamWorkStatus.CANCELLED}:
+                raise TeamRecordError("Team work item cancellation is invalid")
+            if item.status is TeamWorkStatus.ASSIGNED:
+                raise TeamRecordError("Team work item cannot be cancelled while assigned")
+            work_items[record.work_item_id] = TeamWorkItemState(
+                **{
+                    **item.__dict__,
+                    "status": TeamWorkStatus.CANCELLED,
+                    "terminal_reason": record.reason,
+                }
+            )
+            continue
+        if isinstance(record, TeamWorkItemReleased):
+            item = work_items.get(record.work_item_id)
+            if (
+                item is None
+                or item.status is not TeamWorkStatus.REVIEW
+                or item.current_assignment_id != record.assignment_id
+            ):
+                raise TeamRecordError("Team work item release is invalid")
+            work_items[record.work_item_id] = TeamWorkItemState(
+                **{
+                    **item.__dict__,
+                    "status": TeamWorkStatus.READY,
+                    "current_assignment_id": None,
+                    "terminal_reason": record.reason,
+                }
+            )
+            continue
+        if isinstance(record, TeamWorkItemCompleted):
+            item = work_items.get(record.work_item_id)
+            if (
+                item is None
+                or item.status is not TeamWorkStatus.REVIEW
+                or item.current_assignment_id != record.assignment_id
+            ):
+                raise TeamRecordError("Team work item completion is invalid")
+            work_items[record.work_item_id] = TeamWorkItemState(
+                **{
+                    **item.__dict__,
+                    "status": TeamWorkStatus.COMPLETED,
+                    "handoff_sha256": record.handoff_sha256,
+                    "completion_evidence": record.evidence,
+                }
+            )
             continue
         if isinstance(record, TeamAssignmentChildBound):
             assignment = assignments.get(record.assignment_id)
@@ -739,6 +1376,185 @@ def replay_team_records(
                 }
             )
             active_member_assignments.discard(assignment.member_id)
+            if record.child_outcome != "completed":
+                bound_message_ids.difference_update(assignment.inbox_message_ids)
+            if assignment.work_item_id is not None:
+                work_item = work_items[assignment.work_item_id]
+                work_items[assignment.work_item_id] = TeamWorkItemState(
+                    **{**work_item.__dict__, "status": TeamWorkStatus.REVIEW}
+                )
+            continue
+        if isinstance(record, TeamAssignmentMailboxBound):
+            assignment = assignments.get(record.assignment_id)
+            if assignment is None or assignment.phase is not TeamAssignmentPhase.CHILD_BOUND:
+                raise TeamRecordError("Team mailbox binding requires a Child-bound assignment")
+            if (
+                record.child_run_id != assignment.child_run_id
+                or record.member_id != assignment.member_id
+            ):
+                raise TeamRecordError("Team mailbox binding provenance does not match assignment")
+            if assignment.delivery_id is not None:
+                raise TeamRecordError("Team assignment mailbox is already bound")
+            if record.delivery_id in delivery_ids or record.reply_message_id in reply_ids:
+                raise TeamRecordError("Team mailbox delivery or reply ID is duplicated")
+            if len(record.inbox_message_ids) > 8 or len(set(record.inbox_message_ids)) != len(
+                record.inbox_message_ids
+            ):
+                raise TeamRecordError("Team mailbox inbox IDs are invalid")
+            previous_sequence = -1
+            for message_id in record.inbox_message_ids:
+                message = messages.get(message_id)
+                if (
+                    message is None
+                    or message.sender_member_id is not None
+                    or message.recipient_member_id != record.member_id
+                ):
+                    raise TeamRecordError("Team mailbox inbox message is invalid")
+                if message.status is not TeamMessageStatus.PENDING:
+                    raise TeamRecordError("Team mailbox inbox message is not pending")
+                if message_id in bound_message_ids:
+                    raise TeamRecordError("Team mailbox message is already bound")
+                message_sequence = next(
+                    item.sequence
+                    for item in records
+                    if isinstance(item, TeamMessageSent) and item.message_id == message_id
+                )
+                if message_sequence <= previous_sequence:
+                    raise TeamRecordError("Team mailbox inbox order is invalid")
+                previous_sequence = message_sequence
+            delivery_ids.add(record.delivery_id)
+            reply_ids.add(record.reply_message_id)
+            bound_message_ids.update(record.inbox_message_ids)
+            assignments[record.assignment_id] = TeamAssignmentState(
+                **{
+                    **assignment.__dict__,
+                    "delivery_id": record.delivery_id,
+                    "inbox_message_ids": record.inbox_message_ids,
+                    "reply_message_id": record.reply_message_id,
+                    "mailbox_bound_at": record.bound_at,
+                }
+            )
+            continue
+        if isinstance(record, TeamAssignmentMailboxObserved):
+            assignment = assignments.get(record.assignment_id)
+            if assignment is None or assignment.delivery_id != record.delivery_id:
+                raise TeamRecordError("Team mailbox observation is invalid")
+            if assignment.mailbox_observed_at is not None:
+                raise TeamRecordError("Team assignment mailbox is already observed")
+            if (
+                assignment.child_session_id is not None
+                and assignment.child_session_id != record.child_session_id
+            ):
+                raise TeamRecordError("Team mailbox Child Session does not match")
+            if (
+                type(record.child_turn_record_sequence) is not int
+                or record.child_turn_record_sequence < 1
+            ):
+                raise TeamRecordError("Team mailbox Child Turn sequence is invalid")
+            if (
+                not isinstance(record.child_user_message_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", record.child_user_message_sha256) is None
+            ):
+                raise TeamRecordError("Team mailbox user-message digest is invalid")
+            for message_id in assignment.inbox_message_ids:
+                message = messages[message_id]
+                if message.status is not TeamMessageStatus.PENDING:
+                    raise TeamRecordError("Team mailbox message is not pending at delivery")
+                messages[message_id] = TeamMessageState(
+                    **{**message.__dict__, "status": TeamMessageStatus.DELIVERED}
+                )
+            assignments[record.assignment_id] = TeamAssignmentState(
+                **{
+                    **assignment.__dict__,
+                    "mailbox_observed_at": record.observed_at,
+                    "child_session_id": record.child_session_id,
+                    "child_user_message_sha256": record.child_user_message_sha256,
+                }
+            )
+            continue
+        if isinstance(record, TeamMessageSent):
+            if record.message_id in messages:
+                raise TeamRecordError("Team message ID is duplicated")
+            recipient = (
+                members.get(record.recipient_member_id)
+                if record.recipient_member_id is not None
+                else None
+            )
+            sender = (
+                members.get(record.sender_member_id)
+                if record.sender_member_id is not None
+                else None
+            )
+            if record.sender_member_id is None:
+                if record.recipient_member_id is None or recipient is None:
+                    raise TeamRecordError("Owner message recipient is invalid")
+                if recipient.status is TeamMemberStatus.LEFT:
+                    raise TeamRecordError("Owner message targets a left member")
+                if any(
+                    value is not None
+                    for value in (
+                        record.source_assignment_id,
+                        record.source_child_session_id,
+                        record.source_turn_record_sequence,
+                        record.source_handoff_sha256,
+                    )
+                ):
+                    raise TeamRecordError("Owner message has member provenance")
+                status = TeamMessageStatus.PENDING
+            else:
+                if sender is None or record.recipient_member_id is not None:
+                    raise TeamRecordError("Member message endpoints are invalid")
+                assignment = (
+                    assignments.get(record.source_assignment_id)
+                    if record.source_assignment_id is not None
+                    else None
+                )
+                if (
+                    assignment is None
+                    or assignment.member_id != record.sender_member_id
+                    or record.source_child_session_id is None
+                    or record.source_turn_record_sequence is None
+                    or record.source_handoff_sha256 is None
+                ):
+                    raise TeamRecordError("Member message provenance is invalid")
+                status = TeamMessageStatus.UNREAD
+            messages[record.message_id] = TeamMessageState(
+                message_id=record.message_id,
+                sender_member_id=record.sender_member_id,
+                recipient_member_id=record.recipient_member_id,
+                body=record.body,
+                body_sha256=record.body_sha256,
+                source_assignment_id=record.source_assignment_id,
+                source_child_session_id=record.source_child_session_id,
+                source_turn_record_sequence=record.source_turn_record_sequence,
+                source_handoff_sha256=record.source_handoff_sha256,
+                sent_at=record.sent_at,
+                status=status,
+            )
+            continue
+        if isinstance(record, TeamMessageRead):
+            message = messages.get(record.message_id)
+            if message is None or message.sender_member_id is None:
+                raise TeamRecordError("Only member messages can be marked read")
+            if message.status is not TeamMessageStatus.UNREAD:
+                raise TeamRecordError("Team message is not unread")
+            messages[record.message_id] = TeamMessageState(
+                **{**message.__dict__, "status": TeamMessageStatus.READ, "read_at": record.read_at}
+            )
+            continue
+        if isinstance(record, TeamMessageCancelled):
+            message = messages.get(record.message_id)
+            if message is None or message.sender_member_id is not None:
+                raise TeamRecordError("Only owner messages can be cancelled")
+            if message.status is not TeamMessageStatus.PENDING:
+                raise TeamRecordError("Team message is not pending")
+            messages[record.message_id] = TeamMessageState(
+                **{
+                    **message.__dict__,
+                    "status": TeamMessageStatus.CANCELLED,
+                    "cancelled_at": record.cancelled_at,
+                }
+            )
             continue
         if record.member_id not in members:
             raise TeamRecordError("Team member lifecycle references an unknown member")
@@ -773,7 +1589,37 @@ def replay_team_records(
         closed=closed,
         members=tuple(members.values()),
         assignments=tuple(assignments.values()),
+        messages=tuple(messages.values()),
+        work_items=tuple(_project_work_items(work_items)),
     )
+
+
+def _project_work_items(items: dict[str, TeamWorkItemState]) -> tuple[TeamWorkItemState, ...]:
+    projected: list[TeamWorkItemState] = []
+    for item in items.values():
+        if item.status in {
+            TeamWorkStatus.COMPLETED,
+            TeamWorkStatus.CANCELLED,
+            TeamWorkStatus.ASSIGNED,
+            TeamWorkStatus.REVIEW,
+        }:
+            projected.append(item)
+            continue
+        blocked = tuple(
+            dependency_id
+            for dependency_id in item.dependency_ids
+            if items[dependency_id].status is not TeamWorkStatus.COMPLETED
+        )
+        projected.append(
+            TeamWorkItemState(
+                **{
+                    **item.__dict__,
+                    "status": TeamWorkStatus.BLOCKED if blocked else TeamWorkStatus.READY,
+                    "blocked_dependency_ids": blocked,
+                }
+            )
+        )
+    return tuple(projected)
 
 
 def _validate_record(record: TeamRecord) -> None:
@@ -862,10 +1708,10 @@ def _validate_record(record: TeamRecord) -> None:
         canonical_team_timestamp(record.left_at, "Team member left_at")
         return
     if isinstance(record, TeamAssignmentCreated):
-        if (
-            record.record_type != "team_assignment_created"
-            or record.schema_version != TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION
-        ):
+        if record.record_type != "team_assignment_created" or record.schema_version not in {
+            TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION,
+            TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
+        }:
             raise TeamRecordError("unsupported Team assignment-created schema")
         if type(record.sequence) is not int or record.sequence < 1:
             raise TeamRecordError("Team assignment-created sequence must be positive")
@@ -876,6 +1722,13 @@ def _validate_record(record: TeamRecord) -> None:
         objective = canonical_team_assignment_objective(record.objective)
         if record.objective_sha256 != team_assignment_objective_sha256(objective):
             raise TeamRecordError("Team assignment objective digest does not match objective")
+        if (
+            record.schema_version == TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION
+            and record.work_item_id is not None
+        ):
+            raise TeamRecordError("legacy Team assignment cannot carry a work item")
+        if record.work_item_id is not None:
+            canonical_team_id(record.work_item_id)
         canonical_team_timestamp(record.created_at, "Team assignment created_at")
         return
     if isinstance(record, TeamAssignmentChildBound):
@@ -919,6 +1772,197 @@ def _validate_record(record: TeamRecord) -> None:
             raise TeamRecordError("Team assignment handoff digest is invalid")
         canonical_team_timestamp(record.observed_at, "Team assignment observed_at")
         return
+    if isinstance(record, TeamAssignmentMailboxBound):
+        if (
+            record.record_type != "team_assignment_mailbox_bound"
+            or record.schema_version != TEAM_ASSIGNMENT_MAILBOX_BOUND_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team mailbox-bound schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team mailbox-bound sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.assignment_id)
+        canonical_team_id(record.child_run_id)
+        canonical_team_id(record.member_id)
+        canonical_team_id(record.delivery_id)
+        canonical_team_id(record.reply_message_id)
+        if (
+            not isinstance(record.inbox_message_ids, tuple)
+            or len(record.inbox_message_ids) > 8
+            or len(set(record.inbox_message_ids)) != len(record.inbox_message_ids)
+        ):
+            raise TeamRecordError("Team mailbox inbox IDs are invalid")
+        for message_id in record.inbox_message_ids:
+            canonical_team_id(message_id)
+        canonical_team_timestamp(record.bound_at, "Team mailbox bound_at")
+        return
+    if isinstance(record, TeamAssignmentMailboxObserved):
+        if (
+            record.record_type != "team_assignment_mailbox_observed"
+            or record.schema_version != TEAM_ASSIGNMENT_MAILBOX_OBSERVED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team mailbox-observed schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team mailbox-observed sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.assignment_id)
+        canonical_team_id(record.delivery_id)
+        canonical_team_id(record.child_session_id)
+        if (
+            type(record.child_turn_record_sequence) is not int
+            or record.child_turn_record_sequence < 1
+        ):
+            raise TeamRecordError("Team mailbox Child Turn sequence is invalid")
+        if (
+            not isinstance(record.child_user_message_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", record.child_user_message_sha256) is None
+        ):
+            raise TeamRecordError("Team mailbox user-message digest is invalid")
+        canonical_team_timestamp(record.observed_at, "Team mailbox observed_at")
+        return
+    if isinstance(record, TeamWorkItemCreated):
+        if (
+            record.record_type != "team_work_item_created"
+            or record.schema_version != TEAM_WORK_ITEM_CREATED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team work-created schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team work-created sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.work_item_id)
+        canonical_team_name(record.title)
+        canonical_team_assignment_objective(record.objective)
+        if (
+            not isinstance(record.dependency_ids, tuple)
+            or len(record.dependency_ids) > MAX_TEAM_WORK_DEPENDENCIES
+            or len(set(record.dependency_ids)) != len(record.dependency_ids)
+        ):
+            raise TeamRecordError("Team work dependencies are invalid")
+        for dependency_id in record.dependency_ids:
+            canonical_team_id(dependency_id)
+        canonical_team_timestamp(record.created_at, "Team work created_at")
+        return
+    if isinstance(record, TeamWorkItemReleased):
+        if (
+            record.record_type != "team_work_item_released"
+            or record.schema_version != TEAM_WORK_ITEM_RELEASED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team work-released schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team work-released sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.work_item_id)
+        canonical_team_id(record.assignment_id)
+        canonical_team_reason(record.reason)
+        canonical_team_timestamp(record.released_at, "Team work released_at")
+        return
+    if isinstance(record, TeamWorkItemCompleted):
+        if (
+            record.record_type != "team_work_item_completed"
+            or record.schema_version != TEAM_WORK_ITEM_COMPLETED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team work-completed schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team work-completed sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.work_item_id)
+        canonical_team_id(record.assignment_id)
+        if (
+            not isinstance(record.handoff_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", record.handoff_sha256) is None
+        ):
+            raise TeamRecordError("Team work handoff digest is invalid")
+        canonical_team_reason(record.evidence)
+        canonical_team_timestamp(record.completed_at, "Team work completed_at")
+        return
+    if isinstance(record, TeamWorkItemCancelled):
+        if (
+            record.record_type != "team_work_item_cancelled"
+            or record.schema_version != TEAM_WORK_ITEM_CANCELLED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team work-cancelled schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team work-cancelled sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.work_item_id)
+        canonical_team_reason(record.reason)
+        canonical_team_timestamp(record.cancelled_at, "Team work cancelled_at")
+        return
+    if isinstance(record, TeamMessageSent):
+        if (
+            record.record_type != "team_message_sent"
+            or record.schema_version != TEAM_MESSAGE_SENT_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team message-sent schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team message-sent sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.message_id)
+        if (record.sender_member_id is None) == (record.recipient_member_id is None):
+            raise TeamRecordError("Team message must have exactly one member endpoint")
+        if record.sender_member_id is not None:
+            canonical_team_id(record.sender_member_id)
+        if record.recipient_member_id is not None:
+            canonical_team_id(record.recipient_member_id)
+        body = _canonical_message_body(record.body)
+        if record.sender_member_id is None and (
+            len(body) > MAX_TEAM_OWNER_MESSAGE_CHARACTERS
+            or len(body.encode("utf-8")) > MAX_TEAM_OWNER_MESSAGE_BYTES
+        ):
+            raise TeamRecordError("Owner Team message exceeds its bound")
+        if record.body_sha256 != team_message_body_sha256(body):
+            raise TeamRecordError("Team message body digest does not match body")
+        source_values = (
+            record.source_assignment_id,
+            record.source_child_session_id,
+            record.source_turn_record_sequence,
+            record.source_handoff_sha256,
+        )
+        if record.sender_member_id is None:
+            if any(value is not None for value in source_values):
+                raise TeamRecordError("Owner Team message has source provenance")
+        else:
+            if any(value is None for value in source_values):
+                raise TeamRecordError("Member Team message source provenance is incomplete")
+            canonical_team_id(record.source_assignment_id)
+            canonical_team_id(record.source_child_session_id)
+            if (
+                type(record.source_turn_record_sequence) is not int
+                or record.source_turn_record_sequence < 1
+            ):
+                raise TeamRecordError("Member message source Turn sequence is invalid")
+            if (
+                not isinstance(record.source_handoff_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", record.source_handoff_sha256) is None
+            ):
+                raise TeamRecordError("Member message source handoff digest is invalid")
+        canonical_team_timestamp(record.sent_at, "Team message sent_at")
+        return
+    if isinstance(record, TeamMessageRead):
+        if (
+            record.record_type != "team_message_read"
+            or record.schema_version != TEAM_MESSAGE_READ_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team message-read schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team message-read sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.message_id)
+        canonical_team_timestamp(record.read_at, "Team message read_at")
+        return
+    if isinstance(record, TeamMessageCancelled):
+        if (
+            record.record_type != "team_message_cancelled"
+            or record.schema_version != TEAM_MESSAGE_CANCELLED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team message-cancelled schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team message-cancelled sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.message_id)
+        canonical_team_reason(record.reason)
+        canonical_team_timestamp(record.cancelled_at, "Team message cancelled_at")
+        return
     raise TeamRecordError("unsupported Team record")
 
 
@@ -941,6 +1985,21 @@ def _bounded_text(value: object, label: str, *, max_characters: int, max_bytes: 
         raise TeamRecordError(f"{label} must not contain control characters")
     if len(value) > max_characters or len(value.encode("utf-8")) > max_bytes:
         raise TeamRecordError(f"{label} exceeds its bound")
+    return value
+
+
+def _canonical_message_body(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TeamRecordError("Team message body must be nonblank text")
+    if any(
+        unicodedata.category(char).startswith("C") and char not in {"\n", "\t"} for char in value
+    ):
+        raise TeamRecordError("Team message body must not contain control characters")
+    if (
+        len(value) > MAX_TEAM_MESSAGE_BODY_CHARACTERS
+        or len(value.encode("utf-8")) > MAX_TEAM_MESSAGE_BODY_BYTES
+    ):
+        raise TeamRecordError("Team message body exceeds its bound")
     return value
 
 
@@ -970,6 +2029,24 @@ def _record_timestamp(record: TeamRecord) -> str:
         return record.bound_at
     if isinstance(record, TeamAssignmentObserved):
         return record.observed_at
+    if isinstance(record, TeamAssignmentMailboxBound):
+        return record.bound_at
+    if isinstance(record, TeamAssignmentMailboxObserved):
+        return record.observed_at
+    if isinstance(record, TeamWorkItemCreated):
+        return record.created_at
+    if isinstance(record, TeamWorkItemReleased):
+        return record.released_at
+    if isinstance(record, TeamWorkItemCompleted):
+        return record.completed_at
+    if isinstance(record, TeamWorkItemCancelled):
+        return record.cancelled_at
+    if isinstance(record, TeamMessageSent):
+        return record.sent_at
+    if isinstance(record, TeamMessageRead):
+        return record.read_at
+    if isinstance(record, TeamMessageCancelled):
+        return record.cancelled_at
     raise TeamRecordError("Team record has no lifecycle timestamp")
 
 

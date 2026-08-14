@@ -27,21 +27,37 @@ from coquo.team_records import (
     TeamAssignmentCreated,
     TeamAssignmentChildBound,
     TeamAssignmentObserved,
+    TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
+    TeamAssignmentMailboxBound,
+    TeamAssignmentMailboxObserved,
     TeamAssignmentState,
     TeamAssignmentPhase,
     TeamMemberState,
     TeamMemberStatus,
+    TeamMessageCancelled,
+    TeamMessageRead,
+    TeamMessageSent,
+    TeamMessageState,
+    TeamMessageStatus,
+    TeamWorkItemCancelled,
+    TeamWorkItemCompleted,
+    TeamWorkItemCreated,
+    TeamWorkItemReleased,
+    TeamWorkItemState,
+    TeamWorkStatus,
     TeamClosed,
     TeamHeader,
     TeamRecord,
     TeamRecordError,
     TeamReplayState,
     TeamStatus,
+    MAX_TEAM_WORK_DEPENDENCIES,
     canonical_team_id,
     canonical_team_name,
     canonical_team_reason,
     canonical_team_assignment_objective,
     team_assignment_objective_sha256,
+    team_message_body_sha256,
     decode_team_record,
     encode_team_record,
     replay_team_records,
@@ -86,6 +102,8 @@ class TeamInfo:
     closed_at: str | None = None
     members: tuple[TeamMemberState, ...] = ()
     assignments: tuple[TeamAssignmentState, ...] = ()
+    messages: tuple[TeamMessageState, ...] = ()
+    work_items: tuple[TeamWorkItemState, ...] = ()
 
 
 _ACTIVE_WRITERS: set[str] = set()
@@ -231,9 +249,13 @@ class TeamStore:
         member_id: str,
         child_run_id: str,
         objective: str,
+        *,
+        work_item_id: str | None = None,
     ) -> TeamAssignmentState:
         with self.open(team_id) as writer:
-            return writer.create_assignment(assignment_id, member_id, child_run_id, objective)
+            return writer.create_assignment(
+                assignment_id, member_id, child_run_id, objective, work_item_id=work_item_id
+            )
 
     def bind_assignment(
         self,
@@ -288,6 +310,120 @@ class TeamStore:
             if assignment.assignment_id == canonical:
                 return assignment
         raise TeamStoreError("Team assignment was not found")
+
+    def message(self, team_id: str, message_id: str) -> TeamMessageState:
+        state = self.replay_state(team_id)
+        canonical = _store_team_id(message_id)
+        for message in state.messages:
+            if message.message_id == canonical:
+                return message
+        raise TeamStoreError("Team message was not found")
+
+    def work_item(self, team_id: str, work_item_id: str) -> TeamWorkItemState:
+        state = self.replay_state(team_id)
+        canonical = _store_team_id(work_item_id)
+        for item in state.work_items:
+            if item.work_item_id == canonical:
+                return item
+        raise TeamStoreError("Team work item was not found")
+
+    def send_message(self, team_id: str, member_id: str, body: str) -> TeamMessageState:
+        with self.open(team_id) as writer:
+            record = writer.send_owner_message(member_id, body)
+            return writer.message(record.message_id)
+
+    def send_member_message(
+        self,
+        team_id: str,
+        *,
+        message_id: str,
+        member_id: str,
+        body: str,
+        source_assignment_id: str,
+        source_child_session_id: str,
+        source_turn_record_sequence: int,
+        source_handoff_sha256: str,
+    ) -> TeamMessageState:
+        with self.open(team_id) as writer:
+            writer.send_member_message(
+                message_id=message_id,
+                member_id=member_id,
+                body=body,
+                source_assignment_id=source_assignment_id,
+                source_child_session_id=source_child_session_id,
+                source_turn_record_sequence=source_turn_record_sequence,
+                source_handoff_sha256=source_handoff_sha256,
+            )
+            return writer.message(message_id)
+
+    def read_message(self, team_id: str, message_id: str) -> TeamMessageState:
+        with self.open(team_id) as writer:
+            writer.read_message(message_id)
+            return writer.message(message_id)
+
+    def cancel_message(self, team_id: str, message_id: str, reason: str) -> TeamMessageState:
+        with self.open(team_id) as writer:
+            writer.cancel_message(message_id, reason)
+            return writer.message(message_id)
+
+    def create_work_item(
+        self,
+        team_id: str,
+        work_item_id: str,
+        title: str,
+        objective: str,
+        dependency_ids: tuple[str, ...],
+    ) -> TeamWorkItemState:
+        with self.open(team_id) as writer:
+            writer.create_work_item(work_item_id, title, objective, dependency_ids)
+            return writer.work_item(work_item_id)
+
+    def cancel_work_item(self, team_id: str, work_item_id: str, reason: str) -> TeamWorkItemState:
+        with self.open(team_id) as writer:
+            writer.cancel_work_item(work_item_id, reason)
+            return writer.work_item(work_item_id)
+
+    def bind_assignment_mailbox(
+        self,
+        team_id: str,
+        assignment_id: str,
+        *,
+        child_run_id: str,
+        member_id: str,
+        delivery_id: str,
+        inbox_message_ids: tuple[str, ...],
+        reply_message_id: str,
+    ) -> TeamAssignmentState:
+        with self.open(team_id) as writer:
+            writer.bind_assignment_mailbox(
+                assignment_id,
+                child_run_id=child_run_id,
+                member_id=member_id,
+                delivery_id=delivery_id,
+                inbox_message_ids=inbox_message_ids,
+                reply_message_id=reply_message_id,
+            )
+            return writer.assignment(assignment_id)
+
+    def observe_assignment_mailbox(
+        self,
+        team_id: str,
+        assignment_id: str,
+        *,
+        delivery_id: str,
+        child_session_id: str,
+        child_turn_record_sequence: int,
+        child_user_message_sha256: str,
+    ) -> TeamAssignmentState:
+        with self.open(team_id) as writer:
+            writer.observe_assignment_mailbox(
+                assignment_id,
+                delivery_id=delivery_id,
+                child_session_id=child_session_id,
+                child_turn_record_sequence=child_turn_record_sequence,
+                child_user_message_sha256=child_user_message_sha256,
+            )
+            return writer.assignment(assignment_id)
 
     def _ensure_root(self) -> None:
         _ensure_directory(self.workspace / ".coquo", self.workspace)
@@ -358,6 +494,24 @@ class TeamWriter:
             for assignment in self._state.assignments
         ):
             raise TeamStoreError("Team has assignments without terminal observation")
+        if any(
+            item.status not in {TeamWorkStatus.COMPLETED, TeamWorkStatus.CANCELLED}
+            for item in self._state.work_items
+        ):
+            raise TeamStoreError("Team has nonterminal work items")
+        if any(
+            (message.sender_member_id is None and message.status is TeamMessageStatus.PENDING)
+            or (message.sender_member_id is not None and message.status is TeamMessageStatus.UNREAD)
+            for message in self._state.messages
+        ):
+            raise TeamStoreError("Team has pending mailbox messages")
+        if any(
+            assignment.delivery_id is not None
+            and assignment.child_outcome == "completed"
+            and assignment.mailbox_observed_at is None
+            for assignment in self._state.assignments
+        ):
+            raise TeamStoreError("Team has unobserved mailbox delivery")
         record = TeamClosed(
             sequence=self._state.next_sequence,
             team_id=self._state.header.team_id,
@@ -427,6 +581,13 @@ class TeamWriter:
         member = self.member(member_id)
         if member.status is TeamMemberStatus.LEFT:
             raise TeamStoreError("Team member has already left")
+        if any(
+            message.sender_member_id is None
+            and message.recipient_member_id == member.member_id
+            and message.status is TeamMessageStatus.PENDING
+            for message in self._state.messages
+        ):
+            raise TeamStoreError("Team member has pending inbound mailbox messages")
         try:
             canonical_member = canonical_team_id(member_id)
             canonical_reason = canonical_team_reason(reason)
@@ -448,6 +609,8 @@ class TeamWriter:
         member_id: str,
         child_run_id: str,
         objective: str,
+        *,
+        work_item_id: str | None = None,
     ) -> TeamAssignmentState:
         self._ensure_open_team()
         try:
@@ -462,11 +625,255 @@ class TeamWriter:
                     canonical_team_assignment_objective(objective)
                 ),
                 created_at=self._store._clock(),
+                work_item_id=(None if work_item_id is None else canonical_team_id(work_item_id)),
+                schema_version=TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
             )
         except TeamRecordError as error:
             raise TeamStoreError(str(error)) from None
         self._append(record)
         return self.assignment(record.assignment_id)
+
+    def release_work_item(
+        self, work_item_id: str, assignment_id: str, reason: str
+    ) -> TeamWorkItemReleased:
+        self._ensure_open_team()
+        try:
+            item = self.work_item(work_item_id)
+            if item.status.value != "review" or item.current_assignment_id != canonical_team_id(
+                assignment_id
+            ):
+                raise TeamRecordError("Team work item is not ready for release")
+            record = TeamWorkItemReleased(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                work_item_id=item.work_item_id,
+                assignment_id=canonical_team_id(assignment_id),
+                reason=canonical_team_reason(reason),
+                released_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def complete_work_item(
+        self, work_item_id: str, assignment_id: str, handoff_sha256: str, evidence: str
+    ) -> TeamWorkItemCompleted:
+        self._ensure_open_team()
+        try:
+            item = self.work_item(work_item_id)
+            if item.status.value != "review" or item.current_assignment_id != canonical_team_id(
+                assignment_id
+            ):
+                raise TeamRecordError("Team work item is not ready for completion")
+            record = TeamWorkItemCompleted(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                work_item_id=item.work_item_id,
+                assignment_id=canonical_team_id(assignment_id),
+                handoff_sha256=handoff_sha256,
+                evidence=evidence,
+                completed_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def send_owner_message(self, member_id: str, body: str) -> TeamMessageSent:
+        self._ensure_open_team()
+        try:
+            member = self.member(member_id)
+            if member.status is TeamMemberStatus.LEFT:
+                raise TeamRecordError("Team message cannot target a left member")
+            canonical_member = canonical_team_id(member_id)
+            canonical_body = _canonical_owner_message(body)
+            record = TeamMessageSent(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                message_id=_factory_team_id(self._store._uuid_factory),
+                sender_member_id=None,
+                recipient_member_id=canonical_member,
+                body=canonical_body,
+                body_sha256=team_message_body_sha256(canonical_body),
+                source_assignment_id=None,
+                source_child_session_id=None,
+                source_turn_record_sequence=None,
+                source_handoff_sha256=None,
+                sent_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def send_member_message(
+        self,
+        *,
+        message_id: str,
+        member_id: str,
+        body: str,
+        source_assignment_id: str,
+        source_child_session_id: str,
+        source_turn_record_sequence: int,
+        source_handoff_sha256: str,
+    ) -> TeamMessageSent:
+        self._ensure_open_team()
+        try:
+            member = self.member(member_id)
+            if member.status is TeamMemberStatus.LEFT:
+                raise TeamRecordError("Team member has left")
+            record = TeamMessageSent(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                message_id=canonical_team_id(message_id),
+                sender_member_id=member.member_id,
+                recipient_member_id=None,
+                body=body,
+                body_sha256=team_message_body_sha256(body),
+                source_assignment_id=canonical_team_id(source_assignment_id),
+                source_child_session_id=canonical_team_id(source_child_session_id),
+                source_turn_record_sequence=source_turn_record_sequence,
+                source_handoff_sha256=source_handoff_sha256,
+                sent_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def create_work_item(
+        self, work_item_id: str, title: str, objective: str, dependency_ids: tuple[str, ...]
+    ) -> TeamWorkItemCreated:
+        self._ensure_open_team()
+        try:
+            dependencies = tuple(canonical_team_id(item) for item in dependency_ids)
+            if len(dependencies) > MAX_TEAM_WORK_DEPENDENCIES:
+                raise TeamRecordError("Team work item has too many dependencies")
+            record = TeamWorkItemCreated(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                work_item_id=canonical_team_id(work_item_id),
+                title=canonical_team_name(title),
+                objective=canonical_team_assignment_objective(objective),
+                dependency_ids=dependencies,
+                created_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def cancel_work_item(self, work_item_id: str, reason: str) -> TeamWorkItemCancelled:
+        self._ensure_open_team()
+        try:
+            item = self.work_item(work_item_id)
+            if item.status.value in {"completed", "cancelled", "assigned"}:
+                raise TeamRecordError("Team work item cannot be cancelled in its current state")
+            record = TeamWorkItemCancelled(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                work_item_id=item.work_item_id,
+                reason=canonical_team_reason(reason),
+                cancelled_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def read_message(self, message_id: str) -> TeamMessageRead:
+        self._ensure_open_team()
+        try:
+            message = self.message(message_id)
+            if message.sender_member_id is None:
+                raise TeamRecordError("Owner-to-member message cannot be marked read")
+            record = TeamMessageRead(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                message_id=message.message_id,
+                read_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def cancel_message(self, message_id: str, reason: str) -> TeamMessageCancelled:
+        self._ensure_open_team()
+        try:
+            message = self.message(message_id)
+            if message.sender_member_id is not None:
+                raise TeamRecordError("Member-to-owner message cannot be cancelled")
+            record = TeamMessageCancelled(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                message_id=message.message_id,
+                reason=canonical_team_reason(reason),
+                cancelled_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def bind_assignment_mailbox(
+        self,
+        assignment_id: str,
+        *,
+        child_run_id: str,
+        member_id: str,
+        delivery_id: str,
+        inbox_message_ids: tuple[str, ...],
+        reply_message_id: str,
+    ) -> TeamAssignmentMailboxBound:
+        self._ensure_open_team()
+        try:
+            assignment = self.assignment(assignment_id)
+            record = TeamAssignmentMailboxBound(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                assignment_id=assignment.assignment_id,
+                child_run_id=canonical_team_id(child_run_id),
+                member_id=canonical_team_id(member_id),
+                delivery_id=canonical_team_id(delivery_id),
+                inbox_message_ids=tuple(canonical_team_id(item) for item in inbox_message_ids),
+                reply_message_id=canonical_team_id(reply_message_id),
+                bound_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def observe_assignment_mailbox(
+        self,
+        assignment_id: str,
+        *,
+        delivery_id: str,
+        child_session_id: str,
+        child_turn_record_sequence: int,
+        child_user_message_sha256: str,
+    ) -> TeamAssignmentMailboxObserved:
+        self._ensure_open_team()
+        try:
+            assignment = self.assignment(assignment_id)
+            if assignment.delivery_id != canonical_team_id(delivery_id):
+                raise TeamRecordError("Team mailbox delivery ID does not match assignment")
+            record = TeamAssignmentMailboxObserved(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                assignment_id=assignment.assignment_id,
+                delivery_id=canonical_team_id(delivery_id),
+                child_session_id=canonical_team_id(child_session_id),
+                child_turn_record_sequence=child_turn_record_sequence,
+                child_user_message_sha256=child_user_message_sha256,
+                observed_at=self._store._clock(),
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
 
     def bind_assignment(
         self,
@@ -544,6 +951,26 @@ class TeamWriter:
                 return assignment
         raise TeamStoreError("Team assignment was not found")
 
+    def message(self, message_id: str) -> TeamMessageState:
+        try:
+            canonical = canonical_team_id(message_id)
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        for message in self._state.messages:
+            if message.message_id == canonical:
+                return message
+        raise TeamStoreError("Team message was not found")
+
+    def work_item(self, work_item_id: str) -> TeamWorkItemState:
+        try:
+            canonical = canonical_team_id(work_item_id)
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        for item in self._state.work_items:
+            if item.work_item_id == canonical:
+                return item
+        raise TeamStoreError("Team work item was not found")
+
     def _append(self, record: TeamRecord) -> TeamRecord:
         self._ensure_writable()
         candidate = list(self._state.records) + [record]
@@ -601,6 +1028,19 @@ def _store_team_id(value: object) -> str:
         raise TeamStoreError(str(error)) from None
 
 
+def _canonical_owner_message(value: object) -> str:
+    try:
+        if not isinstance(value, str) or not value.strip():
+            raise TeamRecordError("Team message body must be nonblank text")
+        if any(ord(char) < 32 and char not in {"\n", "\t"} for char in value):
+            raise TeamRecordError("Team message body contains a control character")
+        if len(value) > 4096 or len(value.encode("utf-8")) > 8 * 1024:
+            raise TeamRecordError("Owner Team message exceeds its bound")
+        return value
+    except TeamRecordError:
+        raise
+
+
 def _path_team_id(path: Path) -> str:
     return _store_team_id(path.stem)
 
@@ -619,6 +1059,8 @@ def _team_info(path: Path, state: TeamReplayState) -> TeamInfo:
         closed_at=state.closed.closed_at if state.closed is not None else None,
         members=state.members,
         assignments=state.assignments,
+        messages=state.messages,
+        work_items=state.work_items,
     )
 
 

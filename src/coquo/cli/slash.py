@@ -95,6 +95,10 @@ from coquo.cli.presentation import (
     render_team_summary,
     render_team_assignment_info,
     render_team_assignment_summary,
+    render_team_message,
+    render_team_message_summary,
+    render_team_work_item,
+    render_team_work_summary,
     render_task_timeline,
     render_task_verification_result,
     render_switch_rejection,
@@ -126,7 +130,7 @@ from coquo.session_records import (
 )
 from coquo.task_records import TaskRecordError, TaskStatus, canonical_task_id
 from coquo.child_run_records import ChildRunStatus
-from coquo.team_records import TeamStatus
+from coquo.team_records import TeamMessageStatus, TeamStatus, TeamWorkStatus
 from coquo.task_store import TaskAdmissionConfiguration
 from coquo.tools.git_repository import GitObservationError
 from coquo.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
@@ -371,6 +375,18 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/team assignment cancel", "Cancel one Team assignment"),
     SlashCompletionSpec("/team assignment handoff", "Publish one Team assignment handoff"),
     SlashCompletionSpec("/team assignment recover", "Recover Team assignment metadata"),
+    SlashCompletionSpec("/team message send", "Send a durable owner-to-member message"),
+    SlashCompletionSpec("/team message list", "List durable Team messages"),
+    SlashCompletionSpec("/team message show", "Show one durable Team message"),
+    SlashCompletionSpec("/team message read", "Mark one member reply read"),
+    SlashCompletionSpec("/team message cancel", "Cancel one pending owner message"),
+    SlashCompletionSpec("/team work create", "Create a durable Team work item"),
+    SlashCompletionSpec("/team work list", "List durable Team work items"),
+    SlashCompletionSpec("/team work show", "Show one durable Team work item"),
+    SlashCompletionSpec("/team work cancel", "Cancel one Team work item"),
+    SlashCompletionSpec("/team work assign", "Assign ready Team work to a member"),
+    SlashCompletionSpec("/team work complete", "Complete reviewed Team work"),
+    SlashCompletionSpec("/team work release", "Release reviewed Team work"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -547,6 +563,34 @@ class ReplSession(Protocol):
     def cancel_team_assignment(self, team_id: str, assignment_id: str, reason: str): ...
 
     def publish_team_assignment_handoff(self, team_id: str, assignment_id: str): ...
+
+    def send_team_message(self, team_id: str, member_id: str, body: str): ...
+
+    def list_team_messages(
+        self, team_id: str, *, limit: int = 100, member_id: str | None = None, status=None
+    ): ...
+
+    def inspect_team_message(self, team_id: str, message_id: str): ...
+
+    def read_team_message(self, team_id: str, message_id: str): ...
+
+    def cancel_team_message(self, team_id: str, message_id: str, reason: str): ...
+
+    def create_team_work(
+        self, team_id: str, title: str, objective: str, dependency_ids: tuple[str, ...] = ()
+    ): ...
+
+    def list_team_work(self, team_id: str, *, limit: int = 100, status=None): ...
+
+    def inspect_team_work(self, team_id: str, work_item_id: str): ...
+
+    def cancel_team_work(self, team_id: str, work_item_id: str, reason: str): ...
+
+    def assign_team_work(self, team_id: str, work_item_id: str, member_id: str): ...
+
+    def complete_team_work(self, team_id: str, work_item_id: str, evidence: str): ...
+
+    def release_team_work(self, team_id: str, work_item_id: str, reason: str): ...
 
     def inspect_task(self, task_id: str): ...
 
@@ -1096,10 +1140,51 @@ def dispatch_slash(
             f"Unknown Team assignment command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Type /help team for commands."
         )
+    if command == "/team message send" or command.startswith("/team message send "):
+        return _team_message_send(command, session)
+    if command == "/team message list" or command.startswith("/team message list "):
+        return _team_message_list(command, session)
+    if command == "/team message show" or command.startswith("/team message show "):
+        return _team_message_show(command, session)
+    if command == "/team message read" or command.startswith("/team message read "):
+        return _team_message_read(command, session)
+    if command == "/team message cancel" or command.startswith("/team message cancel "):
+        return _team_message_cancel(command, session)
+    if command.startswith("/team message "):
+        subcommand = command.split(maxsplit=3)[2]
+        suggestion = _suggest_token(subcommand, ("send", "list", "show", "read", "cancel"))
+        return _usage(
+            f"Unknown Team message command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
+        )
+    if command == "/team work create" or command.startswith("/team work create "):
+        return _team_work_create(command, session)
+    if command == "/team work list" or command.startswith("/team work list "):
+        return _team_work_list(command, session)
+    if command == "/team work show" or command.startswith("/team work show "):
+        return _team_work_show(command, session)
+    if command == "/team work cancel" or command.startswith("/team work cancel "):
+        return _team_work_cancel(command, session)
+    if command == "/team work assign" or command.startswith("/team work assign "):
+        return _team_work_assign(command, session)
+    if command == "/team work complete" or command.startswith("/team work complete "):
+        return _team_work_complete(command, session)
+    if command == "/team work release" or command.startswith("/team work release "):
+        return _team_work_release(command, session)
+    if command.startswith("/team work "):
+        subcommand = command.split(maxsplit=3)[2]
+        suggestion = _suggest_token(
+            subcommand, ("create", "list", "show", "cancel", "assign", "complete", "release")
+        )
+        return _usage(
+            f"Unknown Team work command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
+        )
     if command.startswith("/team "):
         subcommand = command.split(maxsplit=2)[1]
         suggestion = _suggest_token(
-            subcommand, ("create", "list", "show", "close", "member", "assignment")
+            subcommand,
+            ("create", "list", "show", "close", "member", "assignment", "message", "work"),
         )
         return _usage(
             f"Unknown Team command: {subcommand}{_suggestion_line(suggestion)}\n"
@@ -2417,6 +2502,196 @@ def _team_assignment_recover(command: str, session: ReplSession) -> SlashResult:
         return "\n".join(lines) if lines else "No Team assignments require recovery."
 
     return _call(render, kind="info", failure_prefix="Team assignment recovery failed")
+
+
+def _team_message_send(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team message send").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team message send <team-id> <member-id> <body>")
+    return _call(
+        lambda: render_team_message(session.send_team_message(parts[0], parts[1], parts[2])),
+        kind="success",
+        failure_prefix="Team message send failed",
+    )
+
+
+def _team_message_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) < 4 or len(parts) > 6:
+        return _usage("Usage: /team message list <team-id> [1-100] [status=<status>]")
+    limit = 100
+    member_id = None
+    status = None
+    for part in parts[4:]:
+        if part.isascii() and part.isdigit() and limit == 100:
+            limit = int(part)
+        elif part.startswith("member=") and member_id is None:
+            member_id = part.removeprefix("member=")
+        elif part.startswith("status=") and status is None:
+            status = part.removeprefix("status=")
+        else:
+            return _usage("Usage: /team message list <team-id> [1-100] [status=<status>]")
+    if not 1 <= limit <= 100 or (
+        status is not None and status not in {item.value for item in TeamMessageStatus}
+    ):
+        return _usage("Usage: /team message list <team-id> [1-100] [status=<status>]")
+    selected = None if status is None else TeamMessageStatus(status)
+    return _call(
+        lambda: _render_team_messages(session, parts[3], limit, member_id, selected),
+        kind="info",
+        failure_prefix="Team message listing failed",
+    )
+
+
+def _render_team_messages(
+    session: ReplSession, team_id: str, limit: int, member_id: str | None, status
+) -> str:
+    result = session.list_team_messages(team_id, limit=limit, member_id=member_id, status=status)
+    if not result.messages:
+        return "No Team messages found."
+    return "\n".join(render_team_message_summary(message) for message in result.messages)
+
+
+def _team_message_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team message show <team-id> <message-id>")
+    return _call(
+        lambda: render_team_message(session.inspect_team_message(parts[3], parts[4])),
+        kind="info",
+        failure_prefix="Team message inspection failed",
+    )
+
+
+def _team_message_read(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team message read <team-id> <message-id>")
+    return _call(
+        lambda: render_team_message(session.read_team_message(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team message read failed",
+    )
+
+
+def _team_message_cancel(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team message cancel").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team message cancel <team-id> <message-id> <reason>")
+    return _call(
+        lambda: render_team_message(session.cancel_team_message(parts[0], parts[1], parts[2])),
+        kind="success",
+        failure_prefix="Team message cancellation failed",
+    )
+
+
+def _team_work_create(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team work create").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team work create <team-id> <title> <objective> [depends=<id>,...]")
+    dependency_ids: tuple[str, ...] = ()
+    objective = parts[2]
+    if " depends=" in objective:
+        objective, dependency_text = objective.rsplit(" depends=", 1)
+        dependency_ids = tuple(item for item in dependency_text.split(",") if item)
+        if not objective or not dependency_ids:
+            return _usage(
+                "Usage: /team work create <team-id> <title> <objective> [depends=<id>,...]"
+            )
+    return _call(
+        lambda: render_team_work_item(
+            session.create_team_work(parts[0], parts[1], objective, dependency_ids)
+        ),
+        kind="success",
+        failure_prefix="Team work creation failed",
+    )
+
+
+def _team_work_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) < 4 or len(parts) > 6:
+        return _usage("Usage: /team work list <team-id> [1-100] [status=<status>]")
+    limit = 100
+    status = None
+    for part in parts[4:]:
+        if part.isascii() and part.isdigit() and limit == 100:
+            limit = int(part)
+        elif part.startswith("status=") and status is None:
+            status = part.removeprefix("status=")
+        else:
+            return _usage("Usage: /team work list <team-id> [1-100] [status=<status>]")
+    if not 1 <= limit <= 100 or (
+        status is not None and status not in {item.value for item in TeamWorkStatus}
+    ):
+        return _usage("Usage: /team work list <team-id> [1-100] [status=<status>]")
+    selected = None if status is None else TeamWorkStatus(status)
+    return _call(
+        lambda: _render_team_work_list(session, parts[3], limit, selected),
+        kind="info",
+        failure_prefix="Team work listing failed",
+    )
+
+
+def _render_team_work_list(session: ReplSession, team_id: str, limit: int, status) -> str:
+    result = session.list_team_work(team_id, limit=limit, status=status)
+    if not result.items:
+        return "No Team work items found."
+    return "\n".join(render_team_work_summary(item) for item in result.items)
+
+
+def _team_work_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team work show <team-id> <work-item-id>")
+    return _call(
+        lambda: render_team_work_item(session.inspect_team_work(parts[3], parts[4])),
+        kind="info",
+        failure_prefix="Team work inspection failed",
+    )
+
+
+def _team_work_cancel(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team work cancel").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team work cancel <team-id> <work-item-id> <reason>")
+    return _call(
+        lambda: render_team_work_item(session.cancel_team_work(parts[0], parts[1], parts[2])),
+        kind="success",
+        failure_prefix="Team work cancellation failed",
+    )
+
+
+def _team_work_assign(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 6:
+        return _usage("Usage: /team work assign <team-id> <work-item-id> <member-id>")
+    return _call(
+        lambda: render_team_assignment_info(session.assign_team_work(parts[3], parts[4], parts[5])),
+        kind="success",
+        failure_prefix="Team work assignment failed",
+    )
+
+
+def _team_work_complete(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team work complete").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team work complete <team-id> <work-item-id> <evidence>")
+    return _call(
+        lambda: render_team_work_item(session.complete_team_work(parts[0], parts[1], parts[2])),
+        kind="success",
+        failure_prefix="Team work completion failed",
+    )
+
+
+def _team_work_release(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team work release").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team work release <team-id> <work-item-id> <reason>")
+    return _call(
+        lambda: render_team_work_item(session.release_team_work(parts[0], parts[1], parts[2])),
+        kind="success",
+        failure_prefix="Team work release failed",
+    )
 
 
 def _render_child_recovery(session: ReplSession, child_run_id: str | None) -> str:
