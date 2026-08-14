@@ -255,9 +255,13 @@ uv run coquo child show <child-run-uuid>
 uv run coquo child prepare <child-run-uuid>
 uv run coquo child run <child-run-uuid>
 uv run coquo child cancel <child-run-uuid> "暂不执行"
+uv run coquo child wait <child-run-uuid> --timeout 30
+uv run coquo child recover [<child-run-uuid>]
+uv run coquo child handoff <child-run-uuid>
+uv run coquo child deliver <child-run-uuid>
 ```
 
-`child prepare` 会冻结有界脱敏的只读执行 envelope，并创建不改变 `latest` 的 detached Child Session；`child run` 随后通过共享 Agent runtime 执行一个前台只读 Turn。REPL中的`/child start <id>`可将ready Child提交给当前进程内最多4个daemon worker；这不承诺进程退出后继续运行。取消、wait/join、restart recovery和handoff仍未实现。
+`child prepare` 会冻结有界脱敏的只读执行 envelope，并创建不改变 `latest` 的 detached Child Session；`child run` 随后通过共享 Agent runtime 执行一个前台只读 Turn。REPL中的`/child start <id>`可将ready Child提交给当前进程内最多4个daemon worker。`child cancel`先持久化取消请求再协作式通知运行中的Child；`child wait`只观察durable状态，`child recover`只在能够取得v2 OS执行锁时把遗留的running/cancelling标记为interrupted。`child handoff`发布与精确终态证据绑定的有界非可信结果；`child deliver`先在父Session提交不含正文的receipt，再向Host展示内容，不会把Child输出注入父历史或Effective Context。旧v1 lease保持fail-closed，进程退出后也不会自动重启Child。
 
 ### REPL 命令
 
@@ -535,4 +539,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo目前提供35个普通受限工具，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现及声明式Skill加载，并另有持久Task协调工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。Child Run目前支持可恢复的准备、单次前台只读执行和进程内有界后台监管，但尚无运行中取消、wait/join、restart recovery、handoff、消息或Team。可执行Skill、市场及浏览器自动化也尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent现在可以通过四个模型工具委派最多四个独立Child，并观察、等待或协作取消；Child仍固定为只读、单Turn、depth-one和process-local，handoff作为非可信ToolResult返回。消息、共享任务和Team仍未实现；可执行Skill、市场及浏览器自动化也尚未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

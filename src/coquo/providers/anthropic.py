@@ -705,6 +705,22 @@ def skill_accept_create_tool_definition() -> dict[str, object]:
     return _named_tool_definition("skill_accept_create")
 
 
+def child_spawn_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("child_spawn")
+
+
+def child_status_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("child_status")
+
+
+def child_wait_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("child_wait")
+
+
+def child_cancel_tool_definition() -> dict[str, object]:
+    return _named_tool_definition("child_cancel")
+
+
 def task_propose_plan_tool_definition() -> dict[str, object]:
     return _named_tool_definition("task_propose_plan")
 

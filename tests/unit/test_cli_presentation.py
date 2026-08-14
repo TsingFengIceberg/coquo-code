@@ -41,6 +41,7 @@ from coquo.cli.presentation import (
     render_git_show,
     render_git_status,
     render_host_message,
+    render_child_handoff,
     render_hook_handler_runs,
     render_action_audits,
     render_activity_line,
@@ -959,7 +960,7 @@ def test_context_inspection_renders_fit_unknown_and_capacity(tmp_path) -> None:
 
     assert kind == "warning"
     assert "Source: full committed history" in rendered
-    assert "Context ID: ctx-v21-" in rendered
+    assert "Context ID: ctx-v23-" in rendered
     assert "Full history: 1 turn, 2 items" in rendered
     assert "Effective history: 1 turn, 2 items" in rendered
     assert "Input: 80 tokens (estimated)" in rendered
@@ -1633,3 +1634,8 @@ def test_action_audit_renders_patch_path_without_edit_content() -> None:
     assert "result: succeeded (patched)" in rendered
     assert "secret-before" not in rendered
     assert "secret-after" not in rendered
+
+
+def test_child_handoff_escapes_terminal_control_characters() -> None:
+    rendered = render_child_handoff(SimpleNamespace(body="first\x1b[31m\asecond\nthird\tend"))
+    assert rendered == "first\\x1b[31m\\x07second\nthird\tend"

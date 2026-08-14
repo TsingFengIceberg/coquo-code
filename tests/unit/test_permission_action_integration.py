@@ -1474,6 +1474,7 @@ def test_model_visible_command_auto_runs_and_commits_exact_causality(tmp_path: P
         provider,
         permission_mode=PermissionMode.DANGER_FULL_ACCESS,
         approval_mode=ApprovalMode.AUTO,
+        run_command_factory=direct_run_command,
     )
     try:
         events: list[object] = []

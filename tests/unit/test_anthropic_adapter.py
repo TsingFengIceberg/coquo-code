@@ -82,6 +82,10 @@ from coquo.providers.anthropic import (
     skill_search_tool_definition,
     skill_propose_create_tool_definition,
     skill_accept_create_tool_definition,
+    child_spawn_tool_definition,
+    child_status_tool_definition,
+    child_wait_tool_definition,
+    child_cancel_tool_definition,
 )
 from coquo.providers.errors import ProviderAdapterError
 from coquo.providers.request_context import RequestTokenCountMethod
@@ -1327,6 +1331,10 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 task_confirm_completion_tool_definition(),
                 skill_propose_create_tool_definition(),
                 skill_accept_create_tool_definition(),
+                child_spawn_tool_definition(),
+                child_status_tool_definition(),
+                child_wait_tool_definition(),
+                child_cancel_tool_definition(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,
@@ -1814,6 +1822,28 @@ def test_copy_file_schema_and_parser_preserve_exact_paths() -> None:
             skill_accept_create_tool_definition,
             "skill_accept_create",
             {"candidate_id": "skc-v1-" + "a" * 64},
+        ),
+        (child_spawn_tool_definition, "child_spawn", {"objective": "inspect"}),
+        (
+            child_status_tool_definition,
+            "child_status",
+            {"child_run_id": "42345678-1234-4234-9234-123456789abc"},
+        ),
+        (
+            child_wait_tool_definition,
+            "child_wait",
+            {
+                "child_run_id": "42345678-1234-4234-9234-123456789abc",
+                "timeout_seconds": 1,
+            },
+        ),
+        (
+            child_cancel_tool_definition,
+            "child_cancel",
+            {
+                "child_run_id": "42345678-1234-4234-9234-123456789abc",
+                "reason": "stop",
+            },
         ),
     ],
 )

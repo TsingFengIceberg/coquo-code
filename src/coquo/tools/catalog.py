@@ -139,6 +139,11 @@ from coquo.tools.skill_discovery import (
     skill_discovery_snapshots,
 )
 from coquo.tools.skill_authoring import skill_authoring_tool_snapshots
+from coquo.tools.child_control import (
+    CHILD_CONTROL_TOOL_NAMES,
+    child_control_tool_snapshots,
+    parse_child_control,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -147,6 +152,8 @@ MAX_PROVIDER_INVOCATIONS_PER_TURN = 24
 MAX_TOOL_EXECUTIONS_PER_TURN = MAX_TOOL_REQUESTS_PER_TURN
 MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
 MAX_TOOL_INPUT_STRING_BYTES = 4096
+
+CHILD_CONTROL_TOOL_CATALOG = child_control_tool_snapshots()
 
 ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
@@ -191,19 +198,31 @@ ORDINARY_PROMPT_TOOL_NAMES = (
     TASK_ACCEPT_PLAN_TOOL_NAME,
     TASK_CONFIRM_COMPLETION_TOOL_NAME,
     *SKILL_AUTHORING_CONTROL_TOOL_NAMES,
+    *(definition.name for definition in CHILD_CONTROL_TOOL_CATALOG),
 )
 TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *ORDINARY_TOOL_CATALOG,
     *task_control_tool_snapshots(),
     *skill_authoring_tool_snapshots(),
+    *CHILD_CONTROL_TOOL_CATALOG,
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 6
-TOOL_REGISTRY_GENERATION = 6
+BUILTIN_TOOL_SOURCE_GENERATION = 7
+TOOL_REGISTRY_GENERATION = 7
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "coquo",
     BUILTIN_TOOL_SOURCE_GENERATION,
+)
+CHILD_CONTROL_TOOL_CONTRACTS = tuple(
+    ExtensionToolContract(
+        definition=definition,
+        source=_BUILTIN_SOURCE,
+        execution_kind=ToolExecutionKind.CHILD_CONTROL,
+        exposure=ToolExposure.DIRECT,
+        permission_actions=(),
+    )
+    for definition in CHILD_CONTROL_TOOL_CATALOG
 )
 _WORKSPACE_READ_TOOLS = frozenset(
     {
@@ -289,6 +308,9 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
         permission_actions = ()
     elif name == SKILL_ACCEPT_CREATE_TOOL_NAME:
         execution_kind = ToolExecutionKind.SKILL_LIFECYCLE
+        permission_actions = ()
+    elif name in {definition.name for definition in CHILD_CONTROL_TOOL_CATALOG}:
+        execution_kind = ToolExecutionKind.CHILD_CONTROL
         permission_actions = ()
     else:
         raise RuntimeError(f"canonical tool lacks an extension contract: {name}")
@@ -409,6 +431,14 @@ def tool_input_for_provider_history(request: ToolUse) -> dict[str, object]:
 
 
 def _expected_keys(name: str) -> set[str]:
+    if name == CHILD_CONTROL_TOOL_NAMES[0]:
+        return {"objective"}
+    if name == CHILD_CONTROL_TOOL_NAMES[1]:
+        return {"child_run_id"}
+    if name == CHILD_CONTROL_TOOL_NAMES[2]:
+        return {"child_run_id", "timeout_seconds"}
+    if name == CHILD_CONTROL_TOOL_NAMES[3]:
+        return {"child_run_id", "reason"}
     if name == READ_FILE_TOOL_NAME:
         return {"path"}
     if name == GLOB_TOOL_NAME:
@@ -501,6 +531,9 @@ def _expected_keys(name: str) -> set[str]:
 
 
 def _validate_known_input(name: str, tool_input: dict[str, object], expected: set[str]) -> None:
+    if name in CHILD_CONTROL_TOOL_NAMES:
+        parse_child_control(ToolUse("validation", name, ToolArguments.from_mapping(tool_input)))
+        return
     if name == SKILL_PROPOSE_CREATE_TOOL_NAME:
         from coquo.core.skill_authoring import SkillCreationProposal
 

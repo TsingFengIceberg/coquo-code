@@ -167,7 +167,7 @@ from coquo.skills import (
 from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
 from coquo.child_run_records import ChildRunStatus
-from coquo.child_run_store import ChildRunStore
+from coquo.child_run_store import ChildRunStore, ChildRunStoreError
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
@@ -850,6 +850,16 @@ def build_parser() -> argparse.ArgumentParser:
     child_cancel = child_commands.add_parser("cancel", help="cancel one queued Child Run")
     child_cancel.add_argument("child_run_id")
     child_cancel.add_argument("reason", type=nonblank_prompt)
+    child_wait = child_commands.add_parser("wait", help="wait for one Child Run")
+    child_wait.add_argument("child_run_id")
+    child_wait.add_argument("--timeout", type=float, default=30.0)
+    child_recover = child_commands.add_parser("recover", help="recover abandoned Child Runs")
+    child_recover.add_argument("child_run_id", nargs="?")
+    child_recover.add_argument("--limit", type=task_list_limit, default=100)
+    child_handoff = child_commands.add_parser("handoff", help="publish one terminal Child handoff")
+    child_handoff.add_argument("child_run_id")
+    child_deliver = child_commands.add_parser("deliver", help="deliver one terminal Child handoff")
+    child_deliver.add_argument("child_run_id")
     return parser
 
 
@@ -2350,9 +2360,79 @@ def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout:
         stdout.write(f"{render_child_run_info(info)}\n")
         return 0
     if arguments.child_command == "cancel":
-        with store.open(arguments.child_run_id) as writer:
-            writer.cancel(arguments.reason)
-            stdout.write(f"{render_child_run_info(writer.info)}\n")
+        info = store.request_cancel(arguments.child_run_id, reason=arguments.reason)
+        stdout.write(f"{render_child_run_info(info)}\n")
+        return 0
+    if arguments.child_command == "wait":
+        from coquo.child_supervisor import ChildRunSupervisor
+
+        info = ChildRunSupervisor(workspace).wait(arguments.child_run_id, arguments.timeout)
+        stdout.write(f"{render_child_run_info(info)}\n")
+        return 0
+    if arguments.child_command == "recover":
+        from coquo.child_recovery import ChildRunRecoveryService
+
+        result = ChildRunRecoveryService(workspace).recover(
+            child_run_id=arguments.child_run_id,
+            limit=arguments.limit,
+        )
+        for info in result.recovered:
+            stdout.write(f"{render_child_run_info(info)}\n")
+        for diagnostic in result.diagnostics:
+            stdout.write(
+                f"Recovery {diagnostic.outcome}"
+                f"{f' {diagnostic.child_run_id}' if diagnostic.child_run_id else ''}: "
+                f"{diagnostic.message}\n"
+            )
+        return 0
+    if arguments.child_command == "handoff":
+        from coquo.child_handoff import publish_child_handoff
+
+        handoff = publish_child_handoff(workspace, arguments.child_run_id)
+        stdout.write(
+            json.dumps(
+                {
+                    "body": handoff.body,
+                    "body_sha256": handoff.body_sha256,
+                    "child_run_id": handoff.child_run_id,
+                    "handoff_sha256": handoff.handoff_sha256,
+                    "outcome": handoff.outcome,
+                    "truncated": handoff.truncated,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.child_command == "deliver":
+        from coquo.child_handoff import build_child_handoff, deliver_child_handoff
+
+        pending = build_child_handoff(workspace, arguments.child_run_id)
+        parent_writer = SessionStore(workspace).open_for_audit(pending.parent_session_id)
+        try:
+            handoff = deliver_child_handoff(
+                workspace,
+                arguments.child_run_id,
+                parent_writer=parent_writer,
+            )
+        finally:
+            parent_writer.release()
+        stdout.write(
+            json.dumps(
+                {
+                    "body": handoff.body,
+                    "body_sha256": handoff.body_sha256,
+                    "child_run_id": handoff.child_run_id,
+                    "handoff_sha256": handoff.handoff_sha256,
+                    "outcome": handoff.outcome,
+                    "truncated": handoff.truncated,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         return 0
     status = None if arguments.status is None else ChildRunStatus(arguments.status)
     runs = store.list(status=status)[: arguments.limit]
@@ -2875,6 +2955,9 @@ def main(
         return 2
     except TaskStoreError as error:
         print(f"task error: {error}", file=errors)
+        return 2
+    except ChildRunStoreError as error:
+        print(f"child error: {error}", file=errors)
         return 2
     except McpConfigurationError as error:
         print(f"MCP configuration error: {error}", file=errors)

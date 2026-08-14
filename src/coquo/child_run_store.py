@@ -20,6 +20,7 @@ from coquo.child_run_records import (
     MAX_CHILD_RUN_RECORDS,
     MAX_CHILD_RUN_TRANSCRIPT_BYTES,
     ChildRunCancelled,
+    ChildRunDelegated,
     ChildRunAdmitted,
     ChildRunHeader,
     ChildSessionBound,
@@ -27,6 +28,10 @@ from coquo.child_run_records import (
     ChildRunStarted,
     ChildRunCompleted,
     ChildRunFailed,
+    ChildRunCancelRequested,
+    ChildRunCancelledTerminal,
+    ChildRunInterrupted,
+    ChildRunHandoffPublished,
     ChildRunRecord,
     ChildRunRecordError,
     ChildRunReplayState,
@@ -88,6 +93,12 @@ class ChildRunInfo:
     assistant_text_sha256: str | None = None
     session_record_sequence: int | None = None
     failure_result_code: str | None = None
+    cancellation_request_reason: str | None = None
+    cancellation_request_source: str | None = None
+    cancellation_request_sequence: int | None = None
+    interrupted_result_code: str | None = None
+    handoff: ChildRunHandoffPublished | None = None
+    delegated: ChildRunDelegated | None = None
 
 
 _ACTIVE_WRITERS: set[str] = set()
@@ -123,7 +134,13 @@ class ChildRunStore:
         self._uuid_factory = uuid_factory
         self._clock = clock
 
-    def create(self, objective: str, *, parent_session: str = "latest") -> ChildRunInfo:
+    def create(
+        self,
+        objective: str,
+        *,
+        parent_session: str = "latest",
+        delegation: ChildRunDelegated | None = None,
+    ) -> ChildRunInfo:
         try:
             objective = canonical_child_run_objective(objective)
             owner = SessionStore(self.workspace).inspect(parent_session)
@@ -141,11 +158,27 @@ class ChildRunStore:
             objective=objective,
             created_at=created_at,
         )
-        payload = encode_child_run_record(header)
+        records: list[ChildRunRecord] = [header]
+        if delegation is not None:
+            records.append(
+                ChildRunDelegated(
+                    sequence=1,
+                    child_run_id=child_run_id,
+                    parent_session_id=parent_session_id,
+                    parent_context_id=delegation.parent_context_id,
+                    parent_tool_use_id=delegation.parent_tool_use_id,
+                    decision_record_sequence=delegation.decision_record_sequence,
+                    decision_sha256=delegation.decision_sha256,
+                    depth=delegation.depth,
+                    source=delegation.source,
+                    delegated_at=delegation.delegated_at,
+                )
+            )
+        state = self._replay(self.root / f"{child_run_id}.jsonl", records)
+        payload = b"".join(encode_child_run_record(record) for record in records)
         self._ensure_root()
         path = self.root / f"{child_run_id}.jsonl"
         _install_child_run_transcript(path, payload)
-        state = self._replay(path, [header])
         return _child_run_info(path, state)
 
     def inspect(self, child_run_id: str) -> ChildRunInfo:
@@ -153,6 +186,12 @@ class ChildRunStore:
         self._validate_existing_root()
         path = self.root / f"{canonical}.jsonl"
         return _child_run_info(path, self._load_state(path))
+
+    def replay_state(self, child_run_id: str) -> ChildRunReplayState:
+        """Return one strict Child replay state for Host-owned projections."""
+        canonical = _store_child_run_id(child_run_id)
+        self._validate_existing_root()
+        return self._load_state(self.root / f"{canonical}.jsonl")
 
     def list(self, *, status: ChildRunStatus | None = None) -> tuple[ChildRunInfo, ...]:
         if not self.root.exists() and not self.root.is_symlink():
@@ -340,24 +379,57 @@ class ChildRunStore:
             return writer.info
 
     def acquire_execution(self, child_run_id: str):
-        """Acquire a no-follow process-local execution lease for one Child Run."""
+        """Acquire a persistent v2 OS lifetime lease for one Child Run."""
         info = self.inspect(child_run_id)
         if info.status is not ChildRunStatus.READY:
             raise ChildRunStoreError("Child Run is not ready for execution")
-        path = self.root / f"{info.child_run_id}.execution.lock"
+        return self._acquire_v2_lease(info.child_run_id)
+
+    def acquire_recovery_lease(self, child_run_id: str):
+        """Acquire a v2 lease only to prove a nonterminal executor is abandoned."""
+        info = self.inspect(child_run_id)
+        if info.status not in {ChildRunStatus.RUNNING, ChildRunStatus.CANCELLING}:
+            raise ChildRunStoreError("Child Run is not recoverable")
+        return self._acquire_v2_lease(info.child_run_id)
+
+    def _acquire_v2_lease(self, child_run_id: str):
+        info = self.inspect(child_run_id)
+        legacy_path = self.root / f"{info.child_run_id}.execution.lock"
+        if legacy_path.exists() or legacy_path.is_symlink():
+            raise ChildRunExecutionLeaseError(f"legacy_lease_ambiguous: {legacy_path}")
+        path = self.root / f"{info.child_run_id}.execution-v2.lock"
         self._ensure_root()
         descriptor: int | None = None
+        lease_created = False
         key = str(path)
         with _ACTIVE_EXECUTION_GUARD:
             if key in _ACTIVE_EXECUTION_LEASES:
                 raise ChildRunExecutionLeaseError("Child Run already has an active execution lease")
             _ACTIVE_EXECUTION_LEASES.add(key)
         try:
-            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(path, flags, 0o600)
-            os.write(descriptor, b"child-execution-lease-v1\n")
-            os.fsync(descriptor)
-            return ChildRunExecutionLease(path, descriptor, key)
+            descriptor_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(descriptor_stat.st_mode):
+                raise ChildRunStoreError("Child Run execution lease must be a regular file")
+            if stat.S_IMODE(descriptor_stat.st_mode) != 0o600:
+                raise ChildRunStoreError("Child Run execution lease mode is invalid")
+            if descriptor_stat.st_size == 0:
+                os.write(descriptor, b"child-execution-lease-v2\n")
+                os.fsync(descriptor)
+            else:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                header = os.read(descriptor, 128)
+                if header != b"child-execution-lease-v2\n":
+                    raise ChildRunExecutionLeaseError(
+                        "Child Run v2 execution lease header is invalid"
+                    )
+            _lock_execution_descriptor(descriptor)
+            lease = ChildRunExecutionLease(path, descriptor, key)
+            lease_created = True
+            return lease
+        except ChildRunExecutionLeaseError:
+            raise
         except FileExistsError:
             raise ChildRunExecutionLeaseError(
                 "Child Run already has an active execution lease"
@@ -365,9 +437,106 @@ class ChildRunStore:
         except OSError as error:
             raise ChildRunStoreError("could not acquire Child Run execution lease") from error
         finally:
-            if descriptor is None:
+            if not lease_created:
+                if descriptor is not None:
+                    os.close(descriptor)
                 with _ACTIVE_EXECUTION_GUARD:
                     _ACTIVE_EXECUTION_LEASES.discard(key)
+
+    def request_cancel(
+        self,
+        child_run_id: str,
+        *,
+        reason: str,
+        source: str = "host",
+    ) -> ChildRunInfo:
+        canonical = _store_child_run_id(child_run_id)
+        with self.open(canonical) as writer:
+            state = writer.state
+            if state.status is ChildRunStatus.QUEUED:
+                writer.cancel(reason)
+                return writer.info
+            if state.cancel_requested is not None:
+                if state.cancel_requested.reason != canonical_child_run_reason(reason):
+                    raise ChildRunStoreError(
+                        "Child Run cancellation reason conflicts with existing request"
+                    )
+                return writer.info
+            if state.status in {
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                return writer.info
+            execution_id = state.started.execution_id if state.started is not None else None
+            writer.request_cancel(reason=reason, source=source, execution_id=execution_id)
+            if state.started is None:
+                writer.finish_cancelled(result_code="cancelled_before_start")
+            return writer.info
+
+    def finish_cancelled(
+        self, child_run_id: str, *, result_code: str = "cancelled"
+    ) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.finish_cancelled(result_code=result_code)
+            return writer.info
+
+    def finish_interrupted(
+        self,
+        child_run_id: str,
+        *,
+        result_code: str = "execution_abandoned",
+    ) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.finish_interrupted(result_code=result_code)
+            return writer.info
+
+    def publish_handoff(self, child_run_id: str, handoff: ChildRunHandoffPublished) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.publish_handoff(handoff)
+            return writer.info
+
+    def start_execution(
+        self, child_run_id: str, *, child_session_id: str, execution_id: str
+    ) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.start(child_session_id=child_session_id, execution_id=execution_id)
+            return writer.info
+
+    def finish_completed(
+        self,
+        child_run_id: str,
+        *,
+        execution_id: str,
+        session_record_sequence: int,
+        assistant_text_sha256: str,
+    ) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.complete(
+                execution_id=execution_id,
+                session_record_sequence=session_record_sequence,
+                assistant_text_sha256=assistant_text_sha256,
+            )
+            return writer.info
+
+    def finish_failed(
+        self,
+        child_run_id: str,
+        *,
+        execution_id: str | None,
+        phase: str,
+        result_code: str,
+        message: str,
+    ) -> ChildRunInfo:
+        with self.open(child_run_id) as writer:
+            writer.fail(
+                execution_id=execution_id,
+                phase=phase,
+                result_code=result_code,
+                message=message,
+            )
+            return writer.info
 
     def _ensure_root(self) -> None:
         _ensure_directory(self.workspace / ".coquo", self.workspace)
@@ -447,7 +616,7 @@ class ChildRunWriter:
         if self._state.status is not ChildRunStatus.QUEUED:
             raise ChildRunStoreError("Child Run is already cancelled")
         record = ChildRunCancelled(
-            sequence=1,
+            sequence=len(self._state.records),
             child_run_id=self._state.header.child_run_id,
             reason=canonical_child_run_reason(reason),
             cancelled_at=self._store._clock(),
@@ -486,7 +655,7 @@ class ChildRunWriter:
         session_record_sequence: int,
         assistant_text_sha256: str,
     ) -> ChildRunCompleted:
-        if self._state.status is not ChildRunStatus.RUNNING:
+        if self._state.status not in {ChildRunStatus.RUNNING, ChildRunStatus.CANCELLING}:
             raise ChildRunStoreError("Child Run is not running")
         record = ChildRunCompleted(
             sequence=len(self._state.records),
@@ -507,7 +676,11 @@ class ChildRunWriter:
         result_code: str,
         message: str,
     ) -> ChildRunFailed:
-        if self._state.status not in {ChildRunStatus.READY, ChildRunStatus.RUNNING}:
+        if self._state.status not in {
+            ChildRunStatus.READY,
+            ChildRunStatus.RUNNING,
+            ChildRunStatus.CANCELLING,
+        }:
             raise ChildRunStoreError("Child Run is already terminal")
         record = ChildRunFailed(
             sequence=len(self._state.records),
@@ -520,6 +693,96 @@ class ChildRunWriter:
         )
         self._append_transition(record)
         return record
+
+    def request_cancel(
+        self,
+        *,
+        reason: str,
+        source: str,
+        execution_id: str | None,
+    ) -> ChildRunCancelRequested:
+        if self._state.cancel_requested is not None:
+            existing = self._state.cancel_requested
+            if existing.reason != canonical_child_run_reason(reason):
+                raise ChildRunStoreError(
+                    "Child Run cancellation reason conflicts with existing request"
+                )
+            return existing
+        if self._state.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            raise ChildRunStoreError("Child Run is already terminal")
+        record = ChildRunCancelRequested(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            execution_id=execution_id,
+            reason=canonical_child_run_reason(reason),
+            source=source,
+            requested_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def finish_cancelled(self, *, result_code: str) -> ChildRunCancelledTerminal:
+        if self._state.cancelled_terminal is not None:
+            return self._state.cancelled_terminal
+        request = self._state.cancel_requested
+        if request is None:
+            raise ChildRunStoreError("Child Run has no durable cancellation request")
+        record = ChildRunCancelledTerminal(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            execution_id=request.execution_id,
+            cancel_request_sequence=request.sequence,
+            result_code=result_code,
+            observed_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def finish_interrupted(self, *, result_code: str) -> ChildRunInterrupted:
+        if self._state.interrupted is not None:
+            return self._state.interrupted
+        started = self._state.started
+        if started is None:
+            raise ChildRunStoreError("Child Run has no started execution")
+        record = ChildRunInterrupted(
+            sequence=len(self._state.records),
+            child_run_id=self._state.header.child_run_id,
+            execution_id=started.execution_id,
+            last_durable_state=(
+                ChildRunStatus.CANCELLING.value
+                if self._state.cancel_requested is not None
+                else ChildRunStatus.RUNNING.value
+            ),
+            lock_protocol="v2",
+            result_code=result_code,
+            interrupted_at=self._store._clock(),
+        )
+        self._append_transition(record)
+        return record
+
+    def publish_handoff(self, handoff: ChildRunHandoffPublished) -> ChildRunHandoffPublished:
+        if not isinstance(handoff, ChildRunHandoffPublished):
+            raise ChildRunStoreError("Child Run handoff is invalid")
+        if handoff.child_run_id != self._state.header.child_run_id:
+            raise ChildRunStoreError("Child Run handoff ID does not match transcript")
+        if self._state.handoff is not None:
+            if self._state.handoff == handoff:
+                return self._state.handoff
+            raise ChildRunStoreError("Child Run handoff is already published differently")
+        if self._state.status not in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            raise ChildRunStoreError("Child Run is not terminal")
+        self._append_transition(handoff)
+        return handoff
 
     def _append_transition(self, record: ChildRunRecord) -> ChildRunRecord:
         if self._closed:
@@ -621,6 +884,20 @@ def _child_run_info(path: Path, state: ChildRunReplayState) -> ChildRunInfo:
         if state.completed is not None
         else None,
         failure_result_code=state.failed.result_code if state.failed is not None else None,
+        cancellation_request_reason=(
+            state.cancel_requested.reason if state.cancel_requested is not None else None
+        ),
+        cancellation_request_source=(
+            state.cancel_requested.source if state.cancel_requested is not None else None
+        ),
+        cancellation_request_sequence=(
+            state.cancel_requested.sequence if state.cancel_requested is not None else None
+        ),
+        interrupted_result_code=(
+            state.interrupted.result_code if state.interrupted is not None else None
+        ),
+        handoff=state.handoff,
+        delegated=state.delegated,
     )
 
 
@@ -638,12 +915,10 @@ class ChildRunExecutionLease:
             return
         self._closed = True
         try:
-            os.close(self._descriptor)
+            _unlock_execution_descriptor(self._descriptor)
         finally:
             try:
-                self.path.unlink()
-            except FileNotFoundError:
-                pass
+                os.close(self._descriptor)
             finally:
                 with _ACTIVE_EXECUTION_GUARD:
                     _ACTIVE_EXECUTION_LEASES.discard(self._key)
@@ -679,6 +954,30 @@ def _lock_descriptor(descriptor: int) -> None:
 
 
 def _unlock_descriptor(descriptor: int) -> None:
+    try:
+        if os.name == "nt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+def _lock_execution_descriptor(descriptor: int) -> None:
+    try:
+        if os.name == "nt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise ChildRunExecutionLeaseError(
+            "Child Run already has an active execution lease"
+        ) from None
+
+
+def _unlock_execution_descriptor(descriptor: int) -> None:
     try:
         if os.name == "nt":
             os.lseek(descriptor, 0, os.SEEK_SET)

@@ -526,6 +526,41 @@ class TaskAdmissionResolved:
 
 
 @dataclass(frozen=True)
+class ChildHandoffDelivered:
+    sequence: int
+    occurred_at: str
+    parent_session_id: str
+    child_run_id: str
+    child_session_id: str | None
+    outcome: str
+    terminal_record_sequence: int
+    handoff_sha256: str
+    source: str
+    tool_use_id: str | None = None
+    record_type: str = "child_handoff_delivered"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ChildDelegationDecided:
+    sequence: int
+    occurred_at: str
+    parent_session_id: str
+    context_id: str
+    tool_use_id: str
+    delegation_identity_sha256: str
+    objective_sha256: str
+    route_fingerprint: str
+    child_tool_set_id: str
+    depth: int
+    approval_mode: ApprovalMode
+    outcome: ApprovalAuditOutcome
+    decision_sha256: str
+    record_type: str = "child_delegation_decided"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TaskAdmissionSource:
     proposal: TaskAdmissionProposal
     turn_record_sequence: int
@@ -552,6 +587,8 @@ SessionRecord: TypeAlias = (
     | ContextCompacted
     | CompactionFailed
     | TaskAdmissionResolved
+    | ChildDelegationDecided
+    | ChildHandoffDelivered
     | SessionClosed
 )
 AuditRecord: TypeAlias = (
@@ -570,6 +607,8 @@ AuditRecord: TypeAlias = (
     | Recovery
     | CompactionFailed
     | TaskAdmissionResolved
+    | ChildDelegationDecided
+    | ChildHandoffDelivered
     | SessionClosed
 )
 
@@ -588,6 +627,8 @@ class ReplayState:
     action_audits: tuple[ActionAuditState, ...]
     task_admissions: tuple[TaskAdmissionSource, ...]
     task_admission_resolutions: tuple[TaskAdmissionResolved, ...]
+    child_delegation_decisions: tuple[ChildDelegationDecided, ...]
+    child_handoff_deliveries: tuple[ChildHandoffDelivered, ...]
     turns: tuple[ConversationTurn, ...]
     latest_name: SessionNamed | None
     archived: bool
@@ -738,6 +779,8 @@ def replay_records(
     action_order: list[str] = []
     task_admissions: list[TaskAdmissionSource] = []
     task_admission_resolutions: list[TaskAdmissionResolved] = []
+    child_delegation_decisions: list[ChildDelegationDecided] = []
+    child_handoff_deliveries: list[ChildHandoffDelivered] = []
     grant_ids: set[str] = set()
     live_action_request_id: str | None = None
     validated: list[SessionRecord] = []
@@ -1011,6 +1054,18 @@ def replay_records(
             ):
                 raise SessionRecordError("Task admission proposal is already resolved")
             task_admission_resolutions.append(record)
+        elif isinstance(record, ChildHandoffDelivered):
+            _require_no_live_action(live_action_request_id, "child_handoff_delivered")
+            _validate_child_handoff_delivered(record, parent_session_id=header.session_id)
+            if any(prior.child_run_id == record.child_run_id for prior in child_handoff_deliveries):
+                raise SessionRecordError("Child handoff is already delivered")
+            child_handoff_deliveries.append(record)
+        elif isinstance(record, ChildDelegationDecided):
+            _require_no_live_action(live_action_request_id, "child_delegation_decided")
+            _validate_child_delegation_decided(record, parent_session_id=header.session_id)
+            if any(prior.tool_use_id == record.tool_use_id for prior in child_delegation_decisions):
+                raise SessionRecordError("Child delegation ToolUse is already decided")
+            child_delegation_decisions.append(record)
         elif isinstance(record, SessionClosed):
             _require_no_live_action(live_action_request_id, "session_closed")
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -1030,6 +1085,8 @@ def replay_records(
         action_audits=tuple(action_states[request_id] for request_id in action_order),
         task_admissions=tuple(task_admissions),
         task_admission_resolutions=tuple(task_admission_resolutions),
+        child_delegation_decisions=tuple(child_delegation_decisions),
+        child_handoff_deliveries=tuple(child_handoff_deliveries),
         turns=tuple(turns),
         latest_name=latest_name,
         archived=archived,
@@ -1409,6 +1466,35 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             outcome=record.outcome.value,
             task_id=record.task_id,
             reason=record.reason,
+        )
+    elif isinstance(record, ChildHandoffDelivered):
+        _validate_child_handoff_delivered(record, parent_session_id=record.parent_session_id)
+        common.update(
+            occurred_at=record.occurred_at,
+            parent_session_id=record.parent_session_id,
+            child_run_id=record.child_run_id,
+            child_session_id=record.child_session_id,
+            outcome=record.outcome,
+            terminal_record_sequence=record.terminal_record_sequence,
+            handoff_sha256=record.handoff_sha256,
+            source=record.source,
+            tool_use_id=record.tool_use_id,
+        )
+    elif isinstance(record, ChildDelegationDecided):
+        _validate_child_delegation_decided(record, parent_session_id=record.parent_session_id)
+        common.update(
+            occurred_at=record.occurred_at,
+            parent_session_id=record.parent_session_id,
+            context_id=record.context_id,
+            tool_use_id=record.tool_use_id,
+            delegation_identity_sha256=record.delegation_identity_sha256,
+            objective_sha256=record.objective_sha256,
+            route_fingerprint=record.route_fingerprint,
+            child_tool_set_id=record.child_tool_set_id,
+            depth=record.depth,
+            approval_mode=record.approval_mode.value,
+            outcome=record.outcome.value,
+            decision_sha256=record.decision_sha256,
         )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -2000,6 +2086,68 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             reason=_nullable_field_text(value, "reason", record_type),
         )
         _validate_task_admission_resolved(record)
+        return record
+    if record_type == "child_handoff_delivered":
+        fields = simple_fields | {
+            "parent_session_id",
+            "child_run_id",
+            "child_session_id",
+            "outcome",
+            "terminal_record_sequence",
+            "handoff_sha256",
+            "source",
+            "tool_use_id",
+        }
+        _closed_fields(value, fields, record_type)
+        record = ChildHandoffDelivered(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            parent_session_id=_required_field_text(value, "parent_session_id", record_type),
+            child_run_id=_required_field_text(value, "child_run_id", record_type),
+            child_session_id=_nullable_field_text(value, "child_session_id", record_type),
+            outcome=_required_field_text(value, "outcome", record_type),
+            terminal_record_sequence=_required_field_int(
+                value, "terminal_record_sequence", record_type
+            ),
+            handoff_sha256=_required_field_text(value, "handoff_sha256", record_type),
+            source=_required_field_text(value, "source", record_type),
+            tool_use_id=_nullable_field_text(value, "tool_use_id", record_type),
+        )
+        _validate_child_handoff_delivered(record, parent_session_id=record.parent_session_id)
+        return record
+    if record_type == "child_delegation_decided":
+        fields = simple_fields | {
+            "parent_session_id",
+            "context_id",
+            "tool_use_id",
+            "delegation_identity_sha256",
+            "objective_sha256",
+            "route_fingerprint",
+            "child_tool_set_id",
+            "depth",
+            "approval_mode",
+            "outcome",
+            "decision_sha256",
+        }
+        _closed_fields(value, fields, record_type)
+        record = ChildDelegationDecided(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            parent_session_id=_required_field_text(value, "parent_session_id", record_type),
+            context_id=_required_field_text(value, "context_id", record_type),
+            tool_use_id=_required_field_text(value, "tool_use_id", record_type),
+            delegation_identity_sha256=_required_field_text(
+                value, "delegation_identity_sha256", record_type
+            ),
+            objective_sha256=_required_field_text(value, "objective_sha256", record_type),
+            route_fingerprint=_required_field_text(value, "route_fingerprint", record_type),
+            child_tool_set_id=_required_field_text(value, "child_tool_set_id", record_type),
+            depth=_required_field_int(value, "depth", record_type),
+            approval_mode=_enum_field(value, "approval_mode", record_type, ApprovalMode),
+            outcome=_enum_field(value, "outcome", record_type, ApprovalAuditOutcome),
+            decision_sha256=_required_field_text(value, "decision_sha256", record_type),
+        )
+        _validate_child_delegation_decided(record, parent_session_id=record.parent_session_id)
         return record
     raise SessionRecordError(f"unknown session record type: {record_type}")
 
@@ -2721,6 +2869,56 @@ def _validate_record_version(record: SessionRecord) -> None:
         return
     if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")
+
+
+def _validate_child_handoff_delivered(
+    record: ChildHandoffDelivered, *, parent_session_id: str
+) -> None:
+    _validate_timestamp(record.occurred_at, "child_handoff_delivered occurred_at")
+    canonical_session_id(record.parent_session_id)
+    canonical_session_id(record.child_run_id)
+    if record.child_session_id is not None:
+        canonical_session_id(record.child_session_id)
+    if record.parent_session_id != parent_session_id:
+        raise SessionRecordError("Child handoff parent Session does not match transcript")
+    if record.outcome not in {"completed", "failed", "cancelled", "interrupted"}:
+        raise SessionRecordError("Child handoff delivery outcome is invalid")
+    if type(record.terminal_record_sequence) is not int or record.terminal_record_sequence < 1:
+        raise SessionRecordError("Child handoff terminal sequence is invalid")
+    _required_sha256(record.handoff_sha256, "Child handoff digest")
+    if record.source not in {"host", "model"}:
+        raise SessionRecordError("Child handoff delivery source is invalid")
+    if (record.source == "host") != (record.tool_use_id is None):
+        raise SessionRecordError("Child handoff delivery ToolUse provenance is invalid")
+    if record.tool_use_id is not None:
+        _required_text(record.tool_use_id, "Child handoff delivery ToolUse ID")
+
+
+def _validate_child_delegation_decided(
+    record: ChildDelegationDecided, *, parent_session_id: str
+) -> None:
+    _validate_timestamp(record.occurred_at, "Child delegation occurred_at")
+    if record.parent_session_id != parent_session_id:
+        raise SessionRecordError("Child delegation parent Session does not match")
+    canonical_session_id(record.parent_session_id)
+    if re.fullmatch(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}", record.context_id) is None:
+        raise SessionRecordError("Child delegation context identity is invalid")
+    _required_text(record.tool_use_id, "Child delegation ToolUse ID")
+    for value, label in (
+        (record.delegation_identity_sha256, "Child delegation identity digest"),
+        (record.objective_sha256, "Child delegation objective digest"),
+        (record.decision_sha256, "Child delegation decision digest"),
+    ):
+        if _SHA256.fullmatch(value) is None:
+            raise SessionRecordError(f"{label} is invalid")
+    _required_text(record.route_fingerprint, "Child delegation route fingerprint")
+    _required_text(record.child_tool_set_id, "Child delegation ToolSet ID")
+    if record.depth != 1:
+        raise SessionRecordError("Child delegation depth must be one")
+    if type(record.approval_mode) is not ApprovalMode:
+        raise SessionRecordError("Child delegation approval mode is invalid")
+    if type(record.outcome) is not ApprovalAuditOutcome:
+        raise SessionRecordError("Child delegation outcome is invalid")
 
 
 def _validate_task_admission_resolved(record: TaskAdmissionResolved) -> None:

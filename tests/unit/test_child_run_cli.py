@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 from coquo.cli.main import main
 from coquo.cli.slash import dispatch_slash
+from coquo.child_run_store import ChildRunStore
 from coquo.session_records import BindingSnapshot
 from coquo.session_store import SessionStore
 
@@ -46,6 +48,24 @@ class Session:
             self.supervisor = ChildRunSupervisor(self.workspace)
         return self.supervisor.submit(child_run_id)
 
+    def publish_child_handoff(self, child_run_id):
+        from coquo.child_handoff import publish_child_handoff
+
+        return publish_child_handoff(self.workspace, child_run_id)
+
+    def deliver_child_handoff(self, child_run_id):
+        from coquo.child_handoff import deliver_child_handoff
+
+        writer = SessionStore(self.workspace).open_for_audit(self.session_id)
+        try:
+            return deliver_child_handoff(
+                self.workspace,
+                child_run_id,
+                parent_writer=writer,
+            )
+        finally:
+            writer.release()
+
 
 def invoke(workspace: Path, arguments: list[str]):
     stdout = io.StringIO()
@@ -86,6 +106,67 @@ def test_standalone_child_commands_do_not_need_provider(tmp_path: Path) -> None:
     assert status == 0 and errors == ""
     assert "Status: queued" in output
     assert SessionStore(tmp_path).inspect(session_id).path.read_bytes() == before
+
+
+def test_standalone_and_slash_child_handoff(tmp_path: Path) -> None:
+    session = Session(tmp_path)
+    info = session.create_child_run("do not expose this objective")
+    session.cancel_child_run(info.child_run_id, "stop")
+
+    status, output, errors = invoke(tmp_path, ["child", "handoff", info.child_run_id])
+    payload = json.loads(output)
+    assert status == 0 and errors == ""
+    assert payload["child_run_id"] == info.child_run_id
+    assert payload["outcome"] == "cancelled"
+    assert "do not expose" not in payload["body"]
+
+    result = dispatch_slash(f"/child handoff {info.child_run_id}", session)
+    assert result.handled and result.kind == "info"
+    assert result.message == payload["body"]
+
+
+def test_standalone_and_slash_child_delivery_commits_one_receipt(tmp_path: Path) -> None:
+    session = Session(tmp_path)
+    info = session.create_child_run("do not expose this objective")
+    session.cancel_child_run(info.child_run_id, "stop")
+
+    status, output, errors = invoke(tmp_path, ["child", "deliver", info.child_run_id])
+    payload = json.loads(output)
+    assert status == 0 and errors == ""
+    assert payload["outcome"] == "cancelled"
+    receipts = SessionStore(tmp_path).child_handoff_deliveries(session.session_id)
+    assert len(receipts) == 1
+    transcript = SessionStore(tmp_path).inspect(session.session_id).path.read_text(encoding="utf-8")
+    assert transcript.count('"record_type":"child_handoff_delivered"') == 1
+    assert '"record_type":"session_resumed"' not in transcript
+
+    result = dispatch_slash(f"/child deliver {info.child_run_id}", session)
+    assert result.handled and result.kind == "info"
+    assert result.message == payload["body"]
+    assert len(SessionStore(tmp_path).child_handoff_deliveries(session.session_id)) == 1
+
+
+def test_standalone_child_delivery_failure_does_not_render_body(tmp_path: Path) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    session_id = writer.session_id
+    writer.release()
+    info = ChildRunStore(tmp_path).create("still queued", parent_session=session_id)
+
+    status, output, errors = invoke(tmp_path, ["child", "deliver", info.child_run_id])
+    assert status == 2 and output == ""
+    assert errors == "child error: Child Run is not terminal\n"
+
+
+def test_standalone_child_handoff_failure_has_no_traceback(tmp_path: Path) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    session_id = writer.session_id
+    writer.release()
+    info = ChildRunStore(tmp_path).create("still queued", parent_session=session_id)
+
+    status, output, errors = invoke(tmp_path, ["child", "handoff", info.child_run_id])
+    assert status == 2 and output == ""
+    assert errors == "child error: Child Run is not terminal\n"
+    assert "Traceback" not in errors
 
 
 def test_standalone_child_prepare_binds_detached_session_without_provider(tmp_path: Path) -> None:

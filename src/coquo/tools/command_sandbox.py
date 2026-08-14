@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 from typing import Protocol
 
@@ -23,6 +24,14 @@ _SECCOMP_ACTION_ALLOW = 0x7FFF0000
 _SECCOMP_ACTION_ERRNO = 0x00050000
 _REQUIRED_BLOCKED_SYSCALLS = ("socket", "io_uring_setup")
 _OPTIONAL_BLOCKED_SYSCALLS = ("socketcall",)
+_REQUIRED_BUBBLEWRAP_OPTIONS = (
+    b"--disable-userns",
+    b"--block-fd",
+    b"--info-fd",
+    b"--seccomp",
+)
+_BUBBLEWRAP_HELP_TIMEOUT_SECONDS = 2.0
+_BUBBLEWRAP_HELP_MAX_BYTES = 64 * 1024
 _SENSITIVE_HOME_PATHS = (
     ".ssh",
     ".aws",
@@ -248,11 +257,11 @@ class LinuxBubblewrapCommandSandbox:
         seccomp_available = False
         if platform_supported:
             try:
-                self._validated_bubblewrap_path()
+                bubblewrap = self._validated_bubblewrap_path()
             except CommandSandboxUnavailable:
                 pass
             else:
-                bubblewrap_available = True
+                bubblewrap_available = _bubblewrap_supports_required_options(bubblewrap)
             if bubblewrap_available:
                 descriptor: int | None = None
                 try:
@@ -294,6 +303,28 @@ def sandbox_activation_succeeded(data: bytes, *, read_error: bool) -> bool:
         return False
     return (
         isinstance(value, dict) and type(value.get("child-pid")) is int and value["child-pid"] > 0
+    )
+
+
+def _bubblewrap_supports_required_options(path: Path) -> bool:
+    """Check the fixed binary's bounded help surface before reporting it usable."""
+    try:
+        completed = subprocess.run(
+            (str(path), "--help"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=_BUBBLEWRAP_HELP_TIMEOUT_SECONDS,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    output = completed.stdout
+    return (
+        completed.returncode == 0
+        and len(output) <= _BUBBLEWRAP_HELP_MAX_BYTES
+        and all(option in output for option in _REQUIRED_BUBBLEWRAP_OPTIONS)
     )
 
 

@@ -41,6 +41,7 @@ class ToolExecutionKind(StrEnum):
     SKILL_LIFECYCLE = "skill-lifecycle"
     TOOL_DISCOVERY = "tool-discovery"
     MCP_REMOTE = "mcp-remote"
+    CHILD_CONTROL = "child-control"
 
 
 class ToolExposure(StrEnum):

@@ -144,11 +144,15 @@ CHILD_HELP = (
     "Child Run commands:\n"
     "  /child create <objective>\n"
     "  /child prepare <child-run-id>\n"
-    "  /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]\n"
+    "  /child list [1-100] [status=queued|admitted|ready|running|cancelling|completed|cancelled|interrupted|failed]\n"
     "  /child run <child-run-id>\n"
     "  /child start <child-run-id>\n"
     "  /child show <child-run-id>\n"
     "  /child cancel <child-run-id> <reason>\n"
+    "  /child wait <child-run-id> [timeout-seconds]\n"
+    "  /child recover [child-run-id]\n"
+    "  /child handoff <child-run-id>\n"
+    "  /child deliver <child-run-id>\n"
     "Preparation freezes a read-only envelope and detached Child Session; run executes one foreground "
     "turn through the shared Agent runtime."
 )
@@ -1558,7 +1562,22 @@ def render_child_run_info(info) -> str:
                 f"Cancellation reason: {_safe_inline(info.cancellation_reason or '')}",
             )
         )
+    if getattr(info, "cancellation_request_reason", None) is not None:
+        lines.extend(
+            (
+                f"Cancellation request: {_safe_inline(info.cancellation_request_reason)}",
+                f"Cancellation source: {_safe_inline(info.cancellation_request_source or '')}",
+                f"Cancellation request record: {info.cancellation_request_sequence}",
+            )
+        )
+    if getattr(info, "interrupted_result_code", None) is not None:
+        lines.append(f"Interruption result: {_safe_inline(info.interrupted_result_code)}")
     return "\n".join(lines)
+
+
+def render_child_handoff(handoff) -> str:
+    """Render one untrusted handoff body without terminal control injection."""
+    return _escape_terminal_text(handoff.body)
 
 
 def render_child_supervisor_notification(notification) -> str:
@@ -1805,6 +1824,10 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "task_confirm_completion": "Ordinary Prompt only; current completion proposal and all non-human criteria already verified.",
     "skill_propose_create": "Ordinary Prompt only; explicit user request, isolated call, bounded declarative package, and post-Turn inactive candidate commit.",
     "skill_accept_create": "Ordinary Prompt only; direct user approval, exact owner Session, pending candidate, fingerprint, scope, and post-Turn import-lock validation.",
+    "child_spawn": "Ordinary parent Prompt only; depth one, at most four spawns per Turn, fixed read-only tools, one Child Turn, and separate delegation approval.",
+    "child_status": "Ordinary parent Prompt only; exact parent ownership and durable Child replay; never trusts volatile worker state.",
+    "child_wait": "Ordinary parent Prompt only; 0-30 seconds per request and 60 cumulative requested seconds per Turn; timeout never mutates the Child.",
+    "child_cancel": "Ordinary parent Prompt only; exact parent ownership and durable cooperative cancellation; never force-kills a Provider thread.",
 }
 
 
@@ -1918,6 +1941,10 @@ def _tool_policy_availability(
         if mode == "read-only":
             return "denied by current permission mode"
         return "available only after explicit approval of an exact pending candidate"
+    if policy == "child-control":
+        if tool_name == "child_spawn":
+            return f"available ({approval}; separate delegation approval)"
+        return "available for Children owned by the current parent Session"
     if policy == "tool-discovery":
         return "available; discovery is isolated and does not execute candidates"
     if policy == "dangerous":

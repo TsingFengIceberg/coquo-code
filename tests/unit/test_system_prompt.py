@@ -9,13 +9,21 @@ from coquo.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v44-17058b05c69bedaa66f247bb1334da63a4d898ae4d17cde4ca90335da318cd71"
+EXPECTED_FINGERPRINT = "v45-aabc7454d69b8f97063aac1e92cb23863ba7ea875b2bc9bd3549c1ca4df48b2a"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 44
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 45
+    for text in (
+        "`child_spawn`",
+        "read-only Child Turn",
+        "process-local",
+        "additional Provider calls and cost",
+        "untrusted tool results",
+    ):
+        assert text in prompt.text
     assert prompt.fingerprint == EXPECTED_FINGERPRINT
     assert "at most 8 ordered tool requests in one assistant response" in prompt.text
     assert "at most 32 admitted tool requests across one user turn" in prompt.text

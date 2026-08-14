@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import ctypes.util
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import time
 
@@ -43,6 +41,11 @@ def _payload(result) -> dict[str, object]:
 
 def _close_launch(launch) -> None:
     launch.close_without_spawn()
+
+
+_REAL_SANDBOX_AVAILABLE = (
+    RunCommandTool(Path.cwd()).inspect_sandbox(verify_activation=True).available
+)
 
 
 def test_bubblewrap_launch_has_fixed_mount_namespace_environment_and_seccomp_order(
@@ -243,9 +246,14 @@ def test_missing_bwrap_and_seccomp_setup_failure_fail_before_launch(tmp_path: Pa
         )
 
 
-def test_dependency_inspection_is_content_free_and_does_not_spawn(tmp_path: Path) -> None:
+def test_dependency_inspection_is_content_free_and_requires_supported_options(
+    tmp_path: Path,
+) -> None:
     bwrap = tmp_path / "bwrap"
-    bwrap.write_text("", encoding="utf-8")
+    bwrap.write_text(
+        "#!/bin/sh\nprintf '%s\\n' '--disable-userns --block-fd --info-fd --seccomp'\n",
+        encoding="utf-8",
+    )
     bwrap.chmod(0o755)
     ready = LinuxBubblewrapCommandSandbox(
         bubblewrap_path=bwrap,
@@ -264,6 +272,27 @@ def test_dependency_inspection_is_content_free_and_does_not_spawn(tmp_path: Path
     assert not missing.ready
     assert not missing.bubblewrap_available
     assert not missing.seccomp_available
+
+
+def test_dependency_inspection_rejects_bubblewrap_without_required_options(
+    tmp_path: Path,
+) -> None:
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\nprintf '%s\\n' '--block-fd --info-fd --seccomp'\n",
+        encoding="utf-8",
+    )
+    bwrap.chmod(0o755)
+
+    dependencies = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+    ).inspect_dependencies()
+
+    assert not dependencies.ready
+    assert not dependencies.bubblewrap_available
+    assert not dependencies.seccomp_available
 
 
 def test_run_command_reports_unavailable_without_host_fallback(tmp_path: Path) -> None:
@@ -319,10 +348,8 @@ def test_invalid_or_missing_activation_report_is_rejected() -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_inspection_verifies_fixed_activation_probe(tmp_path: Path) -> None:
     inspection = RunCommandTool(tmp_path).inspect_sandbox(verify_activation=True)
@@ -334,10 +361,8 @@ def test_real_sandbox_inspection_verifies_fixed_activation_probe(tmp_path: Path)
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_allows_workspace_write_but_blocks_host_write_and_network(
     tmp_path: Path,
@@ -367,10 +392,8 @@ def test_real_sandbox_allows_workspace_write_but_blocks_host_write_and_network(
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_read_only_sandbox_prevents_verifier_workspace_mutation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
@@ -393,10 +416,8 @@ def test_real_read_only_sandbox_prevents_verifier_workspace_mutation(tmp_path: P
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_masks_sensitive_home_and_kernel_runtime_views(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
@@ -427,10 +448,8 @@ def test_real_sandbox_masks_sensitive_home_and_kernel_runtime_views(tmp_path: Pa
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_masks_source_parent_and_rebinds_task_workspace(tmp_path: Path) -> None:
     source_checkout = tmp_path / "source"
@@ -459,10 +478,8 @@ def test_real_sandbox_masks_source_parent_and_rebinds_task_workspace(tmp_path: P
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_timeout_cleans_descendants_before_they_can_write_late(
     tmp_path: Path,
@@ -496,10 +513,8 @@ def test_real_sandbox_timeout_cleans_descendants_before_they_can_write_late(
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux"
-    or shutil.which("bwrap") is None
-    or ctypes.util.find_library("seccomp") is None,
-    reason="Linux bubblewrap and libseccomp are required",
+    not _REAL_SANDBOX_AVAILABLE,
+    reason="an activatable bubblewrap with required options and libseccomp is required",
 )
 def test_real_sandbox_restores_bubblewrap_encoded_signal_status(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"

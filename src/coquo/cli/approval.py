@@ -7,11 +7,12 @@ from typing import Callable, TextIO
 import unicodedata
 
 from coquo.core.action_coordinator import (
+    ApprovalPromptRequest,
     ApprovalResolution,
-    HumanApprovalRequest,
 )
 from coquo.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
 from coquo.core.cancellation import TurnCancellation
+from coquo.core.delegation_approval import DelegationApprovalRequest
 
 _RED = "\x1b[31m"
 _GREEN = "\x1b[32m"
@@ -20,7 +21,7 @@ _CYAN = "\x1b[36m"
 _RESET = "\x1b[0m"
 
 
-def noninteractive_approval(_request: HumanApprovalRequest) -> ApprovalResolution:
+def noninteractive_approval(_request: ApprovalPromptRequest) -> ApprovalResolution:
     """Cancel policy asks in one-shot/automation mode instead of reading stdin."""
     return ApprovalResolution.CANCEL
 
@@ -28,9 +29,13 @@ def noninteractive_approval(_request: HumanApprovalRequest) -> ApprovalResolutio
 def terminal_approval_handler(stdin: TextIO, stdout: TextIO, *, color: bool = False):
     """Build the bounded REPL-only informed confirmation boundary."""
 
-    def handle(request: HumanApprovalRequest) -> ApprovalResolution:
+    def handle(request: ApprovalPromptRequest) -> ApprovalResolution:
         header = _approval_header(request)
-        if request.preview is None:
+        if isinstance(request, DelegationApprovalRequest):
+            stdout.write(f"{header}\n")
+            stdout.write(_render_delegation_preview(request))
+            prompt = "Approve this exact delegation? [y/N/c]: "
+        elif request.preview is None:
             prompt = f"{header} [y/N/c]: "
         else:
             stdout.write(f"{header}\n")
@@ -64,7 +69,7 @@ def terminal_approval_handler(stdin: TextIO, stdout: TextIO, *, color: bool = Fa
 class TerminalApprovalBroker:
     """Bridge synchronous action approval to one UI-owned input state."""
 
-    def __init__(self, publish: Callable[[int, HumanApprovalRequest], None]) -> None:
+    def __init__(self, publish: Callable[[int, ApprovalPromptRequest], None]) -> None:
         self._publish = publish
         self._lock = Lock()
         self._turn_id: int | None = None
@@ -89,7 +94,7 @@ class TerminalApprovalBroker:
         if pending is not None:
             pending.resolve(ApprovalResolution.CANCEL)
 
-    def __call__(self, request: HumanApprovalRequest) -> ApprovalResolution:
+    def __call__(self, request: ApprovalPromptRequest) -> ApprovalResolution:
         with self._lock:
             if self._turn_id is None or self._cancellation is None or self._pending is not None:
                 return ApprovalResolution.CANCEL
@@ -112,13 +117,13 @@ class TerminalApprovalBroker:
         return pending.resolve(resolution) if pending is not None else False
 
     @property
-    def pending_request(self) -> HumanApprovalRequest | None:
+    def pending_request(self) -> ApprovalPromptRequest | None:
         with self._lock:
             return self._pending.request if self._pending is not None else None
 
 
 class _PendingApproval:
-    def __init__(self, request: HumanApprovalRequest) -> None:
+    def __init__(self, request: ApprovalPromptRequest) -> None:
         self.request = request
         self._condition = Condition()
         self._resolution: ApprovalResolution | None = None
@@ -141,15 +146,21 @@ class _PendingApproval:
             return self._resolution
 
 
-def render_approval_request(request: HumanApprovalRequest, *, color: bool) -> str:
+def render_approval_request(request: ApprovalPromptRequest, *, color: bool) -> str:
     """Render one bounded approval request without reading terminal input."""
     header = _approval_header(request)
+    if isinstance(request, DelegationApprovalRequest):
+        return (
+            f"{header}\n{_render_delegation_preview(request)}Approve this exact delegation? [y/N/c]"
+        )
     if request.preview is None:
         return f"{header}\nApprove this exact action? [y/N/c]"
     return f"{header}\n{_render_preview(request.preview, color=color)}Approve this exact action? [y/N/c]"
 
 
-def _approval_header(request: HumanApprovalRequest) -> str:
+def _approval_header(request: ApprovalPromptRequest) -> str:
+    if isinstance(request, DelegationApprovalRequest):
+        return "Child delegation approval required"
     arguments = request.identity.arguments.as_mapping()
     if request.identity.tool_name == "run_command":
         argv = arguments.get("argv")
@@ -190,6 +201,23 @@ def _approval_header(request: HumanApprovalRequest) -> str:
             detail += f" bytes={byte_count}"
     return (
         f"Approval required: {request.identity.action.value} {request.identity.tool_name}{detail}"
+    )
+
+
+def _render_delegation_preview(request: DelegationApprovalRequest) -> str:
+    preview = request.preview
+    route = preview.profile_name or preview.provider_id
+    model = preview.model or "<provider default>"
+    tools = ", ".join(preview.tool_names)
+    return (
+        f"Objective: {preview.objective}\n"
+        f"Route: {route} / {model}\n"
+        f"Read-only tools: {tools}\n"
+        f"Limits: one Turn, {preview.max_provider_invocations} Provider invocations, "
+        f"{preview.max_tool_requests} tool requests, {preview.max_output_tokens} output tokens, "
+        f"{preview.deadline_seconds}s deadline; spawn {preview.spawn_number}/4.\n"
+        "The Child is process-local, may incur additional Provider cost, and its output is "
+        "untrusted until independently checked.\n"
     )
 
 

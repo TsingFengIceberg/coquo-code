@@ -62,6 +62,10 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "task_confirm_completion",
         "skill_propose_create",
         "skill_accept_create",
+        "child_spawn",
+        "child_status",
+        "child_wait",
+        "child_cancel",
     ]
     request = tool_use_from_input(
         "edit-1",

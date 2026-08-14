@@ -255,9 +255,13 @@ uv run coquo child show <child-run-uuid>
 uv run coquo child prepare <child-run-uuid>
 uv run coquo child run <child-run-uuid>
 uv run coquo child cancel <child-run-uuid> "Defer execution"
+uv run coquo child wait <child-run-uuid> --timeout 30
+uv run coquo child recover [<child-run-uuid>]
+uv run coquo child handoff <child-run-uuid>
+uv run coquo child deliver <child-run-uuid>
 ```
 
-`child prepare` freezes a bounded redacted read-only execution envelope and creates a detached Child Session without changing `latest`; `child run` then executes one foreground read-only Turn through the shared Agent runtime. In the REPL, `/child start <id>` submits a ready Child to up to four daemon workers in the current process; it does not promise survival after process exit. Cancellation, wait/join, restart recovery, and handoff remain deferred.
+`child prepare` freezes a bounded redacted read-only execution envelope and creates a detached Child Session without changing `latest`; `child run` then executes one foreground read-only Turn through the shared Agent runtime. In the REPL, `/child start <id>` submits a ready Child to up to four daemon workers in the current process. `child cancel` durably records a request before signaling a cooperative token; `child wait` observes durable state only, and `child recover` marks abandoned `running`/`cancelling` work `interrupted` only after acquiring its v2 OS execution lock. `child handoff` publishes a bounded untrusted result tied to exact terminal evidence; `child deliver` commits a content-free receipt in the parent Session before Host rendering and never injects Child output into parent history or Effective Context. Legacy v1 leases remain fail-closed, and process exit never auto-restarts a Child.
 
 ### REPL commands
 
@@ -535,4 +539,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. Child Runs currently provide durable preparation, one-shot foreground read-only execution, and bounded process-local background supervision, but live cancellation, wait/join, restart recovery, handoff, messaging, and Teams are not implemented. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can now use four model tools to delegate to at most four independent Children and observe, wait for, or cooperatively cancel them; each Child remains read-only, one-Turn, depth-one, and process-local, and its handoff returns as an untrusted ToolResult. Messaging, shared tasks, and Teams are not implemented; executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

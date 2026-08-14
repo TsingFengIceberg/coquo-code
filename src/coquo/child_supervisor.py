@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from threading import Condition, Thread
+from time import monotonic
 from typing import Callable
 
 from coquo.child_run_records import ChildRunStatus
@@ -56,6 +57,7 @@ class ChildRunSupervisor:
         )
         self._workers: list[Thread] = []
         self._closing = False
+        self._active: dict[str, object] = {}
 
     def submit(self, child_run_id: str) -> ChildRunInfo:
         info = self.store.inspect(child_run_id)
@@ -79,6 +81,36 @@ class ChildRunSupervisor:
             self._condition.notify()
         return info
 
+    def cancel(self, child_run_id: str, reason: str, *, source: str = "host") -> ChildRunInfo:
+        self.store.request_cancel(child_run_id, reason=reason, source=source)
+        with self._condition:
+            token = self._active.get(child_run_id)
+            if token is not None and hasattr(token, "request"):
+                token.request()
+            self._condition.notify_all()
+        return self.store.inspect(child_run_id)
+
+    def wait(self, child_run_id: str, timeout_seconds: float) -> ChildRunInfo:
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise ValueError("Child wait timeout is invalid")
+        if not 0 <= timeout_seconds <= 30:
+            raise ValueError("Child wait timeout must be between 0 and 30 seconds")
+        deadline = monotonic() + timeout_seconds
+        while True:
+            info = self.store.inspect(child_run_id)
+            if info.status in {
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                return info
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return info
+            with self._condition:
+                self._condition.wait(min(0.1, remaining))
+
     def inspect(self, child_run_id: str) -> ChildRunInfo:
         return self.store.inspect(child_run_id)
 
@@ -91,15 +123,37 @@ class ChildRunSupervisor:
                 items.append(self._notifications.popleft())
             return tuple(items)
 
-    def close(self, *, join_timeout: float = 0.25) -> None:
+    def close(self, *, join_timeout: float = 1.0) -> None:
         if join_timeout < 0:
             raise ValueError("join timeout is invalid")
         with self._condition:
             self._closing = True
+            queued = tuple(self._queue)
+            self._queue.clear()
             self._condition.notify_all()
             workers = tuple(self._workers)
+            active = tuple(self._active)
+        for child_run_id in queued:
+            self.store.request_cancel(child_run_id, reason="supervisor shutdown", source="shutdown")
+        for child_run_id in active:
+            current = self.store.inspect(child_run_id)
+            if current.status in {
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                continue
+            if current.status is not ChildRunStatus.CANCELLING:
+                self.cancel(child_run_id, "supervisor shutdown", source="shutdown")
+            else:
+                with self._condition:
+                    token = self._active.get(child_run_id)
+                    if token is not None and hasattr(token, "request"):
+                        token.request()
+        deadline = monotonic() + join_timeout
         for worker in workers:
-            worker.join(join_timeout)
+            worker.join(max(0.0, deadline - monotonic()))
 
     @property
     def active_worker_count(self) -> int:
@@ -131,7 +185,18 @@ class ChildRunSupervisor:
                 child_run_id = self._queue.popleft()
             status: ChildRunStatus | None = None
             try:
-                self._executor_factory(child_run_id).run(child_run_id)
+                from coquo.core.cancellation import TurnCancellation
+
+                token = TurnCancellation()
+                with self._condition:
+                    self._active[child_run_id] = token
+                executor = self._executor_factory(child_run_id)
+                try:
+                    executor.run(child_run_id, cancellation=token)
+                except TypeError as error:
+                    if "cancellation" not in str(error):
+                        raise
+                    executor.run(child_run_id)
                 status = self.store.inspect(child_run_id).status
                 message = None
             except BaseException as error:
@@ -146,10 +211,12 @@ class ChildRunSupervisor:
                     message = error.__class__.__name__
             finally:
                 with self._condition:
+                    self._active.pop(child_run_id, None)
                     self._submitted.discard(child_run_id)
                     self._notifications.append(
                         ChildSupervisorNotification(child_run_id, status, message)
                     )
+                    self._condition.notify_all()
 
     def _default_executor(self, child_run_id: str):
         del child_run_id

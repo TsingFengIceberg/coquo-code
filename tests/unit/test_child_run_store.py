@@ -192,5 +192,64 @@ def test_child_run_execution_lease_is_exclusive_and_released(tmp_path: Path) -> 
     with pytest.raises(ChildRunExecutionLeaseError, match="active execution lease"):
         child_store.acquire_execution(info.child_run_id)
     first.close()
+    assert first.path.name.endswith(".execution-v2.lock")
+    assert first.path.exists()
     second = child_store.acquire_execution(info.child_run_id)
     second.close()
+
+
+def test_child_run_legacy_execution_lease_fails_closed(tmp_path: Path) -> None:
+    session_store = SessionStore(tmp_path)
+    parent_writer = session_store.create(BindingSnapshot.fake())
+    parent_id = parent_writer.session_id
+    parent = session_store.inspect(parent_id)
+    parent_writer.release()
+    child_store = ChildRunStore(tmp_path)
+    info = child_store.create("Inspect files", parent_session=parent_id)
+    spec = build_child_runtime_spec_from_binding(
+        child_run_id=info.child_run_id,
+        parent_session_id=parent_id,
+        child_session_id="92345678-1234-4234-9234-123456789abc",
+        objective=info.objective,
+        binding=parent.binding,
+    )
+    child_store.prepare(
+        info.child_run_id, runtime_spec=spec, session_store=session_store, binding=parent.binding
+    )
+    legacy = child_store.root / f"{info.child_run_id}.execution.lock"
+    legacy.write_bytes(b"child-execution-lease-v1\n")
+    with pytest.raises(ChildRunExecutionLeaseError, match="legacy_lease_ambiguous"):
+        child_store.acquire_execution(info.child_run_id)
+    assert legacy.exists()
+
+
+def test_child_run_cancel_request_is_durable_and_idempotent(tmp_path: Path) -> None:
+    session_store = SessionStore(tmp_path)
+    parent_writer = session_store.create(BindingSnapshot.fake())
+    parent_id = parent_writer.session_id
+    parent = session_store.inspect(parent_id)
+    parent_writer.release()
+    child_store = ChildRunStore(tmp_path)
+    info = child_store.create("Inspect files", parent_session=parent_id)
+    spec = build_child_runtime_spec_from_binding(
+        child_run_id=info.child_run_id,
+        parent_session_id=parent_id,
+        child_session_id="92345678-1234-4234-9234-123456789abc",
+        objective=info.objective,
+        binding=parent.binding,
+    )
+    child_store.prepare(
+        info.child_run_id, runtime_spec=spec, session_store=session_store, binding=parent.binding
+    )
+    child_store.start_execution(
+        info.child_run_id,
+        child_session_id=spec.child_session_id,
+        execution_id="82345678-1234-4234-9234-123456789abc",
+    )
+    cancelling = child_store.request_cancel(info.child_run_id, reason="stop", source="host")
+    assert cancelling.status is ChildRunStatus.CANCELLING
+    assert child_store.request_cancel(info.child_run_id, reason="stop", source="host") == cancelling
+    with pytest.raises(ChildRunStoreError, match="conflicts"):
+        child_store.request_cancel(info.child_run_id, reason="other", source="host")
+    cancelled = child_store.finish_cancelled(info.child_run_id)
+    assert cancelled.status is ChildRunStatus.CANCELLED

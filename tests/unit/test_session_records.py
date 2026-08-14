@@ -36,7 +36,9 @@ from coquo.core.task_admission import (
     task_admission_receipt,
 )
 from coquo.session_records import (
+    ApprovalAuditOutcome,
     BindingSnapshot,
+    ChildDelegationDecided,
     CompactionFailed,
     ContextCompacted,
     Recovery,
@@ -72,6 +74,7 @@ from coquo.session_records import (
     replay_records,
     workspace_fingerprint,
 )
+from coquo.core.permissions import ApprovalMode
 from coquo.providers.usage import (
     ProviderInvocationKind,
     ProviderInvocationUsage,
@@ -147,6 +150,31 @@ def session_header(workspace: Path) -> SessionHeader:
         created_at=NOW,
         binding=BindingSnapshot.fake(),
     )
+
+
+def test_child_delegation_decision_is_content_free_and_strict(tmp_path) -> None:
+    decision = ChildDelegationDecided(
+        sequence=1,
+        occurred_at=NOW,
+        parent_session_id=SESSION_ID,
+        context_id="ctx-v21-" + "a" * 64,
+        tool_use_id="child-tool-1",
+        delegation_identity_sha256="b" * 64,
+        objective_sha256="c" * 64,
+        route_fingerprint="route-v1-" + "d" * 64,
+        child_tool_set_id="toolset-v1-" + "e" * 64,
+        depth=1,
+        approval_mode=ApprovalMode.ASK,
+        outcome=ApprovalAuditOutcome.ACCEPTED,
+        decision_sha256="f" * 64,
+    )
+    encoded = encode_record(decision)
+    assert b"Inspect the workspace" not in encoded
+    assert decode_record(encoded) == decision
+    state = replay_records([session_header(tmp_path), decision])
+    assert state.child_delegation_decisions == (decision,)
+    with pytest.raises(SessionRecordError, match="already decided"):
+        replay_records([session_header(tmp_path), decision, replace(decision, sequence=2)])
 
 
 def test_task_admission_resolution_round_trips_and_replays_strictly(tmp_path: Path) -> None:

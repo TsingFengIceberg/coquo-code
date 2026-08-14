@@ -916,7 +916,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     assert dispatch_slash("/sandbox extra", session).message == "Usage: /sandbox check"
     context = dispatch_slash("/context", session)
     assert context.kind == "warning"
-    assert "Context ID: ctx-v21-" in context.message
+    assert "Context ID: ctx-v23-" in context.message
     assert dispatch_slash("/context extra", session).message == "Usage: /context"
     instructions = dispatch_slash("/instructions", session)
     assert instructions.kind == "info"
@@ -988,7 +988,7 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     catalog = dispatch_slash("/tools catalog", session).message
     assert f"Model-visible tools: {len(TOOL_CATALOG)} in canonical order" in catalog
     assert "Registry snapshot: registry-v1-" in catalog
-    assert " generation=6" in catalog
+    assert " generation=7" in catalog
     assert " 6. run_command: dangerous; available (ask; sandbox required)" in catalog
     assert (
         "22. web_search: network-read; available "
@@ -997,11 +997,15 @@ def test_group_help_and_targeted_usage(tmp_path) -> None:
     run_command = dispatch_slash("/tools catalog run_command", session).message
     assert f"Tool 6/{len(TOOL_CATALOG)}: run_command" in run_command
     assert "Contract: tool-v1-" in run_command
-    assert "Source: builtin:coquo generation=6" in run_command
+    assert "Source: builtin:coquo generation=7" in run_command
     assert "Exposure: direct" in run_command
     assert "argv: array<string> [1..64 items]; required" in run_command
     assert "timeout_seconds: integer [1..300]; required" in run_command
     assert "Linux sandbox required" in run_command
+    child_spawn = dispatch_slash("/tools catalog child_spawn", session).message
+    assert "Permission class: child-control" in child_spawn
+    assert "available (ask; separate delegation approval)" in child_spawn
+    assert "fixed read-only tools" in child_spawn
     for definition in TOOL_CATALOG:
         detail = dispatch_slash(f"/tools catalog {definition.name}", session).message
         assert f": {definition.name}" in detail

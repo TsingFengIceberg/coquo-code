@@ -129,7 +129,7 @@ def test_execute_rejects_stale_target_without_deleting_replacement(tmp_path: Pat
     target.mkdir()
     tool = DeleteDirectoryTool(tmp_path)
     prepared = tool.prepare(request())
-    target.rmdir()
+    target.rename(tmp_path / "replaced-original")
     target.mkdir()
 
     result = tool.execute_detailed(prepared)

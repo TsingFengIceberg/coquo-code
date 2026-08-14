@@ -6,12 +6,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import hashlib
+import json
 import os
 from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
 from coquo.agent.loop import AgentLoop, PreparedAgentTurn
+from coquo.agent.child_control import ChildControlDispatchResult
 from coquo.agent.runtime import (
     AgentRuntime,
     AgentRuntimeCallbacks,
@@ -19,9 +21,18 @@ from coquo.agent.runtime import (
     AgentRuntimeServices,
     AgentTurnRequest,
 )
-from coquo.child_run_store import ChildRunInfo, ChildRunStore
+from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
+from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.child_supervisor import ChildRunSupervisor
-from coquo.child_runtime import build_child_runtime_spec
+from coquo.child_runtime import (
+    CHILD_DEADLINE_SECONDS,
+    CHILD_MAX_OUTPUT_TOKENS,
+    CHILD_MAX_PROVIDER_INVOCATIONS,
+    CHILD_MAX_TOOL_REQUESTS,
+    CHILD_TOOL_NAMES,
+    build_child_runtime_spec,
+    child_tool_set,
+)
 from coquo.agent.task_control import (
     TASK_LIFECYCLE_KIND_BY_TOOL,
     TASK_PROPOSAL_KIND_BY_TOOL,
@@ -66,6 +77,12 @@ from coquo.core.action_coordinator import (
     ActionExecutionResult,
     ApprovalHandler,
     ApprovalResolution,
+)
+from coquo.core.delegation_approval import (
+    DelegationApprovalIdentity,
+    DelegationApprovalPreview,
+    DelegationApprovalRequest,
+    delegation_decision_sha256,
 )
 from coquo.core.approval_preview import (
     ApprovalPreview,
@@ -209,6 +226,8 @@ from coquo.session_records import (
     ActionAuditState,
     ActionExecutionOutcome,
     BindingSnapshot,
+    ChildDelegationDecided,
+    ApprovalAuditOutcome,
     CompactionFailed,
     ContextCompacted,
     CONTEXT_COMPACTED_SCHEMA_VERSION,
@@ -221,6 +240,14 @@ from coquo.session_records import (
     TURN_COMMITTED_USAGE_SCHEMA_VERSION,
     TurnFailed,
     TURN_FAILED_SCHEMA_VERSION,
+)
+from coquo.tools.child_control import (
+    CHILD_CANCEL_TOOL_NAME,
+    CHILD_CONTROL_TOOL_NAMES,
+    CHILD_SPAWN_TOOL_NAME,
+    CHILD_STATUS_TOOL_NAME,
+    CHILD_WAIT_TOOL_NAME,
+    parse_child_control,
 )
 from coquo.session_store import (
     LatestUpdateStatus,
@@ -984,6 +1011,9 @@ class ProjectSession:
             self._loop.install_task_control_dispatcher(
                 _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
             )
+            self._loop.install_child_control_dispatcher(
+                CHILD_CONTROL_TOOL_NAMES, self._dispatch_child_control
+            )
             self._loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         self._startup_resume_result = startup_resume_result
 
@@ -1023,6 +1053,8 @@ class ProjectSession:
             action_dispatcher=None if self._child_mode else self._dispatch_action,
             task_control_names=() if self._child_mode else _COMMIT_CONTROL_TOOL_NAMES,
             task_control_dispatcher=None if self._child_mode else self._dispatch_task_control,
+            child_control_names=() if self._child_mode else CHILD_CONTROL_TOOL_NAMES,
+            child_control_dispatcher=None if self._child_mode else self._dispatch_child_control,
             tool_set_transition_dispatcher=None if self._child_mode else self._transition_tool_set,
             activate_turn=self._activate_runtime_turn,
             bind_provider=self._bind_runtime_provider,
@@ -1419,6 +1451,12 @@ class ProjectSession:
                     child_mode=child_mode,
                 )
                 session_holder["session"] = session
+                if not child_mode:
+                    from coquo.child_recovery import ChildRunRecoveryService
+
+                    session._startup_child_recovery = ChildRunRecoveryService(
+                        resolved_workspace
+                    ).recover(parent_session_id=session.session_id)
                 return session
             except BaseException:
                 prepared.abort()
@@ -1656,6 +1694,36 @@ class ProjectSession:
                 return ()
             return self._child_supervisor.drain_notifications()
 
+    def wait_child_run(self, child_run_id: str, timeout_seconds: float) -> ChildRunInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            supervisor = self._child_supervisor
+            if supervisor is None:
+                from coquo.child_supervisor import ChildRunSupervisor
+
+                supervisor = ChildRunSupervisor(
+                    self.workspace,
+                    parent_session_id=self._writer.session_id,
+                )
+                self._child_supervisor = supervisor
+            info = supervisor.wait(child_run_id, timeout_seconds)
+            if info.parent_session_id != self._writer.session_id:
+                raise ChildRunStoreError("Child Run belongs to another parent Session")
+            return info
+
+    def recover_child_runs(self, child_run_id: str | None = None, limit: int = 100):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            from coquo.child_recovery import ChildRunRecoveryService
+
+            return ChildRunRecoveryService(self.workspace).recover(
+                parent_session_id=self._writer.session_id,
+                child_run_id=child_run_id,
+                limit=limit,
+            )
+
     def list_child_runs(self, *, status=None) -> tuple[ChildRunInfo, ...]:
         """List Child Run control-plane metadata without changing Session state."""
         with self._lock:
@@ -1668,14 +1736,47 @@ class ProjectSession:
             self._ensure_open()
             return self._child_run_store.inspect(child_run_id)
 
-    def cancel_child_run(self, child_run_id: str, reason: str) -> ChildRunInfo:
-        """Durably cancel a queued Child Run; no live work exists in this slice."""
+    def publish_child_handoff(self, child_run_id: str):
+        """Publish one exact terminal handoff owned by the current parent Session."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            with self._child_run_store.open(child_run_id) as writer:
-                writer.cancel(reason)
-                return writer.info
+            info = self._child_run_store.inspect(child_run_id)
+            if info.parent_session_id != self._writer.session_id:
+                raise ChildRunStoreError("Child Run belongs to another parent Session")
+            from coquo.child_handoff import publish_child_handoff
+
+            return publish_child_handoff(self.workspace, child_run_id)
+
+    def deliver_child_handoff(
+        self,
+        child_run_id: str,
+        *,
+        source: str = "host",
+        tool_use_id: str | None = None,
+    ):
+        """Commit a content-free receipt before returning one exact Child handoff."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            from coquo.child_handoff import deliver_child_handoff
+
+            return deliver_child_handoff(
+                self.workspace,
+                child_run_id,
+                parent_writer=self._writer,
+                source=source,
+                tool_use_id=tool_use_id,
+            )
+
+    def cancel_child_run(self, child_run_id: str, reason: str) -> ChildRunInfo:
+        """Durably request cancellation and signal a local Child worker when present."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            if self._child_supervisor is not None:
+                return self._child_supervisor.cancel(child_run_id, reason)
+            return self._child_run_store.request_cancel(child_run_id, reason=reason)
 
     def inspect_task(self, task_id: str) -> TaskInfo:
         """Strictly inspect one workspace Task without changing current state."""
@@ -4208,7 +4309,7 @@ class ProjectSession:
             supervisor = self._child_supervisor
             self._child_supervisor = None
             if supervisor is not None:
-                supervisor.close()
+                supervisor.close(join_timeout=1.0)
             mcp_cleanup_complete = self._mcp_process_manager.close()
             try:
                 self._writer.close()
@@ -4316,6 +4417,9 @@ class ProjectSession:
         loop.install_task_control_dispatcher(
             _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
         )
+        loop.install_child_control_dispatcher(
+            CHILD_CONTROL_TOOL_NAMES, self._dispatch_child_control
+        )
         loop.install_tool_set_transition_dispatcher(self._transition_tool_set)
         return loop
 
@@ -4372,6 +4476,7 @@ class ProjectSession:
                 ),
                 proposal,
             )
+
         if request.name == SKILL_ACCEPT_CREATE_TOOL_NAME:
             if scope is not None:
                 raise RuntimeError("Skill installation is unavailable inside a Task Stage")
@@ -4454,6 +4559,164 @@ class ProjectSession:
             ),
             proposal,
         )
+
+    def _dispatch_child_control(
+        self, request: ToolUse, context_id: str
+    ) -> ChildControlDispatchResult:
+        """Execute one parent-only Child control outside ActionCoordinator."""
+        if self._child_mode:
+            raise RuntimeError("Child controls are unavailable inside a Child")
+        parsed = parse_child_control(request)
+        state = self._runtime.turn_state.child_control_state
+        if state.depth != 0:
+            raise RuntimeError("recursive Child delegation is unavailable")
+        try:
+            if parsed.name == CHILD_SPAWN_TOOL_NAME:
+                assert parsed.objective is not None
+                return self._dispatch_child_spawn(
+                    request, context_id=context_id, objective=parsed.objective
+                )
+            assert parsed.child_run_id is not None
+            info = self._child_run_store.inspect(parsed.child_run_id)
+            if info.parent_session_id != self._writer.session_id:
+                raise ChildRunStoreError("Child Run belongs to another parent Session")
+            if parsed.name == CHILD_STATUS_TOOL_NAME:
+                return _child_control_success(request, _child_state_payload(info), "child_observed")
+            if parsed.name == CHILD_WAIT_TOOL_NAME:
+                assert parsed.timeout_seconds is not None
+                state.reserve_wait(parsed.timeout_seconds)
+                info = self.wait_child_run(parsed.child_run_id, parsed.timeout_seconds)
+                payload = _child_state_payload(info)
+                if info.status in _CHILD_TERMINAL_STATUSES:
+                    handoff = self.deliver_child_handoff(
+                        info.child_run_id,
+                        source="model",
+                        tool_use_id=request.tool_use_id,
+                    )
+                    payload["handoff"] = {
+                        "body": handoff.body,
+                        "handoff_sha256": handoff.handoff_sha256,
+                        "outcome": handoff.outcome,
+                        "truncated": handoff.truncated,
+                    }
+                return _child_control_success(request, payload, "child_wait_observed")
+            if parsed.name == CHILD_CANCEL_TOOL_NAME:
+                assert parsed.reason is not None
+                info = (
+                    self._child_supervisor.cancel(
+                        parsed.child_run_id, parsed.reason, source="model"
+                    )
+                    if self._child_supervisor is not None
+                    else self._child_run_store.request_cancel(
+                        parsed.child_run_id, reason=parsed.reason, source="model"
+                    )
+                )
+                return _child_control_success(
+                    request, _child_state_payload(info), "child_cancel_requested"
+                )
+            raise ValueError("unsupported Child control")
+        except (ValueError, ChildRunStoreError) as error:
+            from coquo.child_run_store import ChildRunAppendCommitError, ChildRunCreateCommitError
+            from coquo.session_store import SessionAppendCommitError
+
+            if isinstance(
+                error,
+                (ChildRunAppendCommitError, ChildRunCreateCommitError, SessionAppendCommitError),
+            ):
+                raise
+            return _child_control_error(request, str(error), "child_control_rejected")
+
+    def _dispatch_child_spawn(
+        self, request: ToolUse, *, context_id: str, objective: str
+    ) -> ChildControlDispatchResult:
+        state = self._runtime.turn_state.child_control_state
+        spawn_number = state.reserve_spawn()
+        status = self._manager.status()
+        tool_set = child_tool_set()
+        route_fingerprint = (
+            status.route_fingerprint or binding_from_status(status).route_fingerprint
+        )
+        identity = DelegationApprovalIdentity(
+            parent_session_id=self._writer.session_id,
+            context_id=context_id,
+            tool_use_id=request.tool_use_id,
+            objective_sha256=hashlib.sha256(objective.encode("utf-8")).hexdigest(),
+            route_fingerprint=route_fingerprint,
+            child_tool_set_id=tool_set.snapshot_id,
+            max_provider_invocations=CHILD_MAX_PROVIDER_INVOCATIONS,
+            max_tool_requests=CHILD_MAX_TOOL_REQUESTS,
+            max_output_tokens=CHILD_MAX_OUTPUT_TOKENS,
+            deadline_seconds=CHILD_DEADLINE_SECONDS,
+            depth=1,
+            approval_mode=self._approval_mode,
+        )
+        preview = DelegationApprovalPreview(
+            objective=objective,
+            provider_id=status.provider_id or "fake",
+            profile_name=status.profile,
+            model=status.wire_model or status.selected_model,
+            tool_names=CHILD_TOOL_NAMES,
+            max_provider_invocations=CHILD_MAX_PROVIDER_INVOCATIONS,
+            max_tool_requests=CHILD_MAX_TOOL_REQUESTS,
+            max_output_tokens=CHILD_MAX_OUTPUT_TOKENS,
+            deadline_seconds=CHILD_DEADLINE_SECONDS,
+            spawn_number=spawn_number,
+        )
+        resolution = ApprovalResolution.ACCEPT
+        if self._approval_mode is ApprovalMode.ASK:
+            state.pending_approval_identity = identity
+            try:
+                resolution = self._approval_handler(DelegationApprovalRequest(identity, preview))
+            finally:
+                state.pending_approval_identity = None
+            if type(resolution) is not ApprovalResolution:
+                raise ValueError("approval handler returned an invalid resolution")
+        outcome = {
+            ApprovalResolution.ACCEPT: ApprovalAuditOutcome.ACCEPTED,
+            ApprovalResolution.REJECT: ApprovalAuditOutcome.REJECTED,
+            ApprovalResolution.CANCEL: ApprovalAuditOutcome.CANCELLED,
+        }[resolution]
+        decision = ChildDelegationDecided(
+            sequence=self._writer.state.next_sequence,
+            occurred_at=self._writer.now(),
+            parent_session_id=self._writer.session_id,
+            context_id=context_id,
+            tool_use_id=request.tool_use_id,
+            delegation_identity_sha256=identity.digest,
+            objective_sha256=identity.objective_sha256,
+            route_fingerprint=identity.route_fingerprint,
+            child_tool_set_id=identity.child_tool_set_id,
+            depth=identity.depth,
+            approval_mode=identity.approval_mode,
+            outcome=outcome,
+            decision_sha256=delegation_decision_sha256(identity, outcome.value),
+        )
+        decision = self._writer.child_delegation_decided(decision)
+        if resolution is ApprovalResolution.REJECT:
+            return _child_control_error(request, "Child delegation rejected", "child_rejected")
+        if resolution is ApprovalResolution.CANCEL:
+            return _child_control_error(request, "Child delegation cancelled", "child_cancelled")
+        delegated = ChildRunDelegated(
+            sequence=1,
+            child_run_id=self._writer.session_id,
+            parent_session_id=self._writer.session_id,
+            parent_context_id=context_id,
+            parent_tool_use_id=request.tool_use_id,
+            decision_record_sequence=decision.sequence,
+            decision_sha256=decision.decision_sha256,
+            depth=1,
+            source="model",
+            delegated_at=self._writer.now(),
+        )
+        info = self._child_run_store.create(
+            objective,
+            parent_session=self._writer.session_id,
+            delegation=delegated,
+        )
+        state.record_spawn(info.child_run_id)
+        info = self.prepare_child_run(info.child_run_id)
+        info = self.start_child_run(info.child_run_id)
+        return _child_control_success(request, _child_state_payload(info), "child_spawned")
 
     def _prepare_task_lifecycle_request(
         self,
@@ -5952,6 +6215,58 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
         generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
+    )
+
+
+_CHILD_TERMINAL_STATUSES = frozenset(
+    {
+        ChildRunStatus.CANCELLED,
+        ChildRunStatus.COMPLETED,
+        ChildRunStatus.FAILED,
+        ChildRunStatus.INTERRUPTED,
+    }
+)
+
+
+def _child_state_payload(info: ChildRunInfo) -> dict[str, object]:
+    return {
+        "child_run_id": info.child_run_id,
+        "child_session_id": info.child_session_id,
+        "status": info.status.value,
+    }
+
+
+def _child_control_success(
+    request: ToolUse, payload: dict[str, object], result_code: str
+) -> ChildControlDispatchResult:
+    body = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+    return ChildControlDispatchResult(
+        ToolDispatchResult(
+            ToolResult(request.tool_use_id, body),
+            ToolEventStatus.SUCCEEDED,
+            result_code,
+        )
+    )
+
+
+def _child_control_error(
+    request: ToolUse, message: str, result_code: str
+) -> ChildControlDispatchResult:
+    bounded = message.replace("\r", " ").replace("\n", " ")[:512] or "Child control failed"
+    body = json.dumps(
+        {"error": result_code, "message": bounded},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return ChildControlDispatchResult(
+        ToolDispatchResult(
+            ToolResult(request.tool_use_id, body, is_error=True),
+            ToolEventStatus.REJECTED,
+            result_code,
+        )
     )
 
 

@@ -88,6 +88,7 @@ from coquo.cli.presentation import (
     render_task_summary,
     render_child_run_info,
     render_child_run_summary,
+    render_child_handoff,
     render_task_timeline,
     render_task_verification_result,
     render_switch_rejection,
@@ -336,7 +337,11 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/child start", "Queue one Child on local background workers"),
     SlashCompletionSpec("/child list", "List Child Runs by durable state"),
     SlashCompletionSpec("/child show", "Show one Child Run"),
-    SlashCompletionSpec("/child cancel", "Cancel one queued Child Run"),
+    SlashCompletionSpec("/child cancel", "Request cancellation for one Child Run"),
+    SlashCompletionSpec("/child wait", "Wait for one Child Run terminal state"),
+    SlashCompletionSpec("/child recover", "Recover abandoned Child Runs"),
+    SlashCompletionSpec("/child handoff", "Publish a terminal Child handoff"),
+    SlashCompletionSpec("/child deliver", "Deliver a terminal Child handoff"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -463,6 +468,14 @@ class ReplSession(Protocol):
     def inspect_child_run(self, child_run_id: str): ...
 
     def cancel_child_run(self, child_run_id: str, reason: str): ...
+
+    def wait_child_run(self, child_run_id: str, timeout_seconds: float): ...
+
+    def recover_child_runs(self, child_run_id: str | None = None, limit: int = 100): ...
+
+    def publish_child_handoff(self, child_run_id: str): ...
+
+    def deliver_child_handoff(self, child_run_id: str): ...
 
     def inspect_task(self, task_id: str): ...
 
@@ -910,10 +923,31 @@ def dispatch_slash(
         return _child_show(command, session)
     if command == "/child cancel" or command.startswith("/child cancel "):
         return _child_cancel(command, session)
+    if command == "/child wait" or command.startswith("/child wait "):
+        return _child_wait(command, session)
+    if command == "/child recover" or command.startswith("/child recover "):
+        return _child_recover(command, session)
+    if command == "/child handoff" or command.startswith("/child handoff "):
+        return _child_handoff(command, session)
+    if command == "/child deliver" or command.startswith("/child deliver "):
+        return _child_deliver(command, session)
     if command.startswith("/child "):
         subcommand = command.split(maxsplit=2)[1]
         suggestion = _suggest_token(
-            subcommand, ("create", "prepare", "run", "start", "list", "show", "cancel")
+            subcommand,
+            (
+                "create",
+                "prepare",
+                "run",
+                "start",
+                "list",
+                "show",
+                "cancel",
+                "wait",
+                "recover",
+                "handoff",
+                "deliver",
+            ),
         )
         return _usage(
             f"Unknown Child Run command: {subcommand}{_suggestion_line(suggestion)}\n"
@@ -1812,7 +1846,7 @@ def _child_list(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) > 4:
         return _usage(
-            "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+            "Usage: /child list [1-100] [status=queued|admitted|ready|running|cancelling|completed|cancelled|interrupted|failed]"
         )
     limit = 20
     status = None
@@ -1823,13 +1857,13 @@ def _child_list(command: str, session: ReplSession) -> SlashResult:
             status = part.removeprefix("status=")
         else:
             return _usage(
-                "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+                "Usage: /child list [1-100] [status=queued|admitted|ready|running|cancelling|completed|cancelled|interrupted|failed]"
             )
     if not 1 <= limit <= 100 or (
         status is not None and status not in {item.value for item in ChildRunStatus}
     ):
         return _usage(
-            "Usage: /child list [1-100] [status=queued|admitted|ready|running|completed|cancelled|failed]"
+            "Usage: /child list [1-100] [status=queued|admitted|ready|running|cancelling|completed|cancelled|interrupted|failed]"
         )
     return _call(
         lambda: _render_child_list(session, limit, status),
@@ -1866,6 +1900,64 @@ def _child_cancel(command: str, session: ReplSession) -> SlashResult:
         kind="success",
         failure_prefix="Child Run cancellation failed",
     )
+
+
+def _child_wait(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {3, 4}:
+        return _usage("Usage: /child wait <child-run-id> [timeout-seconds]")
+    try:
+        timeout = float(parts[3]) if len(parts) == 4 else 30.0
+    except ValueError:
+        return _usage("Usage: /child wait <child-run-id> [timeout-seconds]")
+    return _call(
+        lambda: render_child_run_info(session.wait_child_run(parts[2], timeout)),
+        kind="info",
+        failure_prefix="Child Run wait failed",
+    )
+
+
+def _child_recover(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) > 3:
+        return _usage("Usage: /child recover [child-run-id]")
+    return _call(
+        lambda: _render_child_recovery(session, parts[2] if len(parts) == 3 else None),
+        kind="info",
+        failure_prefix="Child Run recovery failed",
+    )
+
+
+def _child_handoff(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child handoff <child-run-id>")
+    return _call(
+        lambda: render_child_handoff(session.publish_child_handoff(parts[2])),
+        kind="info",
+        failure_prefix="Child Run handoff failed",
+    )
+
+
+def _child_deliver(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /child deliver <child-run-id>")
+    return _call(
+        lambda: render_child_handoff(session.deliver_child_handoff(parts[2])),
+        kind="info",
+        failure_prefix="Child Run delivery failed",
+    )
+
+
+def _render_child_recovery(session: ReplSession, child_run_id: str | None) -> str:
+    result = session.recover_child_runs(child_run_id)
+    lines = [render_child_run_info(info) for info in result.recovered]
+    lines.extend(
+        f"Recovery {item.outcome}{f' {item.child_run_id}' if item.child_run_id else ''}: {item.message}"
+        for item in result.diagnostics
+    )
+    return "\n".join(lines) if lines else "No abandoned Child Runs found."
 
 
 def _task_proposals(command: str, session: ReplSession) -> SlashResult:

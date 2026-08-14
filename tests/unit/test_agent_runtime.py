@@ -30,10 +30,15 @@ def test_runtime_rejects_reentry_and_clears_after_success(tmp_path) -> None:
     assert runtime.turn_state.active
     with pytest.raises(RuntimeError, match="already has an active turn"):
         runtime.prepare_turn(AgentTurnRequest("nested"))
-    assert runtime.run_prepared(prepared, provider=ScriptedFakeProvider([AssistantText("reply")])) == "reply"
+    assert (
+        runtime.run_prepared(prepared, provider=ScriptedFakeProvider([AssistantText("reply")]))
+        == "reply"
+    )
     assert not runtime.turn_state.active
     assert runtime.turn_state.action_lease is None
     assert runtime.turn_state.provider_runtime is None
+    assert runtime.turn_state.child_control_state.spawned_ids == []
+    assert runtime.turn_state.child_control_state.requested_wait_seconds == 0
 
 
 def test_runtime_clears_after_commit_failure(tmp_path) -> None:
@@ -47,3 +52,4 @@ def test_runtime_clears_after_commit_failure(tmp_path) -> None:
     assert not runtime.turn_state.active
     assert runtime.turn_state.cancellation is None
     assert runtime.turn_state.event_sink is None
+    assert runtime.turn_state.child_control_state.pending_approval_identity is None

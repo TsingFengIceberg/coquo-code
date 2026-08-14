@@ -480,6 +480,22 @@ def task_confirm_completion_tool_definition() -> dict[str, object]:
     return _named_compatible_tool_definition("task_confirm_completion")
 
 
+def child_spawn_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("child_spawn")
+
+
+def child_status_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("child_status")
+
+
+def child_wait_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("child_wait")
+
+
+def child_cancel_tool_definition() -> dict[str, object]:
+    return _named_compatible_tool_definition("child_cancel")
+
+
 def model_tool_definitions_for_openai(
     enabled_tool_names: tuple[str, ...] | None = None,
     *,

@@ -20,6 +20,7 @@ from coquo.agent.loop import (
     TaskControlDispatcher,
     ToolSetTransitionDispatcher,
 )
+from coquo.agent.child_control import ChildControlDispatcher, ChildControlState
 from coquo.core.cancellation import TurnCancellation
 from coquo.core.contracts import ConversationProvider, CommittedTurn, ToolAttemptUsage
 from coquo.core.compaction import decide_auto_compaction
@@ -65,6 +66,8 @@ class AgentRuntimeCallbacks:
     action_dispatcher: ActionDispatcher | None = None
     task_control_names: tuple[str, ...] = ()
     task_control_dispatcher: TaskControlDispatcher | None = None
+    child_control_names: tuple[str, ...] = ()
+    child_control_dispatcher: ChildControlDispatcher | None = None
     tool_set_transition_dispatcher: ToolSetTransitionDispatcher | None = None
     activate_turn: Callable[["AgentRuntimeTurnState", bool], None] | None = None
     bind_provider: Callable[["AgentRuntimeTurnState"], None] | None = None
@@ -105,6 +108,7 @@ class AgentRuntimeTurnState:
     tool_attempt_usage: ToolAttemptUsage = field(default_factory=ToolAttemptUsage)
     hook_set_snapshot: Any | None = None
     session_title_source_text: str | None = None
+    child_control_state: ChildControlState = field(default_factory=ChildControlState)
 
     @property
     def active(self) -> bool:
@@ -122,6 +126,7 @@ class AgentRuntimeTurnState:
         self.tool_attempt_usage = ToolAttemptUsage()
         self.hook_set_snapshot = None
         self.session_title_source_text = None
+        self.child_control_state = ChildControlState()
 
 
 class AgentRuntime:
@@ -262,7 +267,10 @@ class AgentRuntime:
                 if request.cancellation is not None:
                     request.cancellation.check()
                 report = assessment.fit_report
-                if report is not None and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED:
+                if (
+                    report is not None
+                    and report.decision == ContextFitDecision.MODEL_OUTPUT_EXCEEDED
+                ):
                     raise_for_context_fit(report)
                 decision = decide_auto_compaction(report)
                 if decision.trigger is not None:
@@ -387,6 +395,11 @@ class AgentRuntimeFactory:
             loop.install_task_control_dispatcher(
                 callbacks.task_control_names,
                 callbacks.task_control_dispatcher,
+            )
+        if callbacks.child_control_dispatcher is not None:
+            loop.install_child_control_dispatcher(
+                callbacks.child_control_names,
+                callbacks.child_control_dispatcher,
             )
         if callbacks.tool_set_transition_dispatcher is not None:
             loop.install_tool_set_transition_dispatcher(callbacks.tool_set_transition_dispatcher)

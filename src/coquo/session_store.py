@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
@@ -65,6 +65,8 @@ from coquo.session_records import (
     ApprovalResolved,
     AuditRecord,
     BindingSnapshot,
+    ChildHandoffDelivered,
+    ChildDelegationDecided,
     CompactionFailed,
     ContextCompacted,
     MAX_RECORD_BYTES,
@@ -117,6 +119,14 @@ _LATEST_NAME = "latest.json"
 
 class SessionStoreError(RuntimeError):
     """Raised when session persistence cannot proceed safely."""
+
+
+class SessionAppendCommitError(SessionStoreError):
+    """Report an append whose durable visibility cannot be determined safely."""
+
+    def __init__(self, message: str, *, record_may_be_visible: bool) -> None:
+        self.record_may_be_visible = record_may_be_visible
+        super().__init__(message)
 
 
 def _preview_turns(state: ReplayState) -> tuple[SessionPreviewTurn, ...]:
@@ -777,6 +787,43 @@ class SessionStore:
             prepared.abort()
             raise
 
+    def open_for_audit(self, selector: str | Path) -> SessionWriter:
+        """Open one strict live Session writer without resume or latest-pointer mutation."""
+        path = self._resolve_existing_path(selector)
+        session_id = _session_id_from_path(path)
+        lock_path = self.root / f"{session_id}.lock"
+        lock_stream = self._acquire_writer_lock(
+            lock_path,
+            create_exclusive=False,
+            existing_only=True,
+        )
+        descriptor: int | None = None
+        try:
+            descriptor = _open_existing_transcript(path, writable=True)
+            data, _ = _read_descriptor_bytes(descriptor, path)
+            if not data.endswith(b"\n"):
+                raise SessionStoreError(
+                    "session transcript does not end at a durable record boundary"
+                )
+            state = self._replay(path, _decode_lines(data))
+            if state.closed:
+                raise SessionStoreError("cannot append audit to a closed Session")
+            writer = SessionWriter(
+                self,
+                path,
+                lock_path,
+                lock_stream,
+                descriptor,
+                state,
+            )
+            descriptor = None
+            return writer
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            _release_writer_lease(lock_path, lock_stream)
+            raise
+
     def show(self, selector: str | Path) -> SessionInfo:
         """Strictly validate and describe a session without repairing or updating it."""
         self._ensure_root()
@@ -1255,6 +1302,18 @@ class SessionStore:
         _validate_existing_session_root(self.root, self.workspace)
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         return self._load_state(path, allow_repair=False).action_audits
+
+    def child_handoff_deliveries(self, selector: str | Path) -> tuple[ChildHandoffDelivered, ...]:
+        """Strictly replay content-free Child handoff delivery receipts."""
+        path = self._resolve_existing_path(selector)
+        return self._load_state(path, allow_repair=False).child_handoff_deliveries
+
+    def child_delegation_decisions(
+        self, selector: str | Path
+    ) -> tuple[ChildDelegationDecided, ...]:
+        """Strictly replay content-free model delegation decisions."""
+        path = self._resolve_existing_path(selector)
+        return self._load_state(path, allow_repair=False).child_delegation_decisions
 
     def tool_ledgers(self, selector: str | Path, limit: int) -> ToolLedgerQueryResult:
         """Strictly replay and return bounded recent per-turn tool ledgers."""
@@ -1759,6 +1818,7 @@ class SessionWriter:
         self._transcript_descriptor = transcript_descriptor
         self._state = state
         self._released = False
+        self._poisoned = False
 
     @property
     def session_id(self) -> str:
@@ -1886,6 +1946,76 @@ class SessionWriter:
             task_id=task_id,
             reason=reason,
         )
+        self.append_audit(record)
+        return record
+
+    def child_handoff_delivered(
+        self,
+        *,
+        child_run_id: str,
+        child_session_id: str | None,
+        outcome: str,
+        terminal_record_sequence: int,
+        handoff_sha256: str,
+        source: str,
+        tool_use_id: str | None = None,
+        occurred_at: str | None = None,
+    ) -> ChildHandoffDelivered:
+        """Append one content-free idempotent Child handoff delivery receipt."""
+        existing = next(
+            (
+                record
+                for record in self._state.child_handoff_deliveries
+                if record.child_run_id == child_run_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                existing.parent_session_id == self.session_id
+                and existing.child_session_id == child_session_id
+                and existing.outcome == outcome
+                and existing.terminal_record_sequence == terminal_record_sequence
+                and existing.handoff_sha256 == handoff_sha256
+                and existing.source == source
+                and existing.tool_use_id == tool_use_id
+            ):
+                return existing
+            raise SessionStoreError("Child handoff is already delivered differently")
+        record = ChildHandoffDelivered(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            parent_session_id=self.session_id,
+            child_run_id=child_run_id,
+            child_session_id=child_session_id,
+            outcome=outcome,
+            terminal_record_sequence=terminal_record_sequence,
+            handoff_sha256=handoff_sha256,
+            source=source,
+            tool_use_id=tool_use_id,
+        )
+        self.append_audit(record)
+        return record
+
+    def child_delegation_decided(self, record: ChildDelegationDecided) -> ChildDelegationDecided:
+        """Append one exact, content-free delegation decision idempotently."""
+        existing = next(
+            (
+                item
+                for item in self._state.child_delegation_decisions
+                if item.tool_use_id == record.tool_use_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                replace(record, sequence=existing.sequence, occurred_at=existing.occurred_at)
+                == existing
+            ):
+                return existing
+            raise SessionStoreError("Child delegation ToolUse is already decided differently")
+        if record.sequence != self._state.next_sequence:
+            raise SessionStoreError("Child delegation decision sequence is stale")
         self.append_audit(record)
         return record
 
@@ -2114,7 +2244,7 @@ class SessionWriter:
         if self._released:
             return
         try:
-            if not self._state.closed:
+            if not self._state.closed and not self._poisoned:
                 record = SessionClosed(
                     sequence=self._state.next_sequence,
                     occurred_at=occurred_at or self._store._clock(),
@@ -2143,12 +2273,18 @@ class SessionWriter:
             expected_session_id=self.session_id,
             expected_file_name=self.path.name,
         )
-        _append_record_descriptor(self._transcript_descriptor, self.path, record)
+        try:
+            _append_record_descriptor(self._transcript_descriptor, self.path, record)
+        except SessionAppendCommitError:
+            self._poisoned = True
+            raise
         self._state = candidate
 
     def _ensure_writable(self) -> None:
         if self._released:
             raise SessionStoreError("session writer is released")
+        if self._poisoned:
+            raise SessionStoreError("session writer durability is uncertain")
         if self._state.closed:
             raise SessionStoreError("session is closed")
 
@@ -2254,6 +2390,7 @@ def _latest_token(data: bytes, info: os.stat_result) -> LatestStaleToken:
 
 def _append_record_descriptor(descriptor: int, path: Path, record: SessionRecord) -> None:
     payload = encode_record(record)
+    write_started = False
     try:
         path_info = path.lstat()
         info = os.fstat(descriptor)
@@ -2269,13 +2406,19 @@ def _append_record_descriptor(descriptor: int, path: Path, record: SessionRecord
         os.lseek(descriptor, 0, os.SEEK_END)
         view = memoryview(payload)
         while view:
+            write_started = True
             written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("session append made no progress")
             view = view[written:]
         os.fsync(descriptor)
     except SessionStoreError:
         raise
     except OSError:
-        raise SessionStoreError(f"could not append session transcript: {path}") from None
+        raise SessionAppendCommitError(
+            f"could not durably append session transcript: {path}; inspect before retrying",
+            record_may_be_visible=write_started,
+        ) from None
 
 
 def _truncate_and_append_recovery_descriptor(

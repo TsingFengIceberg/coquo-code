@@ -8,7 +8,7 @@ from enum import StrEnum
 from threading import Condition
 
 from coquo.agent.tool_events import AssistantResponseTextDeltaReceived
-from coquo.core.action_coordinator import HumanApprovalRequest
+from coquo.core.action_coordinator import ApprovalPromptRequest
 
 
 class TerminalPhase(StrEnum):
@@ -26,7 +26,7 @@ class TerminalViewState:
     phase: TerminalPhase = TerminalPhase.IDLE
     status: str = "Ready"
     active_turn: int | None = None
-    approval_request: HumanApprovalRequest | None = None
+    approval_request: ApprovalPromptRequest | None = None
     exit_after_turn: bool = False
 
     @property
@@ -55,7 +55,7 @@ class PromptActivity:
 @dataclass(frozen=True)
 class ApprovalPending:
     turn_id: int
-    request: HumanApprovalRequest
+    request: ApprovalPromptRequest
 
 
 @dataclass(frozen=True)

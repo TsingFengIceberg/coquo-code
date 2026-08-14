@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from coquo.child_run_records import (
     ChildRunAdmitted,
     ChildRunCompleted,
     ChildRunCancelled,
+    ChildRunDelegated,
     ChildRunFailed,
+    ChildRunCancelRequested,
+    ChildRunCancelledTerminal,
+    ChildRunInterrupted,
     ChildRunHeader,
     ChildRunStarted,
     ChildSessionBound,
@@ -43,6 +49,46 @@ def test_child_run_header_and_cancel_round_trip() -> None:
     assert decode_child_run_record(encode_child_run_record(cancelled)) == cancelled
     assert replay_child_run_records([first]).status is ChildRunStatus.QUEUED
     assert replay_child_run_records([first, cancelled]).status is ChildRunStatus.CANCELLED
+
+
+def test_model_delegation_prefix_round_trip_and_legacy_admission_compatibility() -> None:
+    delegated = ChildRunDelegated(
+        sequence=1,
+        child_run_id=RUN_ID,
+        parent_session_id=SESSION_ID,
+        parent_context_id="ctx-v21-" + "a" * 64,
+        parent_tool_use_id="child-tool-1",
+        decision_record_sequence=1,
+        decision_sha256="b" * 64,
+        depth=1,
+        source="model",
+        delegated_at=STAMP,
+    )
+    state = replay_child_run_records([header(), delegated])
+    assert state.delegated == delegated
+    assert state.status is ChildRunStatus.QUEUED
+    assert decode_child_run_record(encode_child_run_record(delegated)) == delegated
+    cancelled = ChildRunCancelled(2, RUN_ID, "stop", STAMP)
+    assert replay_child_run_records([header(), delegated, cancelled]).status is (
+        ChildRunStatus.CANCELLED
+    )
+
+
+def test_child_run_delegation_must_be_exactly_between_header_and_admission() -> None:
+    delegated = ChildRunDelegated(
+        1,
+        RUN_ID,
+        SESSION_ID,
+        "ctx-v21-" + "a" * 64,
+        "child-tool-1",
+        1,
+        "b" * 64,
+        1,
+        "model",
+        STAMP,
+    )
+    with pytest.raises(ChildRunRecordError, match="owner"):
+        replay_child_run_records([header(), replace(delegated, parent_session_id=RUN_ID)])
 
 
 @pytest.mark.parametrize(
@@ -188,3 +234,86 @@ def test_child_run_failed_before_and_after_start_replay() -> None:
         failed_at=STAMP,
     )
     assert replay_child_run_records([header(), admitted, failed]).status is ChildRunStatus.FAILED
+
+
+def test_child_run_cancellation_request_and_terminal_replay() -> None:
+    admitted = ChildRunAdmitted(
+        sequence=1,
+        child_run_id=RUN_ID,
+        parent_session_id=SESSION_ID,
+        child_session_id="62345678-1234-4234-9234-123456789abc",
+        permission_mode="read-only",
+        approval_mode="auto",
+        provider_binding={"mode": "fake", "route_fingerprint": "a" * 64},
+        tool_registry_id="registry-v1-" + "b" * 64,
+        tool_registry_generation=6,
+        tool_set_id="toolset-v1-" + "c" * 64,
+        tool_names=("read_file",),
+        role_contract_version=1,
+        role_prompt_fingerprint=child_role_prompt_fingerprint(),
+        max_provider_invocations=24,
+        max_tool_requests=32,
+        max_output_tokens=1024,
+        deadline_seconds=300,
+        admitted_at=STAMP,
+    )
+    bound = ChildSessionBound(2, RUN_ID, admitted.child_session_id, 0, "/tmp/child.jsonl", STAMP)
+    request = ChildRunCancelRequested(
+        3,
+        RUN_ID,
+        None,
+        "no longer needed",
+        "host",
+        STAMP,
+    )
+    terminal = ChildRunCancelledTerminal(4, RUN_ID, None, 3, "cancelled", STAMP)
+    state = replay_child_run_records([header(), admitted, bound, request, terminal])
+    assert state.status is ChildRunStatus.CANCELLED
+    assert decode_child_run_record(encode_child_run_record(request)) == request
+    assert decode_child_run_record(encode_child_run_record(terminal)) == terminal
+
+
+def test_child_run_cancelling_and_interrupted_replay() -> None:
+    started = ChildRunStarted(
+        3,
+        RUN_ID,
+        "62345678-1234-4234-9234-123456789abc",
+        "72345678-1234-4234-9234-123456789abc",
+        STAMP,
+    )
+    request = ChildRunCancelRequested(4, RUN_ID, started.execution_id, "stop", "host", STAMP)
+    state = replay_child_run_records(
+        [
+            header(),
+            ChildRunAdmitted(
+                1,
+                RUN_ID,
+                SESSION_ID,
+                started.child_session_id,
+                "read-only",
+                "auto",
+                {"mode": "fake", "route_fingerprint": "a" * 64},
+                "registry-v1-" + "b" * 64,
+                6,
+                "toolset-v1-" + "c" * 64,
+                ("read_file",),
+                1,
+                child_role_prompt_fingerprint(),
+                24,
+                32,
+                1024,
+                300,
+                STAMP,
+            ),
+            ChildSessionBound(2, RUN_ID, started.child_session_id, 0, "/tmp/child.jsonl", STAMP),
+            started,
+            request,
+        ]
+    )
+    assert state.status is ChildRunStatus.CANCELLING
+    interrupted = ChildRunInterrupted(
+        5, RUN_ID, started.execution_id, "cancelling", "v2", "execution_abandoned", STAMP
+    )
+    assert (
+        replay_child_run_records([*state.records, interrupted]).status is ChildRunStatus.INTERRUPTED
+    )

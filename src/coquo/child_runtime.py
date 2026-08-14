@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+from threading import Event, Thread
+import time
 from typing import Mapping
 from uuid import uuid4
 
@@ -18,6 +20,7 @@ from coquo.core.extensions import ToolSetSnapshot
 from coquo.providers.manager import RuntimeStatus
 from coquo.session_records import BindingSnapshot
 from coquo.tools.catalog import select_tool_set
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
 
 CHILD_ROLE_CONTRACT_VERSION = 1
 CHILD_MAX_PROVIDER_INVOCATIONS = 24
@@ -208,7 +211,13 @@ class ChildRunExecutor:
         self.environment = environment if environment is not None else os.environ
         self.fake_provider_factory = fake_provider_factory
 
-    def run(self, child_run_id: str) -> object:
+    def run(
+        self,
+        child_run_id: str,
+        *,
+        cancellation: TurnCancellation | None = None,
+        deadline_poll_seconds: float = 0.1,
+    ) -> object:
         from coquo.child_run_records import ChildRunStatus
         from coquo.child_run_store import ChildRunStore, ChildRunStoreError
         from coquo.core.permissions import ApprovalMode, PermissionMode
@@ -219,87 +228,130 @@ class ChildRunExecutor:
         info = store.inspect(child_run_id)
         if info.status is not ChildRunStatus.READY or info.child_session_id is None:
             raise ChildRunStoreError("Child Run is not ready for execution")
+        if cancellation is not None and type(cancellation) is not TurnCancellation:
+            raise ValueError("Child turn cancellation token is invalid")
+        token = cancellation or TurnCancellation()
         lease = store.acquire_execution(child_run_id)
+        stop_watcher = Event()
+        watcher = None
+        execution_id = str(uuid4())
         try:
-            with store.open(child_run_id) as writer:
-                admitted = writer.state.admitted
-                if admitted is None or writer.state.session_bound is None:
-                    raise ChildRunStoreError("Child Run admission is incomplete")
-                execution_id = str(uuid4())
-                child_session = None
-                try:
-                    binding = admitted.provider_binding
-                    runtime_arguments = {
-                        "profile": binding.get("profile") or None,
-                        "model": (
-                            binding.get("selected_model")
-                            if binding.get("profile") is None
-                            else None
-                        ),
-                        "custom_protocol": (
-                            binding.get("protocol") if binding.get("profile") is None else None
-                        ),
-                        "custom_base_url": (
-                            binding.get("base_url") if binding.get("profile") is None else None
-                        ),
-                        "custom_api_key_env": (
-                            binding.get("credential_env")
-                            if binding.get("profile") is None
-                            else None
-                        ),
-                        "max_output_tokens": (
-                            admitted.max_output_tokens if binding.get("mode") != "fake" else None
-                        ),
-                    }
-                    child_session = ProjectSession.open(
-                        self.workspace,
-                        resume=admitted.child_session_id,
-                        environment=self.environment,
-                        fake_provider_factory=self.fake_provider_factory,
-                        permission_mode=PermissionMode.READ_ONLY,
-                        approval_mode=ApprovalMode.AUTO,
-                        publish_latest=False,
-                        child_mode=True,
-                        **runtime_arguments,
-                    )
-                    self._validate_route(admitted.provider_binding, child_session.status())
-                    writer.start(
-                        child_session_id=admitted.child_session_id,
+            info = store.inspect(child_run_id)
+            admitted = self._admitted(store, child_run_id)
+            if admitted is None or info.child_session_id is None:
+                raise ChildRunStoreError("Child Run admission is incomplete")
+            store.start_execution(
+                child_run_id,
+                child_session_id=info.child_session_id,
+                execution_id=execution_id,
+            )
+
+            def watch() -> None:
+                deadline = time.monotonic() + admitted.deadline_seconds
+                while not stop_watcher.wait(deadline_poll_seconds):
+                    try:
+                        current = store.inspect(child_run_id)
+                        if current.status.value == "cancelling":
+                            token.request()
+                            return
+                        if time.monotonic() >= deadline:
+                            try:
+                                store.request_cancel(
+                                    child_run_id,
+                                    reason="Child execution deadline reached",
+                                    source="deadline",
+                                )
+                            finally:
+                                token.request()
+                            return
+                    except BaseException:
+                        token.request()
+                        return
+
+            watcher = Thread(
+                target=watch, name=f"coquo-child-cancel-{child_run_id[:8]}", daemon=True
+            )
+            watcher.start()
+            child_session = None
+            try:
+                binding = admitted.provider_binding
+                runtime_arguments = {
+                    "profile": binding.get("profile") or None,
+                    "model": (
+                        binding.get("selected_model") if binding.get("profile") is None else None
+                    ),
+                    "custom_protocol": (
+                        binding.get("protocol") if binding.get("profile") is None else None
+                    ),
+                    "custom_base_url": (
+                        binding.get("base_url") if binding.get("profile") is None else None
+                    ),
+                    "custom_api_key_env": (
+                        binding.get("credential_env") if binding.get("profile") is None else None
+                    ),
+                    "max_output_tokens": (
+                        admitted.max_output_tokens if binding.get("mode") != "fake" else None
+                    ),
+                }
+                child_session = ProjectSession.open(
+                    self.workspace,
+                    resume=admitted.child_session_id,
+                    environment=self.environment,
+                    fake_provider_factory=self.fake_provider_factory,
+                    permission_mode=PermissionMode.READ_ONLY,
+                    approval_mode=ApprovalMode.AUTO,
+                    publish_latest=False,
+                    child_mode=True,
+                    **runtime_arguments,
+                )
+                self._validate_route(admitted.provider_binding, child_session.status())
+                result = child_session.prompt(
+                    build_child_role_prompt(info.objective, info.child_run_id),
+                    _enabled_tool_names=admitted.tool_names,
+                    cancellation=token,
+                )
+                child_info = SessionStore(self.workspace).inspect(admitted.child_session_id)
+                current = store.inspect(child_run_id)
+                if current.status.value == "cancelling" or token.requested:
+                    # A committed turn wins a late request; only an uncommitted
+                    # cooperative cancellation becomes terminal cancelled.
+                    if child_info.turn_count == 0:
+                        store.finish_cancelled(child_run_id)
+                        return store.inspect(child_run_id)
+                store.finish_completed(
+                    child_run_id,
+                    execution_id=execution_id,
+                    session_record_sequence=child_info.record_count - 1,
+                    assistant_text_sha256=hashlib.sha256(result.encode("utf-8")).hexdigest(),
+                )
+                return store.inspect(child_run_id)
+            except TurnCancelled:
+                store.finish_cancelled(child_run_id)
+                raise
+            except BaseException as error:
+                current = store.inspect(child_run_id)
+                if current.status.value in {"cancelling", "running"}:
+                    store.finish_failed(
+                        child_run_id,
                         execution_id=execution_id,
+                        phase="running",
+                        result_code="child_execution_failed",
+                        message=_safe_child_error(error),
                     )
-                    result = child_session.prompt(
-                        build_child_role_prompt(info.objective, info.child_run_id),
-                        _enabled_tool_names=admitted.tool_names,
-                    )
-                    child_info = SessionStore(self.workspace).inspect(admitted.child_session_id)
-                    writer.complete(
-                        execution_id=execution_id,
-                        session_record_sequence=child_info.record_count - 1,
-                        assistant_text_sha256=hashlib.sha256(result.encode("utf-8")).hexdigest(),
-                    )
-                    return writer.info
-                except BaseException as error:
-                    if writer.state.status in {ChildRunStatus.READY, ChildRunStatus.RUNNING}:
-                        writer.fail(
-                            execution_id=(
-                                execution_id
-                                if writer.state.status is ChildRunStatus.RUNNING
-                                else None
-                            ),
-                            phase=(
-                                "running"
-                                if writer.state.status is ChildRunStatus.RUNNING
-                                else "pre_start"
-                            ),
-                            result_code="child_execution_failed",
-                            message=_safe_child_error(error),
-                        )
-                    raise
-                finally:
-                    if child_session is not None:
-                        child_session.close()
+                raise
+            finally:
+                if child_session is not None:
+                    child_session.close()
         finally:
+            stop_watcher.set()
+            if watcher is not None:
+                watcher.join(max(0.1, deadline_poll_seconds * 2))
             lease.close()
+
+    @staticmethod
+    def _admitted(store, child_run_id: str):
+        with store.open(child_run_id) as writer:
+            return writer.state.admitted
 
     @staticmethod
     def _validate_route(expected: Mapping[str, object], status) -> None:

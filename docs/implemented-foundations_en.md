@@ -438,6 +438,8 @@ Production `run_command` now always executes through fixed `/usr/bin/bwrap`. The
 
 This Host cannot reliably create a network namespace, so it generates a BPF filter through `libseccomp.so.2` and has bubblewrap install it after mount/namespace setup. The filter denies `socket`, `socketcall` when available, and `io_uring_setup`, blocking both Internet and Unix-domain socket creation. Bubblewrap must produce private `--info-fd` activation evidence, while `--block-fd` prevents requested argv from starting before Host validation and release. Missing Linux support, fixed bwrap, libseccomp, filter setup, spawn, or activation returns `command_sandbox_unavailable`; the original argv is never retried directly on the Host.
 
+Dependency readiness now also reads fixed `/usr/bin/bwrap --help` under a closed environment, a two-second timeout, and a 64 KiB output limit, and requires every ADR 0080 option: `--disable-userns`, `--block-fd`, `--info-fd`, and `--seccomp`. An older bubblewrap missing any required capability is reported unavailable before a user command is attempted. Production launch arguments never degrade, and real sandbox tests run only when the same production activation probe is available. This Host-only correction changes no tool, permission, Session, prompt, provider, or Effective Context contract. See [0137: Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md).
+
 PermissionGate remains orthogonal: `run_command` still proceeds only within `danger-full-access` under ask or auto, and approval never disables sandboxing. Direct argv, `shell=False`, closed stdin/environment, the 1-to-300-second timeout, independent 32 KiB stdout/stderr retention, continuous drain, cancellation, and TERM-to-KILL process-group cleanup remain. Tool name, order, schema, provider projection, adapter contract v25, ToolArguments v1, ActionIdentity v1, Action Audit, and Session schemas do not change. The model-visible guarantee advances the system prompt to v22 and updates the current empty full-context identity to `ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`. See [0080: Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md).
 
 ## Host Workbench Diagnostics and Prompt History Search
@@ -1338,6 +1340,10 @@ Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks t
 131. [0131: Child Admission and Detached Session Binding](./decisions/0131-child-admission-and-detached-session.md)
 132. [0132: One-Shot Child Foreground Execution](./decisions/0132-child-foreground-execution.md)
 133. [0133: Process-Local Child Run Supervision](./decisions/0133-child-process-local-supervision.md)
+134. [0134: Child Cancellation, Bounded Wait, and Restart Recovery](./decisions/0134-child-cancellation-wait-and-restart-recovery.md)
+135. [0135: Evidence-Backed Child Handoff and Parent Delivery](./decisions/0135-evidence-backed-child-handoff-and-parent-delivery.md)
+136. [0136: Model Child Delegation Controls](./decisions/0136-model-child-delegation-controls.md)
+137. [0137: Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)
 
 ## Shared Agent Runtime and Durable Child Run Foundation
 
@@ -1357,6 +1363,12 @@ creates a detached Child Session without changing `latest`, and derives
 failures are bounded and durable, and exact partial creation states are safe to
 retry.
 
+An ordinary parent Turn now sees `child_spawn`, `child_status`, `child_wait`, and `child_cancel` at the fixed catalog tail. Each control must be the only call in its assistant response, but success does not force final text; the parent may continue useful work or observe another Child in a later response. A Turn may successfully spawn at most four Children, and waits reserve at most 30 seconds per request and 60 seconds cumulatively. Every Child retains the A3 fixed read-only tools, one Turn, and depth one, with no write, command, network, MCP, Skill/Task control, or recursive delegation.
+
+Delegation approval is separate from the Action PermissionGate. Under `ask`, the Host displays the exact objective, redacted route/model, tools, budgets, process-local limitation, and additional Provider-cost warning before creation; `auto` removes only the interaction. The parent Session first persists a content-free `child_delegation_decided`; after acceptance, the Child ledger is atomically created with its header and `child_run_delegated` before normal admission. Rejection or cancellation creates no Child or detached Session. Status, wait, and cancel validate durable parent ownership each time; a terminal wait delivers the A7 handoff through a normal ToolResult, and a later parent Turn failure does not roll back real Child effects.
+
+The model contract advances atomically to Registry generation 7, system prompt v45, provider adapter v46, and Effective Context v23/v24, while v21/v22 remain strict legacy representations. Child, Task Stage, and compact-summary requests exclude the four controls. A deterministic fake path spawns two real Children in one parent Turn, continues parent tool work, waits for and delivers both handoffs, and strictly replays the parent and both detached Child Sessions. See [0136](./decisions/0136-model-child-delegation-controls.md).
+
 `child run <id>` now acquires an independent execution lease for a `ready`
 Child, reconstructs its redacted Provider route, and runs one read-only Turn
 through the same `AgentRuntimeFactory -> AgentRuntime -> AgentLoop` path. A
@@ -1371,13 +1383,22 @@ Session. Each worker calls the same A4 executor without sharing the parent
 writer, Provider manager, or runtime state. The parent can commit its own
 prompt while Children run. Worker failures are isolated and publish only a
 bounded volatile notification; the durable Child ledger remains authoritative.
-Close performs only a short bounded join and does not promise work survives
-process exit. Cancellation/wait/join, restart recovery, handoff, messaging,
-and Teams remain later execution slices. See [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md),
+Close performs a total bounded join of at most one second and never fabricates a terminal state.
+Running cancellation is durably recorded before cooperative signaling; a blocked Provider leaves
+the run `cancelling`. `wait` replays durable state only. New executions use a persistent v2 OS
+lifetime lock, and startup or explicit `child recover` marks abandoned `running`/`cancelling`
+work `interrupted` only after acquiring that lock. Legacy v1 sentinels cannot prove owner death
+and remain fail-closed for human investigation.
+
+Every terminal Child may now append one schema-v1 `child_run_handoff_published` record. A completed handoff uses `committed_turn()` and `turn_evidence()` to bind the exact Child Turn sequence, raw-record SHA-256, and assistant-text digest. Its body is bounded by both 32 KiB characters and UTF-8 bytes with an explicit truncation marker. Failed, cancelled, interrupted, and preparation-failed Children generate only a Host summary containing the stable outcome and result code; objective text, Provider errors, and tracebacks are not copied. An identical publication is idempotent, a different one conflicts, and reading an already-published completed handoff revalidates its Child Session evidence.
+
+`child_handoff_delivered` is a content-free schema-v1 audit receipt in the parent Session containing only parent/Child identity, terminal sequence, handoff digest, source, and optional ToolUse ID. The Host durably commits the receipt before rendering the body; a standalone audit writer adds no `session_resumed` and does not update `latest`. Receipts enter neither history, Effective Context, usage, tool ledgers, compaction, export, nor fork, and workers never hold the parent writer. An uncertain Child or Session fsync poisons that writer and requires inspection instead of blind retry. This Host-only A7 capability changes no Tool Registry, system prompt, Provider contract, or Effective Context version; model delegation controls, messaging, and Teams remain later slices. See [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md),
 [ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md), and
 [ADR 0131](./decisions/0131-child-admission-and-detached-session.md),
-[ADR 0132](./decisions/0132-child-foreground-execution.md), and
-[ADR 0133](./decisions/0133-child-process-local-supervision.md).
+[ADR 0132](./decisions/0132-child-foreground-execution.md),
+[ADR 0133](./decisions/0133-child-process-local-supervision.md),
+[ADR 0134](./decisions/0134-child-cancellation-wait-and-restart-recovery.md), and
+[ADR 0135](./decisions/0135-evidence-backed-child-handoff-and-parent-delivery.md).
 
 1. [0001: Foundation 0 single-turn loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002: Foundation 0 deterministic REPL](./decisions/0002-foundation-0-deterministic-repl.md)

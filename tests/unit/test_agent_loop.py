@@ -14,6 +14,7 @@ from coquo.agent.task_control import (
     TaskControlProposal,
     TaskProposalKind,
 )
+from coquo.agent.child_control import ChildControlDispatchResult
 from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
@@ -54,6 +55,11 @@ from coquo.tools.catalog import (
     MAX_TOOL_REQUESTS_PER_TURN,
     TOOL_REGISTRY_SNAPSHOT,
 )
+
+
+def _registry_with_child_controls() -> ToolRegistrySnapshot:
+    return TOOL_REGISTRY_SNAPSHOT
+
 
 _TASK_ID = "11111111-1111-4111-8111-111111111111"
 _STAGE_ID = "22222222-2222-4222-8222-222222222222"
@@ -178,6 +184,10 @@ def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
         "task_confirm_completion",
         "skill_propose_create",
         "skill_accept_create",
+        "child_spawn",
+        "child_status",
+        "child_wait",
+        "child_cancel",
     ]
     assert provider.received_requests[1].history[-1] == ToolResult("glob-1", "src/app.py\n")
     assert provider.received_requests[2].history[-1] == ToolResult("grep-1", grep_result)
@@ -1686,7 +1696,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v21-")
+    assert proposals[0].context_id.startswith("ctx-v23-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None
@@ -1769,3 +1779,69 @@ def test_task_control_call_must_be_the_only_call_in_its_response(tmp_path) -> No
 
     assert dispatched == []
     assert loop.history == ()
+
+
+def test_child_control_uses_normal_ledger_and_does_not_force_final(tmp_path) -> None:
+    first = ToolUse(
+        "child-control-1",
+        "child_status",
+        ToolArguments.from_mapping({"child_run_id": "42345678-1234-4234-9234-123456789abc"}),
+    )
+    second = ToolUse(
+        "child-control-2",
+        "child_status",
+        ToolArguments.from_mapping({"child_run_id": "52345678-1234-4234-9234-123456789abc"}),
+    )
+    provider = ScriptedFakeProvider([first, second, AssistantText("both observed")])
+    committed: list[CommittedTurn] = []
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
+        tool_registry_factory=_registry_with_child_controls,
+    )
+    calls: list[str] = []
+
+    def dispatch(request, _context_id):
+        calls.append(request.tool_use_id)
+        return ChildControlDispatchResult(
+            ToolDispatchResult(
+                ToolResult(request.tool_use_id, '{"status":"running"}'),
+                ToolEventStatus.SUCCEEDED,
+                "child_observed",
+            )
+        )
+
+    loop.install_child_control_dispatcher(("child_status",), dispatch)
+    prepared = loop.prepare_turn("observe", enabled_tool_names=("child_status",))
+    assert loop.run_prepared(prepared, provider=provider) == "both observed"
+    assert calls == ["child-control-1", "child-control-2"]
+    assert len(provider.received_requests) == 3
+    assert [entry.tool_use_id for entry in committed[0].tool_ledger.entries] == calls
+
+
+def test_child_control_call_must_be_isolated(tmp_path) -> None:
+    control = ToolUse(
+        "child-control-1",
+        "child_status",
+        ToolArguments.from_mapping({"child_run_id": "42345678-1234-4234-9234-123456789abc"}),
+    )
+    read = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "x"}))
+    loop = AgentLoop(
+        ScriptedFakeProvider([AssistantToolBatch((control, read))]),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        tool_registry_factory=_registry_with_child_controls,
+    )
+    loop.install_child_control_dispatcher(
+        ("child_status",),
+        lambda _request, _context_id: (_ for _ in ()).throw(AssertionError()),
+    )
+    prepared = loop.prepare_turn("observe", enabled_tool_names=("read_file", "child_status"))
+    with pytest.raises(TaskControlProtocolError, match="only call"):
+        loop.run_prepared(prepared, provider=loop._provider)

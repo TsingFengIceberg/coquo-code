@@ -6,10 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID, uuid4
+from typing import TypeAlias
 
 from coquo.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
 from coquo.core.actions import ActionIdentity
 from coquo.core.approvals import ApprovalGrant
+from coquo.core.delegation_approval import DelegationApprovalRequest
 from coquo.core.contracts import ToolResult
 from coquo.core.permissions import (
     ApprovalMode,
@@ -90,7 +92,8 @@ class ActionIdentityChangedError(RuntimeError):
     """Raised when the prepared exact action is stale before durable execution start."""
 
 
-ApprovalHandler = Callable[[HumanApprovalRequest], ApprovalResolution]
+ApprovalPromptRequest: TypeAlias = HumanApprovalRequest | DelegationApprovalRequest
+ApprovalHandler = Callable[[ApprovalPromptRequest], ApprovalResolution]
 ActionRevalidator = Callable[[ActionIdentity], ActionIdentity]
 ActionExecutor = Callable[[ActionIdentity], ActionExecutionResult]
 UuidFactory = Callable[[], UUID | str]

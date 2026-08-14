@@ -57,7 +57,7 @@ def test_empty_effective_context_is_stable_and_has_no_synthetic_user() -> None:
     assert first.context_id == second.context_id
     assert (
         first.context_id
-        == "ctx-v21-6fd01fe9f1ff8e598e32bc50d76b9b970a2048defde1e63525bf9ecdf6703037"
+        == "ctx-v23-1dd447a69f2e12c9970ba04986551672d1d298a87879cb28475156eaeb31a13a"
     )
     assert first.full_turn_count == first.effective_turn_count == 0
     assert first.full_item_count == first.effective_item_count == 0
@@ -297,6 +297,24 @@ def test_legacy_hook_v2_context_remains_strictly_readable() -> None:
         replace(legacy, hook_set_id=HOOK_SET_ID)
 
 
+def test_pre_child_control_context_versions_remain_strictly_readable() -> None:
+    full = replace(snapshot(), representation_version=21)
+    assert full.context_id.startswith("ctx-v21-")
+    compact = EffectiveContextSnapshot(
+        representation_version=22,
+        source=EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
+        system_prompt=full.system_prompt,
+        tool_definitions=full.tool_definitions,
+        tool_set_id=full.tool_set_id,
+        skill_inventory_id=full.skill_inventory_id,
+        hook_set_id=full.hook_set_id,
+        full_history=(UserMessage("one"), AssistantText("done")),
+        effective_history=(),
+        effective_summary=EffectiveContextSummary("Earlier: one"),
+    )
+    assert compact.context_id.startswith("ctx-v22-")
+
+
 def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None:
     full = (
         UserMessage("one"),
@@ -320,7 +338,7 @@ def test_compacted_context_identity_covers_summary_and_retained_suffix() -> None
         effective_summary=summary,
     )
 
-    assert context.context_id.startswith("ctx-v22-")
+    assert context.context_id.startswith("ctx-v24-")
     assert context.full_turn_count == 3
     assert context.effective_turn_count == 2
     assert context.to_conversation_request().effective_summary == summary

@@ -13,7 +13,7 @@ from coquo.providers.native_search import (
 )
 
 
-ADAPTER_CONTRACT_VERSION = 45
+ADAPTER_CONTRACT_VERSION = 46
 
 
 class WireProtocol(StrEnum):

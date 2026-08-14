@@ -80,7 +80,7 @@ def test_supervisor_starts_four_workers_and_queues_fifth(tmp_path) -> None:
     while monotonic() < deadline and supervisor.queued_count:
         pass
     supervisor.close()
-    assert store.inspect(ids[0]).status is ChildRunStatus.READY
+    assert store.inspect(ids[0]).status in {ChildRunStatus.READY, ChildRunStatus.CANCELLED}
 
 
 def test_supervisor_rejects_unprepared_run_and_reports_failure(tmp_path) -> None:
@@ -128,7 +128,10 @@ def test_worker_failure_isolated_and_notification_is_bounded(tmp_path) -> None:
     assert [item.child_run_id for item in notifications] == ids
     assert all(item.status is ChildRunStatus.READY for item in notifications)
     assert all(item.message == "planned worker failure" for item in notifications)
-    assert all(store.inspect(child_id).status is ChildRunStatus.READY for child_id in ids)
+    assert all(
+        store.inspect(child_id).status in {ChildRunStatus.READY, ChildRunStatus.CANCELLED}
+        for child_id in ids
+    )
 
 
 def test_parent_session_can_commit_while_child_worker_is_active(tmp_path) -> None:
@@ -197,6 +200,34 @@ def test_supervisor_rejects_queue_overflow(tmp_path) -> None:
     with pytest.raises(ChildSupervisorError, match="queue is full"):
         supervisor.submit(ids[2])
     release.set()
+    supervisor.close()
+
+
+def test_supervisor_wait_timeout_and_cancel_active_worker(tmp_path) -> None:
+    _store, ids = prepared_runs(tmp_path, 1)
+    started = Event()
+    release = Event()
+
+    class CancellableExecutor:
+        def run(self, _child_run_id: str, *, cancellation=None):
+            started.set()
+            while not release.is_set():
+                if cancellation is not None and cancellation.requested:
+                    return
+                release.wait(0.01)
+
+    supervisor = ChildRunSupervisor(
+        tmp_path,
+        executor_factory=lambda _child_id: CancellableExecutor(),
+        worker_count=1,
+    )
+    supervisor.submit(ids[0])
+    assert started.wait(timeout=2)
+    assert supervisor.wait(ids[0], 0).status is ChildRunStatus.READY
+    cancelling = supervisor.cancel(ids[0], "stop")
+    assert cancelling.status is ChildRunStatus.CANCELLED
+    release.set()
+    assert supervisor.wait(ids[0], 2).status is ChildRunStatus.CANCELLED
     supervisor.close()
 
 

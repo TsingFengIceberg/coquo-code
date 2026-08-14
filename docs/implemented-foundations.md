@@ -438,6 +438,8 @@ ToolArguments保持v1，new `turn_committed`保持schema v2，ActionIdentity与A
 
 本机无法可靠创建network namespace，因此Host用`libseccomp.so.2`生成BPF，在bubblewrap完成mount/namespace setup后禁止`socket`、可用时的`socketcall`及`io_uring_setup`。这同时拒绝Internet与Unix-domain socket创建。Bubblewrap必须通过私有`--info-fd`提供activation evidence，`--block-fd`会在Host验证并放行前阻止请求argv启动；Linux、固定bwrap、libseccomp、filter、spawn或activation任一步不可用都返回`command_sandbox_unavailable`，绝不把原argv降级为Host直接执行。
 
+依赖readiness现在还会以closed environment、2秒timeout和64 KiB输出上限读取固定`/usr/bin/bwrap --help`，并要求ADR 0080使用的`--disable-userns`、`--block-fd`、`--info-fd`与`--seccomp`全部存在。缺少任何必需能力的旧版bwrap在执行用户命令前即报告unavailable；生产launch参数不降级，真实沙箱测试仅在同一生产activation probe可用时运行。这个Host-only修正不改变tool、permission、Session、prompt、provider或Effective Context合同。见[0137：Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)。
+
 PermissionGate保持正交：`run_command`仍只在`danger-full-access`范围内按ask/auto继续，approval不关闭沙箱。Direct argv、`shell=False`、closed stdin/environment、1–300秒timeout、stdout/stderr各32 KiB retention、持续drain、取消与TERM到KILL process-group cleanup均保持。工具名、顺序、schema、provider projection、adapter contract v25、ToolArguments v1、ActionIdentity v1、Action Audit与Session schema均不变；模型可见保证使system prompt升级到v22，current empty full-context identity更新为`ctx-v3-a28664ae5f5143fac7e7b5936d78cb59c31643eb1a07eb7f41d73167625d67f8`。完整决策见[0080：Fail-closed Linux Command Sandbox](./decisions/0080-fail-closed-linux-command-sandbox.md)。
 
 ## Host Workbench Diagnostics 与 Prompt History Search
@@ -1338,6 +1340,10 @@ Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks templat
 131. [0131：Child Admission and Detached Session Binding](./decisions/0131-child-admission-and-detached-session.md)
 132. [0132：One-Shot Child Foreground Execution](./decisions/0132-child-foreground-execution.md)
 133. [0133：Process-Local Child Run Supervision](./decisions/0133-child-process-local-supervision.md)
+134. [0134：Child Cancellation, Bounded Wait, and Restart Recovery](./decisions/0134-child-cancellation-wait-and-restart-recovery.md)
+135. [0135：Evidence-Backed Child Handoff and Parent Delivery](./decisions/0135-evidence-backed-child-handoff-and-parent-delivery.md)
+136. [0136：Model Child Delegation Controls](./decisions/0136-model-child-delegation-controls.md)
+137. [0137：Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)
 
 ## Shared Agent Runtime 与 Durable Child Run Foundation
 
@@ -1353,6 +1359,12 @@ Child Run 已有独立 workspace-bound JSONL ledger。Host 可以创建、查看
 并将状态推进到 `ready`；它不调用 Provider，也不写入父 Session。准备失败会
 以有界原因持久化为 `failed`，精确的部分创建状态可安全重试。
 
+普通父Turn现在会在固定catalog末尾看到`child_spawn`、`child_status`、`child_wait`与`child_cancel`。每个控制必须独占一次assistant response，但成功后不会强制final；父Agent可以继续工作或在后续response观察另一个Child。每Turn最多成功spawn四个Child，每次wait最多30秒且累计预留最多60秒。Child仍使用A3固定只读工具、一个Turn和depth one，不含写、命令、网络、MCP、Skill/Task控制或递归委派。
+
+委派审批独立于Action PermissionGate。`ask`在创建前展示精确objective、脱敏route/model、工具、预算、process-local限制与额外Provider成本；`auto`只移除交互。父Session先持久化不含objective正文的`child_delegation_decided`，接受后Child ledger才以header和`child_run_delegated`原子创建，再进入原有admission；拒绝或取消不会创建Child或detached Session。status/wait/cancel每次验证durable parent ownership，终态wait通过普通ToolResult交付A7 handoff，父Turn后来失败也不回滚已经发生的Child效果。
+
+模型契约整体迁移为Registry generation 7、system prompt v45、provider adapter v46及Effective Context v23/v24；v21/v22保持严格legacy读取。Child、Task Stage与compact summary不暴露四个控制。确定性fake路径已在一个父Turn内spawn两个真实Child、继续父工具工作、wait/deliver两个handoff，并严格回放父Session及两个detached Child Sessions。完整决策见[0136](./decisions/0136-model-child-delegation-controls.md)。
+
 `child run <id>` 现在会为 `ready` Child 获取独立执行租约，重建脱敏 Provider 路由，
 通过同一 `AgentRuntimeFactory -> AgentRuntime -> AgentLoop` 路径执行一个只读 Turn，
 并在 Child Session Turn durable commit 后记录 `completed`；路由/构造/执行失败会
@@ -1363,13 +1375,22 @@ REPL现在可用`/child start <id>`将`ready` Child提交到当前进程内的bo
 Supervisor最多启动4个daemon worker、最多保留32个排队项，并按父Session绑定校验归属；
 每个worker继续调用同一个A4 executor且不共享父writer、Provider manager或runtime状态。
 父Session可以在Child运行时继续提交自己的prompt。worker失败只隔离到该Child并发布有界
-volatile notification，durable Child ledger仍是唯一状态来源；关闭时只做短暂bounded join，
-不承诺进程退出后继续运行。取消/wait/join、restart recovery、handoff、消息和Team仍属于后续执行切片。详见
+volatile notification，durable Child ledger仍是唯一状态来源；关闭时只做总计不超过1秒的
+bounded join。运行中的取消先落盘`cancel_requested`再协作式通知，Provider阻塞时保持
+`cancelling`；`wait`只回放durable状态，关闭时会请求取消但不会伪造终态。新执行使用持久化
+v2 OS lifetime lock，启动或显式`child recover`只在成功取得该锁时把遗留的`running/cancelling`
+标记为`interrupted`；旧v1 sentinel无法证明owner死亡，保持fail-closed。
+
+每个终态Child现在可以追加一个`child_run_handoff_published` schema-v1 record。completed handoff通过`committed_turn()`和`turn_evidence()`绑定精确Child Turn序号、原始record SHA-256与assistant text digest；正文同时受32 KiB字符和UTF-8字节边界约束，截断带明确marker。failed、cancelled、interrupted及准备失败只生成含稳定outcome/result code的Host摘要，不复制objective、Provider error或traceback。重复相同publication幂等，不同publication冲突，已发布completed handoff读取时仍会重新验证Child Session证据。
+
+`child_handoff_delivered`是父Session中的content-free schema-v1 audit receipt，只保存父/Child身份、终态序号、handoff digest、source和可选ToolUse ID。Host必须先durably提交receipt再展示正文；standalone audit writer不会追加`session_resumed`或更新`latest`。receipt不进入history、Effective Context、usage、tool ledger、compaction、export或fork，worker也从不持有父writer。Session或Child append发生fsync不确定后，对应writer会poison并要求inspection，不能盲重试。本A7 Host-only能力不改变Tool Registry、system prompt、Provider contract或Effective Context版本；模型侧委派控制、消息和Team仍属于后续切片。详见
 [ADR 0129](./decisions/0129-shared-agent-runtime-assembly-boundary.md)、
 [ADR 0130](./decisions/0130-durable-child-run-identity-and-state.md) 与
 [ADR 0131](./decisions/0131-child-admission-and-detached-session.md)、
-[ADR 0132](./decisions/0132-child-foreground-execution.md) 与
-[ADR 0133](./decisions/0133-child-process-local-supervision.md)。
+[ADR 0132](./decisions/0132-child-foreground-execution.md)、
+[ADR 0133](./decisions/0133-child-process-local-supervision.md)、
+[ADR 0134](./decisions/0134-child-cancellation-wait-and-restart-recovery.md) 与
+[ADR 0135](./decisions/0135-evidence-backed-child-handoff-and-parent-delivery.md)。
 
 1. [0001：Foundation 0 单轮 Loop](./decisions/0001-foundation-0-single-turn-loop.md)
 2. [0002：Foundation 0 确定性 REPL](./decisions/0002-foundation-0-deterministic-repl.md)

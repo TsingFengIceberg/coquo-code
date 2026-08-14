@@ -34,6 +34,7 @@ from coquo.agent.task_control import (
     TaskProposal,
     TaskProposalSink,
 )
+from coquo.agent.child_control import ChildControlDispatcher, ChildControlDispatchResult
 from coquo.core.actions import ActionLease
 from coquo.core.compaction import EffectiveContextSummary
 from coquo.core.cancellation import TurnCancellation
@@ -384,6 +385,8 @@ class AgentLoop:
         self._action_dispatcher = action_dispatcher
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
+        self._child_control_names: frozenset[str] = frozenset()
+        self._child_control_dispatcher: ChildControlDispatcher | None = None
         self._tool_set_transition_dispatcher: ToolSetTransitionDispatcher | None = None
 
     @property
@@ -730,6 +733,13 @@ class AgentLoop:
                 )
             if control_requests and task_proposal_sink is None:
                 raise TaskControlProtocolError("coordination control tool requires a proposal sink")
+            child_control_requests = tuple(
+                request for request in requests if request.name in self._child_control_names
+            )
+            if child_control_requests and len(requests) != 1:
+                raise TaskControlProtocolError(
+                    "Child control tool must be the only call in its assistant response"
+                )
             discovery_requests = tuple(
                 request
                 for request in requests
@@ -849,6 +859,8 @@ class AgentLoop:
                         dispatch = control.dispatch
                         pending_task_proposal = control.proposal
                         force_final = True
+                    elif request.name in self._child_control_names:
+                        dispatch = self._execute_child_control(request, context.context_id).dispatch
                     elif contract.execution_kind is ToolExecutionKind.TOOL_DISCOVERY:
                         if request.name == SKILL_LOAD_TOOL_NAME:
                             skill_load_attempts += 1
@@ -1039,6 +1051,30 @@ class AgentLoop:
             raise ValueError("coordination control dispatcher is invalid")
         self._task_control_names = frozenset(tool_names)
         self._task_control_dispatcher = dispatcher
+
+    def install_child_control_dispatcher(
+        self,
+        tool_names: tuple[str, ...],
+        dispatcher: ChildControlDispatcher,
+    ) -> None:
+        """Install one non-Action Child-control boundary exactly once."""
+        if self._child_control_dispatcher is not None or self._child_control_names:
+            raise ValueError("Child control dispatcher is already installed")
+        registry = self._tool_registry_factory()
+        if not isinstance(registry, ToolRegistrySnapshot):
+            raise ValueError("tool registry factory returned an invalid snapshot")
+        available = set(registry.names)
+        if (
+            not isinstance(tool_names, tuple)
+            or not tool_names
+            or len(set(tool_names)) != len(tool_names)
+            or any(name not in available for name in tool_names)
+        ):
+            raise ValueError("Child control tool names are invalid")
+        if not callable(dispatcher):
+            raise ValueError("Child control dispatcher is invalid")
+        self._child_control_names = frozenset(tool_names)
+        self._child_control_dispatcher = dispatcher
 
     def install_tool_set_transition_dispatcher(
         self,
@@ -1538,6 +1574,17 @@ class AgentLoop:
             raise ValueError("coordination control dispatcher returned an invalid result")
         if result.proposal is not None and result.proposal.context_id != context_id:
             raise ValueError("coordination proposal context does not match prepared turn")
+        return result
+
+    def _execute_child_control(
+        self, request: ToolUse, context_id: str
+    ) -> ChildControlDispatchResult:
+        dispatcher = self._child_control_dispatcher
+        if dispatcher is None:
+            raise RuntimeError("Child control dispatcher is not installed")
+        result = dispatcher(request, context_id)
+        if type(result) is not ChildControlDispatchResult:
+            raise ValueError("Child control dispatcher returned an invalid result")
         return result
 
     @staticmethod
