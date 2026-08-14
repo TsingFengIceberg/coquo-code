@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import os
 import stat
@@ -21,6 +22,7 @@ from coquo.child_run_records import (
     MAX_CHILD_RUN_TRANSCRIPT_BYTES,
     ChildRunCancelled,
     ChildRunDelegated,
+    ChildRunTeamAssignment,
     ChildRunAdmitted,
     ChildRunHeader,
     ChildSessionBound,
@@ -39,6 +41,7 @@ from coquo.child_run_records import (
     canonical_child_run_id,
     canonical_child_run_objective,
     canonical_child_run_reason,
+    canonical_child_run_timestamp,
     decode_child_run_record,
     encode_child_run_record,
     replay_child_run_records,
@@ -99,6 +102,7 @@ class ChildRunInfo:
     interrupted_result_code: str | None = None
     handoff: ChildRunHandoffPublished | None = None
     delegated: ChildRunDelegated | None = None
+    team_assignment: ChildRunTeamAssignment | None = None
 
 
 _ACTIVE_WRITERS: set[str] = set()
@@ -179,6 +183,83 @@ class ChildRunStore:
         self._ensure_root()
         path = self.root / f"{child_run_id}.jsonl"
         _install_child_run_transcript(path, payload)
+        return _child_run_info(path, state)
+
+    def create_for_team(
+        self,
+        objective: str,
+        *,
+        child_run_id: str,
+        parent_session: str,
+        team_id: str,
+        member_id: str,
+        assignment_id: str,
+        assigned_at: str,
+    ) -> ChildRunInfo:
+        """Atomically create or exactly revalidate one Team-origin Child Run."""
+        try:
+            canonical_objective = canonical_child_run_objective(objective)
+            parent = SessionStore(self.workspace).inspect(parent_session)
+            parent_session_id = canonical_session_id(parent.session_id)
+            child_id = canonical_child_run_id(child_run_id)
+            canonical_team = canonical_child_run_id(team_id)
+            canonical_member = canonical_child_run_id(member_id)
+            canonical_assignment = canonical_child_run_id(assignment_id)
+            canonical_assigned_at = canonical_child_run_timestamp(assigned_at, "assigned_at")
+        except (ChildRunRecordError, SessionStoreError) as error:
+            raise ChildRunStoreError(str(error)) from None
+        objective_sha256 = hashlib.sha256(canonical_objective.encode("utf-8")).hexdigest()
+        header = ChildRunHeader(
+            sequence=0,
+            child_run_id=child_id,
+            workspace=str(self.workspace),
+            workspace_fingerprint=self.workspace_fingerprint,
+            parent_session_id=parent_session_id,
+            objective=canonical_objective,
+            created_at=canonical_assigned_at,
+        )
+        origin = ChildRunTeamAssignment(
+            sequence=1,
+            child_run_id=child_id,
+            parent_session_id=parent_session_id,
+            team_id=canonical_team,
+            member_id=canonical_member,
+            assignment_id=canonical_assignment,
+            objective_sha256=objective_sha256,
+            assigned_at=canonical_assigned_at,
+        )
+        records: list[ChildRunRecord] = [header, origin]
+        path = self.root / f"{child_id}.jsonl"
+        if path.exists() or path.is_symlink():
+            try:
+                existing = self._load_state(path)
+            except (ChildRunStoreError, OSError) as error:
+                raise ChildRunStoreError(
+                    f"existing Child Run at {child_id} is not an exact Team-origin transcript: {error}"
+                ) from None
+            if (
+                existing.header != header
+                or existing.team_assignment != origin
+                or existing.delegated is not None
+            ):
+                raise ChildRunStoreError(
+                    f"existing Child Run at {child_id} conflicts with Team assignment"
+                )
+            return _child_run_info(path, existing)
+        state = self._replay(path, records)
+        payload = b"".join(encode_child_run_record(record) for record in records)
+        self._ensure_root()
+        try:
+            _install_child_run_transcript(path, payload)
+        except ChildRunCreateCommitError as error:
+            if error.child_run_visible:
+                try:
+                    existing = self._load_state(path)
+                except ChildRunStoreError:
+                    raise
+                if existing.header == header and existing.team_assignment == origin:
+                    return _child_run_info(path, existing)
+            raise
         return _child_run_info(path, state)
 
     def inspect(self, child_run_id: str) -> ChildRunInfo:
@@ -898,6 +979,7 @@ def _child_run_info(path: Path, state: ChildRunReplayState) -> ChildRunInfo:
         ),
         handoff=state.handoff,
         delegated=state.delegated,
+        team_assignment=state.team_assignment,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 
 import pytest
 
@@ -9,6 +10,7 @@ from coquo.child_run_records import (
     ChildRunCompleted,
     ChildRunCancelled,
     ChildRunDelegated,
+    ChildRunTeamAssignment,
     ChildRunFailed,
     ChildRunCancelRequested,
     ChildRunCancelledTerminal,
@@ -72,6 +74,25 @@ def test_model_delegation_prefix_round_trip_and_legacy_admission_compatibility()
     assert replay_child_run_records([header(), delegated, cancelled]).status is (
         ChildRunStatus.CANCELLED
     )
+
+
+def test_team_assignment_prefix_round_trip_and_digest_binding() -> None:
+    origin = ChildRunTeamAssignment(
+        sequence=1,
+        child_run_id=RUN_ID,
+        parent_session_id=SESSION_ID,
+        team_id="62345678-1234-4234-9234-123456789abc",
+        member_id="72345678-1234-4234-9234-123456789abc",
+        assignment_id="82345678-1234-4234-9234-123456789abc",
+        objective_sha256=hashlib.sha256(header().objective.encode("utf-8")).hexdigest(),
+        assigned_at=STAMP,
+    )
+    state = replay_child_run_records([header(), origin])
+    assert state.team_assignment == origin
+    assert state.delegated is None
+    assert decode_child_run_record(encode_child_run_record(origin)) == origin
+    with pytest.raises(ChildRunRecordError, match="objective"):
+        replay_child_run_records([header(), replace(origin, objective_sha256="a" * 64)])
 
 
 def test_child_run_delegation_must_be_exactly_between_header_and_admission() -> None:

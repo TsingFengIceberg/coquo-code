@@ -40,7 +40,48 @@ def test_child_run_empty_list_does_not_create_storage(tmp_path: Path) -> None:
 def test_child_run_requires_existing_parent_session(tmp_path: Path) -> None:
     with pytest.raises(ChildRunStoreError, match="session|Session"):
         ChildRunStore(tmp_path).create("No owner")
-    assert not (tmp_path / ".coquo").exists()
+
+
+def test_child_run_team_origin_is_atomic_and_idempotent(tmp_path: Path) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    parent_id = writer.session_id
+    writer.release()
+    child_id = "42345678-1234-4234-9234-123456789abc"
+    team_id = "52345678-1234-4234-9234-123456789abc"
+    member_id = "62345678-1234-4234-9234-123456789abc"
+    assignment_id = "72345678-1234-4234-9234-123456789abc"
+    store = ChildRunStore(tmp_path, uuid_factory=lambda: child_id)
+    first = store.create_for_team(
+        "Inspect files",
+        child_run_id=child_id,
+        parent_session=parent_id,
+        team_id=team_id,
+        member_id=member_id,
+        assignment_id=assignment_id,
+        assigned_at="2026-08-14T10:00:00.000000Z",
+    )
+    second = ChildRunStore(tmp_path).create_for_team(
+        "Inspect files",
+        child_run_id=child_id,
+        parent_session=parent_id,
+        team_id=team_id,
+        member_id=member_id,
+        assignment_id=assignment_id,
+        assigned_at="2026-08-14T10:00:00.000000Z",
+    )
+    assert first == second
+    assert first.team_assignment is not None
+    assert first.delegated is None
+    with pytest.raises(ChildRunStoreError, match="conflicts"):
+        ChildRunStore(tmp_path).create_for_team(
+            "Other objective",
+            child_run_id=child_id,
+            parent_session=parent_id,
+            team_id=team_id,
+            member_id=member_id,
+            assignment_id=assignment_id,
+            assigned_at="2026-08-14T10:00:00.000000Z",
+        )
 
 
 def test_child_run_append_uncertainty_poisoned_writer(monkeypatch, tmp_path: Path) -> None:

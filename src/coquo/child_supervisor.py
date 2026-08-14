@@ -165,6 +165,12 @@ class ChildRunSupervisor:
         with self._condition:
             return len(self._queue)
 
+    @property
+    def pending_submission_count(self) -> int:
+        """Return queued or actively executing Child submissions."""
+        with self._condition:
+            return len(self._submitted)
+
     def _ensure_workers_locked(self) -> None:
         if self._workers:
             return

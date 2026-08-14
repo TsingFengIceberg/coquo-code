@@ -112,6 +112,7 @@ HELP_TOPICS = (
     "session",
     "task",
     "child",
+    "team",
     "tools",
     "git",
     "context",
@@ -127,6 +128,7 @@ HELP_TEXT = (
     "Host command groups:\n"
     "  /help session   Session history, browsing, and resume\n"
     "  /help task      Durable Task execution and lifecycle\n"
+    "  /help team      Durable Team and member identity\n"
     "  /help tools     Action Audit and durable tool outcomes\n"
     "  /help git       Read-only Git changes and history\n"
     "  /help context   Context, usage, output budget, and compaction\n"
@@ -155,6 +157,16 @@ CHILD_HELP = (
     "  /child deliver <child-run-id>\n"
     "Preparation freezes a read-only envelope and detached Child Session; run executes one foreground "
     "turn through the shared Agent runtime."
+)
+TEAM_HELP = (
+    "Team commands:\n"
+    "  /team create <name>\n"
+    "  /team list [1-100] [status=open|closed]\n"
+    "  /team show <team-id> | /team close <team-id>\n"
+    "  /team member add|list|show|disable|enable|leave ...\n"
+    "  /team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...\n"
+    "Members are durable identities over fresh bounded read-only Child Runs. Each assignment "
+    "uses a new detached Child Session; background start is process-local and does not survive restart."
 )
 SESSION_HELP = (
     "Session commands:\n"
@@ -309,6 +321,7 @@ HELP_BY_TOPIC = {
     "session": SESSION_HELP,
     "task": TASK_HELP,
     "child": CHILD_HELP,
+    "team": TEAM_HELP,
     "tools": TOOLS_HELP,
     "git": GIT_HELP,
     "context": CONTEXT_HELP,
@@ -1572,6 +1585,71 @@ def render_child_run_info(info) -> str:
         )
     if getattr(info, "interrupted_result_code", None) is not None:
         lines.append(f"Interruption result: {_safe_inline(info.interrupted_result_code)}")
+    return "\n".join(lines)
+
+
+def render_team_summary(info) -> str:
+    """Render compact durable Team metadata without terminal control injection."""
+    return (
+        f"{_safe_inline(info.name)!r} ({info.team_id}): {info.status.value}, "
+        f"{len(info.members)} members, owner Session {info.owner_session_id}, created {info.created_at}"
+    )
+
+
+def render_team_member(member) -> str:
+    """Render one durable Team member identity."""
+    return (
+        f"{_safe_inline(member.name)!r} ({member.member_id}): {member.status.value}, "
+        f"role {member.role_contract}, joined {member.joined_at}"
+    )
+
+
+def render_team_info(info) -> str:
+    """Render one Team header, lifecycle, and bounded member list."""
+    lines = [
+        f"Team ID: {info.team_id}",
+        f"Name: {_safe_inline(info.name)}",
+        f"Status: {info.status.value}",
+        f"Owner Session: {info.owner_session_id}",
+        f"Workspace: {info.workspace}",
+        f"Transcript: {info.path}",
+        f"Created: {info.created_at}",
+        f"Records: {info.record_count}",
+        f"Members: {len(info.members)}",
+    ]
+    if info.closed_at is not None:
+        lines.append(f"Closed: {info.closed_at}")
+    lines.extend(render_team_member(member) for member in info.members)
+    return "\n".join(lines)
+
+
+def render_team_assignment_summary(info) -> str:
+    child_status = info.child.status.value if info.child is not None else "missing"
+    return (
+        f"{info.assignment.assignment_id}: member {info.assignment.member_id}, "
+        f"Child {info.assignment.child_run_id}, phase {info.phase.value}, "
+        f"Child status {child_status}"
+    )
+
+
+def render_team_assignment_info(info) -> str:
+    assignment = info.assignment
+    lines = [
+        f"Assignment ID: {assignment.assignment_id}",
+        f"Team ID: {info.team.team_id}",
+        f"Member ID: {assignment.member_id}",
+        f"Child Run ID: {assignment.child_run_id}",
+        f"Phase: {assignment.phase.value}",
+        f"Objective: {_safe_inline(assignment.objective)}",
+        f"Objective SHA-256: {assignment.objective_sha256}",
+        f"Created: {assignment.created_at}",
+    ]
+    if info.child is not None:
+        lines.append(f"Child status: {info.child.status.value}")
+        if info.child.child_session_id is not None:
+            lines.append(f"Child Session: {info.child.child_session_id}")
+    elif info.child_error is not None:
+        lines.append(f"Child diagnostic: {_safe_inline(info.child_error)}")
     return "\n".join(lines)
 
 

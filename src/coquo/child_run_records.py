@@ -17,6 +17,7 @@ from coquo.session_records import workspace_fingerprint
 CHILD_RUN_HEADER_SCHEMA_VERSION = 1
 CHILD_RUN_CANCELLED_SCHEMA_VERSION = 1
 CHILD_RUN_DELEGATED_SCHEMA_VERSION = 1
+CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION = 1
 CHILD_RUN_ADMITTED_SCHEMA_VERSION = 1
 CHILD_SESSION_BOUND_SCHEMA_VERSION = 1
 CHILD_RUN_PREPARATION_FAILED_SCHEMA_VERSION = 1
@@ -94,6 +95,20 @@ class ChildRunDelegated:
     delegated_at: str
     record_type: str = "child_run_delegated"
     schema_version: int = CHILD_RUN_DELEGATED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class ChildRunTeamAssignment:
+    sequence: int
+    child_run_id: str
+    parent_session_id: str
+    team_id: str
+    member_id: str
+    assignment_id: str
+    objective_sha256: str
+    assigned_at: str
+    record_type: str = "child_run_team_assignment"
+    schema_version: int = CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -243,6 +258,7 @@ ChildRunRecord = (
     ChildRunHeader
     | ChildRunCancelled
     | ChildRunDelegated
+    | ChildRunTeamAssignment
     | ChildRunAdmitted
     | ChildSessionBound
     | ChildRunPreparationFailed
@@ -261,6 +277,7 @@ class ChildRunReplayState:
     header: ChildRunHeader
     cancelled: ChildRunCancelled | None
     delegated: ChildRunDelegated | None
+    team_assignment: ChildRunTeamAssignment | None
     admitted: ChildRunAdmitted | None
     session_bound: ChildSessionBound | None
     preparation_failed: ChildRunPreparationFailed | None
@@ -413,6 +430,9 @@ def _record_identity(record: ChildRunRecord) -> None:
     elif type(record) is ChildRunDelegated:
         if record.record_type != "child_run_delegated" or record.schema_version != 1:
             raise ChildRunRecordError("unsupported Child Run delegation schema")
+    elif type(record) is ChildRunTeamAssignment:
+        if record.record_type != "child_run_team_assignment" or record.schema_version != 1:
+            raise ChildRunRecordError("unsupported Child Run Team assignment schema")
     elif type(record) is ChildRunAdmitted:
         if record.record_type != "child_run_admitted" or record.schema_version != 1:
             raise ChildRunRecordError("unsupported Child Run admission schema")
@@ -479,6 +499,15 @@ def validate_child_run_record(record: ChildRunRecord) -> None:
         if record.depth != 1 or record.source != "model":
             raise ChildRunRecordError("Child Run delegation source or depth is invalid")
         canonical_child_run_timestamp(record.delegated_at, "Child Run delegated_at")
+    elif isinstance(record, ChildRunTeamAssignment):
+        if record.sequence != 1:
+            raise ChildRunRecordError("Child Run Team assignment sequence is invalid")
+        canonical_child_run_id(record.parent_session_id)
+        canonical_child_run_id(record.team_id)
+        canonical_child_run_id(record.member_id)
+        canonical_child_run_id(record.assignment_id)
+        _sha256(record.objective_sha256, "Child Run Team assignment objective digest")
+        canonical_child_run_timestamp(record.assigned_at, "Child Run Team assignment assigned_at")
     if isinstance(record, ChildRunAdmitted):
         if record.sequence < 1:
             raise ChildRunRecordError("Child Run admission sequence is invalid")
@@ -666,6 +695,19 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "schema_version": record.schema_version,
             "sequence": record.sequence,
             "source": record.source,
+        }
+    if isinstance(record, ChildRunTeamAssignment):
+        return {
+            "assigned_at": record.assigned_at,
+            "assignment_id": record.assignment_id,
+            "child_run_id": record.child_run_id,
+            "member_id": record.member_id,
+            "objective_sha256": record.objective_sha256,
+            "parent_session_id": record.parent_session_id,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
         }
     if isinstance(record, ChildRunAdmitted):
         return {
@@ -958,6 +1000,33 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )
+    elif record_type == "child_run_team_assignment":
+        expected = {
+            "assigned_at",
+            "assignment_id",
+            "child_run_id",
+            "member_id",
+            "objective_sha256",
+            "parent_session_id",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "team_id",
+        }
+        if set(value) != expected:
+            raise ChildRunRecordError("Child Run Team assignment has unknown or missing fields")
+        record = ChildRunTeamAssignment(
+            sequence=value["sequence"],
+            child_run_id=value["child_run_id"],
+            parent_session_id=value["parent_session_id"],
+            team_id=value["team_id"],
+            member_id=value["member_id"],
+            assignment_id=value["assignment_id"],
+            objective_sha256=value["objective_sha256"],
+            assigned_at=value["assigned_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
     elif record_type == "child_session_bound":
         expected = {
             "bound_at",
@@ -1212,6 +1281,7 @@ def replay_child_run_records(
                 ChildRunHeader,
                 ChildRunCancelled,
                 ChildRunDelegated,
+                ChildRunTeamAssignment,
                 ChildRunAdmitted,
                 ChildSessionBound,
                 ChildRunPreparationFailed,
@@ -1230,7 +1300,7 @@ def replay_child_run_records(
     header = normalized[0]
     if not isinstance(header, ChildRunHeader):
         raise ChildRunRecordError("Child Run transcript must begin with a header")
-    cancelled = delegated = admitted = session_bound = preparation_failed = None
+    cancelled = delegated = team_assignment = admitted = session_bound = preparation_failed = None
     started = completed = failed = None
     cancel_requested = cancelled_terminal = interrupted = handoff = None
     for record in normalized[1:]:
@@ -1250,6 +1320,23 @@ def replay_child_run_records(
             if record.parent_session_id != header.parent_session_id:
                 raise ChildRunRecordError("Child Run delegation owner does not match header")
             delegated = record
+        elif isinstance(record, ChildRunTeamAssignment):
+            if (
+                team_assignment is not None
+                or delegated is not None
+                or admitted is not None
+                or record is not normalized[1]
+                or record.parent_session_id != header.parent_session_id
+            ):
+                raise ChildRunRecordError("Child Run Team assignment is out of order")
+            if (
+                record.objective_sha256
+                != hashlib.sha256(header.objective.encode("utf-8")).hexdigest()
+            ):
+                raise ChildRunRecordError(
+                    "Child Run Team assignment objective digest does not match"
+                )
+            team_assignment = record
         elif isinstance(record, ChildRunAdmitted):
             if (
                 admitted is not None
@@ -1418,6 +1505,7 @@ def replay_child_run_records(
         header,
         cancelled,
         delegated,
+        team_assignment,
         admitted,
         session_bound,
         preparation_failed,

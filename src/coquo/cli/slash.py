@@ -29,6 +29,7 @@ from coquo.cli.presentation import (
     SESSION_HELP,
     TASK_HELP,
     CHILD_HELP,
+    TEAM_HELP,
     MessageKind,
     ToolDetailMode,
     render_compact_result,
@@ -89,6 +90,11 @@ from coquo.cli.presentation import (
     render_child_run_info,
     render_child_run_summary,
     render_child_handoff,
+    render_team_info,
+    render_team_member,
+    render_team_summary,
+    render_team_assignment_info,
+    render_team_assignment_summary,
     render_task_timeline,
     render_task_verification_result,
     render_switch_rejection,
@@ -120,6 +126,7 @@ from coquo.session_records import (
 )
 from coquo.task_records import TaskRecordError, TaskStatus, canonical_task_id
 from coquo.child_run_records import ChildRunStatus
+from coquo.team_records import TeamStatus
 from coquo.task_store import TaskAdmissionConfiguration
 from coquo.tools.git_repository import GitObservationError
 from coquo.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
@@ -155,6 +162,7 @@ TOP_LEVEL_COMMANDS = (
     "/session",
     "/task",
     "/child",
+    "/team",
     "/resume",
     "/clear",
 )
@@ -229,6 +237,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/session", "Session commands", True),
     SlashCompletionSpec("/task", "Task commands", True),
     SlashCompletionSpec("/child", "Durable Child Run control", True),
+    SlashCompletionSpec("/team", "Durable Team and member identity", True),
     SlashCompletionSpec("/resume", "Resume a Session", True),
     SlashCompletionSpec("/clear", "Clear terminal output", True),
     SlashCompletionSpec("/exit", "Exit the REPL", True),
@@ -342,6 +351,26 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/child recover", "Recover abandoned Child Runs"),
     SlashCompletionSpec("/child handoff", "Publish a terminal Child handoff"),
     SlashCompletionSpec("/child deliver", "Deliver a terminal Child handoff"),
+    SlashCompletionSpec("/team create", "Create a durable Team"),
+    SlashCompletionSpec("/team list", "List durable Teams"),
+    SlashCompletionSpec("/team show", "Show one durable Team"),
+    SlashCompletionSpec("/team close", "Close one durable Team"),
+    SlashCompletionSpec("/team member add", "Add one Team member"),
+    SlashCompletionSpec("/team member list", "List Team members"),
+    SlashCompletionSpec("/team member show", "Show one Team member"),
+    SlashCompletionSpec("/team member disable", "Disable one Team member"),
+    SlashCompletionSpec("/team member enable", "Enable one Team member"),
+    SlashCompletionSpec("/team member leave", "Leave one Team member"),
+    SlashCompletionSpec("/team assignment create", "Create a queued Team assignment"),
+    SlashCompletionSpec("/team assignment list", "List Team assignments"),
+    SlashCompletionSpec("/team assignment show", "Show one Team assignment"),
+    SlashCompletionSpec("/team assignment prepare", "Prepare one Team Child envelope"),
+    SlashCompletionSpec("/team assignment run", "Run one Team assignment in the foreground"),
+    SlashCompletionSpec("/team assignment start", "Start one Team assignment in background"),
+    SlashCompletionSpec("/team assignment wait", "Wait for one Team assignment"),
+    SlashCompletionSpec("/team assignment cancel", "Cancel one Team assignment"),
+    SlashCompletionSpec("/team assignment handoff", "Publish one Team assignment handoff"),
+    SlashCompletionSpec("/team assignment recover", "Recover Team assignment metadata"),
     SlashCompletionSpec("/tools details", "Show per-request ledger outcomes"),
     SlashCompletionSpec("/tools catalog", "Show tool permissions and availability"),
     SlashCompletionSpec("/actions last", "Show the most recent Action Audit"),
@@ -476,6 +505,48 @@ class ReplSession(Protocol):
     def publish_child_handoff(self, child_run_id: str): ...
 
     def deliver_child_handoff(self, child_run_id: str): ...
+
+    def create_team(self, name: str): ...
+
+    def list_teams(self, *, status=None): ...
+
+    def inspect_team(self, team_id: str): ...
+
+    def close_team(self, team_id: str): ...
+
+    def add_team_member(self, team_id: str, name: str): ...
+
+    def list_team_members(self, team_id: str): ...
+
+    def inspect_team_member(self, team_id: str, member_id: str): ...
+
+    def disable_team_member(self, team_id: str, member_id: str, reason: str): ...
+
+    def enable_team_member(self, team_id: str, member_id: str): ...
+
+    def leave_team_member(self, team_id: str, member_id: str, reason: str): ...
+
+    def create_team_assignment(self, team_id: str, member_id: str, objective: str): ...
+
+    def list_team_assignments(self, team_id: str, *, limit: int = 100): ...
+
+    def inspect_team_assignment(self, team_id: str, assignment_id: str): ...
+
+    def recover_team_assignments(
+        self, team_id: str, assignment_id: str | None = None, *, limit: int = 100
+    ): ...
+
+    def prepare_team_assignment(self, team_id: str, assignment_id: str): ...
+
+    def run_team_assignment(self, team_id: str, assignment_id: str): ...
+
+    def start_team_assignment(self, team_id: str, assignment_id: str): ...
+
+    def wait_team_assignment(self, team_id: str, assignment_id: str, timeout_seconds: float): ...
+
+    def cancel_team_assignment(self, team_id: str, assignment_id: str, reason: str): ...
+
+    def publish_team_assignment_handoff(self, team_id: str, assignment_id: str): ...
 
     def inspect_task(self, task_id: str): ...
 
@@ -909,6 +980,8 @@ def dispatch_slash(
         return SlashResult(handled=True, message=TASK_HELP, kind="info")
     if command == "/child":
         return SlashResult(handled=True, message=CHILD_HELP, kind="info")
+    if command == "/team":
+        return SlashResult(handled=True, message=TEAM_HELP, kind="info")
     if command == "/child create" or command.startswith("/child create "):
         return _child_create(command, session)
     if command == "/child prepare" or command.startswith("/child prepare "):
@@ -952,6 +1025,85 @@ def dispatch_slash(
         return _usage(
             f"Unknown Child Run command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Type /help child for commands."
+        )
+    if command == "/team create" or command.startswith("/team create "):
+        return _team_create(command, session)
+    if command == "/team list" or command.startswith("/team list "):
+        return _team_list(command, session)
+    if command == "/team show" or command.startswith("/team show "):
+        return _team_show(command, session)
+    if command == "/team close" or command.startswith("/team close "):
+        return _team_close(command, session)
+    if command == "/team member add" or command.startswith("/team member add "):
+        return _team_member_add(command, session)
+    if command == "/team member list" or command.startswith("/team member list "):
+        return _team_member_list(command, session)
+    if command == "/team member show" or command.startswith("/team member show "):
+        return _team_member_show(command, session)
+    if command == "/team member disable" or command.startswith("/team member disable "):
+        return _team_member_disable(command, session)
+    if command == "/team member enable" or command.startswith("/team member enable "):
+        return _team_member_enable(command, session)
+    if command == "/team member leave" or command.startswith("/team member leave "):
+        return _team_member_leave(command, session)
+    if command.startswith("/team member "):
+        subcommand = command.split(maxsplit=3)[2]
+        suggestion = _suggest_token(
+            subcommand, ("add", "list", "show", "disable", "enable", "leave")
+        )
+        return _usage(
+            f"Unknown Team member command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
+        )
+    if command == "/team assignment create" or command.startswith("/team assignment create "):
+        return _team_assignment_create(command, session)
+    if command == "/team assignment list" or command.startswith("/team assignment list "):
+        return _team_assignment_list(command, session)
+    if command == "/team assignment show" or command.startswith("/team assignment show "):
+        return _team_assignment_show(command, session)
+    if command == "/team assignment prepare" or command.startswith("/team assignment prepare "):
+        return _team_assignment_prepare(command, session)
+    if command == "/team assignment run" or command.startswith("/team assignment run "):
+        return _team_assignment_run(command, session)
+    if command == "/team assignment start" or command.startswith("/team assignment start "):
+        return _team_assignment_start(command, session)
+    if command == "/team assignment wait" or command.startswith("/team assignment wait "):
+        return _team_assignment_wait(command, session)
+    if command == "/team assignment cancel" or command.startswith("/team assignment cancel "):
+        return _team_assignment_cancel(command, session)
+    if command == "/team assignment handoff" or command.startswith("/team assignment handoff "):
+        return _team_assignment_handoff(command, session)
+    if command == "/team assignment recover" or command.startswith("/team assignment recover "):
+        return _team_assignment_recover(command, session)
+    if command.startswith("/team assignment "):
+        subcommand = command.split(maxsplit=3)[2]
+        suggestion = _suggest_token(
+            subcommand,
+            (
+                "create",
+                "list",
+                "show",
+                "prepare",
+                "run",
+                "start",
+                "wait",
+                "cancel",
+                "handoff",
+                "recover",
+            ),
+        )
+        return _usage(
+            f"Unknown Team assignment command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
+        )
+    if command.startswith("/team "):
+        subcommand = command.split(maxsplit=2)[1]
+        suggestion = _suggest_token(
+            subcommand, ("create", "list", "show", "close", "member", "assignment")
+        )
+        return _usage(
+            f"Unknown Team command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
         )
     if command == "/task start" or command.startswith("/task start "):
         return _task_start(command, session)
@@ -1948,6 +2100,323 @@ def _child_deliver(command: str, session: ReplSession) -> SlashResult:
         kind="info",
         failure_prefix="Child Run delivery failed",
     )
+
+
+def _team_create(command: str, session: ReplSession) -> SlashResult:
+    name = command.removeprefix("/team create").strip()
+    if not name:
+        return _usage("Usage: /team create <name>")
+    return _call(
+        lambda: render_team_info(session.create_team(name)),
+        kind="success",
+        failure_prefix="Team creation failed",
+    )
+
+
+def _team_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) > 4:
+        return _usage("Usage: /team list [1-100] [status=open|closed]")
+    limit = 20
+    status = None
+    for part in parts[2:]:
+        if part.isascii() and part.isdigit() and limit == 20:
+            limit = int(part)
+        elif part.startswith("status=") and status is None:
+            status = part.removeprefix("status=")
+        else:
+            return _usage("Usage: /team list [1-100] [status=open|closed]")
+    if not 1 <= limit <= 100 or (
+        status is not None and status not in {item.value for item in TeamStatus}
+    ):
+        return _usage("Usage: /team list [1-100] [status=open|closed]")
+    return _call(
+        lambda: _render_team_list(session, limit, status),
+        kind="info",
+        failure_prefix="Team listing failed",
+    )
+
+
+def _render_team_list(session: ReplSession, limit: int, status: str | None) -> str:
+    selected = None if status is None else TeamStatus(status)
+    teams = session.list_teams(status=selected)[:limit]
+    if not teams:
+        return "No durable Teams found."
+    return "\n".join(render_team_summary(team) for team in teams)
+
+
+def _team_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /team show <team-id>")
+    return _call(
+        lambda: render_team_info(session.inspect_team(parts[2])),
+        kind="info",
+        failure_prefix="Team inspection failed",
+    )
+
+
+def _team_close(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 3:
+        return _usage("Usage: /team close <team-id>")
+    return _call(
+        lambda: render_team_info(session.close_team(parts[2])),
+        kind="success",
+        failure_prefix="Team close failed",
+    )
+
+
+def _team_member_add(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=4)
+    if len(parts) != 5:
+        return _usage("Usage: /team member add <team-id> <name>")
+    return _call(
+        lambda: render_team_member(session.add_team_member(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team member creation failed",
+    )
+
+
+def _team_member_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 4:
+        return _usage("Usage: /team member list <team-id>")
+    return _call(
+        lambda: _render_team_members(session, parts[3]),
+        kind="info",
+        failure_prefix="Team member listing failed",
+    )
+
+
+def _render_team_members(session: ReplSession, team_id: str) -> str:
+    members = session.list_team_members(team_id)
+    if not members:
+        return "No Team members found."
+    return "\n".join(render_team_member(member) for member in members)
+
+
+def _team_member_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team member show <team-id> <member-id>")
+    return _call(
+        lambda: render_team_member(session.inspect_team_member(parts[3], parts[4])),
+        kind="info",
+        failure_prefix="Team member inspection failed",
+    )
+
+
+def _team_member_disable(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=5)
+    if len(parts) != 6:
+        return _usage("Usage: /team member disable <team-id> <member-id> <reason>")
+    return _call(
+        lambda: render_team_member(session.disable_team_member(parts[3], parts[4], parts[5])),
+        kind="success",
+        failure_prefix="Team member disable failed",
+    )
+
+
+def _team_member_enable(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team member enable <team-id> <member-id>")
+    return _call(
+        lambda: render_team_member(session.enable_team_member(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team member enable failed",
+    )
+
+
+def _team_member_leave(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=5)
+    if len(parts) != 6:
+        return _usage("Usage: /team member leave <team-id> <member-id> <reason>")
+    return _call(
+        lambda: render_team_member(session.leave_team_member(parts[3], parts[4], parts[5])),
+        kind="success",
+        failure_prefix="Team member leave failed",
+    )
+
+
+def _team_assignment_create(command: str, session: ReplSession) -> SlashResult:
+    parts = command.removeprefix("/team assignment create").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        return _usage("Usage: /team assignment create <team-id> <member-id> <objective>")
+    return _call(
+        lambda: render_team_assignment_info(
+            session.create_team_assignment(parts[0], parts[1], parts[2])
+        ),
+        kind="success",
+        failure_prefix="Team assignment creation failed",
+    )
+
+
+def _team_assignment_list(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5}:
+        return _usage("Usage: /team assignment list <team-id> [1-100]")
+    try:
+        limit = int(parts[4]) if len(parts) == 5 else 100
+    except ValueError:
+        return _usage("Usage: /team assignment list <team-id> [1-100]")
+    if not 1 <= limit <= 100:
+        return _usage("Usage: /team assignment list <team-id> [1-100]")
+    return _call(
+        lambda: _render_team_assignment_list(session, parts[3], limit),
+        kind="info",
+        failure_prefix="Team assignment listing failed",
+    )
+
+
+def _render_team_assignment_list(session: ReplSession, team_id: str, limit: int) -> str:
+    assignments = session.list_team_assignments(team_id, limit=limit)
+    if not assignments:
+        return "No Team assignments found."
+    return "\n".join(render_team_assignment_summary(item) for item in assignments)
+
+
+def _team_assignment_show(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team assignment show <team-id> <assignment-id>")
+    return _call(
+        lambda: render_team_assignment_info(session.inspect_team_assignment(parts[3], parts[4])),
+        kind="info",
+        failure_prefix="Team assignment inspection failed",
+    )
+
+
+def _team_assignment_prepare(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team assignment prepare <team-id> <assignment-id>")
+    prepare = getattr(session, "prepare_team_assignment", None)
+    if not callable(prepare):
+        return _command_error(
+            RuntimeError("Team assignment preparation is unavailable"),
+            failure_prefix="Team assignment preparation failed",
+        )
+    return _call(
+        lambda: render_team_assignment_info(prepare(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team assignment preparation failed",
+    )
+
+
+def _team_assignment_run(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team assignment run <team-id> <assignment-id>")
+    run = getattr(session, "run_team_assignment", None)
+    if not callable(run):
+        return _command_error(
+            RuntimeError("Team assignment execution is unavailable"),
+            failure_prefix="Team assignment execution failed",
+        )
+    return _call(
+        lambda: render_team_assignment_info(run(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team assignment execution failed",
+    )
+
+
+def _team_assignment_start(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team assignment start <team-id> <assignment-id>")
+    start = getattr(session, "start_team_assignment", None)
+    if not callable(start):
+        return _command_error(
+            RuntimeError("Team assignment background supervision is unavailable"),
+            failure_prefix="Team assignment start failed",
+        )
+    return _call(
+        lambda: render_team_assignment_info(start(parts[3], parts[4])),
+        kind="success",
+        failure_prefix="Team assignment start failed",
+    )
+
+
+def _team_assignment_wait(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {5, 6}:
+        return _usage("Usage: /team assignment wait <team-id> <assignment-id> [timeout-seconds]")
+    try:
+        timeout = float(parts[5]) if len(parts) == 6 else 30.0
+    except ValueError:
+        return _usage("Usage: /team assignment wait <team-id> <assignment-id> [timeout-seconds]")
+    wait = getattr(session, "wait_team_assignment", None)
+    if not callable(wait):
+        return _command_error(
+            RuntimeError("Team assignment wait is unavailable"),
+            failure_prefix="Team assignment wait failed",
+        )
+    return _call(
+        lambda: render_team_assignment_info(wait(parts[3], parts[4], timeout)),
+        kind="info",
+        failure_prefix="Team assignment wait failed",
+    )
+
+
+def _team_assignment_cancel(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=5)
+    if len(parts) != 6:
+        return _usage("Usage: /team assignment cancel <team-id> <assignment-id> <reason>")
+    cancel = getattr(session, "cancel_team_assignment", None)
+    if not callable(cancel):
+        return _command_error(
+            RuntimeError("Team assignment cancellation is unavailable"),
+            failure_prefix="Team assignment cancellation failed",
+        )
+    return _call(
+        lambda: render_team_assignment_info(cancel(parts[3], parts[4], parts[5])),
+        kind="success",
+        failure_prefix="Team assignment cancellation failed",
+    )
+
+
+def _team_assignment_handoff(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 5:
+        return _usage("Usage: /team assignment handoff <team-id> <assignment-id>")
+    handoff = getattr(session, "publish_team_assignment_handoff", None)
+    if not callable(handoff):
+        return _command_error(
+            RuntimeError("Team assignment handoff is unavailable"),
+            failure_prefix="Team assignment handoff failed",
+        )
+    return _call(
+        lambda: render_child_handoff(handoff(parts[3], parts[4])),
+        kind="info",
+        failure_prefix="Team assignment handoff failed",
+    )
+
+
+def _team_assignment_recover(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5, 6}:
+        return _usage("Usage: /team assignment recover <team-id> [assignment-id] [1-100]")
+    assignment_id = parts[4] if len(parts) >= 5 else None
+    try:
+        limit = int(parts[5]) if len(parts) == 6 else 100
+    except ValueError:
+        return _usage("Usage: /team assignment recover <team-id> [assignment-id] [1-100]")
+    if not 1 <= limit <= 100:
+        return _usage("Usage: /team assignment recover <team-id> [assignment-id] [1-100]")
+
+    def render() -> str:
+        result = session.recover_team_assignments(parts[3], assignment_id, limit=limit)
+        lines = [render_team_assignment_info(item) for item in result.recovered]
+        lines.extend(
+            f"Recovery {item.outcome}"
+            f"{f' {item.assignment_id}' if item.assignment_id else ''}: {item.message}"
+            for item in result.diagnostics
+        )
+        return "\n".join(lines) if lines else "No Team assignments require recovery."
+
+    return _call(render, kind="info", failure_prefix="Team assignment recovery failed")
 
 
 def _render_child_recovery(session: ReplSession, child_run_id: str | None) -> str:

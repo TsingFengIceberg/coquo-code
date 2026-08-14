@@ -1344,6 +1344,16 @@ Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks templat
 135. [0135：Evidence-Backed Child Handoff and Parent Delivery](./decisions/0135-evidence-backed-child-handoff-and-parent-delivery.md)
 136. [0136：Model Child Delegation Controls](./decisions/0136-model-child-delegation-controls.md)
 137. [0137：Command Sandbox Capability Readiness](./decisions/0137-command-sandbox-capability-readiness.md)
+138. [0138：Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)
+139. [0139：Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)
+
+## Durable Team Identity 与 Member Registry
+
+B1现在提供workspace-bound的持久Team与成员身份，但不把身份误当作线程、模型上下文或权限。每个Team使用`.coquo/teams/<workspace-fingerprint>/<team-id>.jsonl`独立append-only transcript；header绑定创建它的owner Session，Team生命周期为不可逆的`open -> closed`。记录采用strict closed schema-v1 replay，连续sequence、workspace/fingerprint/path校验、大小上限、no-follow、原子创建、append+fsync、独占writer及durability uncertainty poisoning共同保证损坏或部分写入fail closed。
+
+成员记录保留固定角色`read-only-investigator-v1`与不可变UUID/名称，名称在Team完整历史中casefold唯一并最多64名。状态只允许`active <-> disabled -> left`；disable仅阻止未来assignment，left保留历史身份且不可重新加入。`coquo team ...`与REPL `/team ...`是Host-only的创建、列出、查看、关闭和成员状态管理入口，不调用Provider、不创建Child、不写owner Session transcript、不改变latest或Effective Context。REPL mutation要求当前Session是Team immutable owner；standalone命令按精确Team管理而不隐式切换Session。
+
+B1明确不包含assignment、handoff、mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。B2现在把每个assignment绑定到全新的Child Run和detached Session：Team ledger按`pending_child -> child_bound -> terminal_observed`记录关系，Child ledger继续是执行状态权威。创建使用确定性的双账saga，部分状态可按精确ID恢复；执行复用现有Child prepare/run/start/wait/cancel/recovery/handoff与同一个有界supervisor。一个member可以顺序完成多个assignment，但每次都是新Child和新Session；不同member可通过现有worker池并行，父Session仍可继续工作。Team只保存终态Child/Session坐标和handoff digest，不保存正文，不向父历史或模型上下文注入。Session identity在有queued/active Child时拒绝变更，supervisor quiescent后才退休并切换。Team close/leave要求精确终态观察，不隐式取消。B2仍不包含mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。详见[0138：Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md)与[0139：Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)。
 
 ## Shared Agent Runtime 与 Durable Child Run Foundation
 

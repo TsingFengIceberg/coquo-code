@@ -58,6 +58,11 @@ from coquo.cli.presentation import (
     render_tool_ledgers,
     render_child_run_info,
     render_child_run_summary,
+    render_team_info,
+    render_team_member,
+    render_team_summary,
+    render_team_assignment_info,
+    render_team_assignment_summary,
 )
 from coquo.child_runtime import ChildRunExecutor, build_child_runtime_spec_from_binding
 from coquo.cli.repl import run_repl
@@ -168,6 +173,9 @@ from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
 from coquo.child_run_records import ChildRunStatus
 from coquo.child_run_store import ChildRunStore, ChildRunStoreError
+from coquo.team_records import TeamStatus
+from coquo.team_store import TeamStore, TeamStoreError
+from coquo.team_service import TeamAssignmentError, TeamAssignmentService
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
@@ -860,6 +868,77 @@ def build_parser() -> argparse.ArgumentParser:
     child_handoff.add_argument("child_run_id")
     child_deliver = child_commands.add_parser("deliver", help="deliver one terminal Child handoff")
     child_deliver.add_argument("child_run_id")
+    team_parser = subcommands.add_parser("team", help="create and inspect durable Teams")
+    team_commands = team_parser.add_subparsers(dest="team_command", required=True)
+    team_create = team_commands.add_parser("create", help="create one Team")
+    team_create.add_argument("name", type=nonblank_prompt)
+    team_create.add_argument("--session", dest="owner_session", default="latest")
+    team_list = team_commands.add_parser("list", help="list durable Teams")
+    team_list.add_argument("--limit", type=task_list_limit, default=100)
+    team_list.add_argument("--status", choices=[item.value for item in TeamStatus])
+    team_show = team_commands.add_parser("show", help="show one Team")
+    team_show.add_argument("team_id")
+    team_close = team_commands.add_parser("close", help="close one Team")
+    team_close.add_argument("team_id")
+    team_member = team_commands.add_parser("member", help="manage Team members")
+    team_member_commands = team_member.add_subparsers(dest="team_member_command", required=True)
+    team_member_add = team_member_commands.add_parser("add", help="add one member")
+    team_member_add.add_argument("team_id")
+    team_member_add.add_argument("name", type=nonblank_prompt)
+    team_member_list = team_member_commands.add_parser("list", help="list Team members")
+    team_member_list.add_argument("team_id")
+    team_member_show = team_member_commands.add_parser("show", help="show one Team member")
+    team_member_show.add_argument("team_id")
+    team_member_show.add_argument("member_id")
+    for command_name, help_text in (
+        ("disable", "disable one member"),
+        ("leave", "remove one member"),
+    ):
+        command = team_member_commands.add_parser(command_name, help=help_text)
+        command.add_argument("team_id")
+        command.add_argument("member_id")
+        command.add_argument("reason", type=nonblank_prompt)
+    team_member_enable = team_member_commands.add_parser("enable", help="enable one member")
+    team_member_enable.add_argument("team_id")
+    team_member_enable.add_argument("member_id")
+    team_assignment = team_commands.add_parser("assignment", help="manage Team assignments")
+    team_assignment_commands = team_assignment.add_subparsers(
+        dest="team_assignment_command", required=True
+    )
+    team_assignment_create = team_assignment_commands.add_parser(
+        "create", help="create one queued Team assignment"
+    )
+    team_assignment_create.add_argument("team_id")
+    team_assignment_create.add_argument("member_id")
+    team_assignment_create.add_argument("objective", type=nonblank_prompt)
+    team_assignment_list = team_assignment_commands.add_parser("list", help="list Team assignments")
+    team_assignment_list.add_argument("team_id")
+    team_assignment_list.add_argument("--limit", type=task_list_limit, default=100)
+    team_assignment_show = team_assignment_commands.add_parser(
+        "show", help="show one Team assignment"
+    )
+    team_assignment_show.add_argument("team_id")
+    team_assignment_show.add_argument("assignment_id")
+    team_assignment_recover = team_assignment_commands.add_parser(
+        "recover", help="recover Team assignment ledger metadata"
+    )
+    team_assignment_recover.add_argument("team_id")
+    team_assignment_recover.add_argument("assignment_id", nargs="?")
+    team_assignment_recover.add_argument("--limit", type=task_list_limit, default=100)
+    for command_name, help_text in (
+        ("prepare", "prepare the exact Child envelope"),
+        ("run", "run the exact Child in the foreground"),
+        ("wait", "wait for exact Child terminal state"),
+        ("cancel", "cancel the exact Child"),
+        ("handoff", "publish and observe exact Child handoff"),
+    ):
+        command = team_assignment_commands.add_parser(command_name, help=help_text)
+        command.add_argument("team_id")
+        command.add_argument("assignment_id")
+        if command_name == "wait":
+            command.add_argument("--timeout", type=float, default=30.0)
+        if command_name == "cancel":
+            command.add_argument("reason", type=nonblank_prompt)
     return parser
 
 
@@ -2444,6 +2523,195 @@ def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout:
     return 0
 
 
+def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Manage durable Team and member identity without invoking a Provider."""
+    store = TeamStore(workspace)
+    if arguments.team_command == "create":
+        stdout.write(
+            f"{render_team_info(store.create(arguments.name, owner_session=arguments.owner_session))}\n"
+        )
+        return 0
+    if arguments.team_command == "show":
+        stdout.write(f"{render_team_info(store.inspect(arguments.team_id))}\n")
+        return 0
+    if arguments.team_command == "list":
+        status = None if arguments.status is None else TeamStatus(arguments.status)
+        teams = store.list(status=status)[: arguments.limit]
+        if not teams:
+            stdout.write("No durable Teams found.\n")
+            return 0
+        for info in teams:
+            stdout.write(f"{render_team_summary(info)}\n")
+        return 0
+    if arguments.team_command == "close":
+        stdout.write(
+            f"{render_team_info(TeamAssignmentService(workspace).close(arguments.team_id))}\n"
+        )
+        return 0
+    if arguments.team_command == "member":
+        if arguments.team_member_command == "add":
+            stdout.write(
+                f"{render_team_member(store.add_member(arguments.team_id, arguments.name))}\n"
+            )
+            return 0
+        if arguments.team_member_command == "list":
+            members = store.inspect(arguments.team_id).members
+            if not members:
+                stdout.write("No Team members found.\n")
+                return 0
+            for member in members:
+                stdout.write(f"{render_team_member(member)}\n")
+            return 0
+        if arguments.team_member_command == "show":
+            stdout.write(
+                f"{render_team_member(store.member(arguments.team_id, arguments.member_id))}\n"
+            )
+            return 0
+        if arguments.team_member_command == "disable":
+            member = store.disable_member(arguments.team_id, arguments.member_id, arguments.reason)
+            stdout.write(f"{render_team_member(member)}\n")
+            return 0
+        if arguments.team_member_command == "enable":
+            member = store.enable_member(arguments.team_id, arguments.member_id)
+            stdout.write(f"{render_team_member(member)}\n")
+            return 0
+        if arguments.team_member_command == "leave":
+            member = TeamAssignmentService(workspace).leave_member(
+                arguments.team_id, arguments.member_id, arguments.reason
+            )
+            stdout.write(f"{render_team_member(member)}\n")
+            return 0
+        raise TeamStoreError("unknown Team member command")
+    service = TeamAssignmentService(workspace)
+    if arguments.team_assignment_command == "prepare":
+        info = service.inspect(arguments.team_id, arguments.assignment_id)
+        if info.child is None:
+            raise TeamAssignmentError(info.child_error or "Team assignment Child is unavailable")
+        parent = SessionStore(workspace).inspect(info.team.owner_session_id)
+        child_store = ChildRunStore(workspace)
+        child_session_id = info.child.child_session_id or str(uuid4())
+        spec = build_child_runtime_spec_from_binding(
+            child_run_id=info.child.child_run_id,
+            parent_session_id=info.team.owner_session_id,
+            child_session_id=child_session_id,
+            objective=info.child.objective,
+            binding=parent.binding,
+        )
+        child_store.prepare(
+            info.child.child_run_id,
+            runtime_spec=spec,
+            session_store=SessionStore(workspace),
+            binding=parent.binding,
+        )
+        stdout.write(
+            f"{render_team_assignment_info(service.inspect(arguments.team_id, arguments.assignment_id))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "run":
+        info = service.inspect(arguments.team_id, arguments.assignment_id)
+        if info.child is None:
+            raise TeamAssignmentError(info.child_error or "Team assignment Child is unavailable")
+        ChildRunExecutor(workspace).run(info.child.child_run_id)
+        latest = service.inspect(arguments.team_id, arguments.assignment_id)
+        if latest.child is not None and latest.child.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            service.observe_terminal(arguments.team_id, arguments.assignment_id)
+        stdout.write(
+            f"{render_team_assignment_info(service.inspect(arguments.team_id, arguments.assignment_id))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "wait":
+        info = service.inspect(arguments.team_id, arguments.assignment_id)
+        if info.child is None:
+            raise TeamAssignmentError(info.child_error or "Team assignment Child is unavailable")
+        from coquo.child_supervisor import ChildRunSupervisor
+
+        ChildRunSupervisor(workspace).wait(info.child.child_run_id, arguments.timeout)
+        latest = service.inspect(arguments.team_id, arguments.assignment_id)
+        if latest.child is not None and latest.child.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            service.observe_terminal(arguments.team_id, arguments.assignment_id)
+        stdout.write(
+            f"{render_team_assignment_info(service.inspect(arguments.team_id, arguments.assignment_id))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "cancel":
+        info = service.inspect(arguments.team_id, arguments.assignment_id)
+        if info.child is None:
+            raise TeamAssignmentError(info.child_error or "Team assignment Child is unavailable")
+        ChildRunStore(workspace).request_cancel(info.child.child_run_id, reason=arguments.reason)
+        latest = service.inspect(arguments.team_id, arguments.assignment_id)
+        if latest.child is not None and latest.child.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            service.observe_terminal(arguments.team_id, arguments.assignment_id)
+        stdout.write(
+            f"{render_team_assignment_info(service.inspect(arguments.team_id, arguments.assignment_id))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "handoff":
+        handoff = service.observe_terminal(arguments.team_id, arguments.assignment_id)
+        stdout.write(
+            json.dumps(
+                {
+                    "body": handoff.body,
+                    "body_sha256": handoff.body_sha256,
+                    "child_run_id": handoff.child_run_id,
+                    "handoff_sha256": handoff.handoff_sha256,
+                    "outcome": handoff.outcome,
+                    "truncated": handoff.truncated,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "create":
+        stdout.write(
+            f"{render_team_assignment_info(service.create(arguments.team_id, arguments.member_id, arguments.objective))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "show":
+        stdout.write(
+            f"{render_team_assignment_info(service.inspect(arguments.team_id, arguments.assignment_id))}\n"
+        )
+        return 0
+    if arguments.team_assignment_command == "list":
+        assignments = service.list(arguments.team_id, limit=arguments.limit)
+        if not assignments:
+            stdout.write("No Team assignments found.\n")
+            return 0
+        for assignment in assignments:
+            stdout.write(f"{render_team_assignment_summary(assignment)}\n")
+        return 0
+    if arguments.team_assignment_command == "recover":
+        result = service.recover(arguments.team_id, arguments.assignment_id, limit=arguments.limit)
+        for assignment in result.recovered:
+            stdout.write(f"{render_team_assignment_info(assignment)}\n")
+        for diagnostic in result.diagnostics:
+            stdout.write(
+                f"Recovery {diagnostic.outcome}"
+                f"{f' {diagnostic.assignment_id}' if diagnostic.assignment_id else ''}: "
+                f"{diagnostic.message}\n"
+            )
+        if not result.recovered and not result.diagnostics:
+            stdout.write("No Team assignments require recovery.\n")
+        return 0
+    raise TeamAssignmentError("unknown Team assignment command")
+
+
 def _eval_path(value: str, invocation_workspace: Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else invocation_workspace / path
@@ -2759,6 +3027,16 @@ def main(
                     "provider selection options cannot be combined with Child Run management"
                 )
             return handle_child_command(arguments, workspace, output)
+        if arguments.command == "team":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with Team management"
+                )
+            return handle_team_command(arguments, workspace, output)
         if arguments.command == "demo-read":
             if (
                 arguments.profile is not None
@@ -2958,6 +3236,12 @@ def main(
         return 2
     except ChildRunStoreError as error:
         print(f"child error: {error}", file=errors)
+        return 2
+    except TeamStoreError as error:
+        print(f"team error: {error}", file=errors)
+        return 2
+    except TeamAssignmentError as error:
+        print(f"team assignment error: {error}", file=errors)
         return 2
     except McpConfigurationError as error:
         print(f"MCP configuration error: {error}", file=errors)

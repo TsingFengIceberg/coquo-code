@@ -24,6 +24,9 @@ from coquo.agent.runtime import (
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.child_supervisor import ChildRunSupervisor
+from coquo.team_records import TeamMemberState, TeamStatus
+from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
+from coquo.team_service import TeamAssignmentInfo, TeamAssignmentService, TeamRecoveryResult
 from coquo.child_runtime import (
     CHILD_DEADLINE_SECONDS,
     CHILD_MAX_OUTPUT_TOKENS,
@@ -910,6 +913,8 @@ class ProjectSession:
         self._session_store = session_store
         self._task_store = TaskStore(workspace)
         self._child_run_store = ChildRunStore(workspace)
+        self._team_store = TeamStore(workspace)
+        self._team_service = TeamAssignmentService(workspace)
         self._child_supervisor: ChildRunSupervisor | None = None
         self._writer = writer
         self._read_file = read_file
@@ -1636,6 +1641,192 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             return self._task_store.list()
+
+    def create_team(self, name: str) -> TeamInfo:
+        """Create one Host-owned Team bound to the current Session."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._team_store.create(name, owner_session=self._writer.session_id)
+
+    def list_teams(self, *, status: TeamStatus | None = None) -> tuple[TeamInfo, ...]:
+        """List durable workspace Teams without changing Session or runtime state."""
+        with self._lock:
+            self._ensure_open()
+            return self._team_store.list(status=status)
+
+    def inspect_team(self, team_id: str) -> TeamInfo:
+        with self._lock:
+            self._ensure_open()
+            return self._team_store.inspect(team_id)
+
+    def close_team(self, team_id: str) -> TeamInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_service.close(team_id)
+
+    def add_team_member(self, team_id: str, name: str) -> TeamMemberState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_store.add_member(team_id, name)
+
+    def list_team_members(self, team_id: str) -> tuple[TeamMemberState, ...]:
+        with self._lock:
+            self._ensure_open()
+            return self._team_store.inspect(team_id).members
+
+    def inspect_team_member(self, team_id: str, member_id: str) -> TeamMemberState:
+        with self._lock:
+            self._ensure_open()
+            return self._team_store.member(team_id, member_id)
+
+    def disable_team_member(self, team_id: str, member_id: str, reason: str) -> TeamMemberState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_store.disable_member(team_id, member_id, reason)
+
+    def enable_team_member(self, team_id: str, member_id: str) -> TeamMemberState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_store.enable_member(team_id, member_id)
+
+    def leave_team_member(self, team_id: str, member_id: str, reason: str) -> TeamMemberState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_service.leave_member(team_id, member_id, reason)
+
+    def _ensure_team_owner(self, team_id: str) -> TeamInfo:
+        info = self._team_store.inspect(team_id)
+        if info.owner_session_id != self._writer.session_id:
+            raise TeamStoreError("Team belongs to another parent Session")
+        return info
+
+    def create_team_assignment(
+        self, team_id: str, member_id: str, objective: str
+    ) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_service.create(team_id, member_id, objective)
+
+    def list_team_assignments(
+        self, team_id: str, *, limit: int = 100
+    ) -> tuple[TeamAssignmentInfo, ...]:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_service.list(team_id, limit=limit)
+
+    def inspect_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def recover_team_assignments(
+        self, team_id: str, assignment_id: str | None = None, *, limit: int = 100
+    ) -> TeamRecoveryResult:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_service.recover(team_id, assignment_id, limit=limit)
+
+    def prepare_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            self.prepare_child_run(info.assignment.child_run_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def run_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            self.run_child_run(info.assignment.child_run_id)
+            latest = self._team_service.inspect(team_id, assignment_id)
+            if latest.child is not None and latest.child.status in {
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                self._team_service.observe_terminal(team_id, assignment_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def start_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            self.start_child_run(info.assignment.child_run_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def wait_team_assignment(
+        self, team_id: str, assignment_id: str, timeout_seconds: float
+    ) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            self.wait_child_run(info.assignment.child_run_id, timeout_seconds)
+            latest = self._team_service.inspect(team_id, assignment_id)
+            if latest.child is not None and latest.child.status in {
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                self._team_service.observe_terminal(team_id, assignment_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def cancel_team_assignment(
+        self, team_id: str, assignment_id: str, reason: str
+    ) -> TeamAssignmentInfo:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            info = self._ensure_team_assignment_owner(team_id, assignment_id)
+            self.cancel_child_run(info.assignment.child_run_id, reason)
+            latest = self._team_service.inspect(team_id, assignment_id)
+            if latest.child is not None and latest.child.status in {
+                ChildRunStatus.COMPLETED,
+                ChildRunStatus.FAILED,
+                ChildRunStatus.CANCELLED,
+                ChildRunStatus.INTERRUPTED,
+            }:
+                self._team_service.observe_terminal(team_id, assignment_id)
+            return self._team_service.inspect(team_id, assignment_id)
+
+    def publish_team_assignment_handoff(self, team_id: str, assignment_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_assignment_owner(team_id, assignment_id)
+            return self._team_service.observe_terminal(team_id, assignment_id)
+
+    def _ensure_team_assignment_owner(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
+        info = self._team_service.inspect(team_id, assignment_id)
+        if info.team.owner_session_id != self._writer.session_id:
+            raise TeamStoreError("Team belongs to another parent Session")
+        if info.child is None:
+            raise TeamStoreError(info.child_error or "Team assignment Child Run is unavailable")
+        if info.child.parent_session_id != self._writer.session_id:
+            raise TeamStoreError("Team assignment Child Run belongs to another parent Session")
+        return info
 
     def create_child_run(self, objective: str) -> ChildRunInfo:
         """Queue Child Run metadata under the current Session without invoking a Provider."""
@@ -3068,6 +3259,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            self._retire_child_supervisor_for_identity_change()
             candidate = self._session_store.create(binding_from_status(self._manager.status()))
             try:
                 loop = self._new_loop(candidate)
@@ -3090,6 +3282,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            self._retire_child_supervisor_for_identity_change()
             candidate = self._session_store.fork(
                 selector,
                 through_turn,
@@ -3147,6 +3340,7 @@ class ProjectSession:
                     False,
                     LatestUpdateStatus.UPDATED,
                 )
+            self._retire_child_supervisor_for_identity_change()
             old = self._writer
             old_loop = self._loop
             old_sequence = old.state.next_sequence
@@ -4317,6 +4511,18 @@ class ProjectSession:
                 self._manager.close()
             if not mcp_cleanup_complete:
                 raise RuntimeError("MCP process cleanup is incomplete")
+
+    def _retire_child_supervisor_for_identity_change(self) -> None:
+        supervisor = self._child_supervisor
+        if supervisor is None:
+            return
+        if supervisor.pending_submission_count:
+            raise SessionStoreError(
+                "cannot change Session identity while Child Runs are queued or active; "
+                "cancel or wait for them first"
+            )
+        self._child_supervisor = None
+        supervisor.close(join_timeout=1.0)
 
     def __enter__(self) -> ProjectSession:
         self._ensure_open()

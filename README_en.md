@@ -28,6 +28,7 @@ The name comes from Latin *coquō*, “I cook”: requirements, context, tools, 
   - [Inspect routes and context windows](#inspect-routes-and-context-windows)
   - [Manage Sessions](#manage-sessions)
 - [Manage Tasks](#manage-tasks)
+- [Manage Teams](#manage-teams)
 - [Manage Child Runs](#manage-child-runs)
   - [REPL commands](#repl-commands)
 - [Configuration and local state](#configuration-and-local-state)
@@ -246,6 +247,27 @@ uv run coquo task timeline <task-uuid>
 
 Tasks manage recoverable foreground multi-stage work. They can begin through natural-language interaction or be inspected and controlled through `task` and `/task`; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the Task ADRs for the complete lifecycle, acceptance, and recovery boundaries.
 
+### Manage Teams
+
+```bash
+uv run coquo team create "Code review group"
+uv run coquo team list --status open
+uv run coquo team member add <team-uuid> "Read-only investigator"
+uv run coquo team member disable <team-uuid> <member-uuid> "Temporarily paused"
+uv run coquo team member enable <team-uuid> <member-uuid>
+uv run coquo team member leave <team-uuid> <member-uuid> "Finished"
+uv run coquo team show <team-uuid>
+uv run coquo team close <team-uuid>
+uv run coquo team assignment create <team-uuid> <member-uuid> "Inspect the workspace"
+uv run coquo team assignment prepare <team-uuid> <assignment-uuid>
+uv run coquo team assignment run <team-uuid> <assignment-uuid>
+uv run coquo team assignment wait <team-uuid> <assignment-uuid> --timeout 30
+uv run coquo team assignment handoff <team-uuid> <assignment-uuid>
+uv run coquo team assignment recover <team-uuid>
+```
+
+Teams and members are workspace-bound durable Host identities with append-only audit records. B1 provides identity lifecycle and B2 provides recoverable Host assignment binding and execution through a fresh read-only Child Run and detached Session for every objective. A member can execute sequential assignments, while different members can use the bounded REPL workers in parallel. Team records retain only exact terminal coordinates and a handoff digest; member bodies never enter the parent Session or model context. B2 adds no messaging, shared task board, scheduling, write permissions, recursive delegation, or long-lived workers.
+
 ### Manage Child Runs
 
 ```bash
@@ -267,7 +289,10 @@ uv run coquo child deliver <child-run-uuid>
 
 | Command | Purpose |
 | --- | --- |
-| `/help [session\|task\|child\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points and `child` shows Child Run metadata entry points |
+| `/help [session\|task\|child\|team\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points, `child` shows Child Run metadata entry points, and `team` shows Team/member/assignment entry points |
+| `/team create <name>`, `/team list`, `/team show <id>`, `/team close <id>` | Host-only durable Team identity management |
+| `/team member add|list|show|disable|enable|leave ...` | Host-only fixed read-only member lifecycle management |
+| `/team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...` | Host-only Team assignment binding, execution, observation, and recovery; every assignment uses a new Child Run/Session |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 39 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -450,6 +475,8 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 - [Deterministic Offline Host Eval Baseline](./docs/decisions/0084-deterministic-offline-host-eval-baseline.md): fixed tasks, isolated execution, Host-fact scoring, and the boundary from pytest and real-model evaluation.
 - [Actual Coding Task Eval](./docs/decisions/0085-actual-coding-task-eval.md): actual code outcomes, protected files, Host-private tests, explicit real-provider opt-in, and command-sandbox boundaries.
 - [Durable Task Identity and Host Management](./docs/decisions/0086-durable-task-identity-and-host-management.md): the Task/Stage/Turn/Action hierarchy, independent durable identity, and Host-only management boundary.
+- [Durable Team Identity and Member Registry](./docs/decisions/0138-durable-team-identity-and-members.md): durable Team/member identity, owner Session, strict replay, and Host-only lifecycle.
+- [Recoverable Team Member Child Assignments](./docs/decisions/0139-recoverable-team-member-child-assignments.md): the two-ledger assignment saga, fresh Child/Session execution, terminal handoff observation, supervisor reuse, and Session-switch boundaries.
 - [Durable Stage Lifecycle and Turn Evidence](./docs/decisions/0087-durable-stage-lifecycle-and-turn-evidence.md): the Stage start/terminal state machine, exclusive writer, restart interruption semantics, and Session Turn evidence.
 - [Foreground Task Stage Execution and Recovery](./docs/decisions/0088-foreground-task-stage-execution-and-recovery.md): ordinary AgentLoop reuse, Task framing, exact crash recovery, failure mapping, and terminal integration.
 - [Task Planning, Acceptance, Budgets, and Management](./docs/decisions/0089-task-planning-acceptance-budgets-and-management.md): plan execution, cumulative inter-Stage budgets, completion proposals, human acceptance, and lifecycle management.
@@ -539,4 +566,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently provides 35 ordinary bounded tools for workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, and declarative Skill loading, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can now use four model tools to delegate to at most four independent Children and observe, wait for, or cooperatively cancel them; each Child remains read-only, one-Turn, depth-one, and process-local, and its handoff returns as an untrusted ToolResult. Messaging, shared tasks, and Teams are not implemented; executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can now use four model tools to delegate to at most four independent Children and observe, wait for, or cooperatively cancel them; each Child remains read-only, one-Turn, depth-one, and process-local, and its handoff returns as an untrusted ToolResult. Team B1/B2 now provide durable Team/member identities, recoverable assignment binding, fresh Child/Session execution, terminal observation, and bounded REPL parallelism; messaging, shared tasks, scheduling, and model-visible Team tools remain deferred. Executable Skills, a marketplace, and browser automation are also deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
