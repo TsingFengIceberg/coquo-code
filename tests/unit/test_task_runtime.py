@@ -69,6 +69,7 @@ from coquo.task_store import (
 )
 from coquo.task_verification import TaskVerificationError
 from coquo.tools.catalog import ORDINARY_TOOL_NAMES
+from coquo.tools.team_control import TEAM_CONTROL_TOOL_NAMES
 from coquo.tools.command_sandbox import CommandSandboxLaunch
 from coquo.tools.run_command import RunCommandTool
 from coquo.tools.task_coordination import (
@@ -897,6 +898,7 @@ def test_structured_plan_proposal_commits_after_stage_with_exact_tool_scope(
     assert TASK_REPORT_BLOCKER_TOOL_NAME in first.enabled_tool_names
     assert "read_file" in first.enabled_tool_names
     assert "write_file" not in first.enabled_tool_names
+    assert set(first.enabled_tool_names).isdisjoint(TEAM_CONTROL_TOOL_NAMES)
     assert provider.requests[1].allow_tools is False
     assert session.action_audits() == ()
     session.close()
@@ -925,6 +927,7 @@ def test_structured_completion_proposal_never_bypasses_acceptance(
         TASK_REPORT_BLOCKER_TOOL_NAME,
         TASK_PROPOSE_COMPLETION_TOOL_NAME,
     }
+    assert set(provider.requests[0].enabled_tool_names or ()).isdisjoint(TEAM_CONTROL_TOOL_NAMES)
     session.close()
 
 

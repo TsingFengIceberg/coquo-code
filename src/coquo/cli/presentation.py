@@ -165,6 +165,7 @@ TEAM_HELP = (
     "  /team show <team-id> | /team close <team-id>\n"
     "  /team member add|list|show|disable|enable|leave ...\n"
     "  /team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...\n"
+    "  /team schedule run|start|status|wait|cancel|recover ...\n"
     "  /team message send|list|show|read|cancel ...\n"
     "  /team work create|list|show|assign|complete|release|cancel ...\n"
     "Members are durable identities over fresh bounded read-only Child Runs. Each assignment "
@@ -1709,6 +1710,25 @@ def render_team_assignment_info(info) -> str:
     return "\n".join(lines)
 
 
+def render_team_schedule(state) -> str:
+    """Render bounded durable schedule state and owned assignment IDs."""
+    lines = [
+        f"Schedule Run ID: {state.schedule_run_id}",
+        f"Status: {state.status.value}",
+        f"Source: {state.source.value}",
+        f"Limits: assignments {state.max_assignments}, parallel {state.max_parallel}",
+        f"Assignments: {state.assignment_count} ({', '.join(state.assignment_ids) if state.assignment_ids else 'none'})",
+        f"Started: {state.started_at}",
+    ]
+    if state.outcome is not None:
+        lines.append(f"Outcome: {state.outcome.value}")
+    if state.result_code is not None:
+        lines.append(f"Result: {_safe_inline(state.result_code)}")
+    if state.message:
+        lines.append(f"Message: {_safe_inline(state.message)}")
+    return "\n".join(lines)
+
+
 def render_child_handoff(handoff) -> str:
     """Render one untrusted handoff body without terminal control injection."""
     return _escape_terminal_text(handoff.body)
@@ -1962,6 +1982,17 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "child_status": "Ordinary parent Prompt only; exact parent ownership and durable Child replay; never trusts volatile worker state.",
     "child_wait": "Ordinary parent Prompt only; 0-30 seconds per request and 60 cumulative requested seconds per Turn; timeout never mutates the Child.",
     "child_cancel": "Ordinary parent Prompt only; exact parent ownership and durable cooperative cancellation; never force-kills a Provider thread.",
+    "team_create": "Ordinary parent Prompt only; creates one owner-bound read-only Team after its exact approval decision is durable.",
+    "team_add_member": "Ordinary parent Prompt only; adds one fixed read-only investigator member to the owner-bound Team.",
+    "team_status": "Ordinary parent Prompt only; bounded owner-scoped Team observation with no mutation or approval effect.",
+    "team_message_send": "Ordinary parent Prompt only; sends one bounded owner message to one active fixed read-only member after exact approval.",
+    "team_message_show": "Ordinary parent Prompt only; returns one exact delivered reply body and persists a content-free delivery receipt first.",
+    "team_message_read": "Ordinary parent Prompt only; reads one reply only when its exact parent delivery receipt exists.",
+    "team_work_create": "Ordinary parent Prompt only; creates one bounded immutable work item with backward-only dependencies after exact approval.",
+    "team_schedule_start": "Ordinary parent Prompt only; starts one bounded process-local schedule wave after approval of route, fixed Child tools, and cost ceilings.",
+    "team_schedule_wait": "Ordinary parent Prompt only; waits for one owner-bound schedule for at most 30 seconds per request and 60 per Turn.",
+    "team_work_review": "Ordinary parent Prompt only; explicitly completes, releases, or cancels reviewed work with matching evidence and approval.",
+    "team_close": "Ordinary parent Prompt only; closes a Team only after schedules, assignments, work, replies, and members satisfy durable close gates.",
 }
 
 
@@ -2079,6 +2110,15 @@ def _tool_policy_availability(
         if tool_name == "child_spawn":
             return f"available ({approval}; separate delegation approval)"
         return "available for Children owned by the current parent Session"
+    if policy == "team-control":
+        if tool_name in {
+            "team_status",
+            "team_message_show",
+            "team_message_read",
+            "team_schedule_wait",
+        }:
+            return "available for the current parent Session owner (bounded observation)"
+        return f"available ({approval}; separate Team-control approval)"
     if policy == "tool-discovery":
         return "available; discovery is isolated and does not execute candidates"
     if policy == "dangerous":

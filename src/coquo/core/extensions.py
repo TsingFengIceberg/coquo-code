@@ -42,6 +42,7 @@ class ToolExecutionKind(StrEnum):
     TOOL_DISCOVERY = "tool-discovery"
     MCP_REMOTE = "mcp-remote"
     CHILD_CONTROL = "child-control"
+    TEAM_CONTROL = "team-control"
 
 
 class ToolExposure(StrEnum):

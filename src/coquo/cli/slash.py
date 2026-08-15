@@ -99,6 +99,7 @@ from coquo.cli.presentation import (
     render_team_message_summary,
     render_team_work_item,
     render_team_work_summary,
+    render_team_schedule,
     render_task_timeline,
     render_task_verification_result,
     render_switch_rejection,
@@ -375,6 +376,12 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/team assignment cancel", "Cancel one Team assignment"),
     SlashCompletionSpec("/team assignment handoff", "Publish one Team assignment handoff"),
     SlashCompletionSpec("/team assignment recover", "Recover Team assignment metadata"),
+    SlashCompletionSpec("/team schedule run", "Run one foreground Team schedule wave"),
+    SlashCompletionSpec("/team schedule start", "Start one background Team schedule wave"),
+    SlashCompletionSpec("/team schedule status", "Show one Team schedule"),
+    SlashCompletionSpec("/team schedule wait", "Wait for one Team schedule"),
+    SlashCompletionSpec("/team schedule cancel", "Cancel one Team schedule"),
+    SlashCompletionSpec("/team schedule recover", "Recover one Team schedule"),
     SlashCompletionSpec("/team message send", "Send a durable owner-to-member message"),
     SlashCompletionSpec("/team message list", "List durable Team messages"),
     SlashCompletionSpec("/team message show", "Show one durable Team message"),
@@ -1138,6 +1145,27 @@ def dispatch_slash(
         )
         return _usage(
             f"Unknown Team assignment command: {subcommand}{_suggestion_line(suggestion)}\n"
+            "Type /help team for commands."
+        )
+    if command == "/team schedule run" or command.startswith("/team schedule run "):
+        return _team_schedule_run(command, session)
+    if command == "/team schedule start" or command.startswith("/team schedule start "):
+        return _team_schedule_start(command, session)
+    if command == "/team schedule status" or command.startswith("/team schedule status "):
+        return _team_schedule_status(command, session)
+    if command == "/team schedule wait" or command.startswith("/team schedule wait "):
+        return _team_schedule_wait(command, session)
+    if command == "/team schedule cancel" or command.startswith("/team schedule cancel "):
+        return _team_schedule_cancel(command, session)
+    if command == "/team schedule recover" or command.startswith("/team schedule recover "):
+        return _team_schedule_recover(command, session)
+    if command.startswith("/team schedule "):
+        subcommand = command.split(maxsplit=3)[2]
+        suggestion = _suggest_token(
+            subcommand, ("run", "start", "status", "wait", "cancel", "recover")
+        )
+        return _usage(
+            f"Unknown Team schedule command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Type /help team for commands."
         )
     if command == "/team message send" or command.startswith("/team message send "):
@@ -2502,6 +2530,116 @@ def _team_assignment_recover(command: str, session: ReplSession) -> SlashResult:
         return "\n".join(lines) if lines else "No Team assignments require recovery."
 
     return _call(render, kind="info", failure_prefix="Team assignment recovery failed")
+
+
+def _team_schedule_run(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5, 6}:
+        return _usage("Usage: /team schedule run <team-id> [max-assignments] [max-parallel]")
+    try:
+        max_assignments = int(parts[4]) if len(parts) >= 5 else 32
+        max_parallel = int(parts[5]) if len(parts) == 6 else 4
+    except ValueError:
+        return _usage("Usage: /team schedule run <team-id> [max-assignments] [max-parallel]")
+    if not 1 <= max_assignments <= 32 or not 1 <= max_parallel <= 4:
+        return _usage("Usage: /team schedule run <team-id> [max-assignments] [max-parallel]")
+    return _call(
+        lambda: render_team_schedule(
+            session.run_team_schedule(
+                parts[3], max_assignments=max_assignments, max_parallel=max_parallel
+            )
+        ),
+        kind="success",
+        failure_prefix="Team schedule run failed",
+    )
+
+
+def _team_schedule_start(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5, 6}:
+        return _usage("Usage: /team schedule start <team-id> [max-assignments] [max-parallel]")
+    try:
+        max_assignments = int(parts[4]) if len(parts) >= 5 else 32
+        max_parallel = int(parts[5]) if len(parts) == 6 else 4
+    except ValueError:
+        return _usage("Usage: /team schedule start <team-id> [max-assignments] [max-parallel]")
+    if not 1 <= max_assignments <= 32 or not 1 <= max_parallel <= 4:
+        return _usage("Usage: /team schedule start <team-id> [max-assignments] [max-parallel]")
+    return _call(
+        lambda: render_team_schedule(
+            session.start_team_schedule(
+                parts[3], max_assignments=max_assignments, max_parallel=max_parallel
+            )
+        ),
+        kind="success",
+        failure_prefix="Team schedule start failed",
+    )
+
+
+def _team_schedule_status(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5}:
+        return _usage("Usage: /team schedule status <team-id> [schedule-run-id]")
+    return _call(
+        lambda: (
+            render_team_schedule(state)
+            if (
+                state := session.team_schedule_status(
+                    parts[3], parts[4] if len(parts) == 5 else None
+                )
+            )
+            is not None
+            else "No Team schedule found."
+        ),
+        kind="info",
+        failure_prefix="Team schedule status failed",
+    )
+
+
+def _team_schedule_wait(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {5, 6}:
+        return _usage("Usage: /team schedule wait <team-id> <schedule-run-id> [0-30]")
+    try:
+        timeout = float(parts[5]) if len(parts) == 6 else 30.0
+    except ValueError:
+        return _usage("Usage: /team schedule wait <team-id> <schedule-run-id> [0-30]")
+    if not 0 <= timeout <= 30:
+        return _usage("Usage: /team schedule wait <team-id> <schedule-run-id> [0-30]")
+    return _call(
+        lambda: (
+            render_team_schedule(notification.state)
+            if (notification := session.wait_team_schedule(parts[3], parts[4], timeout))
+            and notification.state is not None
+            else "No terminal Team schedule notification observed."
+        ),
+        kind="info",
+        failure_prefix="Team schedule wait failed",
+    )
+
+
+def _team_schedule_cancel(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split(maxsplit=5)
+    if len(parts) != 6:
+        return _usage("Usage: /team schedule cancel <team-id> <schedule-run-id> <reason>")
+    return _call(
+        lambda: render_team_schedule(session.cancel_team_schedule(parts[3], parts[4], parts[5])),
+        kind="success",
+        failure_prefix="Team schedule cancellation failed",
+    )
+
+
+def _team_schedule_recover(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) not in {4, 5}:
+        return _usage("Usage: /team schedule recover <team-id> [schedule-run-id]")
+    return _call(
+        lambda: render_team_schedule(
+            session.recover_team_schedule(parts[3], parts[4] if len(parts) == 5 else None)
+        ),
+        kind="info",
+        failure_prefix="Team schedule recovery failed",
+    )
 
 
 def _team_message_send(command: str, session: ReplSession) -> SlashResult:

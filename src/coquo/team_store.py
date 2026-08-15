@@ -27,7 +27,7 @@ from coquo.team_records import (
     TeamAssignmentCreated,
     TeamAssignmentChildBound,
     TeamAssignmentObserved,
-    TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
+    TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
     TeamAssignmentMailboxBound,
     TeamAssignmentMailboxObserved,
     TeamAssignmentState,
@@ -51,6 +51,15 @@ from coquo.team_records import (
     TeamRecordError,
     TeamReplayState,
     TeamStatus,
+    TeamScheduleCancelRequested,
+    TeamScheduleFinished,
+    TeamScheduleOutcome,
+    TeamScheduleSource,
+    TeamScheduleStarted,
+    TeamScheduleState,
+    canonical_team_schedule_message,
+    MAX_TEAM_SCHEDULE_ASSIGNMENTS,
+    MAX_TEAM_SCHEDULE_PARALLEL,
     MAX_TEAM_WORK_DEPENDENCIES,
     canonical_team_id,
     canonical_team_name,
@@ -66,6 +75,7 @@ from coquo.team_records import (
 
 MAX_TEAM_TRANSCRIPT_BYTES = 1024 * 1024
 MAX_TEAM_DIRECTORY_ENTRIES = 10_000
+_SCHEDULE_LEASE_HEADER = b"coquo-team-schedule-v1\n"
 
 
 class TeamStoreError(RuntimeError):
@@ -104,10 +114,40 @@ class TeamInfo:
     assignments: tuple[TeamAssignmentState, ...] = ()
     messages: tuple[TeamMessageState, ...] = ()
     work_items: tuple[TeamWorkItemState, ...] = ()
+    schedules: tuple[TeamScheduleState, ...] = ()
 
 
 _ACTIVE_WRITERS: set[str] = set()
 _ACTIVE_WRITERS_GUARD = Lock()
+_ACTIVE_SCHEDULE_LEASES: set[str] = set()
+_ACTIVE_SCHEDULE_LEASES_GUARD = Lock()
+
+
+class TeamScheduleLease:
+    """Process/lifetime-scoped OS lease for one Team schedule coordinator."""
+
+    def __init__(self, descriptor: int, path: Path, key: str) -> None:
+        self._descriptor = descriptor
+        self.path = path
+        self._key = key
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            _unlock_schedule_descriptor(self._descriptor)
+        finally:
+            with _ACTIVE_SCHEDULE_LEASES_GUARD:
+                _ACTIVE_SCHEDULE_LEASES.discard(self._key)
+            os.close(self._descriptor)
+
+    def __enter__(self) -> TeamScheduleLease:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 class TeamStore:
@@ -137,13 +177,26 @@ class TeamStore:
         self._uuid_factory = uuid_factory
         self._clock = clock
 
-    def create(self, name: str, *, owner_session: str = "latest") -> TeamInfo:
+    def create(
+        self,
+        name: str,
+        *,
+        owner_session: str = "latest",
+        team_id: str | None = None,
+    ) -> TeamInfo:
         try:
             canonical_name = canonical_team_name(name)
             owner = SessionStore(self.workspace).inspect(owner_session)
         except (TeamRecordError, SessionStoreError, SessionRecordError) as error:
             raise TeamStoreError(f"Team owner or name is invalid: {error}") from None
-        team_id = _factory_team_id(self._uuid_factory)
+        try:
+            team_id = (
+                _factory_team_id(self._uuid_factory)
+                if team_id is None
+                else canonical_team_id(team_id)
+            )
+        except TeamRecordError as error:
+            raise TeamStoreError(f"Team ID is invalid: {error}") from None
         header = TeamHeader(
             sequence=0,
             team_id=team_id,
@@ -218,10 +271,101 @@ class TeamStore:
             os.close(descriptor)
             raise
 
+    def acquire_schedule(self, team_id: str) -> TeamScheduleLease:
+        """Acquire a nonblocking, lifetime-scoped Team schedule lease."""
+        canonical = _store_team_id(team_id)
+        self._ensure_root()
+        path = self.workspace / ".coquo" / "teams" / f"{canonical}.schedule-v1.lock"
+        if path.is_symlink():
+            raise TeamStoreError("Team schedule lease path must not be a symlink")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError:
+            raise TeamStoreError("Team schedule lease is inaccessible") from None
+        key = str(path)
+        claimed = False
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise TeamStoreError("Team schedule lease must be a regular file")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise TeamStoreError("Team schedule lease mode must be 0600")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            current = os.read(descriptor, len(_SCHEDULE_LEASE_HEADER) + 1)
+            if current not in {b"", _SCHEDULE_LEASE_HEADER}:
+                raise TeamStoreError("Team schedule lease header is invalid")
+            if current == b"":
+                os.write(descriptor, _SCHEDULE_LEASE_HEADER)
+                os.fsync(descriptor)
+            with _ACTIVE_SCHEDULE_LEASES_GUARD:
+                if key in _ACTIVE_SCHEDULE_LEASES:
+                    raise TeamStoreError("Team already has an active schedule lease")
+                _ACTIVE_SCHEDULE_LEASES.add(key)
+                claimed = True
+            _lock_schedule_descriptor(descriptor)
+            return TeamScheduleLease(descriptor, path, key)
+        except BaseException:
+            if claimed:
+                with _ACTIVE_SCHEDULE_LEASES_GUARD:
+                    _ACTIVE_SCHEDULE_LEASES.discard(key)
+            os.close(descriptor)
+            raise
+
     def close(self, team_id: str) -> TeamInfo:
         with self.open(team_id) as writer:
             writer.close_team()
             return writer.info
+
+    def start_schedule(
+        self,
+        team_id: str,
+        schedule_run_id: str,
+        *,
+        source: TeamScheduleSource | str = TeamScheduleSource.HOST,
+        max_assignments: int = MAX_TEAM_SCHEDULE_ASSIGNMENTS,
+        max_parallel: int = MAX_TEAM_SCHEDULE_PARALLEL,
+    ) -> TeamScheduleState:
+        with self.open(team_id) as writer:
+            writer.start_schedule(
+                schedule_run_id,
+                source=source,
+                max_assignments=max_assignments,
+                max_parallel=max_parallel,
+            )
+            return writer.schedule(schedule_run_id)
+
+    def cancel_schedule(
+        self,
+        team_id: str,
+        schedule_run_id: str,
+        reason: str,
+        *,
+        source: TeamScheduleSource | str = TeamScheduleSource.HOST,
+    ) -> TeamScheduleState:
+        with self.open(team_id) as writer:
+            writer.cancel_schedule(schedule_run_id, reason, source=source)
+            return writer.schedule(schedule_run_id)
+
+    def finish_schedule(
+        self,
+        team_id: str,
+        schedule_run_id: str,
+        *,
+        outcome: TeamScheduleOutcome | str,
+        assignment_count: int,
+        result_code: str,
+        message: str,
+    ) -> TeamScheduleState:
+        with self.open(team_id) as writer:
+            writer.finish_schedule(
+                schedule_run_id,
+                outcome=outcome,
+                assignment_count=assignment_count,
+                result_code=result_code,
+                message=message,
+            )
+            return writer.schedule(schedule_run_id)
 
     def add_member(self, team_id: str, name: str) -> TeamMemberState:
         with self.open(team_id) as writer:
@@ -251,10 +395,16 @@ class TeamStore:
         objective: str,
         *,
         work_item_id: str | None = None,
+        schedule_run_id: str | None = None,
     ) -> TeamAssignmentState:
         with self.open(team_id) as writer:
             return writer.create_assignment(
-                assignment_id, member_id, child_run_id, objective, work_item_id=work_item_id
+                assignment_id,
+                member_id,
+                child_run_id,
+                objective,
+                work_item_id=work_item_id,
+                schedule_run_id=schedule_run_id,
             )
 
     def bind_assignment(
@@ -489,6 +639,8 @@ class TeamWriter:
         self._ensure_writable()
         if self._state.closed is not None:
             return self._state.closed
+        if any(not schedule.status.terminal for schedule in self._state.schedules):
+            raise TeamStoreError("Team has a nonterminal schedule")
         if any(
             assignment.phase is not TeamAssignmentPhase.TERMINAL_OBSERVED
             for assignment in self._state.assignments
@@ -603,6 +755,92 @@ class TeamWriter:
         self._append(record)
         return record
 
+    def schedule(self, schedule_run_id: str) -> TeamScheduleState:
+        try:
+            canonical = canonical_team_id(schedule_run_id)
+        except TeamRecordError as error:
+            raise TeamStoreError(str(error)) from None
+        for schedule in self._state.schedules:
+            if schedule.schedule_run_id == canonical:
+                return schedule
+        raise TeamStoreError("Team schedule run was not found")
+
+    def start_schedule(
+        self,
+        schedule_run_id: str,
+        *,
+        source: TeamScheduleSource | str,
+        max_assignments: int,
+        max_parallel: int,
+    ) -> TeamScheduleStarted:
+        self._ensure_open_team()
+        try:
+            record = TeamScheduleStarted(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                schedule_run_id=canonical_team_id(schedule_run_id),
+                source=TeamScheduleSource(source).value,
+                max_assignments=max_assignments,
+                max_parallel=max_parallel,
+                started_at=self._store._clock(),
+            )
+        except (TeamRecordError, ValueError) as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def cancel_schedule(
+        self,
+        schedule_run_id: str,
+        reason: str,
+        *,
+        source: TeamScheduleSource | str,
+    ) -> TeamScheduleCancelRequested:
+        self._ensure_open_team()
+        try:
+            schedule = self.schedule(schedule_run_id)
+            if schedule.status.terminal or schedule.cancel_requested_at is not None:
+                raise TeamRecordError("Team schedule cannot be cancelled")
+            record = TeamScheduleCancelRequested(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                schedule_run_id=schedule.schedule_run_id,
+                reason=canonical_team_reason(reason),
+                source=TeamScheduleSource(source).value,
+                requested_at=self._store._clock(),
+            )
+        except (TeamRecordError, ValueError) as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def finish_schedule(
+        self,
+        schedule_run_id: str,
+        *,
+        outcome: TeamScheduleOutcome | str,
+        assignment_count: int,
+        result_code: str,
+        message: str,
+    ) -> TeamScheduleFinished:
+        self._ensure_open_team()
+        try:
+            schedule = self.schedule(schedule_run_id)
+            record = TeamScheduleFinished(
+                sequence=self._state.next_sequence,
+                team_id=self._state.header.team_id,
+                schedule_run_id=schedule.schedule_run_id,
+                outcome=TeamScheduleOutcome(outcome).value,
+                assignment_count=assignment_count,
+                result_code=canonical_team_reason(result_code),
+                message=canonical_team_schedule_message(message),
+                finished_at=self._store._clock(),
+            )
+        except (TeamRecordError, ValueError) as error:
+            raise TeamStoreError(str(error)) from None
+        self._append(record)
+        return record
+
     def create_assignment(
         self,
         assignment_id: str,
@@ -611,6 +849,7 @@ class TeamWriter:
         objective: str,
         *,
         work_item_id: str | None = None,
+        schedule_run_id: str | None = None,
     ) -> TeamAssignmentState:
         self._ensure_open_team()
         try:
@@ -626,7 +865,10 @@ class TeamWriter:
                 ),
                 created_at=self._store._clock(),
                 work_item_id=(None if work_item_id is None else canonical_team_id(work_item_id)),
-                schema_version=TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
+                schedule_run_id=(
+                    None if schedule_run_id is None else canonical_team_id(schedule_run_id)
+                ),
+                schema_version=TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
             )
         except TeamRecordError as error:
             raise TeamStoreError(str(error)) from None
@@ -1061,6 +1303,7 @@ def _team_info(path: Path, state: TeamReplayState) -> TeamInfo:
         assignments=state.assignments,
         messages=state.messages,
         work_items=state.work_items,
+        schedules=state.schedules,
     )
 
 
@@ -1088,6 +1331,28 @@ def _lock_descriptor(descriptor: int) -> None:
 
 
 def _unlock_descriptor(descriptor: int) -> None:
+    try:
+        if os.name == "nt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+def _lock_schedule_descriptor(descriptor: int) -> None:
+    try:
+        if os.name == "nt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise TeamStoreError("Team schedule lease is already held") from None
+
+
+def _unlock_schedule_descriptor(descriptor: int) -> None:
     try:
         if os.name == "nt":
             os.lseek(descriptor, 0, os.SEEK_SET)

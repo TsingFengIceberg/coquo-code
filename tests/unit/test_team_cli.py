@@ -300,3 +300,23 @@ def test_slash_team_message_and_work_commands_are_host_only(tmp_path: Path) -> N
         session.transcript_before
         == SessionStore(tmp_path).inspect(session.session_id).path.read_bytes()
     )
+
+
+def test_standalone_team_schedule_run_uses_existing_owner_session(tmp_path: Path) -> None:
+    status, _output, errors = invoke(tmp_path, ["prompt", "bootstrap"])
+    assert status == 0, errors
+    status, output, errors = invoke(tmp_path, ["team", "create", "Scheduled"])
+    assert status == 0, errors
+    team_id = _team_id(output)
+    status, output, errors = invoke(tmp_path, ["team", "member", "add", team_id, "Worker"])
+    assert status == 0, errors
+    status, output, errors = invoke(
+        tmp_path, ["team", "work", "create", team_id, "Inspect", "Inspect workspace"]
+    )
+    assert status == 0, errors
+    status, output, errors = invoke(
+        tmp_path, ["team", "schedule", "run", team_id, "--max-assignments", "1"]
+    )
+    assert status == 0, errors
+    assert "Schedule Run ID:" in output
+    assert "limit_reached" in output

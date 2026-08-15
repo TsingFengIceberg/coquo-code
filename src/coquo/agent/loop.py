@@ -35,6 +35,7 @@ from coquo.agent.task_control import (
     TaskProposalSink,
 )
 from coquo.agent.child_control import ChildControlDispatcher, ChildControlDispatchResult
+from coquo.agent.team_control import TeamControlDispatcher, TeamControlDispatchResult
 from coquo.core.actions import ActionLease
 from coquo.core.compaction import EffectiveContextSummary
 from coquo.core.cancellation import TurnCancellation
@@ -387,6 +388,8 @@ class AgentLoop:
         self._task_control_dispatcher: TaskControlDispatcher | None = None
         self._child_control_names: frozenset[str] = frozenset()
         self._child_control_dispatcher: ChildControlDispatcher | None = None
+        self._team_control_names: frozenset[str] = frozenset()
+        self._team_control_dispatcher: TeamControlDispatcher | None = None
         self._tool_set_transition_dispatcher: ToolSetTransitionDispatcher | None = None
 
     @property
@@ -740,6 +743,13 @@ class AgentLoop:
                 raise TaskControlProtocolError(
                     "Child control tool must be the only call in its assistant response"
                 )
+            team_control_requests = tuple(
+                request for request in requests if request.name in self._team_control_names
+            )
+            if team_control_requests and len(requests) != 1:
+                raise TaskControlProtocolError(
+                    "Team control tool must be the only call in its assistant response"
+                )
             discovery_requests = tuple(
                 request
                 for request in requests
@@ -861,6 +871,8 @@ class AgentLoop:
                         force_final = True
                     elif request.name in self._child_control_names:
                         dispatch = self._execute_child_control(request, context.context_id).dispatch
+                    elif request.name in self._team_control_names:
+                        dispatch = self._execute_team_control(request, context.context_id).dispatch
                     elif contract.execution_kind is ToolExecutionKind.TOOL_DISCOVERY:
                         if request.name == SKILL_LOAD_TOOL_NAME:
                             skill_load_attempts += 1
@@ -1075,6 +1087,26 @@ class AgentLoop:
             raise ValueError("Child control dispatcher is invalid")
         self._child_control_names = frozenset(tool_names)
         self._child_control_dispatcher = dispatcher
+
+    def install_team_control_dispatcher(
+        self,
+        tool_names: tuple[str, ...],
+        dispatcher: TeamControlDispatcher,
+    ) -> None:
+        """Install one non-Action Team-control boundary exactly once."""
+        if self._team_control_dispatcher is not None or self._team_control_names:
+            raise ValueError("Team control dispatcher is already installed")
+        if (
+            not isinstance(tool_names, tuple)
+            or not tool_names
+            or len(set(tool_names)) != len(tool_names)
+            or any(not isinstance(name, str) or not name for name in tool_names)
+        ):
+            raise ValueError("Team control tool names are invalid")
+        if not callable(dispatcher):
+            raise ValueError("Team control dispatcher is invalid")
+        self._team_control_names = frozenset(tool_names)
+        self._team_control_dispatcher = dispatcher
 
     def install_tool_set_transition_dispatcher(
         self,
@@ -1585,6 +1617,15 @@ class AgentLoop:
         result = dispatcher(request, context_id)
         if type(result) is not ChildControlDispatchResult:
             raise ValueError("Child control dispatcher returned an invalid result")
+        return result
+
+    def _execute_team_control(self, request: ToolUse, context_id: str) -> TeamControlDispatchResult:
+        dispatcher = self._team_control_dispatcher
+        if dispatcher is None:
+            raise RuntimeError("Team control dispatcher is not installed")
+        result = dispatcher(request, context_id)
+        if type(result) is not TeamControlDispatchResult:
+            raise ValueError("Team control dispatcher returned an invalid result")
         return result
 
     @staticmethod

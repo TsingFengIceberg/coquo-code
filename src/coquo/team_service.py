@@ -92,6 +92,7 @@ class TeamAssignmentService:
         objective: str,
         *,
         work_item_id: str | None = None,
+        schedule_run_id: str | None = None,
     ) -> TeamAssignmentInfo:
         team = self._inspect_team(team_id)
         canonical_team = team.team_id
@@ -131,6 +132,7 @@ class TeamAssignmentService:
                 child_run_id,
                 objective,
                 work_item_id=canonical_work,
+                schedule_run_id=schedule_run_id,
             )
         except TeamStoreError as error:
             raise TeamAssignmentError(

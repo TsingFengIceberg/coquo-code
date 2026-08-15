@@ -144,6 +144,7 @@ from coquo.tools.child_control import (
     child_control_tool_snapshots,
     parse_child_control,
 )
+from coquo.tools.team_control import TEAM_CONTROL_TOOL_NAMES, team_control_tool_snapshots
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -154,6 +155,7 @@ MAX_TOOL_INPUT_STRING_CHARACTERS = 4096
 MAX_TOOL_INPUT_STRING_BYTES = 4096
 
 CHILD_CONTROL_TOOL_CATALOG = child_control_tool_snapshots()
+TEAM_CONTROL_TOOL_CATALOG = team_control_tool_snapshots()
 
 ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
@@ -199,16 +201,18 @@ ORDINARY_PROMPT_TOOL_NAMES = (
     TASK_CONFIRM_COMPLETION_TOOL_NAME,
     *SKILL_AUTHORING_CONTROL_TOOL_NAMES,
     *(definition.name for definition in CHILD_CONTROL_TOOL_CATALOG),
+    *(definition.name for definition in TEAM_CONTROL_TOOL_CATALOG),
 )
 TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     *ORDINARY_TOOL_CATALOG,
     *task_control_tool_snapshots(),
     *skill_authoring_tool_snapshots(),
     *CHILD_CONTROL_TOOL_CATALOG,
+    *TEAM_CONTROL_TOOL_CATALOG,
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 7
-TOOL_REGISTRY_GENERATION = 7
+BUILTIN_TOOL_SOURCE_GENERATION = 8
+TOOL_REGISTRY_GENERATION = 8
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "coquo",
@@ -223,6 +227,16 @@ CHILD_CONTROL_TOOL_CONTRACTS = tuple(
         permission_actions=(),
     )
     for definition in CHILD_CONTROL_TOOL_CATALOG
+)
+TEAM_CONTROL_TOOL_CONTRACTS = tuple(
+    ExtensionToolContract(
+        definition=definition,
+        source=_BUILTIN_SOURCE,
+        execution_kind=ToolExecutionKind.TEAM_CONTROL,
+        exposure=ToolExposure.DIRECT,
+        permission_actions=(),
+    )
+    for definition in TEAM_CONTROL_TOOL_CATALOG
 )
 _WORKSPACE_READ_TOOLS = frozenset(
     {
@@ -311,6 +325,9 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
         permission_actions = ()
     elif name in {definition.name for definition in CHILD_CONTROL_TOOL_CATALOG}:
         execution_kind = ToolExecutionKind.CHILD_CONTROL
+        permission_actions = ()
+    elif name in TEAM_CONTROL_TOOL_NAMES:
+        execution_kind = ToolExecutionKind.TEAM_CONTROL
         permission_actions = ()
     else:
         raise RuntimeError(f"canonical tool lacks an extension contract: {name}")

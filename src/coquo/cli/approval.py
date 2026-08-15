@@ -13,6 +13,7 @@ from coquo.core.action_coordinator import (
 from coquo.core.approval_preview import ApprovalPreview, ApprovalPreviewKind
 from coquo.core.cancellation import TurnCancellation
 from coquo.core.delegation_approval import DelegationApprovalRequest
+from coquo.core.team_approval import TeamControlApprovalRequest
 
 _RED = "\x1b[31m"
 _GREEN = "\x1b[32m"
@@ -31,7 +32,11 @@ def terminal_approval_handler(stdin: TextIO, stdout: TextIO, *, color: bool = Fa
 
     def handle(request: ApprovalPromptRequest) -> ApprovalResolution:
         header = _approval_header(request)
-        if isinstance(request, DelegationApprovalRequest):
+        if isinstance(request, TeamControlApprovalRequest):
+            stdout.write(f"{header}\n")
+            stdout.write(_render_team_preview(request))
+            prompt = "Approve this exact Team control? [y/N/c]: "
+        elif isinstance(request, DelegationApprovalRequest):
             stdout.write(f"{header}\n")
             stdout.write(_render_delegation_preview(request))
             prompt = "Approve this exact delegation? [y/N/c]: "
@@ -149,6 +154,8 @@ class _PendingApproval:
 def render_approval_request(request: ApprovalPromptRequest, *, color: bool) -> str:
     """Render one bounded approval request without reading terminal input."""
     header = _approval_header(request)
+    if isinstance(request, TeamControlApprovalRequest):
+        return f"{header}\n{_render_team_preview(request)}Approve this exact Team control? [y/N/c]"
     if isinstance(request, DelegationApprovalRequest):
         return (
             f"{header}\n{_render_delegation_preview(request)}Approve this exact delegation? [y/N/c]"
@@ -159,6 +166,11 @@ def render_approval_request(request: ApprovalPromptRequest, *, color: bool) -> s
 
 
 def _approval_header(request: ApprovalPromptRequest) -> str:
+    if isinstance(request, TeamControlApprovalRequest):
+        return (
+            f"Team control approval required: {request.identity.control_name} "
+            f"team={request.identity.target_or_preallocated_team_id}"
+        )
     if isinstance(request, DelegationApprovalRequest):
         return "Child delegation approval required"
     arguments = request.identity.arguments.as_mapping()
@@ -202,6 +214,28 @@ def _approval_header(request: ApprovalPromptRequest) -> str:
     return (
         f"Approval required: {request.identity.action.value} {request.identity.tool_name}{detail}"
     )
+
+
+def _render_team_preview(request: TeamControlApprovalRequest) -> str:
+    """Render only bounded, terminal-safe Team approval information."""
+    preview = request.preview
+    lines = [f"Team: {preview.team_id}\n", f"Action: {preview.control_name}\n"]
+    lines.append(f"Summary: {_escape_terminal_text(preview.summary)}\n")
+    if preview.provider_id is not None:
+        route = preview.provider_id
+        if preview.model:
+            route += f" / {preview.model}"
+        lines.append(f"Provider route: {_escape_terminal_text(route)}\n")
+    if preview.max_assignments is not None:
+        lines.append(
+            "Child cost limits: "
+            f"{preview.max_assignments} assignments, {preview.max_parallel} parallel, "
+            f"{preview.per_child_provider_invocations} Provider calls, "
+            f"{preview.per_child_tool_requests} tool requests, "
+            f"{preview.per_child_output_tokens} output tokens, "
+            f"{preview.per_child_deadline_seconds}s deadline.\n"
+        )
+    return "".join(lines)
 
 
 def _render_delegation_preview(request: DelegationApprovalRequest) -> str:

@@ -96,7 +96,7 @@ def test_parent_delegates_two_children_works_and_replays_three_sessions(tmp_path
         assert len(parent_provider.child_ids) == 2
         first_request = parent_provider.received_requests[0]
         assert first_request.enabled_tool_names is not None
-        assert first_request.enabled_tool_names[-4:] == CHILD_CONTROL_TOOL_NAMES
+        assert first_request.enabled_tool_names[-15:-11] == CHILD_CONTROL_TOOL_NAMES
         committed = session._writer.state.records[-1]
         assert tuple(entry.tool_use_id for entry in committed.tool_ledger.entries) == (
             "spawn-1",

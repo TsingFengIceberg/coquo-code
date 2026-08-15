@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from coquo.agent.loop import AgentLoop, PreparedAgentTurn
 from coquo.agent.child_control import ChildControlDispatchResult
+from coquo.agent.team_control import TeamControlDispatchResult
 from coquo.agent.runtime import (
     AgentRuntime,
     AgentRuntimeCallbacks,
@@ -24,12 +25,19 @@ from coquo.agent.runtime import (
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.child_supervisor import ChildRunSupervisor
-from coquo.team_records import TeamMemberState, TeamStatus
+from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
 from coquo.team_messaging import TeamMessagingService
 from coquo.team_records import TeamWorkItemState
 from coquo.team_work import TeamWorkList, TeamWorkService
 from coquo.team_service import TeamAssignmentInfo, TeamAssignmentService, TeamRecoveryResult
+from coquo.team_records import TeamScheduleSource, TeamScheduleState
+from coquo.team_schedule import TeamScheduleError, TeamScheduleService
+from coquo.team_supervisor import (
+    TeamScheduleNotification,
+    TeamScheduleSupervisor,
+    TeamScheduleSupervisorError,
+)
 from coquo.child_runtime import (
     CHILD_DEADLINE_SECONDS,
     CHILD_MAX_OUTPUT_TOKENS,
@@ -91,6 +99,13 @@ from coquo.core.delegation_approval import (
     DelegationApprovalPreview,
     DelegationApprovalRequest,
     delegation_decision_sha256,
+)
+from coquo.core.team_approval import (
+    TeamControlApprovalIdentity,
+    TeamControlApprovalPreview,
+    TeamControlApprovalRequest,
+    canonical_team_arguments_sha256,
+    team_control_decision_sha256,
 )
 from coquo.core.approval_preview import (
     ApprovalPreview,
@@ -235,6 +250,7 @@ from coquo.session_records import (
     ActionExecutionOutcome,
     BindingSnapshot,
     ChildDelegationDecided,
+    TeamControlDecided,
     ApprovalAuditOutcome,
     CompactionFailed,
     ContextCompacted,
@@ -256,6 +272,22 @@ from coquo.tools.child_control import (
     CHILD_STATUS_TOOL_NAME,
     CHILD_WAIT_TOOL_NAME,
     parse_child_control,
+)
+from coquo.tools.team_control import (
+    TEAM_ADD_MEMBER_TOOL_NAME,
+    TEAM_CLOSE_TOOL_NAME,
+    TEAM_CONTROL_TOOL_NAMES,
+    TEAM_CREATE_TOOL_NAME,
+    TEAM_MESSAGE_READ_TOOL_NAME,
+    TEAM_MESSAGE_SEND_TOOL_NAME,
+    TEAM_MESSAGE_SHOW_TOOL_NAME,
+    TEAM_SCHEDULE_START_TOOL_NAME,
+    TEAM_SCHEDULE_WAIT_TOOL_NAME,
+    TEAM_STATUS_TOOL_NAME,
+    MAX_TEAM_RESULT_BYTES,
+    TEAM_WORK_CREATE_TOOL_NAME,
+    TEAM_WORK_REVIEW_TOOL_NAME,
+    parse_team_control,
 )
 from coquo.session_store import (
     LatestUpdateStatus,
@@ -922,7 +954,9 @@ class ProjectSession:
         self._team_service = TeamAssignmentService(workspace)
         self._team_messaging = TeamMessagingService(workspace)
         self._team_work = TeamWorkService(workspace)
+        self._team_schedule_service = TeamScheduleService(workspace)
         self._child_supervisor: ChildRunSupervisor | None = None
+        self._team_schedule_supervisor: TeamScheduleSupervisor | None = None
         self._writer = writer
         self._read_file = read_file
         self._glob = glob
@@ -1067,6 +1101,8 @@ class ProjectSession:
             task_control_dispatcher=None if self._child_mode else self._dispatch_task_control,
             child_control_names=() if self._child_mode else CHILD_CONTROL_TOOL_NAMES,
             child_control_dispatcher=None if self._child_mode else self._dispatch_child_control,
+            team_control_names=() if self._child_mode else TEAM_CONTROL_TOOL_NAMES,
+            team_control_dispatcher=None if self._child_mode else self._dispatch_team_control,
             tool_set_transition_dispatcher=None if self._child_mode else self._transition_tool_set,
             activate_turn=self._activate_runtime_turn,
             bind_provider=self._bind_runtime_provider,
@@ -1656,6 +1692,17 @@ class ProjectSession:
             self._ensure_not_compacting()
             return self._team_store.create(name, owner_session=self._writer.session_id)
 
+    def create_team_preallocated(self, team_id: str, name: str) -> TeamInfo:
+        """Create one owned Team at an ID reserved by a validated control approval."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            return self._team_store.create(
+                name,
+                owner_session=self._writer.session_id,
+                team_id=team_id,
+            )
+
     def list_teams(self, *, status: TeamStatus | None = None) -> tuple[TeamInfo, ...]:
         """List durable workspace Teams without changing Session or runtime state."""
         with self._lock:
@@ -1744,6 +1791,81 @@ class ProjectSession:
             self._ensure_team_owner(team_id)
             return self._team_messaging.read(team_id, message_id)
 
+    def show_team_message_for_model(
+        self, team_id: str, message_id: str, *, context_id: str, tool_use_id: str
+    ):
+        """Deliver exactly one verified reply body after persisting its parent receipt."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            message = self._team_messaging.show(team_id, message_id)
+            if message.sender_member_id is None or message.source_assignment_id is None:
+                raise TeamStoreError("Team control may show only a member reply")
+            if (
+                message.source_child_session_id is None
+                or message.source_turn_record_sequence is None
+            ):
+                raise TeamStoreError("Team reply lacks Child provenance")
+            if message.source_handoff_sha256 is None:
+                raise TeamStoreError("Team reply lacks handoff provenance")
+            team = self._team_store.inspect(team_id)
+            assignment = next(
+                (
+                    item
+                    for item in team.assignments
+                    if item.assignment_id == message.source_assignment_id
+                ),
+                None,
+            )
+            if assignment is None or assignment.reply_message_id != message.message_id:
+                raise TeamStoreError("Team reply is not bound to its assignment")
+            if (
+                assignment.phase is not TeamAssignmentPhase.TERMINAL_OBSERVED
+                or assignment.child_outcome != "completed"
+            ):
+                raise TeamStoreError("Team reply requires a completed observed Child")
+            if assignment.handoff_sha256 != message.source_handoff_sha256:
+                raise TeamStoreError("Team reply handoff provenance disagrees with assignment")
+            existing = next(
+                (
+                    receipt
+                    for receipt in self._writer.state.team_message_deliveries
+                    if receipt.message_id == message.message_id
+                ),
+                None,
+            )
+            if existing is None:
+                self._writer.team_message_delivered_to_parent(
+                    context_id=context_id,
+                    tool_use_id=tool_use_id,
+                    team_id=team.team_id,
+                    message_id=message.message_id,
+                    body_sha256=message.body_sha256,
+                    source_assignment_id=assignment.assignment_id,
+                    source_child_session_id=message.source_child_session_id,
+                    source_child_turn_sequence=message.source_turn_record_sequence,
+                    source_handoff_sha256=message.source_handoff_sha256,
+                )
+            elif (
+                existing.context_id != context_id
+                or existing.tool_use_id != tool_use_id
+                or existing.body_sha256 != message.body_sha256
+            ):
+                raise TeamStoreError("Team reply delivery receipt does not match this ToolUse")
+            return message
+
+    def read_team_message_for_model(self, team_id: str, message_id: str):
+        """Mark a reply read only after an exact parent delivery receipt exists."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            if not any(
+                receipt.message_id == message_id
+                for receipt in self._writer.state.team_message_deliveries
+            ):
+                raise TeamStoreError("Team reply has not been delivered to the parent")
+            return self._team_messaging.read(team_id, message_id)
+
     def cancel_team_message(self, team_id: str, message_id: str, reason: str):
         with self._lock:
             self._ensure_open()
@@ -1802,6 +1924,135 @@ class ProjectSession:
             self._ensure_team_owner(team_id)
             return self._team_work.complete(team_id, work_item_id, evidence)
 
+    def review_team_work_for_model(
+        self,
+        team_id: str,
+        work_item_id: str,
+        *,
+        decision: str,
+        note: str,
+        message_id: str | None = None,
+    ) -> TeamWorkItemState:
+        """Apply explicit model review only with the required reply receipt evidence."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            item = self._team_work.show(team_id, work_item_id)
+            if item.current_assignment_id is None:
+                raise TeamStoreError("Team work item has no current assignment")
+            if decision == "complete":
+                if message_id is None:
+                    raise TeamStoreError("Team work completion requires a delivered reply ID")
+                assignment = self._team_service.inspect(
+                    team_id, item.current_assignment_id
+                ).assignment
+                if assignment.reply_message_id != message_id:
+                    raise TeamStoreError("Team work completion reply does not match assignment")
+                if not any(
+                    receipt.message_id == message_id
+                    for receipt in self._writer.state.team_message_deliveries
+                ):
+                    raise TeamStoreError("Team work completion requires a parent delivery receipt")
+                return self._team_work.complete(team_id, work_item_id, note)
+            if decision == "release":
+                if message_id is not None:
+                    raise TeamStoreError("Team work release must not include a reply ID")
+                return self._team_work.release(team_id, work_item_id, note)
+            if decision == "cancel":
+                if message_id is not None:
+                    raise TeamStoreError("Team work cancellation must not include a reply ID")
+                return self._team_work.cancel(team_id, work_item_id, note)
+            raise TeamStoreError("Team work review decision is invalid")
+
+    def run_team_schedule(
+        self,
+        team_id: str,
+        *,
+        max_assignments: int = 32,
+        max_parallel: int = 4,
+    ) -> TeamScheduleState:
+        """Run one foreground schedule wave under the current owner Session."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            if self._team_schedule_supervisor is not None:
+                raise TeamScheduleError("Team schedule supervisor is active")
+            return self._team_schedule_service.run(
+                team_id,
+                self,
+                source=TeamScheduleSource.HOST,
+                max_assignments=max_assignments,
+                max_parallel=max_parallel,
+            )
+
+    def start_team_schedule(
+        self,
+        team_id: str,
+        *,
+        max_assignments: int = 32,
+        max_parallel: int = 4,
+    ) -> TeamScheduleState:
+        """Start one background schedule wave and return its durable identity."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            team = self._ensure_team_owner(team_id)
+            if self._team_schedule_supervisor is None:
+                self._team_schedule_supervisor = TeamScheduleSupervisor(self.workspace, self)
+            run = self._team_schedule_service.start(
+                team.team_id,
+                source=TeamScheduleSource.HOST,
+                max_assignments=max_assignments,
+                max_parallel=max_parallel,
+            )
+            try:
+                return self._team_schedule_supervisor.submit(run)
+            except TeamScheduleSupervisorError:
+                run.close()
+                raise
+
+    def team_schedule_status(
+        self, team_id: str, schedule_run_id: str | None = None
+    ) -> TeamScheduleState | None:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            return self._team_schedule_service.status(team_id, schedule_run_id)
+
+    def wait_team_schedule(
+        self, team_id: str, schedule_run_id: str, timeout_seconds: float
+    ) -> TeamScheduleNotification | None:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            supervisor = self._team_schedule_supervisor
+        if supervisor is None:
+            return None
+        return supervisor.wait(schedule_run_id, timeout_seconds)
+
+    def cancel_team_schedule(
+        self, team_id: str, schedule_run_id: str, reason: str
+    ) -> TeamScheduleState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            state = self._team_schedule_service.cancel(
+                team_id, schedule_run_id, reason, source=TeamScheduleSource.HOST
+            )
+            return state
+
+    def recover_team_schedule(
+        self, team_id: str, schedule_run_id: str | None = None
+    ) -> TeamScheduleState:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            self._ensure_team_owner(team_id)
+            return self._team_schedule_service.recover(team_id, schedule_run_id)
+
     def _ensure_team_owner(self, team_id: str) -> TeamInfo:
         info = self._team_store.inspect(team_id)
         if info.owner_session_id != self._writer.session_id:
@@ -1842,33 +2093,39 @@ class ProjectSession:
 
     def prepare_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
         with self._lock:
-            self._ensure_open()
-            self._ensure_not_compacting()
-            info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            self._team_messaging.bind_assignment(team_id, assignment_id)
-            info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            status = self._manager.status()
-            child_info = self._child_run_store.inspect(info.assignment.child_run_id)
-            child_session_id = child_info.child_session_id or str(uuid4())
-            spec = build_child_runtime_spec(
-                child_run_id=child_info.child_run_id,
-                parent_session_id=self._writer.session_id,
-                child_session_id=child_session_id,
-                objective=child_info.objective,
-                status=status,
-            )
-            spec = replace(
-                spec,
-                role_contract_version=TEAM_CHILD_ROLE_CONTRACT_VERSION,
-                role_prompt_fingerprint=team_child_role_prompt_fingerprint(),
-            )
-            self._child_run_store.prepare(
-                child_info.child_run_id,
-                runtime_spec=spec,
-                session_store=self._session_store,
-                binding=binding_from_status(status),
-            )
-            return self._team_service.inspect(team_id, assignment_id)
+            return self._prepare_team_assignment_unlocked(team_id, assignment_id)
+
+    def _prepare_team_assignment_unlocked(
+        self, team_id: str, assignment_id: str
+    ) -> TeamAssignmentInfo:
+        """Prepare one schedule assignment without reacquiring the parent Session lock."""
+        self._ensure_open()
+        self._ensure_not_compacting()
+        info = self._ensure_team_assignment_owner(team_id, assignment_id)
+        self._team_messaging.bind_assignment(team_id, assignment_id)
+        info = self._ensure_team_assignment_owner(team_id, assignment_id)
+        status = self._manager.status()
+        child_info = self._child_run_store.inspect(info.assignment.child_run_id)
+        child_session_id = child_info.child_session_id or str(uuid4())
+        spec = build_child_runtime_spec(
+            child_run_id=child_info.child_run_id,
+            parent_session_id=self._writer.session_id,
+            child_session_id=child_session_id,
+            objective=child_info.objective,
+            status=status,
+        )
+        spec = replace(
+            spec,
+            role_contract_version=TEAM_CHILD_ROLE_CONTRACT_VERSION,
+            role_prompt_fingerprint=team_child_role_prompt_fingerprint(),
+        )
+        self._child_run_store.prepare(
+            child_info.child_run_id,
+            runtime_spec=spec,
+            session_store=self._session_store,
+            binding=binding_from_status(status),
+        )
+        return self._team_service.inspect(team_id, assignment_id)
 
     def run_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
         with self._lock:
@@ -1888,47 +2145,85 @@ class ProjectSession:
 
     def start_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
         with self._lock:
-            self._ensure_open()
-            self._ensure_not_compacting()
-            info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            self.start_child_run(info.assignment.child_run_id)
-            return self._team_service.inspect(team_id, assignment_id)
+            return self._start_team_assignment_unlocked(team_id, assignment_id)
+
+    def _start_team_assignment_unlocked(
+        self, team_id: str, assignment_id: str
+    ) -> TeamAssignmentInfo:
+        """Submit one schedule assignment without reacquiring the parent Session lock."""
+        self._ensure_open()
+        self._ensure_not_compacting()
+        info = self._ensure_team_assignment_owner(team_id, assignment_id)
+        supervisor = self._child_supervisor
+        if supervisor is None:
+            supervisor = ChildRunSupervisor(
+                self.workspace,
+                parent_session_id=self._writer.session_id,
+            )
+            self._child_supervisor = supervisor
+        supervisor.submit(info.assignment.child_run_id)
+        return self._team_service.inspect(team_id, assignment_id)
 
     def wait_team_assignment(
         self, team_id: str, assignment_id: str, timeout_seconds: float
     ) -> TeamAssignmentInfo:
         with self._lock:
-            self._ensure_open()
-            self._ensure_not_compacting()
-            info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            self.wait_child_run(info.assignment.child_run_id, timeout_seconds)
-            latest = self._team_service.inspect(team_id, assignment_id)
-            if latest.child is not None and latest.child.status in {
-                ChildRunStatus.COMPLETED,
-                ChildRunStatus.FAILED,
-                ChildRunStatus.CANCELLED,
-                ChildRunStatus.INTERRUPTED,
-            }:
-                self._team_service.observe_terminal(team_id, assignment_id)
-            return self._team_service.inspect(team_id, assignment_id)
+            return self._wait_team_assignment_unlocked(team_id, assignment_id, timeout_seconds)
+
+    def _wait_team_assignment_unlocked(
+        self, team_id: str, assignment_id: str, timeout_seconds: float
+    ) -> TeamAssignmentInfo:
+        """Observe one schedule assignment without reacquiring the parent Session lock."""
+        self._ensure_open()
+        self._ensure_not_compacting()
+        info = self._ensure_team_assignment_owner(team_id, assignment_id)
+        supervisor = self._child_supervisor
+        if supervisor is None:
+            supervisor = ChildRunSupervisor(
+                self.workspace,
+                parent_session_id=self._writer.session_id,
+            )
+            self._child_supervisor = supervisor
+        child_info = supervisor.wait(info.assignment.child_run_id, timeout_seconds)
+        if child_info.parent_session_id != self._writer.session_id:
+            raise ChildRunStoreError("Child Run belongs to another parent Session")
+        latest = self._team_service.inspect(team_id, assignment_id)
+        if latest.child is not None and latest.child.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            self._team_service.observe_terminal(team_id, assignment_id)
+        return self._team_service.inspect(team_id, assignment_id)
 
     def cancel_team_assignment(
         self, team_id: str, assignment_id: str, reason: str
     ) -> TeamAssignmentInfo:
         with self._lock:
-            self._ensure_open()
-            self._ensure_not_compacting()
-            info = self._ensure_team_assignment_owner(team_id, assignment_id)
-            self.cancel_child_run(info.assignment.child_run_id, reason)
-            latest = self._team_service.inspect(team_id, assignment_id)
-            if latest.child is not None and latest.child.status in {
-                ChildRunStatus.COMPLETED,
-                ChildRunStatus.FAILED,
-                ChildRunStatus.CANCELLED,
-                ChildRunStatus.INTERRUPTED,
-            }:
-                self._team_service.observe_terminal(team_id, assignment_id)
-            return self._team_service.inspect(team_id, assignment_id)
+            return self._cancel_team_assignment_unlocked(team_id, assignment_id, reason)
+
+    def _cancel_team_assignment_unlocked(
+        self, team_id: str, assignment_id: str, reason: str
+    ) -> TeamAssignmentInfo:
+        """Cancel one schedule assignment without reacquiring the parent Session lock."""
+        self._ensure_open()
+        self._ensure_not_compacting()
+        info = self._ensure_team_assignment_owner(team_id, assignment_id)
+        supervisor = self._child_supervisor
+        if supervisor is not None:
+            supervisor.cancel(info.assignment.child_run_id, reason)
+        else:
+            self._child_run_store.request_cancel(info.assignment.child_run_id, reason=reason)
+        latest = self._team_service.inspect(team_id, assignment_id)
+        if latest.child is not None and latest.child.status in {
+            ChildRunStatus.COMPLETED,
+            ChildRunStatus.FAILED,
+            ChildRunStatus.CANCELLED,
+            ChildRunStatus.INTERRUPTED,
+        }:
+            self._team_service.observe_terminal(team_id, assignment_id)
+        return self._team_service.inspect(team_id, assignment_id)
 
     def publish_team_assignment_handoff(self, team_id: str, assignment_id: str):
         with self._lock:
@@ -3378,6 +3673,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            self._retire_team_schedule_supervisor_for_identity_change()
             self._retire_child_supervisor_for_identity_change()
             candidate = self._session_store.create(binding_from_status(self._manager.status()))
             try:
@@ -3401,6 +3697,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
+            self._retire_team_schedule_supervisor_for_identity_change()
             self._retire_child_supervisor_for_identity_change()
             candidate = self._session_store.fork(
                 selector,
@@ -3459,6 +3756,7 @@ class ProjectSession:
                     False,
                     LatestUpdateStatus.UPDATED,
                 )
+            self._retire_team_schedule_supervisor_for_identity_change()
             self._retire_child_supervisor_for_identity_change()
             old = self._writer
             old_loop = self._loop
@@ -4618,6 +4916,10 @@ class ProjectSession:
                     raise RuntimeError("MCP process cleanup is incomplete")
                 return
             self._ensure_not_compacting()
+            team_supervisor = self._team_schedule_supervisor
+            self._team_schedule_supervisor = None
+            if team_supervisor is not None:
+                team_supervisor.close(join_timeout=1.0)
             self._closed = True
             supervisor = self._child_supervisor
             self._child_supervisor = None
@@ -4630,6 +4932,18 @@ class ProjectSession:
                 self._manager.close()
             if not mcp_cleanup_complete:
                 raise RuntimeError("MCP process cleanup is incomplete")
+
+    def _retire_team_schedule_supervisor_for_identity_change(self) -> None:
+        supervisor = self._team_schedule_supervisor
+        if supervisor is None:
+            return
+        if supervisor.queued_count:
+            raise SessionStoreError(
+                "cannot change Session identity while Team schedules are queued or active; "
+                "cancel or wait for them first"
+            )
+        self._team_schedule_supervisor = None
+        supervisor.close(join_timeout=1.0)
 
     def _retire_child_supervisor_for_identity_change(self) -> None:
         supervisor = self._child_supervisor
@@ -4950,6 +5264,310 @@ class ProjectSession:
             ):
                 raise
             return _child_control_error(request, str(error), "child_control_rejected")
+
+    def _dispatch_team_control(
+        self, request: ToolUse, context_id: str
+    ) -> TeamControlDispatchResult:
+        """Dispatch one parent-only Team control through its dedicated audit boundary."""
+        if self._child_mode:
+            raise RuntimeError("Team controls are unavailable inside a Child")
+        parsed = parse_team_control(request)
+        state = self._runtime.turn_state.team_control_state
+        mutation_names = {
+            TEAM_CREATE_TOOL_NAME,
+            TEAM_ADD_MEMBER_TOOL_NAME,
+            TEAM_MESSAGE_SEND_TOOL_NAME,
+            TEAM_MESSAGE_READ_TOOL_NAME,
+            TEAM_WORK_CREATE_TOOL_NAME,
+            TEAM_SCHEDULE_START_TOOL_NAME,
+            TEAM_WORK_REVIEW_TOOL_NAME,
+            TEAM_CLOSE_TOOL_NAME,
+        }
+        try:
+            if parsed.name == TEAM_STATUS_TOOL_NAME:
+                return _team_control_success(
+                    request,
+                    _team_status_payload(self._ensure_team_owner(parsed.team_id)),
+                    "team_observed",
+                )
+            if parsed.name == TEAM_MESSAGE_SHOW_TOOL_NAME:
+                state.reserve_message_show()
+                assert parsed.team_id is not None and parsed.message_id is not None
+                message = self.show_team_message_for_model(
+                    parsed.team_id,
+                    parsed.message_id,
+                    context_id=context_id,
+                    tool_use_id=request.tool_use_id,
+                )
+                return _team_control_success(
+                    request,
+                    {
+                        "body": message.body,
+                        "body_sha256": message.body_sha256,
+                        "message_id": message.message_id,
+                        "team_id": parsed.team_id,
+                        "source_assignment_id": message.source_assignment_id,
+                        "source_child_session_id": message.source_child_session_id,
+                        "source_turn_record_sequence": message.source_turn_record_sequence,
+                        "source_handoff_sha256": message.source_handoff_sha256,
+                    },
+                    "team_reply_delivered",
+                    exact_body=True,
+                )
+            if parsed.name == TEAM_SCHEDULE_WAIT_TOOL_NAME:
+                assert parsed.team_id is not None and parsed.schedule_run_id is not None
+                assert parsed.timeout_seconds is not None
+                state.reserve_wait(parsed.timeout_seconds)
+                self._ensure_team_owner(parsed.team_id)
+                notification = self.wait_team_schedule(
+                    parsed.team_id, parsed.schedule_run_id, parsed.timeout_seconds
+                )
+                schedule = self._team_schedule_service.status(
+                    parsed.team_id, parsed.schedule_run_id
+                )
+                return _team_control_success(
+                    request,
+                    _team_schedule_payload(parsed.team_id, schedule, notification),
+                    "team_schedule_observed",
+                )
+
+            if parsed.name in mutation_names:
+                if parsed.name == TEAM_CREATE_TOOL_NAME:
+                    state.reserve_create()
+                    target_team_id = _uuid4_text(self._action_uuid_factory(), "Team ID")
+                elif parsed.name == TEAM_ADD_MEMBER_TOOL_NAME:
+                    state.reserve_member_add()
+                    assert parsed.team_id is not None
+                    target_team_id = self._ensure_team_owner(parsed.team_id).team_id
+                elif parsed.name == TEAM_SCHEDULE_START_TOOL_NAME:
+                    state.reserve_schedule_start()
+                    assert parsed.team_id is not None
+                    target_team_id = self._ensure_team_owner(parsed.team_id).team_id
+                else:
+                    state.reserve_mutation()
+                    assert parsed.team_id is not None
+                    target_team_id = self._ensure_team_owner(parsed.team_id).team_id
+                schedule_run_id = None
+                route_fingerprint = None
+                child_tool_set_id = None
+                max_assignments = None
+                max_parallel = None
+                per_child_provider_invocations = None
+                per_child_tool_requests = None
+                per_child_output_tokens = None
+                per_child_deadline_seconds = None
+                if parsed.name == TEAM_SCHEDULE_START_TOOL_NAME:
+                    schedule_run_id = _uuid4_text(
+                        self._action_uuid_factory(), "Team schedule run ID"
+                    )
+                    status = self._manager.status()
+                    route_fingerprint = (
+                        status.route_fingerprint or binding_from_status(status).route_fingerprint
+                    )
+                    child_tools = child_tool_set()
+                    child_tool_set_id = child_tools.snapshot_id
+                    max_assignments = parsed.max_assignments
+                    max_parallel = parsed.max_parallel
+                    per_child_provider_invocations = CHILD_MAX_PROVIDER_INVOCATIONS
+                    per_child_tool_requests = CHILD_MAX_TOOL_REQUESTS
+                    per_child_output_tokens = CHILD_MAX_OUTPUT_TOKENS
+                    per_child_deadline_seconds = CHILD_DEADLINE_SECONDS
+                identity = TeamControlApprovalIdentity(
+                    parent_session_id=self._writer.session_id,
+                    context_id=context_id,
+                    tool_use_id=request.tool_use_id,
+                    control_name=parsed.name,
+                    canonical_arguments_sha256=canonical_team_arguments_sha256(parsed),
+                    target_or_preallocated_team_id=target_team_id,
+                    approval_mode=self._approval_mode,
+                    schedule_run_id=schedule_run_id,
+                    route_fingerprint=route_fingerprint,
+                    child_tool_set_id=child_tool_set_id,
+                    max_assignments=max_assignments,
+                    max_parallel=max_parallel,
+                    per_child_provider_invocations=per_child_provider_invocations,
+                    per_child_tool_requests=per_child_tool_requests,
+                    per_child_output_tokens=per_child_output_tokens,
+                    per_child_deadline_seconds=per_child_deadline_seconds,
+                )
+                preview = TeamControlApprovalPreview(
+                    control_name=parsed.name,
+                    team_id=target_team_id,
+                    summary=_team_control_summary(parsed),
+                    provider_id=(self._manager.status().provider_id if route_fingerprint else None),
+                    model=(self._manager.status().wire_model if route_fingerprint else None),
+                    child_tool_names=tuple(child_tool_set().names) if route_fingerprint else (),
+                    max_assignments=max_assignments,
+                    max_parallel=max_parallel,
+                    per_child_provider_invocations=per_child_provider_invocations,
+                    per_child_tool_requests=per_child_tool_requests,
+                    per_child_output_tokens=per_child_output_tokens,
+                    per_child_deadline_seconds=per_child_deadline_seconds,
+                )
+                resolution = ApprovalResolution.ACCEPT
+                if self._approval_mode is ApprovalMode.ASK:
+                    state.pending_approval_identity = identity
+                    try:
+                        resolution = self._approval_handler(
+                            TeamControlApprovalRequest(identity, preview)  # type: ignore[arg-type]
+                        )
+                    finally:
+                        state.pending_approval_identity = None
+                    if type(resolution) is not ApprovalResolution:
+                        raise ValueError("approval handler returned an invalid resolution")
+                outcome = {
+                    ApprovalResolution.ACCEPT: ApprovalAuditOutcome.ACCEPTED,
+                    ApprovalResolution.REJECT: ApprovalAuditOutcome.REJECTED,
+                    ApprovalResolution.CANCEL: ApprovalAuditOutcome.CANCELLED,
+                }[resolution]
+                decision = TeamControlDecided(
+                    sequence=self._writer.state.next_sequence,
+                    occurred_at=self._writer.now(),
+                    parent_session_id=self._writer.session_id,
+                    context_id=context_id,
+                    tool_use_id=request.tool_use_id,
+                    control_name=parsed.name,
+                    target_team_id=target_team_id,
+                    team_control_identity_sha256=identity.digest,
+                    canonical_arguments_sha256=identity.canonical_arguments_sha256,
+                    approval_mode=identity.approval_mode,
+                    outcome=outcome,
+                    decision_sha256=team_control_decision_sha256(identity, outcome.value),
+                )
+                self._writer.team_control_decided(decision)
+                if resolution is ApprovalResolution.REJECT:
+                    return _team_control_error(
+                        request, "Team control approval rejected", "team_rejected"
+                    )
+                if resolution is ApprovalResolution.CANCEL:
+                    return _team_control_error(
+                        request, "Team control approval cancelled", "team_cancelled"
+                    )
+                return self._execute_accepted_team_control(
+                    request, parsed, target_team_id=target_team_id, schedule_run_id=schedule_run_id
+                )
+            raise ValueError("Team control name is unsupported")
+        except (
+            SessionStoreError,
+            TeamScheduleError,
+            TeamScheduleSupervisorError,
+            TeamStoreError,
+            ValueError,
+        ) as error:
+            from coquo.session_store import SessionAppendCommitError
+
+            if isinstance(error, SessionAppendCommitError):
+                raise
+            return _team_control_error(request, str(error), "team_control_rejected")
+
+    def _execute_accepted_team_control(
+        self,
+        request: ToolUse,
+        parsed,
+        *,
+        target_team_id: str,
+        schedule_run_id: str | None,
+    ) -> TeamControlDispatchResult:
+        if parsed.name == TEAM_CREATE_TOOL_NAME:
+            assert parsed.team_name is not None
+            team = self.create_team_preallocated(target_team_id, parsed.team_name)
+            return _team_control_success(
+                request, {"team_id": team.team_id, "status": team.status.value}, "team_created"
+            )
+        if parsed.name == TEAM_ADD_MEMBER_TOOL_NAME:
+            assert parsed.name_value is not None
+            member = self.add_team_member(target_team_id, parsed.name_value)
+            return _team_control_success(
+                request,
+                {
+                    "team_id": target_team_id,
+                    "member_id": member.member_id,
+                    "status": member.status.value,
+                },
+                "team_member_added",
+            )
+        if parsed.name == TEAM_MESSAGE_SEND_TOOL_NAME:
+            assert parsed.member_id is not None and parsed.body is not None
+            message = self.send_team_message(target_team_id, parsed.member_id, parsed.body)
+            return _team_control_success(
+                request,
+                {
+                    "team_id": target_team_id,
+                    "message_id": message.message_id,
+                    "status": message.status.value,
+                },
+                "team_message_sent",
+            )
+        if parsed.name == TEAM_MESSAGE_READ_TOOL_NAME:
+            assert parsed.message_id is not None
+            message = self.read_team_message_for_model(target_team_id, parsed.message_id)
+            return _team_control_success(
+                request,
+                {
+                    "team_id": target_team_id,
+                    "message_id": message.message_id,
+                    "status": message.status.value,
+                },
+                "team_message_read",
+            )
+        if parsed.name == TEAM_WORK_CREATE_TOOL_NAME:
+            assert parsed.title is not None and parsed.objective is not None
+            item = self.create_team_work(
+                target_team_id, parsed.title, parsed.objective, parsed.dependency_ids
+            )
+            return _team_control_success(
+                request,
+                {
+                    "team_id": target_team_id,
+                    "work_item_id": item.work_item_id,
+                    "status": item.status.value,
+                },
+                "team_work_created",
+            )
+        if parsed.name == TEAM_SCHEDULE_START_TOOL_NAME:
+            assert (
+                parsed.max_assignments is not None
+                and parsed.max_parallel is not None
+                and schedule_run_id is not None
+            )
+            team = self._ensure_team_owner(target_team_id)
+            if self._team_schedule_supervisor is None:
+                self._team_schedule_supervisor = TeamScheduleSupervisor(self.workspace, self)
+            run = self._team_schedule_service.start(
+                team.team_id,
+                source=TeamScheduleSource.MODEL,
+                max_assignments=parsed.max_assignments,
+                max_parallel=parsed.max_parallel,
+                schedule_run_id=schedule_run_id,
+            )
+            state = self._team_schedule_supervisor.submit(run)
+            return _team_control_success(
+                request, _team_schedule_payload(team.team_id, state, None), "team_schedule_started"
+            )
+        if parsed.name == TEAM_WORK_REVIEW_TOOL_NAME:
+            assert parsed.decision is not None and parsed.note is not None
+            item = self.review_team_work_for_model(
+                target_team_id,
+                parsed.work_item_id,
+                decision=parsed.decision,
+                note=parsed.note,
+                message_id=parsed.message_id,
+            )
+            return _team_control_success(
+                request,
+                {
+                    "team_id": target_team_id,
+                    "work_item_id": item.work_item_id,
+                    "status": item.status.value,
+                },
+                "team_work_reviewed",
+            )
+        if parsed.name == TEAM_CLOSE_TOOL_NAME:
+            team = self.close_team(target_team_id)
+            return _team_control_success(
+                request, {"team_id": team.team_id, "status": team.status.value}, "team_closed"
+            )
+        raise ValueError("accepted Team control is unsupported")
 
     def _dispatch_child_spawn(
         self, request: ToolUse, *, context_id: str, objective: str
@@ -6593,6 +7211,113 @@ def _child_control_error(
             result_code,
         )
     )
+
+
+def _team_control_success(
+    request: ToolUse,
+    payload: dict[str, object],
+    result_code: str,
+    *,
+    exact_body: bool = False,
+) -> TeamControlDispatchResult:
+    body = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(body.encode("utf-8")) > MAX_TEAM_RESULT_BYTES:
+        raise ValueError("Team control result exceeds its 40 KiB bound")
+    return TeamControlDispatchResult(
+        ToolDispatchResult(
+            ToolResult(request.tool_use_id, body), ToolEventStatus.SUCCEEDED, result_code
+        )
+    )
+
+
+def _team_control_error(
+    request: ToolUse, message: str, result_code: str
+) -> TeamControlDispatchResult:
+    bounded = message.replace("\r", " ").replace("\n", " ")[:512] or "Team control failed"
+    body = json.dumps(
+        {"error": result_code, "message": bounded},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return TeamControlDispatchResult(
+        ToolDispatchResult(
+            ToolResult(request.tool_use_id, body, is_error=True),
+            ToolEventStatus.REJECTED,
+            result_code,
+        )
+    )
+
+
+def _team_status_payload(team: TeamInfo) -> dict[str, object]:
+    return {
+        "team_id": team.team_id,
+        "status": team.status.value,
+        "members": tuple(
+            {"member_id": member.member_id, "name": member.name, "status": member.status.value}
+            for member in team.members
+        ),
+        "schedules": tuple(
+            {
+                "schedule_run_id": schedule.schedule_run_id,
+                "status": schedule.status.value,
+                "assignment_count": schedule.assignment_count,
+                "result_code": schedule.result_code,
+            }
+            for schedule in team.schedules[-1:]
+        ),
+        "work": tuple(
+            {
+                "work_item_id": item.work_item_id,
+                "status": item.status.value,
+                "current_assignment_id": item.current_assignment_id,
+            }
+            for item in team.work_items
+            if item.status.value not in {"completed", "cancelled"}
+        )[:32],
+        "unread_reply_ids": tuple(
+            {"message_id": message.message_id, "body_sha256": message.body_sha256}
+            for message in team.messages
+            if message.sender_member_id is not None and message.status.value == "unread"
+        ),
+    }
+
+
+def _team_schedule_payload(team_id: str, schedule, notification) -> dict[str, object]:
+    state = (
+        notification.state
+        if notification is not None and notification.state is not None
+        else schedule
+    )
+    payload: dict[str, object] = {"team_id": team_id}
+    if state is None:
+        payload["status"] = "unknown"
+        return payload
+    payload.update(
+        {
+            "schedule_run_id": state.schedule_run_id,
+            "status": state.status.value,
+            "assignment_count": state.assignment_count,
+            "assignment_ids": state.assignment_ids,
+            "result_code": state.result_code,
+            "message": state.message,
+        }
+    )
+    return payload
+
+
+def _team_control_summary(parsed) -> str:
+    values = [parsed.name]
+    for value in (parsed.team_id, parsed.member_id, parsed.work_item_id, parsed.message_id):
+        if value is not None:
+            values.append(value)
+    if parsed.name_value is not None:
+        values.append(f"name={parsed.name_value}")
+    if parsed.decision is not None:
+        values.append(f"decision={parsed.decision}")
+    return " ".join(values)
 
 
 def _task_control_names_for_stage(kind: StageKind) -> tuple[str, ...]:

@@ -4,7 +4,13 @@ import pytest
 
 from coquo.core.contracts import ToolArguments, ToolUse
 from coquo.tools.catalog import (
+    BUILTIN_TOOL_SOURCE_GENERATION,
+    ORDINARY_PROMPT_TOOL_NAMES,
+    TEAM_CONTROL_TOOL_CATALOG,
+    TEAM_CONTROL_TOOL_CONTRACTS,
     TOOL_CATALOG,
+    TOOL_REGISTRY_GENERATION,
+    TOOL_REGISTRY_SNAPSHOT,
     model_tool_definitions,
     select_tool_definitions,
     tool_input_for_provider_history,
@@ -66,7 +72,29 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "child_status",
         "child_wait",
         "child_cancel",
+        "team_create",
+        "team_add_member",
+        "team_status",
+        "team_message_send",
+        "team_message_show",
+        "team_message_read",
+        "team_work_create",
+        "team_schedule_start",
+        "team_schedule_wait",
+        "team_work_review",
+        "team_close",
     ]
+    assert len(TOOL_CATALOG) == 61
+    assert len(ORDINARY_PROMPT_TOOL_NAMES) == 57
+    assert TOOL_REGISTRY_GENERATION == BUILTIN_TOOL_SOURCE_GENERATION == 8
+    assert TOOL_REGISTRY_SNAPSHOT.generation == 8
+    assert tuple(item.name for item in TEAM_CONTROL_TOOL_CATALOG) == tuple(
+        ORDINARY_PROMPT_TOOL_NAMES[-11:]
+    )
+    assert all(
+        contract.execution_kind.value == "team-control" and contract.permission_actions == ()
+        for contract in TEAM_CONTROL_TOOL_CONTRACTS
+    )
     request = tool_use_from_input(
         "edit-1",
         "edit_file",

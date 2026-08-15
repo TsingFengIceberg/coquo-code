@@ -46,7 +46,7 @@ def test_assignment_saga_binds_exact_child_and_reuses_member_identity(tmp_path: 
     first = service.create(team.team_id, member_a.member_id, "Inspect files")
     assert first.phase is TeamAssignmentPhase.CHILD_BOUND
     created_record = TeamStore(tmp_path).replay_state(team.team_id).records[3]
-    assert created_record.schema_version == 2
+    assert created_record.schema_version == 3
     assert created_record.work_item_id is None
     assert first.child is not None and first.child.team_assignment is not None
     assert first.child.parent_session_id == owner

@@ -23,6 +23,10 @@ TEAM_MEMBER_ENABLED_SCHEMA_VERSION = 1
 TEAM_MEMBER_LEFT_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION = 2
+TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION = 3
+TEAM_SCHEDULE_STARTED_SCHEMA_VERSION = 1
+TEAM_SCHEDULE_CANCEL_REQUESTED_SCHEMA_VERSION = 1
+TEAM_SCHEDULE_FINISHED_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CHILD_BOUND_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_OBSERVED_SCHEMA_VERSION = 1
 TEAM_MESSAGE_SENT_SCHEMA_VERSION = 1
@@ -50,6 +54,10 @@ MAX_TEAM_OWNER_MESSAGE_CHARACTERS = 4096
 MAX_TEAM_OWNER_MESSAGE_BYTES = 8 * 1024
 MAX_TEAM_WORK_ITEMS = 1024
 MAX_TEAM_WORK_DEPENDENCIES = 16
+MAX_TEAM_SCHEDULE_ASSIGNMENTS = 32
+MAX_TEAM_SCHEDULE_PARALLEL = 4
+MAX_TEAM_SCHEDULE_REASON_CHARACTERS = 4096
+MAX_TEAM_SCHEDULE_REASON_BYTES = 16 * 1024
 
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
@@ -91,6 +99,40 @@ class TeamWorkStatus(StrEnum):
     REVIEW = "review"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+class TeamScheduleSource(StrEnum):
+    HOST = "host"
+    MODEL = "model"
+    SHUTDOWN = "shutdown"
+
+
+class TeamScheduleOutcome(StrEnum):
+    IDLE = "idle"
+    LIMIT_REACHED = "limit_reached"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+class TeamScheduleStatus(StrEnum):
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    IDLE = "idle"
+    LIMIT_REACHED = "limit_reached"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {
+            TeamScheduleStatus.IDLE,
+            TeamScheduleStatus.LIMIT_REACHED,
+            TeamScheduleStatus.CANCELLED,
+            TeamScheduleStatus.FAILED,
+            TeamScheduleStatus.INTERRUPTED,
+        }
 
 
 @dataclass(frozen=True)
@@ -170,8 +212,48 @@ class TeamAssignmentCreated:
     objective_sha256: str
     created_at: str
     work_item_id: str | None = None
+    schedule_run_id: str | None = None
     record_type: str = "team_assignment_created"
     schema_version: int = TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamScheduleStarted:
+    sequence: int
+    team_id: str
+    schedule_run_id: str
+    source: str
+    max_assignments: int
+    max_parallel: int
+    started_at: str
+    record_type: str = "team_schedule_started"
+    schema_version: int = TEAM_SCHEDULE_STARTED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamScheduleCancelRequested:
+    sequence: int
+    team_id: str
+    schedule_run_id: str
+    reason: str
+    source: str
+    requested_at: str
+    record_type: str = "team_schedule_cancel_requested"
+    schema_version: int = TEAM_SCHEDULE_CANCEL_REQUESTED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamScheduleFinished:
+    sequence: int
+    team_id: str
+    schedule_run_id: str
+    outcome: str
+    assignment_count: int
+    result_code: str
+    message: str
+    finished_at: str
+    record_type: str = "team_schedule_finished"
+    schema_version: int = TEAM_SCHEDULE_FINISHED_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -327,6 +409,9 @@ TeamRecord: TypeAlias = (
     | TeamMemberEnabled
     | TeamMemberLeft
     | TeamAssignmentCreated
+    | TeamScheduleStarted
+    | TeamScheduleCancelRequested
+    | TeamScheduleFinished
     | TeamAssignmentChildBound
     | TeamAssignmentObserved
     | TeamAssignmentMailboxBound
@@ -373,6 +458,7 @@ class TeamAssignmentState:
     delivery_id: str | None = None
     inbox_message_ids: tuple[str, ...] = ()
     reply_message_id: str | None = None
+    schedule_run_id: str | None = None
     mailbox_bound_at: str | None = None
     mailbox_observed_at: str | None = None
     child_user_message_sha256: str | None = None
@@ -412,6 +498,25 @@ class TeamMessageState:
 
 
 @dataclass(frozen=True)
+class TeamScheduleState:
+    schedule_run_id: str
+    source: TeamScheduleSource
+    max_assignments: int
+    max_parallel: int
+    started_at: str
+    status: TeamScheduleStatus
+    cancel_reason: str | None = None
+    cancel_source: TeamScheduleSource | None = None
+    cancel_requested_at: str | None = None
+    outcome: TeamScheduleOutcome | None = None
+    assignment_count: int = 0
+    result_code: str | None = None
+    message: str | None = None
+    finished_at: str | None = None
+    assignment_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TeamReplayState:
     header: TeamHeader
     records: tuple[TeamRecord, ...]
@@ -420,6 +525,7 @@ class TeamReplayState:
     assignments: tuple[TeamAssignmentState, ...] = ()
     messages: tuple[TeamMessageState, ...] = ()
     work_items: tuple[TeamWorkItemState, ...] = ()
+    schedules: tuple[TeamScheduleState, ...] = ()
 
     @property
     def status(self) -> TeamStatus:
@@ -498,6 +604,42 @@ def encode_team_record(record: TeamRecord) -> bytes:
             "sequence": record.sequence,
             "team_id": record.team_id,
         }
+    elif isinstance(record, TeamScheduleStarted):
+        value = {
+            "max_assignments": record.max_assignments,
+            "max_parallel": record.max_parallel,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "schedule_run_id": record.schedule_run_id,
+            "source": record.source,
+            "started_at": record.started_at,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamScheduleCancelRequested):
+        value = {
+            "reason": record.reason,
+            "record_type": record.record_type,
+            "requested_at": record.requested_at,
+            "schedule_run_id": record.schedule_run_id,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "source": record.source,
+            "team_id": record.team_id,
+        }
+    elif isinstance(record, TeamScheduleFinished):
+        value = {
+            "assignment_count": record.assignment_count,
+            "finished_at": record.finished_at,
+            "message": record.message,
+            "outcome": record.outcome,
+            "record_type": record.record_type,
+            "result_code": record.result_code,
+            "schema_version": record.schema_version,
+            "schedule_run_id": record.schedule_run_id,
+            "sequence": record.sequence,
+            "team_id": record.team_id,
+        }
     elif isinstance(record, TeamMemberJoined):
         value = {
             "joined_at": record.joined_at,
@@ -542,6 +684,9 @@ def encode_team_record(record: TeamRecord) -> bytes:
             "team_id": record.team_id,
         }
         if record.schema_version == TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION:
+            value["work_item_id"] = record.work_item_id
+        if record.schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION:
+            value["schedule_run_id"] = record.schedule_run_id
             value["work_item_id"] = record.work_item_id
     elif isinstance(record, TeamAssignmentChildBound):
         value = {
@@ -757,6 +902,81 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )
+    elif record_type == "team_schedule_started":
+        _require_fields(
+            value,
+            "team_schedule_started",
+            "max_assignments",
+            "max_parallel",
+            "record_type",
+            "schema_version",
+            "sequence",
+            "schedule_run_id",
+            "source",
+            "started_at",
+            "team_id",
+        )
+        record = TeamScheduleStarted(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            schedule_run_id=value["schedule_run_id"],
+            source=value["source"],
+            max_assignments=value["max_assignments"],
+            max_parallel=value["max_parallel"],
+            started_at=value["started_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_schedule_cancel_requested":
+        _require_fields(
+            value,
+            "team_schedule_cancel_requested",
+            "reason",
+            "record_type",
+            "requested_at",
+            "schedule_run_id",
+            "schema_version",
+            "sequence",
+            "source",
+            "team_id",
+        )
+        record = TeamScheduleCancelRequested(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            schedule_run_id=value["schedule_run_id"],
+            reason=value["reason"],
+            source=value["source"],
+            requested_at=value["requested_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
+    elif record_type == "team_schedule_finished":
+        _require_fields(
+            value,
+            "team_schedule_finished",
+            "assignment_count",
+            "finished_at",
+            "message",
+            "outcome",
+            "record_type",
+            "result_code",
+            "schema_version",
+            "schedule_run_id",
+            "sequence",
+            "team_id",
+        )
+        record = TeamScheduleFinished(
+            sequence=value["sequence"],
+            team_id=value["team_id"],
+            schedule_run_id=value["schedule_run_id"],
+            outcome=value["outcome"],
+            assignment_count=value["assignment_count"],
+            result_code=value["result_code"],
+            message=value["message"],
+            finished_at=value["finished_at"],
+            record_type=value["record_type"],
+            schema_version=value["schema_version"],
+        )
     elif record_type == "team_member_joined":
         _require_fields(
             value,
@@ -857,6 +1077,8 @@ def decode_team_record(payload: bytes) -> TeamRecord:
         }
         if schema_version == TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION:
             expected.add("work_item_id")
+        elif schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION:
+            expected.update({"work_item_id", "schedule_run_id"})
         if set(value) != expected:
             raise TeamRecordError("team_assignment_created has unknown or missing fields")
         record = TeamAssignmentCreated(
@@ -871,6 +1093,7 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             record_type=value["record_type"],
             schema_version=value["schema_version"],
             work_item_id=value.get("work_item_id"),
+            schedule_run_id=value.get("schedule_run_id"),
         )
     elif record_type == "team_assignment_child_bound":
         _require_fields(
@@ -1191,6 +1414,7 @@ def replay_team_records(
     assignment_children: set[str] = set()
     active_member_assignments: set[str] = set()
     messages: dict[str, TeamMessageState] = {}
+    schedules: dict[str, TeamScheduleState] = {}
     delivery_ids: set[str] = set()
     reply_ids: set[str] = set()
     bound_message_ids: set[str] = set()
@@ -1213,6 +1437,69 @@ def replay_team_records(
             raise TeamRecordError("Team lifecycle record appears after team_closed")
         if isinstance(record, TeamClosed):
             closed = record
+            continue
+        if isinstance(record, TeamScheduleStarted):
+            if record.schedule_run_id in schedules:
+                raise TeamRecordError("Team schedule run ID is duplicated")
+            if any(not schedule.status.terminal for schedule in schedules.values()):
+                raise TeamRecordError("Team already has a nonterminal schedule")
+            schedules[record.schedule_run_id] = TeamScheduleState(
+                schedule_run_id=record.schedule_run_id,
+                source=TeamScheduleSource(record.source),
+                max_assignments=record.max_assignments,
+                max_parallel=record.max_parallel,
+                started_at=record.started_at,
+                status=TeamScheduleStatus.RUNNING,
+            )
+            continue
+        if isinstance(record, TeamScheduleCancelRequested):
+            schedule = schedules.get(record.schedule_run_id)
+            if schedule is None or schedule.status.terminal:
+                raise TeamRecordError("Team schedule cancellation is invalid")
+            if schedule.cancel_requested_at is not None:
+                raise TeamRecordError("Team schedule cancellation is duplicated")
+            schedules[record.schedule_run_id] = TeamScheduleState(
+                **{
+                    **schedule.__dict__,
+                    "status": TeamScheduleStatus.CANCELLING,
+                    "cancel_reason": record.reason,
+                    "cancel_source": TeamScheduleSource(record.source),
+                    "cancel_requested_at": record.requested_at,
+                }
+            )
+            continue
+        if isinstance(record, TeamScheduleFinished):
+            schedule = schedules.get(record.schedule_run_id)
+            if schedule is None or schedule.status.terminal:
+                raise TeamRecordError("Team schedule finish is invalid")
+            if record.assignment_count != len(schedule.assignment_ids):
+                raise TeamRecordError("Team schedule assignment count is invalid")
+            if any(
+                assignments[assignment_id].phase is not TeamAssignmentPhase.TERMINAL_OBSERVED
+                for assignment_id in schedule.assignment_ids
+                if assignment_id in assignments
+            ):
+                raise TeamRecordError("Team schedule cannot finish with pending assignments")
+            outcome = TeamScheduleOutcome(record.outcome)
+            if outcome is TeamScheduleOutcome.CANCELLED and schedule.cancel_requested_at is None:
+                raise TeamRecordError("Cancelled Team schedule requires a cancel request")
+            if (
+                outcome is not TeamScheduleOutcome.CANCELLED
+                and schedule.cancel_requested_at is not None
+            ):
+                raise TeamRecordError("Cancelling Team schedule must finish as cancelled")
+            status = TeamScheduleStatus(record.outcome)
+            schedules[record.schedule_run_id] = TeamScheduleState(
+                **{
+                    **schedule.__dict__,
+                    "status": status,
+                    "outcome": outcome,
+                    "assignment_count": record.assignment_count,
+                    "result_code": record.result_code,
+                    "message": record.message,
+                    "finished_at": record.finished_at,
+                }
+            )
             continue
         if isinstance(record, TeamMemberJoined):
             if record.member_id in members:
@@ -1243,6 +1530,15 @@ def replay_team_records(
                 raise TeamRecordError("Team assignment requires an active member")
             if record.member_id in active_member_assignments:
                 raise TeamRecordError("Team member already has a pending assignment")
+            schedule = schedules.get(record.schedule_run_id) if record.schedule_run_id else None
+            if (
+                record.schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION
+                and record.schedule_run_id is not None
+            ):
+                if schedule is None or schedule.status.terminal:
+                    raise TeamRecordError("Team assignment references an invalid schedule run")
+                if len(schedule.assignment_ids) >= schedule.max_assignments:
+                    raise TeamRecordError("Team schedule assignment limit was exceeded")
             work_item = (
                 work_items.get(record.work_item_id) if record.work_item_id is not None else None
             )
@@ -1258,6 +1554,7 @@ def replay_team_records(
                 created_at=record.created_at,
                 phase=TeamAssignmentPhase.PENDING_CHILD,
                 work_item_id=record.work_item_id,
+                schedule_run_id=record.schedule_run_id,
             )
             assignment_children.add(record.child_run_id)
             active_member_assignments.add(record.member_id)
@@ -1268,6 +1565,13 @@ def replay_team_records(
                         "status": TeamWorkStatus.ASSIGNED,
                         "assignment_ids": (*work_item.assignment_ids, record.assignment_id),
                         "current_assignment_id": record.assignment_id,
+                    }
+                )
+            if schedule is not None:
+                schedules[record.schedule_run_id] = TeamScheduleState(
+                    **{
+                        **schedule.__dict__,
+                        "assignment_ids": (*schedule.assignment_ids, record.assignment_id),
                     }
                 )
             continue
@@ -1591,6 +1895,7 @@ def replay_team_records(
         assignments=tuple(assignments.values()),
         messages=tuple(messages.values()),
         work_items=tuple(_project_work_items(work_items)),
+        schedules=tuple(schedules.values()),
     )
 
 
@@ -1654,6 +1959,66 @@ def _validate_record(record: TeamRecord) -> None:
         canonical_team_id(record.team_id)
         canonical_team_timestamp(record.closed_at, "Team closed_at")
         return
+    if isinstance(record, TeamScheduleStarted):
+        if (
+            record.record_type != "team_schedule_started"
+            or record.schema_version != TEAM_SCHEDULE_STARTED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team schedule-started schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team schedule-started sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.schedule_run_id)
+        if record.source not in {TeamScheduleSource.HOST.value, TeamScheduleSource.MODEL.value}:
+            raise TeamRecordError("Team schedule source is invalid")
+        if (
+            type(record.max_assignments) is not int
+            or not 1 <= record.max_assignments <= MAX_TEAM_SCHEDULE_ASSIGNMENTS
+        ):
+            raise TeamRecordError("Team schedule assignment limit is invalid")
+        if (
+            type(record.max_parallel) is not int
+            or not 1 <= record.max_parallel <= MAX_TEAM_SCHEDULE_PARALLEL
+        ):
+            raise TeamRecordError("Team schedule parallel limit is invalid")
+        canonical_team_timestamp(record.started_at, "Team schedule started_at")
+        return
+    if isinstance(record, TeamScheduleCancelRequested):
+        if (
+            record.record_type != "team_schedule_cancel_requested"
+            or record.schema_version != TEAM_SCHEDULE_CANCEL_REQUESTED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team schedule-cancel schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team schedule-cancel sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.schedule_run_id)
+        if record.source not in {item.value for item in TeamScheduleSource}:
+            raise TeamRecordError("Team schedule cancellation source is invalid")
+        canonical_team_schedule_reason(record.reason)
+        canonical_team_timestamp(record.requested_at, "Team schedule requested_at")
+        return
+    if isinstance(record, TeamScheduleFinished):
+        if (
+            record.record_type != "team_schedule_finished"
+            or record.schema_version != TEAM_SCHEDULE_FINISHED_SCHEMA_VERSION
+        ):
+            raise TeamRecordError("unsupported Team schedule-finished schema")
+        if type(record.sequence) is not int or record.sequence < 1:
+            raise TeamRecordError("Team schedule-finished sequence must be positive")
+        canonical_team_id(record.team_id)
+        canonical_team_id(record.schedule_run_id)
+        if record.outcome not in {item.value for item in TeamScheduleOutcome}:
+            raise TeamRecordError("Team schedule outcome is invalid")
+        if (
+            type(record.assignment_count) is not int
+            or not 0 <= record.assignment_count <= MAX_TEAM_SCHEDULE_ASSIGNMENTS
+        ):
+            raise TeamRecordError("Team schedule assignment count is invalid")
+        canonical_team_reason(record.result_code)
+        canonical_team_schedule_message(record.message)
+        canonical_team_timestamp(record.finished_at, "Team schedule finished_at")
+        return
     if isinstance(record, TeamMemberJoined):
         if (
             record.record_type != "team_member_joined"
@@ -1711,6 +2076,7 @@ def _validate_record(record: TeamRecord) -> None:
         if record.record_type != "team_assignment_created" or record.schema_version not in {
             TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION,
             TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
+            TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
         }:
             raise TeamRecordError("unsupported Team assignment-created schema")
         if type(record.sequence) is not int or record.sequence < 1:
@@ -1727,8 +2093,15 @@ def _validate_record(record: TeamRecord) -> None:
             and record.work_item_id is not None
         ):
             raise TeamRecordError("legacy Team assignment cannot carry a work item")
+        if (
+            record.schema_version != TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION
+            and record.schedule_run_id is not None
+        ):
+            raise TeamRecordError("non-v3 Team assignment cannot carry a schedule run")
         if record.work_item_id is not None:
             canonical_team_id(record.work_item_id)
+        if record.schedule_run_id is not None:
+            canonical_team_id(record.schedule_run_id)
         canonical_team_timestamp(record.created_at, "Team assignment created_at")
         return
     if isinstance(record, TeamAssignmentChildBound):
@@ -2012,9 +2385,37 @@ def canonical_team_reason(value: object) -> str:
     )
 
 
+def canonical_team_schedule_reason(value: object) -> str:
+    return _bounded_text(
+        value,
+        "Team schedule reason",
+        max_characters=MAX_TEAM_SCHEDULE_REASON_CHARACTERS,
+        max_bytes=MAX_TEAM_SCHEDULE_REASON_BYTES,
+    )
+
+
+def canonical_team_schedule_message(value: object) -> str:
+    if not isinstance(value, str):
+        raise TeamRecordError("Team schedule message must be text")
+    if any(ord(char) < 32 and char not in {"\n", "\t"} for char in value):
+        raise TeamRecordError("Team schedule message must not contain control characters")
+    if (
+        len(value) > MAX_TEAM_SCHEDULE_REASON_CHARACTERS
+        or len(value.encode("utf-8")) > MAX_TEAM_SCHEDULE_REASON_BYTES
+    ):
+        raise TeamRecordError("Team schedule message exceeds its bound")
+    return value
+
+
 def _record_timestamp(record: TeamRecord) -> str:
     if isinstance(record, TeamClosed):
         return record.closed_at
+    if isinstance(record, TeamScheduleStarted):
+        return record.started_at
+    if isinstance(record, TeamScheduleCancelRequested):
+        return record.requested_at
+    if isinstance(record, TeamScheduleFinished):
+        return record.finished_at
     if isinstance(record, TeamMemberJoined):
         return record.joined_at
     if isinstance(record, TeamMemberDisabled):

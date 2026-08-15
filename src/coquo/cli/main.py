@@ -67,6 +67,7 @@ from coquo.cli.presentation import (
     render_team_message_summary,
     render_team_work_item,
     render_team_work_summary,
+    render_team_schedule,
 )
 from coquo.child_runtime import (
     ChildRunExecutor,
@@ -182,11 +183,19 @@ from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
 from coquo.child_run_records import ChildRunStatus
 from coquo.child_run_store import ChildRunStore, ChildRunStoreError
-from coquo.team_records import TeamMessageStatus, TeamStatus, TeamWorkStatus
+from coquo.team_records import (
+    MAX_TEAM_SCHEDULE_ASSIGNMENTS,
+    MAX_TEAM_SCHEDULE_PARALLEL,
+    TeamMessageStatus,
+    TeamScheduleSource,
+    TeamStatus,
+    TeamWorkStatus,
+)
 from coquo.team_store import TeamStore, TeamStoreError
 from coquo.team_messaging import TeamMessageError, TeamMessagingService
 from coquo.team_work import TeamWorkError, TeamWorkService
 from coquo.team_service import TeamAssignmentError, TeamAssignmentService
+from coquo.team_schedule import TeamScheduleError, TeamScheduleService
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
@@ -297,6 +306,28 @@ def task_list_limit(value: str) -> int:
     limit = positive_task_limit(value)
     if limit > 100:
         raise argparse.ArgumentTypeError("Task list limit must be between 1 and 100")
+    return limit
+
+
+def team_schedule_assignment_limit(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("Team schedule assignment limit must be an integer")
+    limit = int(value)
+    if not 1 <= limit <= MAX_TEAM_SCHEDULE_ASSIGNMENTS:
+        raise argparse.ArgumentTypeError(
+            f"Team schedule assignment limit must be between 1 and {MAX_TEAM_SCHEDULE_ASSIGNMENTS}"
+        )
+    return limit
+
+
+def team_schedule_parallel_limit(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("Team schedule parallel limit must be an integer")
+    limit = int(value)
+    if not 1 <= limit <= MAX_TEAM_SCHEDULE_PARALLEL:
+        raise argparse.ArgumentTypeError(
+            f"Team schedule parallel limit must be between 1 and {MAX_TEAM_SCHEDULE_PARALLEL}"
+        )
     return limit
 
 
@@ -1007,6 +1038,30 @@ def build_parser() -> argparse.ArgumentParser:
     team_work_release.add_argument("team_id")
     team_work_release.add_argument("work_item_id")
     team_work_release.add_argument("reason", type=nonblank_prompt)
+    team_schedule = team_commands.add_parser("schedule", help="run bounded Team schedules")
+    team_schedule_commands = team_schedule.add_subparsers(
+        dest="team_schedule_command", required=True
+    )
+    team_schedule_run = team_schedule_commands.add_parser(
+        "run", help="run one foreground schedule wave"
+    )
+    team_schedule_run.add_argument("team_id")
+    team_schedule_run.add_argument(
+        "--max-assignments", type=team_schedule_assignment_limit, default=32
+    )
+    team_schedule_run.add_argument("--max-parallel", type=team_schedule_parallel_limit, default=4)
+    team_schedule_status = team_schedule_commands.add_parser("status", help="show schedule status")
+    team_schedule_status.add_argument("team_id")
+    team_schedule_status.add_argument("schedule_run_id", nargs="?")
+    team_schedule_cancel = team_schedule_commands.add_parser("cancel", help="cancel one schedule")
+    team_schedule_cancel.add_argument("team_id")
+    team_schedule_cancel.add_argument("schedule_run_id")
+    team_schedule_cancel.add_argument("reason", type=nonblank_prompt)
+    team_schedule_recover = team_schedule_commands.add_parser(
+        "recover", help="recover one schedule"
+    )
+    team_schedule_recover.add_argument("team_id")
+    team_schedule_recover.add_argument("schedule_run_id", nargs="?")
     return parser
 
 
@@ -2687,6 +2742,47 @@ def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: 
             )
             return 0
         raise TeamStoreError("unknown Team message command")
+    if arguments.team_command == "schedule":
+        service = TeamScheduleService(workspace)
+        if arguments.team_schedule_command == "status":
+            state = service.status(arguments.team_id, arguments.schedule_run_id)
+            if state is None:
+                stdout.write("No Team schedule found.\n")
+            else:
+                stdout.write(f"{render_team_schedule(state)}\n")
+            return 0
+        if arguments.team_schedule_command == "cancel":
+            state = service.cancel(
+                arguments.team_id,
+                arguments.schedule_run_id,
+                arguments.reason,
+                source=TeamScheduleSource.HOST,
+            )
+            stdout.write(f"{render_team_schedule(state)}\n")
+            return 0
+        if arguments.team_schedule_command == "recover":
+            stdout.write(
+                f"{render_team_schedule(service.recover(arguments.team_id, arguments.schedule_run_id))}\n"
+            )
+            return 0
+        if arguments.team_schedule_command == "run":
+            team = TeamStore(workspace).inspect(arguments.team_id)
+            session = ProjectSession.open(
+                workspace,
+                resume=team.owner_session_id,
+                environment=os.environ,
+            )
+            try:
+                state = session.run_team_schedule(
+                    team.team_id,
+                    max_assignments=arguments.max_assignments,
+                    max_parallel=arguments.max_parallel,
+                )
+            finally:
+                session.close()
+            stdout.write(f"{render_team_schedule(state)}\n")
+            return 0
+        raise TeamScheduleError("unknown Team schedule command")
     if arguments.team_command == "work":
         service = TeamWorkService(workspace)
         if arguments.team_work_command == "create":

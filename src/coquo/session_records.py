@@ -561,6 +561,46 @@ class ChildDelegationDecided:
 
 
 @dataclass(frozen=True)
+class TeamControlDecided:
+    """Content-free parent audit for one exact Team control approval decision."""
+
+    sequence: int
+    occurred_at: str
+    parent_session_id: str
+    context_id: str
+    tool_use_id: str
+    control_name: str
+    target_team_id: str
+    team_control_identity_sha256: str
+    canonical_arguments_sha256: str
+    approval_mode: ApprovalMode
+    outcome: ApprovalAuditOutcome
+    decision_sha256: str
+    record_type: str = "team_control_decided"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class TeamMessageDeliveredToParent:
+    """Content-free receipt proving one exact reply body was delivered to a parent."""
+
+    sequence: int
+    occurred_at: str
+    parent_session_id: str
+    context_id: str
+    tool_use_id: str
+    team_id: str
+    message_id: str
+    body_sha256: str
+    source_assignment_id: str
+    source_child_session_id: str
+    source_child_turn_sequence: int
+    source_handoff_sha256: str
+    record_type: str = "team_message_delivered_to_parent"
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TaskAdmissionSource:
     proposal: TaskAdmissionProposal
     turn_record_sequence: int
@@ -589,6 +629,8 @@ SessionRecord: TypeAlias = (
     | TaskAdmissionResolved
     | ChildDelegationDecided
     | ChildHandoffDelivered
+    | TeamControlDecided
+    | TeamMessageDeliveredToParent
     | SessionClosed
 )
 AuditRecord: TypeAlias = (
@@ -609,6 +651,8 @@ AuditRecord: TypeAlias = (
     | TaskAdmissionResolved
     | ChildDelegationDecided
     | ChildHandoffDelivered
+    | TeamControlDecided
+    | TeamMessageDeliveredToParent
     | SessionClosed
 )
 
@@ -629,6 +673,8 @@ class ReplayState:
     task_admission_resolutions: tuple[TaskAdmissionResolved, ...]
     child_delegation_decisions: tuple[ChildDelegationDecided, ...]
     child_handoff_deliveries: tuple[ChildHandoffDelivered, ...]
+    team_control_decisions: tuple[TeamControlDecided, ...]
+    team_message_deliveries: tuple[TeamMessageDeliveredToParent, ...]
     turns: tuple[ConversationTurn, ...]
     latest_name: SessionNamed | None
     archived: bool
@@ -781,6 +827,8 @@ def replay_records(
     task_admission_resolutions: list[TaskAdmissionResolved] = []
     child_delegation_decisions: list[ChildDelegationDecided] = []
     child_handoff_deliveries: list[ChildHandoffDelivered] = []
+    team_control_decisions: list[TeamControlDecided] = []
+    team_message_deliveries: list[TeamMessageDeliveredToParent] = []
     grant_ids: set[str] = set()
     live_action_request_id: str | None = None
     validated: list[SessionRecord] = []
@@ -1066,6 +1114,20 @@ def replay_records(
             if any(prior.tool_use_id == record.tool_use_id for prior in child_delegation_decisions):
                 raise SessionRecordError("Child delegation ToolUse is already decided")
             child_delegation_decisions.append(record)
+        elif isinstance(record, TeamControlDecided):
+            _require_no_live_action(live_action_request_id, "team_control_decided")
+            _validate_team_control_decided(record, parent_session_id=header.session_id)
+            if any(prior.tool_use_id == record.tool_use_id for prior in team_control_decisions):
+                raise SessionRecordError("Team control ToolUse is already decided")
+            team_control_decisions.append(record)
+        elif isinstance(record, TeamMessageDeliveredToParent):
+            _require_no_live_action(live_action_request_id, "team_message_delivered_to_parent")
+            _validate_team_message_delivered(record, parent_session_id=header.session_id)
+            if any(prior.tool_use_id == record.tool_use_id for prior in team_message_deliveries):
+                raise SessionRecordError("Team message ToolUse is already delivered")
+            if any(prior.message_id == record.message_id for prior in team_message_deliveries):
+                raise SessionRecordError("Team message is already delivered")
+            team_message_deliveries.append(record)
         elif isinstance(record, SessionClosed):
             _require_no_live_action(live_action_request_id, "session_closed")
             _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -1087,6 +1149,8 @@ def replay_records(
         task_admission_resolutions=tuple(task_admission_resolutions),
         child_delegation_decisions=tuple(child_delegation_decisions),
         child_handoff_deliveries=tuple(child_handoff_deliveries),
+        team_control_decisions=tuple(team_control_decisions),
+        team_message_deliveries=tuple(team_message_deliveries),
         turns=tuple(turns),
         latest_name=latest_name,
         archived=archived,
@@ -1495,6 +1559,36 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             approval_mode=record.approval_mode.value,
             outcome=record.outcome.value,
             decision_sha256=record.decision_sha256,
+        )
+    elif isinstance(record, TeamControlDecided):
+        _validate_team_control_decided(record, parent_session_id=record.parent_session_id)
+        common.update(
+            occurred_at=record.occurred_at,
+            parent_session_id=record.parent_session_id,
+            context_id=record.context_id,
+            tool_use_id=record.tool_use_id,
+            control_name=record.control_name,
+            target_team_id=record.target_team_id,
+            team_control_identity_sha256=record.team_control_identity_sha256,
+            canonical_arguments_sha256=record.canonical_arguments_sha256,
+            approval_mode=record.approval_mode.value,
+            outcome=record.outcome.value,
+            decision_sha256=record.decision_sha256,
+        )
+    elif isinstance(record, TeamMessageDeliveredToParent):
+        _validate_team_message_delivered(record, parent_session_id=record.parent_session_id)
+        common.update(
+            occurred_at=record.occurred_at,
+            parent_session_id=record.parent_session_id,
+            context_id=record.context_id,
+            tool_use_id=record.tool_use_id,
+            team_id=record.team_id,
+            message_id=record.message_id,
+            body_sha256=record.body_sha256,
+            source_assignment_id=record.source_assignment_id,
+            source_child_session_id=record.source_child_session_id,
+            source_child_turn_sequence=record.source_child_turn_sequence,
+            source_handoff_sha256=record.source_handoff_sha256,
         )
     elif isinstance(record, SessionClosed):
         _validate_timestamp(record.occurred_at, "session_closed occurred_at")
@@ -2148,6 +2242,74 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             decision_sha256=_required_field_text(value, "decision_sha256", record_type),
         )
         _validate_child_delegation_decided(record, parent_session_id=record.parent_session_id)
+        return record
+    if record_type == "team_control_decided":
+        fields = simple_fields | {
+            "parent_session_id",
+            "context_id",
+            "tool_use_id",
+            "control_name",
+            "target_team_id",
+            "team_control_identity_sha256",
+            "canonical_arguments_sha256",
+            "approval_mode",
+            "outcome",
+            "decision_sha256",
+        }
+        _closed_fields(value, fields, record_type)
+        record = TeamControlDecided(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            parent_session_id=_required_field_text(value, "parent_session_id", record_type),
+            context_id=_required_field_text(value, "context_id", record_type),
+            tool_use_id=_required_field_text(value, "tool_use_id", record_type),
+            control_name=_required_field_text(value, "control_name", record_type),
+            target_team_id=_required_field_text(value, "target_team_id", record_type),
+            team_control_identity_sha256=_required_field_text(
+                value, "team_control_identity_sha256", record_type
+            ),
+            canonical_arguments_sha256=_required_field_text(
+                value, "canonical_arguments_sha256", record_type
+            ),
+            approval_mode=_enum_field(value, "approval_mode", record_type, ApprovalMode),
+            outcome=_enum_field(value, "outcome", record_type, ApprovalAuditOutcome),
+            decision_sha256=_required_field_text(value, "decision_sha256", record_type),
+        )
+        _validate_team_control_decided(record, parent_session_id=record.parent_session_id)
+        return record
+    if record_type == "team_message_delivered_to_parent":
+        fields = simple_fields | {
+            "parent_session_id",
+            "context_id",
+            "tool_use_id",
+            "team_id",
+            "message_id",
+            "body_sha256",
+            "source_assignment_id",
+            "source_child_session_id",
+            "source_child_turn_sequence",
+            "source_handoff_sha256",
+        }
+        _closed_fields(value, fields, record_type)
+        record = TeamMessageDeliveredToParent(
+            sequence=sequence,
+            occurred_at=_required_field_text(value, "occurred_at", record_type),
+            parent_session_id=_required_field_text(value, "parent_session_id", record_type),
+            context_id=_required_field_text(value, "context_id", record_type),
+            tool_use_id=_required_field_text(value, "tool_use_id", record_type),
+            team_id=_required_field_text(value, "team_id", record_type),
+            message_id=_required_field_text(value, "message_id", record_type),
+            body_sha256=_required_field_text(value, "body_sha256", record_type),
+            source_assignment_id=_required_field_text(value, "source_assignment_id", record_type),
+            source_child_session_id=_required_field_text(
+                value, "source_child_session_id", record_type
+            ),
+            source_child_turn_sequence=_required_field_int(
+                value, "source_child_turn_sequence", record_type
+            ),
+            source_handoff_sha256=_required_field_text(value, "source_handoff_sha256", record_type),
+        )
+        _validate_team_message_delivered(record, parent_session_id=record.parent_session_id)
         return record
     raise SessionRecordError(f"unknown session record type: {record_type}")
 
@@ -2919,6 +3081,62 @@ def _validate_child_delegation_decided(
         raise SessionRecordError("Child delegation approval mode is invalid")
     if type(record.outcome) is not ApprovalAuditOutcome:
         raise SessionRecordError("Child delegation outcome is invalid")
+
+
+def _validate_team_control_decided(record: TeamControlDecided, *, parent_session_id: str) -> None:
+    _validate_timestamp(record.occurred_at, "team_control_decided occurred_at")
+    if record.parent_session_id != parent_session_id:
+        raise SessionRecordError("Team control parent Session does not match transcript")
+    canonical_session_id(record.parent_session_id)
+    if re.fullmatch(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}", record.context_id) is None:
+        raise SessionRecordError("Team control context identity is invalid")
+    _required_text(record.tool_use_id, "Team control ToolUse ID")
+    if record.control_name not in {
+        "team_create",
+        "team_add_member",
+        "team_status",
+        "team_message_send",
+        "team_message_show",
+        "team_message_read",
+        "team_work_create",
+        "team_schedule_start",
+        "team_schedule_wait",
+        "team_work_review",
+        "team_close",
+    }:
+        raise SessionRecordError("Team control name is invalid")
+    canonical_session_id(record.target_team_id)
+    for value, label in (
+        (record.team_control_identity_sha256, "Team control identity digest"),
+        (record.canonical_arguments_sha256, "Team control argument digest"),
+        (record.decision_sha256, "Team control decision digest"),
+    ):
+        if _SHA256.fullmatch(value) is None:
+            raise SessionRecordError(f"{label} is invalid")
+    if type(record.approval_mode) is not ApprovalMode:
+        raise SessionRecordError("Team control approval mode is invalid")
+    if type(record.outcome) is not ApprovalAuditOutcome:
+        raise SessionRecordError("Team control outcome is invalid")
+
+
+def _validate_team_message_delivered(
+    record: TeamMessageDeliveredToParent, *, parent_session_id: str
+) -> None:
+    _validate_timestamp(record.occurred_at, "team_message_delivered_to_parent occurred_at")
+    if record.parent_session_id != parent_session_id:
+        raise SessionRecordError("Team message parent Session does not match transcript")
+    canonical_session_id(record.parent_session_id)
+    if re.fullmatch(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}", record.context_id) is None:
+        raise SessionRecordError("Team message delivery context identity is invalid")
+    _required_text(record.tool_use_id, "Team message delivery ToolUse ID")
+    canonical_session_id(record.team_id)
+    canonical_session_id(record.message_id)
+    canonical_session_id(record.source_assignment_id)
+    canonical_session_id(record.source_child_session_id)
+    if type(record.source_child_turn_sequence) is not int or record.source_child_turn_sequence < 1:
+        raise SessionRecordError("Team message delivery Child Turn sequence is invalid")
+    _required_sha256(record.body_sha256, "Team message delivery body digest")
+    _required_sha256(record.source_handoff_sha256, "Team message delivery handoff digest")
 
 
 def _validate_task_admission_resolved(record: TaskAdmissionResolved) -> None:

@@ -14,11 +14,13 @@ from coquo.core.contracts import AssistantText
 from coquo.providers.fake import ScriptedFakeProvider
 from coquo.session_records import BindingSnapshot
 from coquo.session_store import SessionStore
+from coquo.tools.team_control import TEAM_CONTROL_TOOL_NAMES
 
 
 def test_child_tool_set_is_fixed_and_ordered() -> None:
     snapshot = child_tool_set()
     assert snapshot.names == CHILD_TOOL_NAMES
+    assert set(snapshot.names).isdisjoint(TEAM_CONTROL_TOOL_NAMES)
     assert snapshot.names == (
         "read_file",
         "glob",

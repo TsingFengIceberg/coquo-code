@@ -21,6 +21,7 @@ from coquo.agent.loop import (
     ToolSetTransitionDispatcher,
 )
 from coquo.agent.child_control import ChildControlDispatcher, ChildControlState
+from coquo.agent.team_control import TeamControlDispatcher, TeamControlState
 from coquo.core.cancellation import TurnCancellation
 from coquo.core.contracts import ConversationProvider, CommittedTurn, ToolAttemptUsage
 from coquo.core.compaction import decide_auto_compaction
@@ -68,6 +69,8 @@ class AgentRuntimeCallbacks:
     task_control_dispatcher: TaskControlDispatcher | None = None
     child_control_names: tuple[str, ...] = ()
     child_control_dispatcher: ChildControlDispatcher | None = None
+    team_control_names: tuple[str, ...] = ()
+    team_control_dispatcher: TeamControlDispatcher | None = None
     tool_set_transition_dispatcher: ToolSetTransitionDispatcher | None = None
     activate_turn: Callable[["AgentRuntimeTurnState", bool], None] | None = None
     bind_provider: Callable[["AgentRuntimeTurnState"], None] | None = None
@@ -109,6 +112,7 @@ class AgentRuntimeTurnState:
     hook_set_snapshot: Any | None = None
     session_title_source_text: str | None = None
     child_control_state: ChildControlState = field(default_factory=ChildControlState)
+    team_control_state: TeamControlState = field(default_factory=TeamControlState)
 
     @property
     def active(self) -> bool:
@@ -127,6 +131,7 @@ class AgentRuntimeTurnState:
         self.hook_set_snapshot = None
         self.session_title_source_text = None
         self.child_control_state = ChildControlState()
+        self.team_control_state = TeamControlState()
 
 
 class AgentRuntime:
@@ -400,6 +405,11 @@ class AgentRuntimeFactory:
             loop.install_child_control_dispatcher(
                 callbacks.child_control_names,
                 callbacks.child_control_dispatcher,
+            )
+        if callbacks.team_control_dispatcher is not None:
+            loop.install_team_control_dispatcher(
+                callbacks.team_control_names,
+                callbacks.team_control_dispatcher,
             )
         if callbacks.tool_set_transition_dispatcher is not None:
             loop.install_tool_set_transition_dispatcher(callbacks.tool_set_transition_dispatcher)

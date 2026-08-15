@@ -1348,6 +1348,8 @@ Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks t
 139. [0139: Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md)
 140. [0140: Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)
 141. [0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)
+142. [0142: Bounded Team Scheduler and Recovery](./decisions/0142-bounded-team-scheduler-and-recovery.md)
+143. [0143: Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md)
 
 ## Durable Team Identity and Member Registry
 
@@ -1385,12 +1387,22 @@ terminal Child evidence enters review, and explicit Host completion or release
 controls the work result. Team close requires terminal work, assignment, mailbox,
 and reply-read gates. Reading never deletes evidence, failed or interrupted work
 does not consume pending messages, and generic or already-admitted v1 Children
-keep their old contract. Scheduling, write permissions, recursive delegation,
-long-lived workers, and model-visible Team tools remain deferred. See [0138:
-Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md),
+keep their old contract. B5 adds append-only schedule waves, schema-v3 assignment
+provenance, one OS lifetime lease per Team, deterministic selection, process-local
+dispatch through at most four existing Child workers, cancellation, and Provider-free
+abandoned-run recovery; a schedule only moves Child outcomes into review and never
+retries, auto-completes, or runs as a daemon. B7/B8 add a dedicated `TEAM_CONTROL`
+runtime path and eleven controls visible only to an ordinary parent Session. Rejection,
+ownership, budget, and approval failures return bounded ToolResults, while an accepted
+effect remains durable after a later parent-Turn failure. Registry generation 8,
+system prompt v47, Provider contract v47, and Effective Context v25/v26 migrate
+together with v23/v24 replay support; Children, Task Stages, and compact summaries
+never receive Team controls. See [0138: Durable Team Identity and Member Registry](./decisions/0138-durable-team-identity-and-members.md),
 [0139: Recoverable Team Member Child Assignments](./decisions/0139-recoverable-team-member-child-assignments.md),
 [0140: Durable Team Mailbox and Assignment Delivery](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md),
-and [0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md).
+[0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md),
+[0142: Bounded Team Scheduler and Recovery](./decisions/0142-bounded-team-scheduler-and-recovery.md),
+and [0143: Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md).
 
 ## Shared Agent Runtime and Durable Child Run Foundation
 
@@ -1414,7 +1426,15 @@ An ordinary parent Turn now sees `child_spawn`, `child_status`, `child_wait`, an
 
 Delegation approval is separate from the Action PermissionGate. Under `ask`, the Host displays the exact objective, redacted route/model, tools, budgets, process-local limitation, and additional Provider-cost warning before creation; `auto` removes only the interaction. The parent Session first persists a content-free `child_delegation_decided`; after acceptance, the Child ledger is atomically created with its header and `child_run_delegated` before normal admission. Rejection or cancellation creates no Child or detached Session. Status, wait, and cancel validate durable parent ownership each time; a terminal wait delivers the A7 handoff through a normal ToolResult, and a later parent Turn failure does not roll back real Child effects.
 
-The model contract advances atomically to Registry generation 7, system prompt v45, provider adapter v46, and Effective Context v23/v24, while v21/v22 remain strict legacy representations. Child, Task Stage, and compact-summary requests exclude the four controls. A deterministic fake path spawns two real Children in one parent Turn, continues parent tool work, waits for and delivers both handoffs, and strictly replays the parent and both detached Child Sessions. See [0136](./decisions/0136-model-child-delegation-controls.md).
+At the A7 Child slice, the model contract advanced to Registry generation 7,
+system prompt v45, Provider adapter v46, and Effective Context v23/v24, while
+v21/v22 remained strict legacy representations. B8.1 later migrated the current
+ordinary-parent contract atomically to generation 8, system prompt v47, Provider
+v47, and Effective Context v25/v26; older versions remain replayable. Child,
+Task Stage, and compact-summary requests never receive parent Child or Team
+controls. A deterministic fake path spawns two real Children in one parent Turn,
+continues parent tool work, waits for and delivers both handoffs, and strictly
+replays the parent and both detached Child Sessions. See [0136](./decisions/0136-model-child-delegation-controls.md).
 
 `child run <id>` now acquires an independent execution lease for a `ready`
 Child, reconstructs its redacted Provider route, and runs one read-only Turn

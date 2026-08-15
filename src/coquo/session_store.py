@@ -85,6 +85,8 @@ from coquo.session_records import (
     SessionPinChanged,
     SessionTitleFallbackReason,
     TaskAdmissionResolved,
+    TeamControlDecided,
+    TeamMessageDeliveredToParent,
     SessionRecord,
     SessionRecordError,
     SessionResumed,
@@ -1315,6 +1317,18 @@ class SessionStore:
         path = self._resolve_existing_path(selector)
         return self._load_state(path, allow_repair=False).child_delegation_decisions
 
+    def team_control_decisions(self, selector: str | Path) -> tuple[TeamControlDecided, ...]:
+        """Strictly replay content-free parent Team control decisions."""
+        path = self._resolve_existing_path(selector)
+        return self._load_state(path, allow_repair=False).team_control_decisions
+
+    def team_message_deliveries(
+        self, selector: str | Path
+    ) -> tuple[TeamMessageDeliveredToParent, ...]:
+        """Strictly replay content-free Team reply delivery receipts."""
+        path = self._resolve_existing_path(selector)
+        return self._load_state(path, allow_repair=False).team_message_deliveries
+
     def tool_ledgers(self, selector: str | Path, limit: int) -> ToolLedgerQueryResult:
         """Strictly replay and return bounded recent per-turn tool ledgers."""
         _validate_existing_session_root(self.root, self.workspace)
@@ -2016,6 +2030,75 @@ class SessionWriter:
             raise SessionStoreError("Child delegation ToolUse is already decided differently")
         if record.sequence != self._state.next_sequence:
             raise SessionStoreError("Child delegation decision sequence is stale")
+        self.append_audit(record)
+        return record
+
+    def team_control_decided(self, record: TeamControlDecided) -> TeamControlDecided:
+        """Append one exact, content-free Team control decision idempotently."""
+        existing = next(
+            (
+                item
+                for item in self._state.team_control_decisions
+                if item.tool_use_id == record.tool_use_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                replace(record, sequence=existing.sequence, occurred_at=existing.occurred_at)
+                == existing
+            ):
+                return existing
+            raise SessionStoreError("Team control ToolUse is already decided differently")
+        if record.sequence != self._state.next_sequence:
+            raise SessionStoreError("Team control decision sequence is stale")
+        self.append_audit(record)
+        return record
+
+    def team_message_delivered_to_parent(
+        self,
+        *,
+        context_id: str,
+        tool_use_id: str,
+        team_id: str,
+        message_id: str,
+        body_sha256: str,
+        source_assignment_id: str,
+        source_child_session_id: str,
+        source_child_turn_sequence: int,
+        source_handoff_sha256: str,
+        occurred_at: str | None = None,
+    ) -> TeamMessageDeliveredToParent:
+        """Append one exact reply delivery receipt without persisting its body."""
+        existing = next(
+            (
+                item
+                for item in self._state.team_message_deliveries
+                if item.tool_use_id == tool_use_id or item.message_id == message_id
+            ),
+            None,
+        )
+        record = TeamMessageDeliveredToParent(
+            sequence=self._state.next_sequence,
+            occurred_at=occurred_at or self._store._clock(),
+            parent_session_id=self.session_id,
+            context_id=context_id,
+            tool_use_id=tool_use_id,
+            team_id=team_id,
+            message_id=message_id,
+            body_sha256=body_sha256,
+            source_assignment_id=source_assignment_id,
+            source_child_session_id=source_child_session_id,
+            source_child_turn_sequence=source_child_turn_sequence,
+            source_handoff_sha256=source_handoff_sha256,
+        )
+        if existing is not None:
+            if (
+                replace(record, sequence=existing.sequence, occurred_at=existing.occurred_at)
+                == existing
+            ):
+                return existing
+            raise SessionStoreError("Team message is already delivered differently")
         self.append_audit(record)
         return record
 

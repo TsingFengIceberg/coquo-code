@@ -12,6 +12,7 @@ from coquo.tools.catalog import (
     TOOL_REGISTRY_SNAPSHOT,
     model_tool_definitions,
 )
+from coquo.tools.team_control import TEAM_CONTROL_TOOL_NAMES
 from coquo.tools.child_control import (
     CHILD_CANCEL_TOOL_NAME,
     CHILD_CONTROL_TOOL_NAMES,
@@ -38,13 +39,15 @@ def test_child_control_definitions_are_closed_ordered_and_exposed_only_to_parent
         item.execution_kind is ToolExecutionKind.CHILD_CONTROL and item.permission_actions == ()
         for item in CHILD_CONTROL_TOOL_CONTRACTS
     )
-    assert ORDINARY_PROMPT_TOOL_NAMES[-4:] == CHILD_CONTROL_TOOL_NAMES
-    assert tuple(item.name for item in TOOL_CATALOG[-4:]) == CHILD_CONTROL_TOOL_NAMES
-    assert TOOL_REGISTRY_SNAPSHOT.names[-4:] == CHILD_CONTROL_TOOL_NAMES
+    assert ORDINARY_PROMPT_TOOL_NAMES[-15:-11] == CHILD_CONTROL_TOOL_NAMES
+    assert tuple(item.name for item in TOOL_CATALOG[-15:-11]) == CHILD_CONTROL_TOOL_NAMES
+    assert ORDINARY_PROMPT_TOOL_NAMES[-11:] == TEAM_CONTROL_TOOL_NAMES
+    assert tuple(item.name for item in TOOL_CATALOG[-11:]) == TEAM_CONTROL_TOOL_NAMES
+    assert TOOL_REGISTRY_SNAPSHOT.names[-15:-11] == CHILD_CONTROL_TOOL_NAMES
     assert (
         tuple(
             definition["name"]
-            for definition in model_tool_definitions(ORDINARY_PROMPT_TOOL_NAMES)[-4:]
+            for definition in model_tool_definitions(ORDINARY_PROMPT_TOOL_NAMES)[-15:-11]
         )
         == CHILD_CONTROL_TOOL_NAMES
     )
