@@ -24,6 +24,7 @@ from coquo.agent.runtime import (
 )
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
+from coquo.session_records import workspace_fingerprint
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
@@ -45,8 +46,10 @@ from coquo.child_runtime import (
     CHILD_MAX_TOOL_REQUESTS,
     CHILD_TOOL_NAMES,
     build_child_runtime_spec,
+    build_child_runtime_spec_from_binding,
+    child_role_descriptor,
+    role_allowed_by_parent,
     TEAM_CHILD_ROLE_CONTRACT_VERSION,
-    team_child_role_prompt_fingerprint,
     child_tool_set,
 )
 from coquo.agent.task_control import (
@@ -185,6 +188,7 @@ from coquo.core.effective_context import (
     EffectiveContextSnapshot,
 )
 from coquo.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
+from coquo.core.execution_scope import ExecutionScope
 from coquo.skills import (
     ActiveSkill,
     SkillActivationInspection,
@@ -942,19 +946,34 @@ class ProjectSession:
         hook_store: HookStore | None = None,
         startup_resume_result: SessionResumeResult | None = None,
         child_mode: bool = False,
+        execution_scope: ExecutionScope | None = None,
+        child_action_names: tuple[str, ...] = (),
     ) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace).resolve(strict=True)
+        self._execution_scope = execution_scope or ExecutionScope.authority(self.workspace)
+        if self._execution_scope.authority_workspace != self.workspace:
+            raise ValueError("execution scope authority does not match Session workspace")
+        self.execution_workspace = self._execution_scope.execution_root
         self._child_mode = child_mode
+        if type(child_action_names) is not tuple or any(
+            type(name) is not str or not name for name in child_action_names
+        ):
+            raise ValueError("Child action whitelist is invalid")
+        if len(set(child_action_names)) != len(child_action_names):
+            raise ValueError("Child action whitelist contains duplicate names")
+        if not child_mode and child_action_names:
+            raise ValueError("Child action whitelist requires child mode")
+        self._child_action_names = child_action_names
         self._store = store
         self._manager = manager
         self._session_store = session_store
-        self._task_store = TaskStore(workspace)
-        self._child_run_store = ChildRunStore(workspace)
-        self._team_store = TeamStore(workspace)
-        self._team_service = TeamAssignmentService(workspace)
-        self._team_messaging = TeamMessagingService(workspace)
-        self._team_work = TeamWorkService(workspace)
-        self._team_schedule_service = TeamScheduleService(workspace)
+        self._task_store = TaskStore(self.workspace)
+        self._child_run_store = ChildRunStore(self.workspace)
+        self._team_store = TeamStore(self.workspace)
+        self._team_service = TeamAssignmentService(self.workspace)
+        self._team_messaging = TeamMessagingService(self.workspace)
+        self._team_work = TeamWorkService(self.workspace)
+        self._team_schedule_service = TeamScheduleService(self.workspace)
         self._child_supervisor: ChildRunSupervisor | None = None
         self._team_schedule_supervisor: TeamScheduleSupervisor | None = None
         self._writer = writer
@@ -962,37 +981,46 @@ class ProjectSession:
         self._glob = glob
         self._grep = grep
         self._list_directory = list_directory
-        self._write_file = write_file or WriteFileTool(workspace)
-        self._edit_file = edit_file or EditFileTool(workspace)
-        self._run_command = run_command or RunCommandTool(workspace)
-        self._hook_runner = HookRunner(workspace, self._run_command)
-        self._mkdir = mkdir or MkdirTool(workspace)
-        self._move_file = move_file or MoveFileTool(workspace)
-        self._delete_file = delete_file or DeleteFileTool(workspace)
-        self._delete_directory = delete_directory or DeleteDirectoryTool(workspace)
-        self._copy_file = copy_file or CopyFileTool(workspace)
-        self._read_file_lines = read_file_lines or ReadFileLinesTool(workspace)
-        self._stat_path = stat_path or StatPathTool(workspace)
-        self._list_tree = list_tree or ListTreeTool(workspace)
-        self._grep_regex = grep_regex or GrepRegexTool(workspace)
-        self._patch_file = patch_file or PatchFileTool(workspace)
-        self._git_status = git_status or GitStatusTool(workspace)
-        self._git_diff = git_diff or GitDiffTool(workspace)
-        self._git_log = git_log or GitLogTool(workspace)
-        self._git_show = git_show or GitShowTool(workspace)
+        self._write_file = write_file or WriteFileTool(self.execution_workspace)
+        self._edit_file = edit_file or EditFileTool(self.execution_workspace)
+        self._run_command = run_command or RunCommandTool(
+            self.execution_workspace,
+            read_only_paths=(
+                (self.execution_workspace / ".git",)
+                if self._execution_scope.kind == "team-worktree"
+                else ()
+            ),
+        )
+        self._hook_runner = HookRunner(self.execution_workspace, self._run_command)
+        self._mkdir = mkdir or MkdirTool(self.execution_workspace)
+        self._move_file = move_file or MoveFileTool(self.execution_workspace)
+        self._delete_file = delete_file or DeleteFileTool(self.execution_workspace)
+        self._delete_directory = delete_directory or DeleteDirectoryTool(self.execution_workspace)
+        self._copy_file = copy_file or CopyFileTool(self.execution_workspace)
+        self._read_file_lines = read_file_lines or ReadFileLinesTool(self.execution_workspace)
+        self._stat_path = stat_path or StatPathTool(self.execution_workspace)
+        self._list_tree = list_tree or ListTreeTool(self.execution_workspace)
+        self._grep_regex = grep_regex or GrepRegexTool(self.execution_workspace)
+        self._patch_file = patch_file or PatchFileTool(self.execution_workspace)
+        self._git_status = git_status or GitStatusTool(self.execution_workspace)
+        self._git_diff = git_diff or GitDiffTool(self.execution_workspace)
+        self._git_log = git_log or GitLogTool(self.execution_workspace)
+        self._git_show = git_show or GitShowTool(self.execution_workspace)
         self._web_search = web_search or WebSearchTool()
         self._web_fetch = web_fetch or WebFetchTool()
-        self._compare_files = compare_files or CompareFilesTool(workspace)
-        self._git_blame = git_blame or GitBlameTool(workspace)
-        self._git_refs = git_refs or GitRefsTool(workspace)
-        self._json_query = json_query or JsonQueryTool(workspace)
-        self._checksum_file = checksum_file or ChecksumFileTool(workspace)
-        self._archive_list = archive_list or ArchiveListTool(workspace)
-        self._move_directory = move_directory or MoveDirectoryTool(workspace)
-        self._download_file = download_file or DownloadFileTool(workspace)
-        self._mcp_store = mcp_store or McpServerStore.for_workspace(workspace)
-        self._mcp_client = mcp_client or McpClient(workspace)
-        self._mcp_policy_store = mcp_policy_store or McpToolPolicyStore.for_workspace(workspace)
+        self._compare_files = compare_files or CompareFilesTool(self.execution_workspace)
+        self._git_blame = git_blame or GitBlameTool(self.execution_workspace)
+        self._git_refs = git_refs or GitRefsTool(self.execution_workspace)
+        self._json_query = json_query or JsonQueryTool(self.execution_workspace)
+        self._checksum_file = checksum_file or ChecksumFileTool(self.execution_workspace)
+        self._archive_list = archive_list or ArchiveListTool(self.execution_workspace)
+        self._move_directory = move_directory or MoveDirectoryTool(self.execution_workspace)
+        self._download_file = download_file or DownloadFileTool(self.execution_workspace)
+        self._mcp_store = mcp_store or McpServerStore.for_workspace(self.workspace)
+        self._mcp_client = mcp_client or McpClient(self.workspace)
+        self._mcp_policy_store = mcp_policy_store or McpToolPolicyStore.for_workspace(
+            self.workspace
+        )
         self._mcp_catalog_service = McpCatalogService(
             self._mcp_store,
             self._mcp_client,
@@ -1007,11 +1035,15 @@ class ProjectSession:
         )
         self._native_search_options = NativeSearchRuntimeOptions()
         self._project_instructions_loader = (
-            project_instructions_loader or ProjectInstructionsLoader(workspace)
+            project_instructions_loader or ProjectInstructionsLoader(self.execution_workspace)
         )
-        self._skill_inventory_loader = skill_inventory_loader or SkillInventoryLoader(workspace)
-        self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(workspace)
-        self._hook_store = hook_store or HookStore.for_workspace(workspace)
+        self._skill_inventory_loader = skill_inventory_loader or SkillInventoryLoader(
+            self.execution_workspace
+        )
+        self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(
+            self.execution_workspace
+        )
+        self._hook_store = hook_store or HookStore.for_workspace(self.workspace)
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -1052,8 +1084,13 @@ class ProjectSession:
             )
         )
         self._loop = self._runtime.loop
+        if loop is not None and (not self._child_mode or self._child_action_names):
+            self._loop.install_action_dispatcher(
+                self._dispatch_restricted_child_action
+                if self._child_mode
+                else self._dispatch_action
+            )
         if loop is not None and not self._child_mode:
-            self._loop.install_action_dispatcher(self._dispatch_action)
             self._loop.install_task_control_dispatcher(
                 _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
             )
@@ -1064,6 +1101,14 @@ class ProjectSession:
         self._startup_resume_result = startup_resume_result
 
     def _runtime_services(self) -> AgentRuntimeServices:
+        skill_inventory_factory = (
+            (lambda: SkillInventorySnapshot((), ()))
+            if self._child_mode
+            else self._skill_inventory_loader.load
+        )
+        hook_set_factory = (
+            (lambda: HookSetSnapshot(())) if self._child_mode else self._hook_store.snapshot
+        )
         return AgentRuntimeServices(
             self._read_file,
             self._glob,
@@ -1087,8 +1132,8 @@ class ProjectSession:
             (lambda: TOOL_REGISTRY_SNAPSHOT)
             if self._child_mode
             else self._mcp_catalog_service.registry_snapshot,
-            self._skill_inventory_loader.load,
-            self._hook_store.snapshot,
+            skill_inventory_factory,
+            hook_set_factory,
             self._skill_inventory_loader.read_resource,
             provider_manager=self._manager,
         )
@@ -1096,7 +1141,11 @@ class ProjectSession:
     def _runtime_callbacks(self, writer: SessionWriter) -> AgentRuntimeCallbacks:
         return AgentRuntimeCallbacks(
             commit_turn=lambda turn: self._commit_turn(writer, turn),
-            action_dispatcher=None if self._child_mode else self._dispatch_action,
+            action_dispatcher=(
+                self._dispatch_restricted_child_action
+                if self._child_mode and self._child_action_names
+                else (None if self._child_mode else self._dispatch_action)
+            ),
             task_control_names=() if self._child_mode else _COMMIT_CONTROL_TOOL_NAMES,
             task_control_dispatcher=None if self._child_mode else self._dispatch_task_control,
             child_control_names=() if self._child_mode else CHILD_CONTROL_TOOL_NAMES,
@@ -1160,6 +1209,17 @@ class ProjectSession:
         self._active_hook_set_snapshot = prepared.hook_set_snapshot
         return prepared
 
+    def _action_scope_fields(self) -> dict[str, object]:
+        return {
+            "execution_scope": self._execution_scope.kind,
+            "execution_root_fingerprint": (
+                self._execution_scope.execution_root_fingerprint
+                or self._session_store.workspace_fingerprint
+            ),
+            "worktree_id": self._execution_scope.worktree_id,
+            "version": 2,
+        }
+
     def _emit_runtime_usage(self, usage, event_sink) -> None:
         if usage.latest_invocation is not None:
             self._emit_prompt_event(event_sink, TurnUsageCompleted(usage))
@@ -1206,6 +1266,8 @@ class ProjectSession:
         fake_provider_factory: Callable[[], ConversationProvider] | None = None,
         publish_latest: bool = True,
         child_mode: bool = False,
+        execution_scope: ExecutionScope | None = None,
+        child_action_names: tuple[str, ...] = (),
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
@@ -1246,6 +1308,13 @@ class ProjectSession:
     ) -> ProjectSession:
         """Create or resume durable history while selecting runtime independently."""
         resolved_workspace = Path(workspace).resolve()
+        if execution_scope is not None:
+            if execution_scope.authority_workspace != resolved_workspace:
+                raise ValueError("execution scope authority does not match workspace")
+            selected_execution_scope = execution_scope
+        else:
+            selected_execution_scope = ExecutionScope.authority(resolved_workspace)
+        execution_workspace = selected_execution_scope.execution_root
         resolved_environment = environment if environment is not None else os.environ
         store = ProviderProfileStore.for_workspace(
             resolved_workspace,
@@ -1274,40 +1343,50 @@ class ProjectSession:
         manager = RuntimeProviderManager(store, **manager_arguments)  # type: ignore[arg-type]
         writer: SessionWriter | None = None
         try:
-            read_file = read_file_factory(resolved_workspace)
-            glob = glob_factory(resolved_workspace)
-            grep = grep_factory(resolved_workspace)
-            list_directory = list_directory_factory(resolved_workspace)
-            write_file = write_file_factory(resolved_workspace)
-            edit_file = edit_file_factory(resolved_workspace)
-            run_command = run_command_factory(resolved_workspace, resolved_environment)
-            mkdir = mkdir_factory(resolved_workspace)
-            move_file = move_file_factory(resolved_workspace)
-            delete_file = delete_file_factory(resolved_workspace)
-            delete_directory = delete_directory_factory(resolved_workspace)
-            copy_file = copy_file_factory(resolved_workspace)
-            read_file_lines = read_file_lines_factory(resolved_workspace)
-            stat_path = stat_path_factory(resolved_workspace)
-            list_tree = list_tree_factory(resolved_workspace)
-            grep_regex = grep_regex_factory(resolved_workspace)
-            patch_file = patch_file_factory(resolved_workspace)
-            git_status = git_status_factory(resolved_workspace)
-            git_diff = git_diff_factory(resolved_workspace)
-            git_log = git_log_factory(resolved_workspace)
-            git_show = git_show_factory(resolved_workspace)
+            read_file = read_file_factory(execution_workspace)
+            glob = glob_factory(execution_workspace)
+            grep = grep_factory(execution_workspace)
+            list_directory = list_directory_factory(execution_workspace)
+            write_file = write_file_factory(execution_workspace)
+            edit_file = edit_file_factory(execution_workspace)
+            if (
+                run_command_factory is RunCommandTool
+                and selected_execution_scope.kind == "team-worktree"
+            ):
+                run_command = RunCommandTool(
+                    execution_workspace,
+                    resolved_environment,
+                    read_only_paths=(execution_workspace / ".git",),
+                )
+            else:
+                run_command = run_command_factory(execution_workspace, resolved_environment)
+            mkdir = mkdir_factory(execution_workspace)
+            move_file = move_file_factory(execution_workspace)
+            delete_file = delete_file_factory(execution_workspace)
+            delete_directory = delete_directory_factory(execution_workspace)
+            copy_file = copy_file_factory(execution_workspace)
+            read_file_lines = read_file_lines_factory(execution_workspace)
+            stat_path = stat_path_factory(execution_workspace)
+            list_tree = list_tree_factory(execution_workspace)
+            grep_regex = grep_regex_factory(execution_workspace)
+            patch_file = patch_file_factory(execution_workspace)
+            git_status = git_status_factory(execution_workspace)
+            git_diff = git_diff_factory(execution_workspace)
+            git_log = git_log_factory(execution_workspace)
+            git_show = git_show_factory(execution_workspace)
             web_search = web_search_factory(resolved_environment)
             web_fetch = web_fetch_factory()
-            compare_files = compare_files_factory(resolved_workspace)
-            git_blame = git_blame_factory(resolved_workspace)
-            git_refs = git_refs_factory(resolved_workspace)
-            json_query = json_query_factory(resolved_workspace)
-            checksum_file = checksum_file_factory(resolved_workspace)
-            archive_list = archive_list_factory(resolved_workspace)
-            move_directory = move_directory_factory(resolved_workspace)
-            download_file = download_file_factory(resolved_workspace)
-            project_instructions_loader = ProjectInstructionsLoader(resolved_workspace)
-            skill_inventory_loader = SkillInventoryLoader(resolved_workspace, resolved_environment)
-            skill_candidate_store = SkillCandidateStore(resolved_workspace, resolved_environment)
+            compare_files = compare_files_factory(execution_workspace)
+            git_blame = git_blame_factory(execution_workspace)
+            git_refs = git_refs_factory(execution_workspace)
+            json_query = json_query_factory(execution_workspace)
+            checksum_file = checksum_file_factory(execution_workspace)
+            archive_list = archive_list_factory(execution_workspace)
+            move_directory = move_directory_factory(execution_workspace)
+            download_file = download_file_factory(execution_workspace)
+            project_instructions_loader = ProjectInstructionsLoader(execution_workspace)
+            skill_inventory_loader = SkillInventoryLoader(execution_workspace, resolved_environment)
+            skill_candidate_store = SkillCandidateStore(execution_workspace, resolved_environment)
             mcp_store = McpServerStore.for_workspace(
                 resolved_workspace,
                 environment=resolved_environment,
@@ -1383,6 +1462,8 @@ class ProjectSession:
                     mcp_policy_store=mcp_policy_store,
                     hook_store=hook_store,
                     child_mode=child_mode,
+                    execution_scope=selected_execution_scope,
+                    child_action_names=child_action_names,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -1422,8 +1503,14 @@ class ProjectSession:
                         if child_mode
                         else resume_mcp_catalog.registry_snapshot
                     ),
-                    skill_inventory_factory=skill_inventory_loader.load,
-                    hook_set_factory=hook_store.snapshot,
+                    skill_inventory_factory=(
+                        (lambda: SkillInventorySnapshot((), ()))
+                        if child_mode
+                        else skill_inventory_loader.load
+                    ),
+                    hook_set_factory=(
+                        (lambda: HookSetSnapshot(())) if child_mode else hook_store.snapshot
+                    ),
                     skill_resource_reader=skill_inventory_loader.read_resource,
                 )
                 snapshot = loop.effective_context_snapshot()
@@ -1497,6 +1584,8 @@ class ProjectSession:
                     hook_store=hook_store,
                     startup_resume_result=result,
                     child_mode=child_mode,
+                    execution_scope=selected_execution_scope,
+                    child_action_names=child_action_names,
                 )
                 session_holder["session"] = session
                 if not child_mode:
@@ -1523,6 +1612,11 @@ class ProjectSession:
     def session_id(self) -> str:
         with self._lock:
             return self._writer.session_id
+
+    @property
+    def execution_scope(self) -> ExecutionScope:
+        """Return the immutable authority/tool-root binding for this Session."""
+        return self._execution_scope
 
     @property
     def transcript_path(self) -> Path:
@@ -1721,12 +1815,18 @@ class ProjectSession:
             self._ensure_team_owner(team_id)
             return self._team_service.close(team_id)
 
-    def add_team_member(self, team_id: str, name: str) -> TeamMemberState:
+    def add_team_member(
+        self,
+        team_id: str,
+        name: str,
+        *,
+        role_contract: str = "read-only-investigator-v1",
+    ) -> TeamMemberState:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
-            return self._team_store.add_member(team_id, name)
+            return self._team_store.add_member(team_id, name, role_contract=role_contract)
 
     def list_team_members(self, team_id: str) -> tuple[TeamMemberState, ...]:
         with self._lock:
@@ -1985,6 +2085,7 @@ class ProjectSession:
                 source=TeamScheduleSource.HOST,
                 max_assignments=max_assignments,
                 max_parallel=max_parallel,
+                parent_permission_mode=self._permission_mode.value,
             )
 
     def start_team_schedule(
@@ -2006,6 +2107,7 @@ class ProjectSession:
                 source=TeamScheduleSource.HOST,
                 max_assignments=max_assignments,
                 max_parallel=max_parallel,
+                parent_permission_mode=self._permission_mode.value,
             )
             try:
                 return self._team_schedule_supervisor.submit(run)
@@ -2066,7 +2168,12 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
-            return self._team_service.create(team_id, member_id, objective)
+            return self._team_service.create(
+                team_id,
+                member_id,
+                objective,
+                parent_permission_mode=self._permission_mode.value,
+            )
 
     def list_team_assignments(
         self, team_id: str, *, limit: int = 100
@@ -2107,17 +2214,54 @@ class ProjectSession:
         status = self._manager.status()
         child_info = self._child_run_store.inspect(info.assignment.child_run_id)
         child_session_id = child_info.child_session_id or str(uuid4())
-        spec = build_child_runtime_spec(
+        role_contract = info.assignment.member_role_contract
+        if not role_allowed_by_parent(role_contract, self._permission_mode.value):
+            raise TeamStoreError("parent permission ceiling cannot admit Team member role")
+        role = child_role_descriptor(role_contract)
+        action_names: tuple[str, ...] = ()
+        execution_root_fingerprint = (
+            info.assignment.worktree_id and child_info.execution_root_fingerprint
+        )
+        if role.execution_scope == "team-worktree":
+            if (
+                not info.assignment.worktree_id
+                or not info.assignment.base_commit
+                or not info.assignment.target_ref
+            ):
+                raise TeamStoreError("writable Team assignment has incomplete worktree identity")
+            if execution_root_fingerprint is None:
+                raise TeamStoreError("writable Child origin has no execution-root identity")
+            from coquo.core.extensions import ToolExecutionKind
+            from coquo.tools.catalog import select_tool_set
+            from coquo.worktree_service import WorktreeService
+
+            binding = WorktreeService(self.workspace).inspect_binding(info.assignment.worktree_id)
+            if workspace_fingerprint(binding.worktree_root) != execution_root_fingerprint:
+                raise TeamStoreError("writable Team worktree root fingerprint changed")
+            tools = select_tool_set(role.tool_names)
+            action_names = tuple(
+                contract.name
+                for contract in tools.contracts
+                if contract.execution_kind is ToolExecutionKind.HOST_ACTION
+            )
+        spec = build_child_runtime_spec_from_binding(
             child_run_id=child_info.child_run_id,
             parent_session_id=self._writer.session_id,
             child_session_id=child_session_id,
             objective=child_info.objective,
-            status=status,
-        )
-        spec = replace(
-            spec,
-            role_contract_version=TEAM_CHILD_ROLE_CONTRACT_VERSION,
-            role_prompt_fingerprint=team_child_role_prompt_fingerprint(),
+            binding=binding_from_status(status),
+            role_contract_version=(
+                TEAM_CHILD_ROLE_CONTRACT_VERSION
+                if role_contract == "read-only-investigator-v1"
+                else 3
+            ),
+            role_contract=role_contract,
+            execution_scope=role.execution_scope,
+            execution_root_fingerprint=execution_root_fingerprint,
+            worktree_id=info.assignment.worktree_id,
+            base_commit=info.assignment.base_commit,
+            target_ref=info.assignment.target_ref,
+            child_action_names=action_names,
         )
         self._child_run_store.prepare(
             child_info.child_run_id,
@@ -4622,6 +4766,7 @@ class ProjectSession:
             workspace_fingerprint=self._session_store.workspace_fingerprint,
             lease=lease,
             precondition=prepared.precondition,
+            **self._action_scope_fields(),
         )
         preview = build_metadata_preview(
             action_digest=identity.digest,
@@ -5916,6 +6061,20 @@ class ProjectSession:
             TaskLifecycleCommitted(request.kind.value, task.task_id, max_stages),
         )
 
+    def _dispatch_restricted_child_action(
+        self, request: ToolUse, lease: ActionLease
+    ) -> ToolDispatchResult:
+        """Apply the injected Child Action allowlist before shared Host dispatch."""
+        if not self._child_mode or request.name not in self._child_action_names:
+            raise RuntimeError("Child Action is outside its immutable allowlist")
+        tool_set = self._active_tool_set_snapshot
+        if tool_set is None or request.name not in tool_set.names:
+            raise RuntimeError("Child Action ToolSet snapshot does not contain the request")
+        contract = tool_set.contract(request.name)
+        if contract.execution_kind is not ToolExecutionKind.HOST_ACTION:
+            raise RuntimeError("Child Action must use a built-in Host action")
+        return self._dispatch_action(request, lease)
+
     def _dispatch_action(self, request: ToolUse, lease: ActionLease) -> ToolDispatchResult:
         """Prepare and run one model tool request through the exact Host boundary."""
         self._assert_action_lease(lease)
@@ -6116,6 +6275,7 @@ class ProjectSession:
             workspace_fingerprint=self._session_store.workspace_fingerprint,
             lease=lease,
             precondition=precondition,
+            **self._action_scope_fields(),
         )
         hook_set = self._active_hook_set_snapshot
         if hook_set is None:

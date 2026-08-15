@@ -28,6 +28,8 @@ from coquo.team_records import (
     TeamAssignmentChildBound,
     TeamAssignmentObserved,
     TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
+    TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION,
+    TEAM_MEMBER_JOINED_V2_SCHEMA_VERSION,
     TeamAssignmentMailboxBound,
     TeamAssignmentMailboxObserved,
     TeamAssignmentState,
@@ -325,6 +327,9 @@ class TeamStore:
         source: TeamScheduleSource | str = TeamScheduleSource.HOST,
         max_assignments: int = MAX_TEAM_SCHEDULE_ASSIGNMENTS,
         max_parallel: int = MAX_TEAM_SCHEDULE_PARALLEL,
+        capability_snapshot_sha256: str | None = None,
+        eligible_members: tuple[dict[str, object], ...] = (),
+        parent_permission_mode: str | None = None,
     ) -> TeamScheduleState:
         with self.open(team_id) as writer:
             writer.start_schedule(
@@ -332,6 +337,9 @@ class TeamStore:
                 source=source,
                 max_assignments=max_assignments,
                 max_parallel=max_parallel,
+                capability_snapshot_sha256=capability_snapshot_sha256,
+                eligible_members=eligible_members,
+                parent_permission_mode=parent_permission_mode,
             )
             return writer.schedule(schedule_run_id)
 
@@ -367,9 +375,11 @@ class TeamStore:
             )
             return writer.schedule(schedule_run_id)
 
-    def add_member(self, team_id: str, name: str) -> TeamMemberState:
+    def add_member(
+        self, team_id: str, name: str, *, role_contract: str = TEAM_MEMBER_ROLE_CONTRACT
+    ) -> TeamMemberState:
         with self.open(team_id) as writer:
-            return writer.join_member(name)
+            return writer.join_member(name, role_contract=role_contract)
 
     def disable_member(self, team_id: str, member_id: str, reason: str) -> TeamMemberState:
         with self.open(team_id) as writer:
@@ -396,6 +406,9 @@ class TeamStore:
         *,
         work_item_id: str | None = None,
         schedule_run_id: str | None = None,
+        worktree_id: str | None = None,
+        base_commit: str | None = None,
+        target_ref: str | None = None,
     ) -> TeamAssignmentState:
         with self.open(team_id) as writer:
             return writer.create_assignment(
@@ -405,6 +418,9 @@ class TeamStore:
                 objective,
                 work_item_id=work_item_id,
                 schedule_run_id=schedule_run_id,
+                worktree_id=worktree_id,
+                base_commit=base_commit,
+                target_ref=target_ref,
             )
 
     def bind_assignment(
@@ -672,7 +688,9 @@ class TeamWriter:
         self._append(record)
         return record
 
-    def join_member(self, name: str) -> TeamMemberState:
+    def join_member(
+        self, name: str, *, role_contract: str = TEAM_MEMBER_ROLE_CONTRACT
+    ) -> TeamMemberState:
         self._ensure_open_team()
         try:
             canonical_name = canonical_team_name(name)
@@ -684,8 +702,13 @@ class TeamWriter:
             team_id=self._state.header.team_id,
             member_id=member_id,
             name=canonical_name,
-            role_contract=TEAM_MEMBER_ROLE_CONTRACT,
+            role_contract=role_contract,
             joined_at=self._store._clock(),
+            schema_version=(
+                TEAM_MEMBER_JOINED_V2_SCHEMA_VERSION
+                if role_contract != TEAM_MEMBER_ROLE_CONTRACT
+                else 1
+            ),
         )
         self._append(record)
         return self.member(member_id)
@@ -772,6 +795,9 @@ class TeamWriter:
         source: TeamScheduleSource | str,
         max_assignments: int,
         max_parallel: int,
+        capability_snapshot_sha256: str | None = None,
+        eligible_members: tuple[dict[str, object], ...] = (),
+        parent_permission_mode: str | None = None,
     ) -> TeamScheduleStarted:
         self._ensure_open_team()
         try:
@@ -783,6 +809,12 @@ class TeamWriter:
                 max_assignments=max_assignments,
                 max_parallel=max_parallel,
                 started_at=self._store._clock(),
+                capability_snapshot_sha256=capability_snapshot_sha256,
+                eligible_members=eligible_members,
+                parent_permission_mode=parent_permission_mode,
+                schema_version=(
+                    2 if capability_snapshot_sha256 is not None or eligible_members else 1
+                ),
             )
         except (TeamRecordError, ValueError) as error:
             raise TeamStoreError(str(error)) from None
@@ -850,9 +882,18 @@ class TeamWriter:
         *,
         work_item_id: str | None = None,
         schedule_run_id: str | None = None,
+        worktree_id: str | None = None,
+        base_commit: str | None = None,
+        target_ref: str | None = None,
     ) -> TeamAssignmentState:
         self._ensure_open_team()
         try:
+            member = self.member(member_id)
+            writable = member.role_contract != TEAM_MEMBER_ROLE_CONTRACT
+            if writable != all(
+                value is not None for value in (worktree_id, base_commit, target_ref)
+            ):
+                raise TeamStoreError("writable assignment worktree identity is incomplete")
             record = TeamAssignmentCreated(
                 sequence=self._state.next_sequence,
                 team_id=self._state.header.team_id,
@@ -868,7 +909,15 @@ class TeamWriter:
                 schedule_run_id=(
                     None if schedule_run_id is None else canonical_team_id(schedule_run_id)
                 ),
-                schema_version=TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
+                member_role_contract=member.role_contract,
+                worktree_id=(None if worktree_id is None else canonical_team_id(worktree_id)),
+                base_commit=base_commit,
+                target_ref=target_ref,
+                schema_version=(
+                    TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION
+                    if writable
+                    else TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION
+                ),
             )
         except TeamRecordError as error:
             raise TeamStoreError(str(error)) from None

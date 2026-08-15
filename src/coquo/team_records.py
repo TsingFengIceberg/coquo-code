@@ -21,10 +21,13 @@ TEAM_MEMBER_JOINED_SCHEMA_VERSION = 1
 TEAM_MEMBER_DISABLED_SCHEMA_VERSION = 1
 TEAM_MEMBER_ENABLED_SCHEMA_VERSION = 1
 TEAM_MEMBER_LEFT_SCHEMA_VERSION = 1
+TEAM_MEMBER_JOINED_V2_SCHEMA_VERSION = 2
 TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION = 2
 TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION = 3
+TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION = 4
 TEAM_SCHEDULE_STARTED_SCHEMA_VERSION = 1
+TEAM_SCHEDULE_STARTED_V2_SCHEMA_VERSION = 2
 TEAM_SCHEDULE_CANCEL_REQUESTED_SCHEMA_VERSION = 1
 TEAM_SCHEDULE_FINISHED_SCHEMA_VERSION = 1
 TEAM_ASSIGNMENT_CHILD_BOUND_SCHEMA_VERSION = 1
@@ -213,6 +216,10 @@ class TeamAssignmentCreated:
     created_at: str
     work_item_id: str | None = None
     schedule_run_id: str | None = None
+    member_role_contract: str = TEAM_MEMBER_ROLE_CONTRACT
+    worktree_id: str | None = None
+    base_commit: str | None = None
+    target_ref: str | None = None
     record_type: str = "team_assignment_created"
     schema_version: int = TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION
 
@@ -226,6 +233,9 @@ class TeamScheduleStarted:
     max_assignments: int
     max_parallel: int
     started_at: str
+    capability_snapshot_sha256: str | None = None
+    eligible_members: tuple[dict[str, object], ...] = ()
+    parent_permission_mode: str | None = None
     record_type: str = "team_schedule_started"
     schema_version: int = TEAM_SCHEDULE_STARTED_SCHEMA_VERSION
 
@@ -462,6 +472,10 @@ class TeamAssignmentState:
     mailbox_bound_at: str | None = None
     mailbox_observed_at: str | None = None
     child_user_message_sha256: str | None = None
+    member_role_contract: str = TEAM_MEMBER_ROLE_CONTRACT
+    worktree_id: str | None = None
+    base_commit: str | None = None
+    target_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -514,6 +528,9 @@ class TeamScheduleState:
     message: str | None = None
     finished_at: str | None = None
     assignment_ids: tuple[str, ...] = ()
+    capability_snapshot_sha256: str | None = None
+    eligible_members: tuple[dict[str, object], ...] = ()
+    parent_permission_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -616,6 +633,10 @@ def encode_team_record(record: TeamRecord) -> bytes:
             "started_at": record.started_at,
             "team_id": record.team_id,
         }
+        if record.schema_version == TEAM_SCHEDULE_STARTED_V2_SCHEMA_VERSION:
+            value["capability_snapshot_sha256"] = record.capability_snapshot_sha256
+            value["eligible_members"] = [dict(item) for item in record.eligible_members]
+            value["parent_permission_mode"] = record.parent_permission_mode
     elif isinstance(record, TeamScheduleCancelRequested):
         value = {
             "reason": record.reason,
@@ -688,6 +709,17 @@ def encode_team_record(record: TeamRecord) -> bytes:
         if record.schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION:
             value["schedule_run_id"] = record.schedule_run_id
             value["work_item_id"] = record.work_item_id
+        if record.schema_version == TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION:
+            value.update(
+                {
+                    "base_commit": record.base_commit,
+                    "member_role_contract": record.member_role_contract,
+                    "schedule_run_id": record.schedule_run_id,
+                    "target_ref": record.target_ref,
+                    "work_item_id": record.work_item_id,
+                    "worktree_id": record.worktree_id,
+                }
+            )
     elif isinstance(record, TeamAssignmentChildBound):
         value = {
             "assignment_id": record.assignment_id,
@@ -903,9 +935,8 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             schema_version=value["schema_version"],
         )
     elif record_type == "team_schedule_started":
-        _require_fields(
-            value,
-            "team_schedule_started",
+        schema_version = value.get("schema_version")
+        expected = {
             "max_assignments",
             "max_parallel",
             "record_type",
@@ -915,7 +946,13 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             "source",
             "started_at",
             "team_id",
-        )
+        }
+        if schema_version == TEAM_SCHEDULE_STARTED_V2_SCHEMA_VERSION:
+            expected.update(
+                {"capability_snapshot_sha256", "eligible_members", "parent_permission_mode"}
+            )
+        if set(value) != expected:
+            raise TeamRecordError("team_schedule_started has unknown or missing fields")
         record = TeamScheduleStarted(
             sequence=value["sequence"],
             team_id=value["team_id"],
@@ -924,6 +961,9 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             max_assignments=value["max_assignments"],
             max_parallel=value["max_parallel"],
             started_at=value["started_at"],
+            capability_snapshot_sha256=value.get("capability_snapshot_sha256"),
+            eligible_members=tuple(value.get("eligible_members", ())),
+            parent_permission_mode=value.get("parent_permission_mode"),
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )
@@ -1079,6 +1119,17 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             expected.add("work_item_id")
         elif schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION:
             expected.update({"work_item_id", "schedule_run_id"})
+        elif schema_version == TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION:
+            expected.update(
+                {
+                    "base_commit",
+                    "member_role_contract",
+                    "schedule_run_id",
+                    "target_ref",
+                    "work_item_id",
+                    "worktree_id",
+                }
+            )
         if set(value) != expected:
             raise TeamRecordError("team_assignment_created has unknown or missing fields")
         record = TeamAssignmentCreated(
@@ -1094,6 +1145,10 @@ def decode_team_record(payload: bytes) -> TeamRecord:
             schema_version=value["schema_version"],
             work_item_id=value.get("work_item_id"),
             schedule_run_id=value.get("schedule_run_id"),
+            member_role_contract=value.get("member_role_contract", TEAM_MEMBER_ROLE_CONTRACT),
+            worktree_id=value.get("worktree_id"),
+            base_commit=value.get("base_commit"),
+            target_ref=value.get("target_ref"),
         )
     elif record_type == "team_assignment_child_bound":
         _require_fields(
@@ -1450,6 +1505,9 @@ def replay_team_records(
                 max_parallel=record.max_parallel,
                 started_at=record.started_at,
                 status=TeamScheduleStatus.RUNNING,
+                capability_snapshot_sha256=record.capability_snapshot_sha256,
+                eligible_members=record.eligible_members,
+                parent_permission_mode=record.parent_permission_mode,
             )
             continue
         if isinstance(record, TeamScheduleCancelRequested):
@@ -1532,7 +1590,11 @@ def replay_team_records(
                 raise TeamRecordError("Team member already has a pending assignment")
             schedule = schedules.get(record.schedule_run_id) if record.schedule_run_id else None
             if (
-                record.schema_version == TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION
+                record.schema_version
+                in {
+                    TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
+                    TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION,
+                }
                 and record.schedule_run_id is not None
             ):
                 if schedule is None or schedule.status.terminal:
@@ -1545,6 +1607,9 @@ def replay_team_records(
             if record.work_item_id is not None:
                 if work_item is None or work_item.status is not TeamWorkStatus.READY:
                     raise TeamRecordError("Team assignment work item is not ready")
+            if record.schema_version == TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION:
+                if record.member_role_contract != member.role_contract:
+                    raise TeamRecordError("Team assignment role does not match its member")
             assignments[record.assignment_id] = TeamAssignmentState(
                 assignment_id=record.assignment_id,
                 member_id=record.member_id,
@@ -1555,6 +1620,10 @@ def replay_team_records(
                 phase=TeamAssignmentPhase.PENDING_CHILD,
                 work_item_id=record.work_item_id,
                 schedule_run_id=record.schedule_run_id,
+                member_role_contract=record.member_role_contract,
+                worktree_id=record.worktree_id,
+                base_commit=record.base_commit,
+                target_ref=record.target_ref,
             )
             assignment_children.add(record.child_run_id)
             active_member_assignments.add(record.member_id)
@@ -1960,10 +2029,10 @@ def _validate_record(record: TeamRecord) -> None:
         canonical_team_timestamp(record.closed_at, "Team closed_at")
         return
     if isinstance(record, TeamScheduleStarted):
-        if (
-            record.record_type != "team_schedule_started"
-            or record.schema_version != TEAM_SCHEDULE_STARTED_SCHEMA_VERSION
-        ):
+        if record.record_type != "team_schedule_started" or record.schema_version not in {
+            TEAM_SCHEDULE_STARTED_SCHEMA_VERSION,
+            TEAM_SCHEDULE_STARTED_V2_SCHEMA_VERSION,
+        }:
             raise TeamRecordError("unsupported Team schedule-started schema")
         if type(record.sequence) is not int or record.sequence < 1:
             raise TeamRecordError("Team schedule-started sequence must be positive")
@@ -1981,6 +2050,20 @@ def _validate_record(record: TeamRecord) -> None:
             or not 1 <= record.max_parallel <= MAX_TEAM_SCHEDULE_PARALLEL
         ):
             raise TeamRecordError("Team schedule parallel limit is invalid")
+        if record.schema_version == TEAM_SCHEDULE_STARTED_SCHEMA_VERSION:
+            if record.capability_snapshot_sha256 is not None or record.eligible_members:
+                raise TeamRecordError("legacy Team schedule cannot carry capability snapshot")
+        else:
+            if (
+                not isinstance(record.capability_snapshot_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", record.capability_snapshot_sha256) is None
+                or not isinstance(record.eligible_members, tuple)
+                or len(record.eligible_members) > MAX_TEAM_MEMBERS
+                or any(not isinstance(item, dict) for item in record.eligible_members)
+                or record.parent_permission_mode
+                not in {"read-only", "workspace-write", "danger-full-access"}
+            ):
+                raise TeamRecordError("Team schedule capability snapshot is invalid")
         canonical_team_timestamp(record.started_at, "Team schedule started_at")
         return
     if isinstance(record, TeamScheduleCancelRequested):
@@ -2020,18 +2103,27 @@ def _validate_record(record: TeamRecord) -> None:
         canonical_team_timestamp(record.finished_at, "Team schedule finished_at")
         return
     if isinstance(record, TeamMemberJoined):
-        if (
-            record.record_type != "team_member_joined"
-            or record.schema_version != TEAM_MEMBER_JOINED_SCHEMA_VERSION
-        ):
+        if record.record_type != "team_member_joined" or record.schema_version not in {
+            TEAM_MEMBER_JOINED_SCHEMA_VERSION,
+            TEAM_MEMBER_JOINED_V2_SCHEMA_VERSION,
+        }:
             raise TeamRecordError("unsupported Team member-joined schema")
         if type(record.sequence) is not int or record.sequence < 1:
             raise TeamRecordError("Team member-joined sequence must be positive")
         canonical_team_id(record.team_id)
         canonical_team_id(record.member_id)
         canonical_team_name(record.name)
-        if record.role_contract != TEAM_MEMBER_ROLE_CONTRACT:
+        if record.role_contract not in {
+            "read-only-investigator-v1",
+            "isolated-workspace-writer-v1",
+            "isolated-coder-v1",
+        }:
             raise TeamRecordError("Team member role contract is invalid")
+        if (
+            record.schema_version == TEAM_MEMBER_JOINED_SCHEMA_VERSION
+            and record.role_contract != TEAM_MEMBER_ROLE_CONTRACT
+        ):
+            raise TeamRecordError("legacy Team member cannot carry a writable role")
         canonical_team_timestamp(record.joined_at, "Team member joined_at")
         return
     if isinstance(record, TeamMemberDisabled):
@@ -2077,6 +2169,7 @@ def _validate_record(record: TeamRecord) -> None:
             TEAM_ASSIGNMENT_CREATED_SCHEMA_VERSION,
             TEAM_ASSIGNMENT_CREATED_V2_SCHEMA_VERSION,
             TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
+            TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION,
         }:
             raise TeamRecordError("unsupported Team assignment-created schema")
         if type(record.sequence) is not int or record.sequence < 1:
@@ -2094,7 +2187,11 @@ def _validate_record(record: TeamRecord) -> None:
         ):
             raise TeamRecordError("legacy Team assignment cannot carry a work item")
         if (
-            record.schema_version != TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION
+            record.schema_version
+            not in {
+                TEAM_ASSIGNMENT_CREATED_V3_SCHEMA_VERSION,
+                TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION,
+            }
             and record.schedule_run_id is not None
         ):
             raise TeamRecordError("non-v3 Team assignment cannot carry a schedule run")
@@ -2102,6 +2199,33 @@ def _validate_record(record: TeamRecord) -> None:
             canonical_team_id(record.work_item_id)
         if record.schedule_run_id is not None:
             canonical_team_id(record.schedule_run_id)
+        if record.schema_version != TEAM_ASSIGNMENT_CREATED_V4_SCHEMA_VERSION:
+            if record.member_role_contract != TEAM_MEMBER_ROLE_CONTRACT or any(
+                value is not None
+                for value in (record.worktree_id, record.base_commit, record.target_ref)
+            ):
+                raise TeamRecordError("legacy Team assignment cannot carry writable provenance")
+        else:
+            if record.member_role_contract not in {
+                "read-only-investigator-v1",
+                "isolated-workspace-writer-v1",
+                "isolated-coder-v1",
+            }:
+                raise TeamRecordError("Team assignment role contract is invalid")
+            writable = record.member_role_contract != TEAM_MEMBER_ROLE_CONTRACT
+            if writable != all(
+                value is not None
+                for value in (record.worktree_id, record.base_commit, record.target_ref)
+            ):
+                raise TeamRecordError("Team assignment worktree provenance is incomplete")
+            if record.worktree_id is not None:
+                canonical_team_id(record.worktree_id)
+            for value, label in (
+                (record.base_commit, "Team assignment base commit"),
+                (record.target_ref, "Team assignment target ref"),
+            ):
+                if value is not None:
+                    _bounded_text(value, label, max_characters=256, max_bytes=1024)
         canonical_team_timestamp(record.created_at, "Team assignment created_at")
         return
     if isinstance(record, TeamAssignmentChildBound):

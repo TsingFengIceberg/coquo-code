@@ -61,6 +61,7 @@ from coquo.session_records import (
     ActionExecutionOutcome,
     ActionExecutionStarted,
     ActionRequested,
+    ACTION_REQUESTED_SCHEMA_VERSION,
     ApprovalAuditOutcome,
     ApprovalResolved,
     AuditRecord,
@@ -2228,6 +2229,7 @@ class SessionWriter:
             identity=identity,
             permission_mode=permission_mode,
             approval_mode=approval_mode,
+            schema_version=(ACTION_REQUESTED_SCHEMA_VERSION if identity.version == 2 else 1),
         )
         self.append_audit(record)
         return record

@@ -13,7 +13,7 @@ MAX_APPROVAL_DIFF_LINES = 160
 MAX_APPROVAL_DIFF_BYTES = 24 * 1024
 MAX_APPROVAL_DIFF_LINE_BYTES = 4096
 
-_ACTION_DIGEST = re.compile(r"act-v1-[0-9a-f]{64}")
+_ACTION_DIGEST = re.compile(r"act-v[12]-[0-9a-f]{64}")
 
 
 class ApprovalPreviewKind(StrEnum):

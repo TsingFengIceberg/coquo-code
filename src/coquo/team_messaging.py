@@ -259,7 +259,33 @@ class TeamMessagingService:
             for message in team.messages
             if message.message_id in assignment.inbox_message_ids
         )
-        from coquo.child_runtime import build_team_child_role_prompt
+        from coquo.child_runtime import (
+            build_team_child_role_prompt,
+            build_writable_child_role_prompt,
+        )
+
+        member = next(item for item in team.members if item.member_id == assignment.member_id)
+        if member.role_contract != "read-only-investigator-v1":
+            if (
+                assignment.worktree_id is None
+                or assignment.base_commit is None
+                or assignment.target_ref is None
+            ):
+                raise TeamMessageError("writable Team assignment has incomplete worktree identity")
+            from coquo.session_records import workspace_fingerprint
+            from coquo.worktree_service import WorktreeService
+
+            binding = WorktreeService(self.workspace).inspect_binding(assignment.worktree_id)
+            return build_writable_child_role_prompt(
+                objective=assignment.objective,
+                child_run_id=assignment.child_run_id,
+                role_contract=member.role_contract,
+                worktree_id=assignment.worktree_id,
+                execution_root_fingerprint=workspace_fingerprint(binding.worktree_root),
+                base_commit=assignment.base_commit,
+                target_ref=assignment.target_ref,
+                inbox=inbox,
+            )
 
         return build_team_child_role_prompt(
             objective=assignment.objective,

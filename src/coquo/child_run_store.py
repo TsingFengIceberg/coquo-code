@@ -9,6 +9,7 @@ from pathlib import Path
 import os
 import stat
 import tempfile
+import time
 from threading import Lock
 from uuid import UUID, uuid4
 
@@ -103,6 +104,12 @@ class ChildRunInfo:
     handoff: ChildRunHandoffPublished | None = None
     delegated: ChildRunDelegated | None = None
     team_assignment: ChildRunTeamAssignment | None = None
+    role_contract: str | None = None
+    execution_scope: str | None = None
+    execution_root_fingerprint: str | None = None
+    worktree_id: str | None = None
+    base_commit: str | None = None
+    target_ref: str | None = None
 
 
 _ACTIVE_WRITERS: set[str] = set()
@@ -195,6 +202,12 @@ class ChildRunStore:
         member_id: str,
         assignment_id: str,
         assigned_at: str,
+        role_contract: str = "read-only-investigator-v1",
+        execution_scope: str = "authority-workspace",
+        execution_root_fingerprint: str | None = None,
+        worktree_id: str | None = None,
+        base_commit: str | None = None,
+        target_ref: str | None = None,
     ) -> ChildRunInfo:
         """Atomically create or exactly revalidate one Team-origin Child Run."""
         try:
@@ -227,6 +240,13 @@ class ChildRunStore:
             assignment_id=canonical_assignment,
             objective_sha256=objective_sha256,
             assigned_at=canonical_assigned_at,
+            role_contract=role_contract,
+            execution_scope=execution_scope,
+            execution_root_fingerprint=execution_root_fingerprint,
+            worktree_id=worktree_id,
+            base_commit=base_commit,
+            target_ref=target_ref,
+            schema_version=(2 if role_contract != "read-only-investigator-v1" else 1),
         )
         records: list[ChildRunRecord] = [header, origin]
         path = self.root / f"{child_id}.jsonl"
@@ -366,6 +386,15 @@ class ChildRunStore:
                     max_output_tokens=runtime_spec.max_output_tokens,
                     deadline_seconds=runtime_spec.deadline_seconds,
                     admitted_at=self._clock(),
+                    role_contract=runtime_spec.role_contract,
+                    execution_scope=runtime_spec.execution_scope,
+                    execution_root_fingerprint=runtime_spec.execution_root_fingerprint,
+                    worktree_id=runtime_spec.worktree_id,
+                    base_commit=runtime_spec.base_commit,
+                    target_ref=runtime_spec.target_ref,
+                    schema_version=(
+                        2 if runtime_spec.role_contract != "read-only-investigator-v1" else 1
+                    ),
                 )
                 writer._append_transition(admitted)
             elif state.status is ChildRunStatus.ADMITTED:
@@ -375,6 +404,13 @@ class ChildRunStore:
                     admitted.child_session_id != runtime_spec.child_session_id
                     or admitted.tool_set_id != runtime_spec.tool_set_id
                     or admitted.provider_binding != dict(runtime_spec.provider_binding)
+                    or admitted.role_contract != runtime_spec.role_contract
+                    or admitted.execution_scope != runtime_spec.execution_scope
+                    or admitted.execution_root_fingerprint
+                    != runtime_spec.execution_root_fingerprint
+                    or admitted.worktree_id != runtime_spec.worktree_id
+                    or admitted.base_commit != runtime_spec.base_commit
+                    or admitted.target_ref != runtime_spec.target_ref
                 ):
                     raise ChildRunStoreError(
                         "Child Run admission does not match the requested runtime"
@@ -388,6 +424,13 @@ class ChildRunStore:
                     or admitted.tool_set_id != runtime_spec.tool_set_id
                     or admitted.provider_binding != dict(runtime_spec.provider_binding)
                     or bound.child_session_id != runtime_spec.child_session_id
+                    or admitted.role_contract != runtime_spec.role_contract
+                    or admitted.execution_scope != runtime_spec.execution_scope
+                    or admitted.execution_root_fingerprint
+                    != runtime_spec.execution_root_fingerprint
+                    or admitted.worktree_id != runtime_spec.worktree_id
+                    or admitted.base_commit != runtime_spec.base_commit
+                    or admitted.target_ref != runtime_spec.target_ref
                 ):
                     raise ChildRunStoreError(
                         "Child Run binding does not match the requested runtime"
@@ -980,6 +1023,30 @@ def _child_run_info(path: Path, state: ChildRunReplayState) -> ChildRunInfo:
         handoff=state.handoff,
         delegated=state.delegated,
         team_assignment=state.team_assignment,
+        role_contract=admitted.role_contract
+        if admitted is not None
+        else (state.team_assignment.role_contract if state.team_assignment is not None else None),
+        execution_scope=admitted.execution_scope
+        if admitted is not None
+        else (state.team_assignment.execution_scope if state.team_assignment is not None else None),
+        execution_root_fingerprint=(
+            admitted.execution_root_fingerprint
+            if admitted is not None
+            else (
+                state.team_assignment.execution_root_fingerprint
+                if state.team_assignment is not None
+                else None
+            )
+        ),
+        worktree_id=admitted.worktree_id
+        if admitted is not None
+        else (state.team_assignment.worktree_id if state.team_assignment is not None else None),
+        base_commit=admitted.base_commit
+        if admitted is not None
+        else (state.team_assignment.base_commit if state.team_assignment is not None else None),
+        target_ref=admitted.target_ref
+        if admitted is not None
+        else (state.team_assignment.target_ref if state.team_assignment is not None else None),
     )
 
 
@@ -1124,11 +1191,23 @@ def _read_descriptor(descriptor: int, path: Path) -> bytes:
 
 
 def _read_transcript(path: Path) -> bytes:
-    descriptor = _open_transcript(path, writable=False)
-    try:
-        return _read_descriptor(descriptor, path)
-    finally:
-        os.close(descriptor)
+    last_error: ChildRunStoreError | None = None
+    for attempt in range(8):
+        descriptor = _open_transcript(path, writable=False)
+        try:
+            return _read_descriptor(descriptor, path)
+        except ChildRunStoreError as error:
+            last_error = error
+            if "changed while it was being read" not in str(
+                error
+            ) and "ended during read" not in str(error):
+                raise
+        finally:
+            os.close(descriptor)
+        if attempt < 7:
+            time.sleep(0.001)
+    assert last_error is not None
+    raise last_error
 
 
 def _append_record(descriptor: int, path: Path, record: ChildRunRecord) -> None:

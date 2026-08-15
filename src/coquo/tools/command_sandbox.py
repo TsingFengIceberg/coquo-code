@@ -133,12 +133,14 @@ class LinuxBubblewrapCommandSandbox:
         seccomp_filter_factory: Callable[[], int] | None = None,
         platform: str | None = None,
         masked_read_paths: tuple[Path, ...] = (),
+        read_only_paths: tuple[Path, ...] = (),
         workspace_writable: bool = True,
     ) -> None:
         self._bubblewrap_path = Path(bubblewrap_path)
         self._seccomp_filter_factory = seccomp_filter_factory or _create_network_seccomp_filter
         self._platform = sys.platform if platform is None else platform
         self._masked_read_paths = tuple(Path(path) for path in masked_read_paths)
+        self._read_only_paths = tuple(Path(path) for path in read_only_paths)
         if type(workspace_writable) is not bool:
             raise ValueError("workspace writable option must be boolean")
         self._workspace_writable = workspace_writable
@@ -157,6 +159,7 @@ class LinuxBubblewrapCommandSandbox:
         original_home = _absolute_home(environment)
         sensitive_mounts = _sensitive_mounts(original_home, workspace)
         masked_read_mounts = _masked_read_mounts(self._masked_read_paths, workspace)
+        read_only_mounts = _read_only_mounts(self._read_only_paths, workspace)
 
         seccomp_fd: int | None = None
         activation_read_fd: int | None = None
@@ -203,6 +206,7 @@ class LinuxBubblewrapCommandSandbox:
                     str(workspace),
                 )
             )
+            command.extend(read_only_mounts)
             command.extend(sensitive_mounts)
             for directory in _PRIVATE_DIRECTORIES:
                 if directory != SANDBOX_PRIVATE_TMP:
@@ -382,6 +386,34 @@ def _masked_read_mounts(paths: tuple[Path, ...], workspace: Path) -> list[str]:
             mounts.extend(("--tmpfs", str(target)))
         else:
             mounts.extend(("--ro-bind", "/dev/null", str(target)))
+    return mounts
+
+
+def _read_only_mounts(paths: tuple[Path, ...], workspace: Path) -> list[str]:
+    """Rebind trusted execution-root metadata read-only after the workspace RW bind."""
+    mounts: list[str] = []
+    for target in paths:
+        if not target.is_absolute():
+            raise CommandSandboxUnavailable("read-only mount path must be absolute")
+        try:
+            relative = target.relative_to(workspace)
+        except ValueError:
+            raise CommandSandboxUnavailable(
+                "read-only mount path must be inside workspace"
+            ) from None
+        if not relative.parts:
+            raise CommandSandboxUnavailable("read-only mount path cannot be workspace root")
+        try:
+            info = target.lstat()
+        except OSError as error:
+            raise CommandSandboxUnavailable(
+                "read-only mount path could not be inspected"
+            ) from error
+        if stat.S_ISLNK(info.st_mode) or not (
+            stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+        ):
+            raise CommandSandboxUnavailable("read-only mount path must be a real file or directory")
+        mounts.extend(("--ro-bind", str(target), str(target)))
     return mounts
 
 

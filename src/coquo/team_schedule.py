@@ -7,6 +7,8 @@ execution and background supervision are layered on top in ``team_supervisor``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 from typing import Callable
 from uuid import UUID, uuid4
@@ -29,6 +31,7 @@ from coquo.team_records import (
 )
 from coquo.team_store import TeamInfo, TeamScheduleLease, TeamStore, TeamStoreError
 from coquo.team_service import TeamAssignmentError, TeamAssignmentService
+from coquo.child_runtime import child_role_descriptor
 
 
 class TeamScheduleError(RuntimeError):
@@ -183,6 +186,7 @@ class TeamScheduleService:
         max_assignments: int = MAX_TEAM_SCHEDULE_ASSIGNMENTS,
         max_parallel: int = MAX_TEAM_SCHEDULE_PARALLEL,
         schedule_run_id: str | None = None,
+        parent_permission_mode: str = "read-only",
     ) -> TeamScheduleRun:
         if (
             type(max_assignments) is not int
@@ -196,6 +200,33 @@ class TeamScheduleService:
             if team.status is not TeamStatus.OPEN:
                 raise TeamScheduleError("Team is closed")
             run_id = canonical_team_id(schedule_run_id) if schedule_run_id else self._new_id()
+            eligible_members = tuple(
+                {
+                    "member_id": member.member_id,
+                    "permission_mode": child_role_descriptor(member.role_contract).permission_mode,
+                    "role_contract": member.role_contract,
+                    "tool_names": list(child_role_descriptor(member.role_contract).tool_names),
+                }
+                for member in team.members
+                if member.status is TeamMemberStatus.ACTIVE
+            )
+            use_v2 = any(
+                item["role_contract"] != "read-only-investigator-v1" for item in eligible_members
+            )
+            snapshot_digest = (
+                hashlib.sha256(
+                    json.dumps(
+                        {
+                            "eligible_members": eligible_members,
+                            "parent_permission_mode": parent_permission_mode,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if use_v2
+                else None
+            )
             lease = self.teams.acquire_schedule(team.team_id)
             try:
                 state = self.teams.start_schedule(
@@ -204,6 +235,9 @@ class TeamScheduleService:
                     source=source,
                     max_assignments=max_assignments,
                     max_parallel=max_parallel,
+                    capability_snapshot_sha256=snapshot_digest,
+                    eligible_members=eligible_members if use_v2 else (),
+                    parent_permission_mode=parent_permission_mode if use_v2 else None,
                 )
             except BaseException:
                 lease.close()
@@ -232,6 +266,7 @@ class TeamScheduleService:
         source: TeamScheduleSource | str = TeamScheduleSource.HOST,
         max_assignments: int = MAX_TEAM_SCHEDULE_ASSIGNMENTS,
         max_parallel: int = MAX_TEAM_SCHEDULE_PARALLEL,
+        parent_permission_mode: str = "read-only",
     ) -> TeamScheduleState:
         """Start and synchronously execute one bounded schedule wave."""
         run = self.start(
@@ -239,6 +274,7 @@ class TeamScheduleService:
             source=source,
             max_assignments=max_assignments,
             max_parallel=max_parallel,
+            parent_permission_mode=parent_permission_mode,
         )
         return self.run_started(run, session)
 
@@ -284,6 +320,26 @@ class TeamScheduleService:
                     selection = select_next(current)
                     if selection is None:
                         break
+                    if schedule.eligible_members:
+                        descriptor = next(
+                            (
+                                item
+                                for item in schedule.eligible_members
+                                if item.get("member_id") == selection.member.member_id
+                            ),
+                            None,
+                        )
+                        role = child_role_descriptor(selection.member.role_contract)
+                        if (
+                            descriptor is None
+                            or descriptor.get("role_contract") != role.role_contract
+                            or tuple(descriptor.get("tool_names", ())) != role.tool_names
+                        ):
+                            return run.finish(
+                                outcome=TeamScheduleOutcome.FAILED,
+                                result_code="capability_roster_drift",
+                                message="Team member capability changed after schedule admission",
+                            )
                     try:
                         info = assignment_service.create(
                             run.team_id,
@@ -291,6 +347,9 @@ class TeamScheduleService:
                             selection.work_item.objective,
                             work_item_id=selection.work_item.work_item_id,
                             schedule_run_id=run.schedule_run_id,
+                            parent_permission_mode=getattr(
+                                getattr(session, "_permission_mode", None), "value", "read-only"
+                            ),
                         )
                         _schedule_session_call(
                             session, "_prepare_team_assignment_unlocked", "prepare_team_assignment"

@@ -139,6 +139,59 @@ def test_bubblewrap_can_bind_the_workspace_read_only_for_host_verification(
         _close_launch(launch)
 
 
+def test_bubblewrap_rebinds_attested_linked_worktree_git_pointer_read_only(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    git_pointer = workspace / ".git"
+    git_pointer.write_text("gitdir: /authority/.git/worktrees/child\n", encoding="utf-8")
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    sandbox = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+        read_only_paths=(git_pointer,),
+    )
+
+    launch = sandbox.prepare_launch(
+        workspace=workspace,
+        cwd=workspace,
+        argv=("/usr/bin/true",),
+        environment={"PATH": "/usr/bin"},
+    )
+    try:
+        assert _subsequence(launch.argv, ("--bind", str(workspace), str(workspace)))
+        assert _subsequence(launch.argv, ("--ro-bind", str(git_pointer), str(git_pointer)))
+        assert launch.argv.index(str(git_pointer)) > launch.argv.index(str(workspace))
+    finally:
+        _close_launch(launch)
+
+
+def test_bubblewrap_rejects_invalid_read_only_mount_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("", encoding="utf-8")
+    bwrap.chmod(0o755)
+    sandbox = LinuxBubblewrapCommandSandbox(
+        bubblewrap_path=bwrap,
+        seccomp_filter_factory=_filter_fd,
+        platform="linux",
+        read_only_paths=(tmp_path / "outside",),
+    )
+
+    with pytest.raises(CommandSandboxUnavailable, match="inside workspace"):
+        sandbox.prepare_launch(
+            workspace=workspace,
+            cwd=workspace,
+            argv=("/usr/bin/true",),
+            environment={"PATH": "/usr/bin"},
+        )
+
+
 def test_bubblewrap_masks_eval_sources_before_rebinding_nested_workspace(tmp_path: Path) -> None:
     source_checkout = tmp_path / "source"
     workspace = source_checkout / "task"

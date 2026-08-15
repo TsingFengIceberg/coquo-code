@@ -82,6 +82,8 @@ from coquo.providers.usage import (
 )
 
 SCHEMA_VERSION = 1
+ACTION_REQUESTED_LEGACY_SCHEMA_VERSION = 1
+ACTION_REQUESTED_SCHEMA_VERSION = 2
 SESSION_HEADER_SCHEMA_VERSION = 2
 TURN_COMMITTED_LEGACY_SCHEMA_VERSION = 1
 TURN_COMMITTED_ARGUMENTS_SCHEMA_VERSION = 2
@@ -114,7 +116,7 @@ MAX_GENERATED_SESSION_NAME_BYTES = 160
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
-_ACTION_DIGEST = re.compile(r"act-v1-[0-9a-f]{64}\Z")
+_ACTION_DIGEST = re.compile(r"act-v[12]-[0-9a-f]{64}\Z")
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 
@@ -380,7 +382,7 @@ class ActionRequested:
     permission_mode: PermissionMode
     approval_mode: ApprovalMode
     record_type: str = "action_requested"
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = ACTION_REQUESTED_LEGACY_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -1203,12 +1205,25 @@ def _validate_action_requested(
         raise SessionRecordError("action identity Session does not match transcript")
     if record.identity.workspace_fingerprint != header.workspace_fingerprint:
         raise SessionRecordError("action identity workspace does not match transcript")
+    if record.identity.version == ACTION_REQUESTED_SCHEMA_VERSION:
+        if record.identity.execution_scope == "authority-workspace":
+            if record.identity.execution_root_fingerprint != header.workspace_fingerprint:
+                raise SessionRecordError(
+                    "authority action execution root does not match transcript"
+                )
+        elif record.identity.execution_root_fingerprint == header.workspace_fingerprint:
+            raise SessionRecordError("Team worktree action must use a distinct execution root")
     if record.identity.lease.runtime_generation != binding.generation:
         raise SessionRecordError("action identity runtime generation is stale")
 
 
 def _validate_action_requested_fields(record: ActionRequested) -> None:
     _validate_timestamp(record.occurred_at, "action_requested occurred_at")
+    if record.schema_version not in {
+        ACTION_REQUESTED_LEGACY_SCHEMA_VERSION,
+        ACTION_REQUESTED_SCHEMA_VERSION,
+    }:
+        raise SessionRecordError("action_requested schema version is unsupported")
     record.binding.__post_init__()
     if type(record.identity) is not ActionIdentity:
         raise SessionRecordError("action_requested identity is invalid")
@@ -1216,6 +1231,11 @@ def _validate_action_requested_fields(record: ActionRequested) -> None:
         record.identity.__post_init__()
     except ValueError as error:
         raise SessionRecordError(str(error)) from None
+    if record.schema_version == ACTION_REQUESTED_LEGACY_SCHEMA_VERSION:
+        if record.identity.version != ACTION_REQUESTED_LEGACY_SCHEMA_VERSION:
+            raise SessionRecordError("legacy action_requested requires ActionIdentity v1")
+    elif record.identity.version != ACTION_REQUESTED_SCHEMA_VERSION:
+        raise SessionRecordError("current action_requested requires ActionIdentity v2")
     if type(record.permission_mode) is not PermissionMode:
         raise SessionRecordError("action_requested permission mode is invalid")
     if type(record.approval_mode) is not ApprovalMode:
@@ -1634,6 +1654,11 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             SESSION_RESUMED_LEGACY_SCHEMA_VERSION,
             SESSION_RESUMED_SCHEMA_VERSION,
         }
+    elif record_type == "action_requested":
+        allowed_versions = {
+            ACTION_REQUESTED_LEGACY_SCHEMA_VERSION,
+            ACTION_REQUESTED_SCHEMA_VERSION,
+        }
     else:
         allowed_versions = {SCHEMA_VERSION}
     if type(version) is not int or version not in allowed_versions:
@@ -1926,6 +1951,7 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             identity=identity,
             permission_mode=_enum_field(value, "permission_mode", record_type, PermissionMode),
             approval_mode=_enum_field(value, "approval_mode", record_type, ApprovalMode),
+            schema_version=version,
         )
         _validate_action_requested_fields(record)
         return record
@@ -3028,6 +3054,23 @@ def _validate_record_version(record: SessionRecord) -> None:
             raise SessionRecordError("legacy session_resumed cannot contain a runtime binding")
         if record.schema_version == SESSION_RESUMED_SCHEMA_VERSION and record.binding is None:
             raise SessionRecordError("current session_resumed requires a runtime binding")
+        return
+    if isinstance(record, ActionRequested):
+        if record.schema_version not in {
+            ACTION_REQUESTED_LEGACY_SCHEMA_VERSION,
+            ACTION_REQUESTED_SCHEMA_VERSION,
+        }:
+            raise SessionRecordError("unsupported session record schema version")
+        if (
+            record.schema_version == ACTION_REQUESTED_LEGACY_SCHEMA_VERSION
+            and record.identity.version != ACTION_REQUESTED_LEGACY_SCHEMA_VERSION
+        ):
+            raise SessionRecordError("legacy action_requested requires ActionIdentity v1")
+        if (
+            record.schema_version == ACTION_REQUESTED_SCHEMA_VERSION
+            and record.identity.version != ACTION_REQUESTED_SCHEMA_VERSION
+        ):
+            raise SessionRecordError("current action_requested requires ActionIdentity v2")
         return
     if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")

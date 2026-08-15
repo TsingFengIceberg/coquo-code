@@ -18,7 +18,9 @@ CHILD_RUN_HEADER_SCHEMA_VERSION = 1
 CHILD_RUN_CANCELLED_SCHEMA_VERSION = 1
 CHILD_RUN_DELEGATED_SCHEMA_VERSION = 1
 CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION = 1
+CHILD_RUN_TEAM_ASSIGNMENT_V2_SCHEMA_VERSION = 2
 CHILD_RUN_ADMITTED_SCHEMA_VERSION = 1
+CHILD_RUN_ADMITTED_V2_SCHEMA_VERSION = 2
 CHILD_SESSION_BOUND_SCHEMA_VERSION = 1
 CHILD_RUN_PREPARATION_FAILED_SCHEMA_VERSION = 1
 CHILD_RUN_STARTED_SCHEMA_VERSION = 1
@@ -107,6 +109,12 @@ class ChildRunTeamAssignment:
     assignment_id: str
     objective_sha256: str
     assigned_at: str
+    role_contract: str = "read-only-investigator-v1"
+    execution_scope: str = "authority-workspace"
+    execution_root_fingerprint: str | None = None
+    worktree_id: str | None = None
+    base_commit: str | None = None
+    target_ref: str | None = None
     record_type: str = "child_run_team_assignment"
     schema_version: int = CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION
 
@@ -131,6 +139,12 @@ class ChildRunAdmitted:
     max_output_tokens: int
     deadline_seconds: int
     admitted_at: str
+    role_contract: str = "read-only-investigator-v1"
+    execution_scope: str = "authority-workspace"
+    execution_root_fingerprint: str | None = None
+    worktree_id: str | None = None
+    base_commit: str | None = None
+    target_ref: str | None = None
     record_type: str = "child_run_admitted"
     schema_version: int = CHILD_RUN_ADMITTED_SCHEMA_VERSION
 
@@ -431,10 +445,16 @@ def _record_identity(record: ChildRunRecord) -> None:
         if record.record_type != "child_run_delegated" or record.schema_version != 1:
             raise ChildRunRecordError("unsupported Child Run delegation schema")
     elif type(record) is ChildRunTeamAssignment:
-        if record.record_type != "child_run_team_assignment" or record.schema_version != 1:
+        if record.record_type != "child_run_team_assignment" or record.schema_version not in {
+            1,
+            CHILD_RUN_TEAM_ASSIGNMENT_V2_SCHEMA_VERSION,
+        }:
             raise ChildRunRecordError("unsupported Child Run Team assignment schema")
     elif type(record) is ChildRunAdmitted:
-        if record.record_type != "child_run_admitted" or record.schema_version != 1:
+        if record.record_type != "child_run_admitted" or record.schema_version not in {
+            1,
+            CHILD_RUN_ADMITTED_V2_SCHEMA_VERSION,
+        }:
             raise ChildRunRecordError("unsupported Child Run admission schema")
     elif type(record) is ChildSessionBound:
         if record.record_type != "child_session_bound" or record.schema_version != 1:
@@ -507,6 +527,50 @@ def validate_child_run_record(record: ChildRunRecord) -> None:
         canonical_child_run_id(record.member_id)
         canonical_child_run_id(record.assignment_id)
         _sha256(record.objective_sha256, "Child Run Team assignment objective digest")
+        if record.role_contract not in {
+            "read-only-investigator-v1",
+            "isolated-workspace-writer-v1",
+            "isolated-coder-v1",
+        }:
+            raise ChildRunRecordError("Child Run Team role contract is invalid")
+        if record.schema_version == CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION:
+            if (
+                record.role_contract != "read-only-investigator-v1"
+                or record.execution_scope != "authority-workspace"
+                or any(
+                    value is not None
+                    for value in (
+                        record.execution_root_fingerprint,
+                        record.worktree_id,
+                        record.base_commit,
+                        record.target_ref,
+                    )
+                )
+            ):
+                raise ChildRunRecordError("legacy Child Team origin carries writable provenance")
+        else:
+            if (
+                record.execution_scope != "team-worktree"
+                or record.role_contract == "read-only-investigator-v1"
+            ):
+                raise ChildRunRecordError("writable Child Team origin scope is invalid")
+            if not all(
+                value is not None
+                for value in (
+                    record.execution_root_fingerprint,
+                    record.worktree_id,
+                    record.base_commit,
+                    record.target_ref,
+                )
+            ):
+                raise ChildRunRecordError("Child Team origin provenance is incomplete")
+            _sha256(
+                record.execution_root_fingerprint.removeprefix("v1-"),
+                "Child execution root fingerprint",
+            )
+            canonical_child_run_id(record.worktree_id)
+            _canonical_text(record.base_commit, "Child base commit", 256, 1024)
+            _canonical_text(record.target_ref, "Child target ref", 256, 1024)
         canonical_child_run_timestamp(record.assigned_at, "Child Run Team assignment assigned_at")
     if isinstance(record, ChildRunAdmitted):
         if record.sequence < 1:
@@ -538,6 +602,50 @@ def validate_child_run_record(record: ChildRunRecord) -> None:
             raise ChildRunRecordError("Child Run tool names are invalid")
         if type(record.role_contract_version) is not int or record.role_contract_version < 1:
             raise ChildRunRecordError("Child Run role contract version is invalid")
+        if record.role_contract not in {
+            "read-only-investigator-v1",
+            "isolated-workspace-writer-v1",
+            "isolated-coder-v1",
+        }:
+            raise ChildRunRecordError("Child Run role contract is invalid")
+        if record.schema_version == CHILD_RUN_ADMITTED_SCHEMA_VERSION:
+            if (
+                record.role_contract != "read-only-investigator-v1"
+                or record.execution_scope != "authority-workspace"
+                or any(
+                    value is not None
+                    for value in (
+                        record.execution_root_fingerprint,
+                        record.worktree_id,
+                        record.base_commit,
+                        record.target_ref,
+                    )
+                )
+            ):
+                raise ChildRunRecordError("legacy Child admission carries writable provenance")
+        else:
+            if (
+                record.execution_scope != "team-worktree"
+                or record.role_contract == "read-only-investigator-v1"
+            ):
+                raise ChildRunRecordError("writable Child admission scope is invalid")
+            if not all(
+                value is not None
+                for value in (
+                    record.execution_root_fingerprint,
+                    record.worktree_id,
+                    record.base_commit,
+                    record.target_ref,
+                )
+            ):
+                raise ChildRunRecordError("Child admission provenance is incomplete")
+            _sha256(
+                record.execution_root_fingerprint.removeprefix("v1-"),
+                "Child execution root fingerprint",
+            )
+            canonical_child_run_id(record.worktree_id)
+            _canonical_text(record.base_commit, "Child base commit", 256, 1024)
+            _canonical_text(record.target_ref, "Child target ref", 256, 1024)
         _canonical_text(
             record.role_prompt_fingerprint, "Child Run role prompt fingerprint", 128, 256
         )
@@ -697,7 +805,7 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "source": record.source,
         }
     if isinstance(record, ChildRunTeamAssignment):
-        return {
+        value = {
             "assigned_at": record.assigned_at,
             "assignment_id": record.assignment_id,
             "child_run_id": record.child_run_id,
@@ -709,8 +817,20 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "sequence": record.sequence,
             "team_id": record.team_id,
         }
+        if record.schema_version == CHILD_RUN_TEAM_ASSIGNMENT_V2_SCHEMA_VERSION:
+            value.update(
+                {
+                    "base_commit": record.base_commit,
+                    "execution_root_fingerprint": record.execution_root_fingerprint,
+                    "execution_scope": record.execution_scope,
+                    "role_contract": record.role_contract,
+                    "target_ref": record.target_ref,
+                    "worktree_id": record.worktree_id,
+                }
+            )
+        return value
     if isinstance(record, ChildRunAdmitted):
-        return {
+        value = {
             "approval_mode": record.approval_mode,
             "admitted_at": record.admitted_at,
             "child_run_id": record.child_run_id,
@@ -732,6 +852,18 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "tool_registry_id": record.tool_registry_id,
             "tool_set_id": record.tool_set_id,
         }
+        if record.schema_version == CHILD_RUN_ADMITTED_V2_SCHEMA_VERSION:
+            value.update(
+                {
+                    "base_commit": record.base_commit,
+                    "execution_root_fingerprint": record.execution_root_fingerprint,
+                    "execution_scope": record.execution_scope,
+                    "role_contract": record.role_contract,
+                    "target_ref": record.target_ref,
+                    "worktree_id": record.worktree_id,
+                }
+            )
+        return value
     if isinstance(record, ChildSessionBound):
         return {
             "bound_at": record.bound_at,
@@ -945,6 +1077,18 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             "tool_registry_id",
             "tool_set_id",
         }
+        schema_version = value.get("schema_version")
+        if schema_version == CHILD_RUN_ADMITTED_V2_SCHEMA_VERSION:
+            expected.update(
+                {
+                    "base_commit",
+                    "execution_root_fingerprint",
+                    "execution_scope",
+                    "role_contract",
+                    "target_ref",
+                    "worktree_id",
+                }
+            )
         if set(value) != expected:
             raise ChildRunRecordError("Child Run admission has unknown or missing fields")
         record = ChildRunAdmitted(
@@ -966,6 +1110,12 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             max_output_tokens=value["max_output_tokens"],
             deadline_seconds=value["deadline_seconds"],
             admitted_at=value["admitted_at"],
+            role_contract=value.get("role_contract", "read-only-investigator-v1"),
+            execution_scope=value.get("execution_scope", "authority-workspace"),
+            execution_root_fingerprint=value.get("execution_root_fingerprint"),
+            worktree_id=value.get("worktree_id"),
+            base_commit=value.get("base_commit"),
+            target_ref=value.get("target_ref"),
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )
@@ -1013,6 +1163,18 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             "sequence",
             "team_id",
         }
+        schema_version = value.get("schema_version")
+        if schema_version == CHILD_RUN_TEAM_ASSIGNMENT_V2_SCHEMA_VERSION:
+            expected.update(
+                {
+                    "base_commit",
+                    "execution_root_fingerprint",
+                    "execution_scope",
+                    "role_contract",
+                    "target_ref",
+                    "worktree_id",
+                }
+            )
         if set(value) != expected:
             raise ChildRunRecordError("Child Run Team assignment has unknown or missing fields")
         record = ChildRunTeamAssignment(
@@ -1024,6 +1186,12 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             assignment_id=value["assignment_id"],
             objective_sha256=value["objective_sha256"],
             assigned_at=value["assigned_at"],
+            role_contract=value.get("role_contract", "read-only-investigator-v1"),
+            execution_scope=value.get("execution_scope", "authority-workspace"),
+            execution_root_fingerprint=value.get("execution_root_fingerprint"),
+            worktree_id=value.get("worktree_id"),
+            base_commit=value.get("base_commit"),
+            target_ref=value.get("target_ref"),
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )

@@ -14,7 +14,9 @@ from coquo.core.contracts import ToolArguments
 from coquo.core.permissions import PermissionAction
 
 ACTION_IDENTITY_VERSION = 1
+CURRENT_ACTION_IDENTITY_VERSION = 2
 _ACTION_IDENTITY_DOMAIN = b"coquo-action-identity-v1\0"
+_ACTION_IDENTITY_V2_DOMAIN = b"coquo-action-identity-v2\0"
 _WORKSPACE_FINGERPRINT = re.compile(r"v1-[0-9a-f]{64}\Z")
 _CONTEXT_ID = re.compile(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -29,6 +31,7 @@ class ActionPreconditionKind(StrEnum):
     PATH_ABSENT = "path-absent"
     EXPECTED_STATE_SHA256 = "expected-state-sha256"
     EXPECTED_CONFIGURATION_SHA256 = "expected-configuration-sha256"
+    WORKTREE_INTEGRATION = "worktree-integration"
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ class ActionPrecondition:
         if self.kind in {
             ActionPreconditionKind.EXPECTED_STATE_SHA256,
             ActionPreconditionKind.EXPECTED_CONFIGURATION_SHA256,
+            ActionPreconditionKind.WORKTREE_INTEGRATION,
         }:
             if type(self.fingerprint) is not str or _SHA256.fullmatch(self.fingerprint) is None:
                 raise ValueError("SHA-256 precondition requires a lowercase SHA-256 digest")
@@ -65,6 +69,10 @@ class ActionPrecondition:
     @classmethod
     def expected_configuration(cls, fingerprint: str) -> ActionPrecondition:
         return cls(ActionPreconditionKind.EXPECTED_CONFIGURATION_SHA256, fingerprint)
+
+    @classmethod
+    def worktree_integration(cls, fingerprint: str) -> ActionPrecondition:
+        return cls(ActionPreconditionKind.WORKTREE_INTEGRATION, fingerprint)
 
     def as_mapping(self) -> dict[str, object]:
         return {"fingerprint": self.fingerprint, "kind": self.kind.value}
@@ -131,10 +139,16 @@ class ActionIdentity:
     workspace_fingerprint: str
     lease: ActionLease
     precondition: ActionPrecondition
+    execution_scope: str = "authority-workspace"
+    execution_root_fingerprint: str | None = None
+    worktree_id: str | None = None
     version: int = ACTION_IDENTITY_VERSION
 
     def __post_init__(self) -> None:
-        if type(self.version) is not int or self.version != ACTION_IDENTITY_VERSION:
+        if type(self.version) is not int or self.version not in {
+            ACTION_IDENTITY_VERSION,
+            CURRENT_ACTION_IDENTITY_VERSION,
+        }:
             raise ValueError("unsupported action identity version")
         canonical_uuid4(self.request_id, "action request ID")
         _bounded_text(self.tool_use_id, "action tool_use ID")
@@ -153,6 +167,32 @@ class ActionIdentity:
             raise ValueError("action lease is invalid")
         if type(self.precondition) is not ActionPrecondition:
             raise ValueError("action precondition is invalid")
+        if self.execution_scope not in {"authority-workspace", "team-worktree"}:
+            raise ValueError("action execution scope is invalid")
+        if self.version == ACTION_IDENTITY_VERSION and (
+            self.execution_scope != "authority-workspace"
+            or self.execution_root_fingerprint is not None
+            or self.worktree_id is not None
+        ):
+            raise ValueError("legacy action identity cannot carry execution scope")
+        if (
+            self.execution_root_fingerprint is not None
+            and _WORKSPACE_FINGERPRINT.fullmatch(self.execution_root_fingerprint) is None
+        ):
+            raise ValueError("action execution root fingerprint is invalid")
+        if self.version == CURRENT_ACTION_IDENTITY_VERSION and (
+            self.execution_scope == "authority-workspace"
+            and self.execution_root_fingerprint is None
+        ):
+            raise ValueError("v2 authority action requires an execution root fingerprint")
+        if self.execution_scope == "team-worktree":
+            if self.version != CURRENT_ACTION_IDENTITY_VERSION:
+                raise ValueError("team worktree scope requires action identity v2")
+            if self.execution_root_fingerprint is None or self.worktree_id is None:
+                raise ValueError("team worktree scope requires root and worktree identity")
+            canonical_uuid4(self.worktree_id, "action worktree ID")
+        elif self.worktree_id is not None:
+            raise ValueError("authority action cannot carry a worktree ID")
 
     @property
     def canonical_json(self) -> str:
@@ -167,12 +207,15 @@ class ActionIdentity:
     @property
     def digest(self) -> str:
         payload = self.canonical_json.encode("utf-8")
-        return (
-            f"act-v{self.version}-{hashlib.sha256(_ACTION_IDENTITY_DOMAIN + payload).hexdigest()}"
+        domain = (
+            _ACTION_IDENTITY_V2_DOMAIN
+            if self.version == CURRENT_ACTION_IDENTITY_VERSION
+            else _ACTION_IDENTITY_DOMAIN
         )
+        return f"act-v{self.version}-{hashlib.sha256(domain + payload).hexdigest()}"
 
     def as_mapping(self) -> dict[str, object]:
-        return {
+        value = {
             "action": self.action.value,
             "arguments": self.arguments.as_mapping(),
             "arguments_version": self.arguments.version,
@@ -184,23 +227,41 @@ class ActionIdentity:
             "version": self.version,
             "workspace_fingerprint": self.workspace_fingerprint,
         }
+        if self.version == CURRENT_ACTION_IDENTITY_VERSION:
+            value.update(
+                {
+                    "execution_root_fingerprint": self.execution_root_fingerprint,
+                    "execution_scope": self.execution_scope,
+                    "worktree_id": self.worktree_id,
+                }
+            )
+        return value
 
     @classmethod
     def from_mapping(cls, value: object) -> ActionIdentity:
+        if not isinstance(value, dict):
+            raise ValueError("action identity must be a JSON object")
+        version = value.get("version")
+        legacy_fields = {
+            "action",
+            "arguments",
+            "arguments_version",
+            "lease",
+            "precondition",
+            "request_id",
+            "tool_name",
+            "tool_use_id",
+            "version",
+            "workspace_fingerprint",
+        }
+        v2_fields = legacy_fields | {
+            "execution_root_fingerprint",
+            "execution_scope",
+            "worktree_id",
+        }
         mapping = _closed_mapping(
             value,
-            {
-                "action",
-                "arguments",
-                "arguments_version",
-                "lease",
-                "precondition",
-                "request_id",
-                "tool_name",
-                "tool_use_id",
-                "version",
-                "workspace_fingerprint",
-            },
+            v2_fields if version == CURRENT_ACTION_IDENTITY_VERSION else legacy_fields,
             "action identity",
         )
         raw_arguments = mapping["arguments"]
@@ -230,6 +291,9 @@ class ActionIdentity:
             lease=ActionLease.from_mapping(mapping["lease"]),
             precondition=ActionPrecondition.from_mapping(mapping["precondition"]),
             version=mapping["version"],  # type: ignore[arg-type]
+            execution_scope=mapping.get("execution_scope", "authority-workspace"),  # type: ignore[arg-type]
+            execution_root_fingerprint=mapping.get("execution_root_fingerprint"),  # type: ignore[arg-type]
+            worktree_id=mapping.get("worktree_id"),  # type: ignore[arg-type]
         )
 
 

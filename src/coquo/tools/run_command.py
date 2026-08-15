@@ -202,12 +202,18 @@ class RunCommandTool:
         environment: Mapping[str, str] | None = None,
         *,
         command_sandbox: CommandSandbox | None = None,
+        read_only_paths: tuple[Path, ...] = (),
     ) -> None:
         self._workspace = workspace.resolve()
         if not self._workspace.is_dir():
             raise ValueError("workspace must be an existing directory")
         self._environment = dict(os.environ if environment is None else environment)
-        self._command_sandbox = command_sandbox or LinuxBubblewrapCommandSandbox()
+        if command_sandbox is not None:
+            self._command_sandbox = command_sandbox
+        elif read_only_paths:
+            self._command_sandbox = LinuxBubblewrapCommandSandbox(read_only_paths=read_only_paths)
+        else:
+            self._command_sandbox = LinuxBubblewrapCommandSandbox()
 
     def inspect_sandbox(self, *, verify_activation: bool = False) -> CommandSandboxInspection:
         """Inspect dependencies and optionally run one fixed activation probe."""

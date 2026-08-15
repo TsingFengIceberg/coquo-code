@@ -9,6 +9,9 @@ from uuid import UUID, uuid4
 
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.child_run_records import ChildRunStatus
+from coquo.child_runtime import role_allowed_by_parent
+from coquo.git_worktree import inspect_authority_repository
+from coquo.session_records import workspace_fingerprint
 from coquo.team_records import (
     TeamAssignmentPhase,
     TeamAssignmentState,
@@ -23,6 +26,8 @@ from coquo.team_records import (
 )
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
 from coquo.team_messaging import TeamMessageError, TeamMessagingService
+from coquo.worktree_service import WorktreeService, WorktreeServiceError
+from coquo.worktree_store import WorktreeStoreError
 
 
 class TeamAssignmentError(RuntimeError):
@@ -84,6 +89,7 @@ class TeamAssignmentService:
         self.teams = TeamStore(self.workspace, clock=clock)
         self.children = ChildRunStore(self.workspace, clock=clock)
         self.messaging = TeamMessagingService(self.workspace)
+        self.worktrees = WorktreeService(self.workspace, uuid_factory=uuid_factory, clock=clock)
 
     def create(
         self,
@@ -93,6 +99,7 @@ class TeamAssignmentService:
         *,
         work_item_id: str | None = None,
         schedule_run_id: str | None = None,
+        parent_permission_mode: str = "read-only",
     ) -> TeamAssignmentInfo:
         team = self._inspect_team(team_id)
         canonical_team = team.team_id
@@ -106,6 +113,10 @@ class TeamAssignmentService:
             raise TeamAssignmentError("Team is closed", team_id=canonical_team)
         if member.status is not TeamMemberStatus.ACTIVE:
             raise TeamAssignmentError("Team member is not active", team_id=canonical_team)
+        if not role_allowed_by_parent(member.role_contract, parent_permission_mode):
+            raise TeamAssignmentError(
+                "parent permission ceiling cannot admit Team member role", team_id=canonical_team
+            )
         if any(
             assignment.member_id == canonical_member
             and assignment.phase is not TeamAssignmentPhase.TERMINAL_OBSERVED
@@ -124,6 +135,22 @@ class TeamAssignmentService:
                 raise TeamAssignmentError("Team work item is not ready", team_id=canonical_team)
         assignment_id = self._new_id("assignment ID")
         child_run_id = self._new_id("Child Run ID")
+        worktree_id: str | None = None
+        base_commit: str | None = None
+        target_ref: str | None = None
+        if member.role_contract != "read-only-investigator-v1":
+            try:
+                authority = inspect_authority_repository(self.workspace)
+            except Exception as error:
+                raise TeamAssignmentError(
+                    f"writable Team assignment repository is unsupported: {error}",
+                    team_id=canonical_team,
+                    assignment_id=assignment_id,
+                    child_run_id=child_run_id,
+                ) from None
+            worktree_id = self._new_id("worktree ID")
+            base_commit = authority.head
+            target_ref = authority.target_ref
         try:
             created = self.teams.create_assignment(
                 canonical_team,
@@ -133,6 +160,9 @@ class TeamAssignmentService:
                 objective,
                 work_item_id=canonical_work,
                 schedule_run_id=schedule_run_id,
+                worktree_id=worktree_id,
+                base_commit=base_commit,
+                target_ref=target_ref,
             )
         except TeamStoreError as error:
             raise TeamAssignmentError(
@@ -141,6 +171,26 @@ class TeamAssignmentService:
                 assignment_id=assignment_id,
                 child_run_id=child_run_id,
             ) from None
+        execution_root_fingerprint: str | None = None
+        if worktree_id is not None:
+            try:
+                self.worktrees.provision(
+                    team_id=canonical_team,
+                    assignment_id=assignment_id,
+                    child_run_id=child_run_id,
+                    member_id=canonical_member,
+                    role_contract=member.role_contract,
+                    worktree_id=worktree_id,
+                )
+                binding = self.worktrees.inspect_binding(worktree_id)
+                execution_root_fingerprint = workspace_fingerprint(binding.worktree_root)
+            except (WorktreeServiceError, OSError) as error:
+                raise TeamAssignmentError(
+                    f"writable worktree provisioning requires recovery: {error}",
+                    team_id=canonical_team,
+                    assignment_id=assignment_id,
+                    child_run_id=child_run_id,
+                ) from None
         try:
             self.children.create_for_team(
                 objective,
@@ -150,6 +200,14 @@ class TeamAssignmentService:
                 member_id=canonical_member,
                 assignment_id=assignment_id,
                 assigned_at=created.created_at,
+                role_contract=member.role_contract,
+                execution_scope=(
+                    "team-worktree" if worktree_id is not None else "authority-workspace"
+                ),
+                execution_root_fingerprint=execution_root_fingerprint,
+                worktree_id=worktree_id,
+                base_commit=base_commit,
+                target_ref=target_ref,
             )
         except (ChildRunStoreError, OSError) as error:
             raise TeamAssignmentError(
@@ -233,6 +291,22 @@ class TeamAssignmentService:
                         member_id=assignment.member_id,
                         assignment_id=assignment.assignment_id,
                         assigned_at=assignment.created_at,
+                        role_contract=assignment.member_role_contract,
+                        execution_scope=(
+                            "team-worktree"
+                            if assignment.worktree_id is not None
+                            else "authority-workspace"
+                        ),
+                        execution_root_fingerprint=(
+                            workspace_fingerprint(
+                                self.worktrees.inspect_binding(assignment.worktree_id).worktree_root
+                            )
+                            if assignment.worktree_id is not None
+                            else None
+                        ),
+                        worktree_id=assignment.worktree_id,
+                        base_commit=assignment.base_commit,
+                        target_ref=assignment.target_ref,
                     )
                     self.teams.bind_assignment(
                         team.team_id, assignment.assignment_id, assignment.child_run_id
@@ -397,6 +471,25 @@ class TeamAssignmentService:
                 assignment_id=info.assignment.assignment_id,
                 child_run_id=info.assignment.child_run_id,
             )
+        if (
+            info.assignment.worktree_id is not None
+            and info.child.status is ChildRunStatus.COMPLETED
+        ):
+            try:
+                worktree = self.worktrees.store.inspect(info.assignment.worktree_id)
+                if worktree.state == "ready":
+                    self.worktrees.seal(info.assignment.worktree_id)
+                elif worktree.state not in {"sealed_empty", "sealed_changes"}:
+                    raise WorktreeServiceError(
+                        f"worktree is not sealable in state {worktree.state}"
+                    )
+            except (WorktreeServiceError, WorktreeStoreError) as error:
+                raise TeamAssignmentError(
+                    f"writable Child change sealing requires recovery: {error}",
+                    team_id=info.team.team_id,
+                    assignment_id=info.assignment.assignment_id,
+                    child_run_id=info.assignment.child_run_id,
+                ) from None
         from coquo.child_handoff import publish_child_handoff
 
         try:
