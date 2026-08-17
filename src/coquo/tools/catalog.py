@@ -145,6 +145,11 @@ from coquo.tools.child_control import (
     parse_child_control,
 )
 from coquo.tools.team_control import TEAM_CONTROL_TOOL_NAMES, team_control_tool_snapshots
+from coquo.tools.team_worktree_integrate import (
+    TEAM_WORKTREE_INTEGRATE_TOOL_NAME,
+    parse_team_worktree_integrate,
+    team_worktree_integrate_tool_snapshot,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -191,10 +196,11 @@ ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     download_file_tool_snapshot(),
     *tool_discovery_snapshots(),
     *skill_discovery_snapshots(),
+    team_worktree_integrate_tool_snapshot(),
 )
 ORDINARY_TOOL_NAMES = tuple(definition.name for definition in ORDINARY_TOOL_CATALOG)
 ORDINARY_PROMPT_TOOL_NAMES = (
-    *ORDINARY_TOOL_NAMES,
+    *(name for name in ORDINARY_TOOL_NAMES if name != TEAM_WORKTREE_INTEGRATE_TOOL_NAME),
     TASK_PROPOSE_START_TOOL_NAME,
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
@@ -202,17 +208,19 @@ ORDINARY_PROMPT_TOOL_NAMES = (
     *SKILL_AUTHORING_CONTROL_TOOL_NAMES,
     *(definition.name for definition in CHILD_CONTROL_TOOL_CATALOG),
     *(definition.name for definition in TEAM_CONTROL_TOOL_CATALOG),
+    TEAM_WORKTREE_INTEGRATE_TOOL_NAME,
 )
 TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
-    *ORDINARY_TOOL_CATALOG,
+    *ORDINARY_TOOL_CATALOG[:-1],
     *task_control_tool_snapshots(),
     *skill_authoring_tool_snapshots(),
     *CHILD_CONTROL_TOOL_CATALOG,
     *TEAM_CONTROL_TOOL_CATALOG,
+    ORDINARY_TOOL_CATALOG[-1],
 )
 
-BUILTIN_TOOL_SOURCE_GENERATION = 8
-TOOL_REGISTRY_GENERATION = 8
+BUILTIN_TOOL_SOURCE_GENERATION = 9
+TOOL_REGISTRY_GENERATION = 9
 _BUILTIN_SOURCE = ExtensionSource(
     ExtensionSourceKind.BUILTIN,
     "coquo",
@@ -278,6 +286,7 @@ _HOST_PERMISSION_ACTIONS: dict[str, tuple[PermissionAction, ...]] = {
     WEB_FETCH_TOOL_NAME: (PermissionAction.NETWORK_READ,),
     MOVE_DIRECTORY_TOOL_NAME: (PermissionAction.WORKSPACE_MOVE,),
     DOWNLOAD_FILE_TOOL_NAME: (PermissionAction.NETWORK_WRITE,),
+    TEAM_WORKTREE_INTEGRATE_TOOL_NAME: (PermissionAction.DANGEROUS,),
 }
 _TASK_STAGE_CONTROL_NAMES = frozenset(
     {
@@ -516,6 +525,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"source", "destination"}
     if name == DOWNLOAD_FILE_TOOL_NAME:
         return {"url", "path"}
+    if name == TEAM_WORKTREE_INTEGRATE_TOOL_NAME:
+        return {"team_id", "assignment_id", "expected_patch_sha256"}
     if name == TOOL_SEARCH_TOOL_NAME:
         return {"query", "max_results"}
     if name == TOOL_PROMOTE_TOOL_NAME:
@@ -550,6 +561,11 @@ def _expected_keys(name: str) -> set[str]:
 def _validate_known_input(name: str, tool_input: dict[str, object], expected: set[str]) -> None:
     if name in CHILD_CONTROL_TOOL_NAMES:
         parse_child_control(ToolUse("validation", name, ToolArguments.from_mapping(tool_input)))
+        return
+    if name == TEAM_WORKTREE_INTEGRATE_TOOL_NAME:
+        parse_team_worktree_integrate(
+            ToolUse("validation", name, ToolArguments.from_mapping(tool_input))
+        )
         return
     if name == SKILL_PROPOSE_CREATE_TOOL_NAME:
         from coquo.core.skill_authoring import SkillCreationProposal

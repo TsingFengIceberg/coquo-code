@@ -14,6 +14,13 @@ import unicodedata
 from coquo.core.contracts import ToolArguments, ToolUse
 from coquo.core.effective_context import CanonicalToolDefinition
 
+TEAM_MEMBER_ROLE_CONTRACT = "read-only-investigator-v1"
+TEAM_MEMBER_ROLE_CONTRACTS = (
+    TEAM_MEMBER_ROLE_CONTRACT,
+    "isolated-workspace-writer-v1",
+    "isolated-coder-v1",
+)
+
 # Keep the parser import-light: team_records itself depends on Session/provider
 # replay types, while the active catalog is imported during that replay assembly.
 MAX_TEAM_SCHEDULE_ASSIGNMENTS = 32
@@ -69,6 +76,7 @@ class TeamControlRequest:
     work_item_id: str | None = None
     schedule_run_id: str | None = None
     name_value: str | None = None
+    role_contract: str = TEAM_MEMBER_ROLE_CONTRACT
     body: str | None = None
     title: str | None = None
     objective: str | None = None
@@ -97,8 +105,12 @@ def team_control_tool_snapshots() -> tuple[CanonicalToolDefinition, ...]:
         ),
         _definition(
             TEAM_ADD_MEMBER_TOOL_NAME,
-            "Add one fixed read-only investigator member to an owned Team.",
-            {"team_id": uuid, "name": {"type": "string", "minLength": 1, "maxLength": 80}},
+            "Add one fixed-role member to an owned Team; writable roles receive an isolated linked worktree.",
+            {
+                "team_id": uuid,
+                "name": {"type": "string", "minLength": 1, "maxLength": 80},
+                "role": {"type": "string", "enum": list(TEAM_MEMBER_ROLE_CONTRACTS)},
+            },
             ("team_id", "name"),
         ),
         _definition(
@@ -218,6 +230,8 @@ def parse_team_control(request: ToolUse) -> TeamControlRequest:
         TEAM_WORK_REVIEW_TOOL_NAME: {"team_id", "work_item_id", "decision", "note"},
         TEAM_CLOSE_TOOL_NAME: {"team_id"},
     }[request.name]
+    if request.name == TEAM_ADD_MEMBER_TOOL_NAME and "role" in values:
+        expected = expected | {"role"}
     if request.name == TEAM_WORK_REVIEW_TOOL_NAME:
         decision = values.get("decision")
         if decision == "complete":
@@ -231,8 +245,14 @@ def parse_team_control(request: ToolUse) -> TeamControlRequest:
         return TeamControlRequest(request.name, name_value=_team_name(values["name"]))
     team_id = _id(values["team_id"], "Team ID")
     if request.name == TEAM_ADD_MEMBER_TOOL_NAME:
+        role = values.get("role", TEAM_MEMBER_ROLE_CONTRACT)
+        if not isinstance(role, str) or role not in TEAM_MEMBER_ROLE_CONTRACTS:
+            raise ValueError("team_add_member role is invalid")
         return TeamControlRequest(
-            request.name, team_id=team_id, name_value=_team_name(values["name"])
+            request.name,
+            team_id=team_id,
+            name_value=_team_name(values["name"]),
+            role_contract=role,
         )
     if request.name == TEAM_STATUS_TOOL_NAME or request.name == TEAM_CLOSE_TOOL_NAME:
         return TeamControlRequest(request.name, team_id=team_id)

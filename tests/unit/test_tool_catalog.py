@@ -83,13 +83,15 @@ def test_catalog_exposes_all_tools_in_canonical_order_with_shared_closed_schema(
         "team_schedule_wait",
         "team_work_review",
         "team_close",
+        "team_worktree_integrate",
     ]
-    assert len(TOOL_CATALOG) == 61
-    assert len(ORDINARY_PROMPT_TOOL_NAMES) == 57
-    assert TOOL_REGISTRY_GENERATION == BUILTIN_TOOL_SOURCE_GENERATION == 8
-    assert TOOL_REGISTRY_SNAPSHOT.generation == 8
+    assert len(TOOL_CATALOG) == 62
+    assert len(ORDINARY_PROMPT_TOOL_NAMES) == 58
+    assert TOOL_REGISTRY_GENERATION == BUILTIN_TOOL_SOURCE_GENERATION == 9
+    assert TOOL_REGISTRY_SNAPSHOT.generation == 9
+    assert ORDINARY_PROMPT_TOOL_NAMES[-1] == "team_worktree_integrate"
     assert tuple(item.name for item in TEAM_CONTROL_TOOL_CATALOG) == tuple(
-        ORDINARY_PROMPT_TOOL_NAMES[-11:]
+        ORDINARY_PROMPT_TOOL_NAMES[-12:-1]
     )
     assert all(
         contract.execution_kind.value == "team-control" and contract.permission_actions == ()

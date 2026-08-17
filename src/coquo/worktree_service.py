@@ -17,6 +17,7 @@ from coquo.git_worktree import (
     authority_status,
     inspect_authority_repository,
     inspect_linked_worktree,
+    remove_linked_worktree,
     untracked_diff,
     worktree_diff,
     worktree_untracked_paths,
@@ -47,6 +48,17 @@ class SealedChange:
     changed_paths: tuple[str, ...]
     manifest_sha256: str
     artifact: Path
+
+
+@dataclass(frozen=True)
+class WorktreeDiff:
+    """Bounded, Host-observed change evidence for one linked worktree."""
+
+    worktree_id: str
+    patch: bytes
+    patch_sha256: str
+    changed_paths: tuple[str, ...]
+    truncated: bool = False
 
 
 class WorktreeService:
@@ -201,6 +213,7 @@ class WorktreeService:
                 patch_sha = hashlib.sha256(patch).hexdigest()
                 manifest_sha = hashlib.sha256(manifest).hexdigest()
                 artifact = self.store.write_patch_artifact(worktree_id, patch)
+                self.store.write_manifest_artifact(worktree_id, manifest)
                 self.store.append(
                     worktree_id,
                     WorktreeSealed(
@@ -252,6 +265,126 @@ class WorktreeService:
                     ),
                 )
                 raise WorktreeServiceError(str(error)) from None
+
+    def diff(self, worktree_id: str, *, max_bytes: int = 64 * 1024) -> WorktreeDiff:
+        """Return a bounded patch observation without mutating the worktree ledger."""
+        if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_WORKTREE_PATCH_BYTES:
+            raise WorktreeServiceError("diff byte bound is invalid")
+        info = self.store.inspect(worktree_id)
+        if info.state in {WorktreeState.RETIRED.value}:
+            return WorktreeDiff(worktree_id, b"", hashlib.sha256(b"").hexdigest(), ())
+        binding = self.inspect_binding(worktree_id)
+        tracked = worktree_diff(binding)
+        untracked = worktree_untracked_paths(binding)
+        chunks = [tracked, *(untracked_diff(binding, path) for path in untracked)]
+        patch = b"".join(chunks)
+        paths = tuple(untracked) + (("<tracked>",) if tracked else ())
+        truncated = len(patch) > max_bytes
+        bounded = patch[:max_bytes]
+        return WorktreeDiff(
+            worktree_id,
+            bounded,
+            hashlib.sha256(patch).hexdigest(),
+            paths,
+            truncated,
+        )
+
+    def recover(self, worktree_id: str) -> WorktreeInfo:
+        """Observe and return current state; recovery never retries or cleans up."""
+        info = self.store.inspect(worktree_id)
+        if info.state in {
+            WorktreeState.READY.value,
+            WorktreeState.SEALED_EMPTY.value,
+            WorktreeState.SEALED_CHANGES.value,
+            WorktreeState.APPLIED.value,
+            WorktreeState.RETIRED.value,
+        }:
+            return info
+        try:
+            self.inspect_binding(worktree_id)
+        except WorktreeServiceError:
+            return info
+        return info
+
+    def retire(self, worktree_id: str) -> WorktreeInfo:
+        """Explicitly remove an eligible linked worktree while retaining evidence."""
+        info = self.store.inspect(worktree_id)
+        eligible = {
+            WorktreeState.SEALED_EMPTY.value,
+            WorktreeState.APPLIED.value,
+            WorktreeState.PROVISION_FAILED.value,
+            WorktreeState.SEAL_FAILED.value,
+            WorktreeState.INTEGRATION_FAILED.value,
+        }
+        if info.state not in eligible:
+            raise WorktreeServiceError(f"worktree cannot be retired from state {info.state}")
+        operation_id = self._new_id()
+        with self.store.acquire_lease(worktree_id):
+            latest = self.store.inspect(worktree_id)
+            self.store.append(
+                worktree_id,
+                WorktreeOperationStarted(
+                    latest.record_count,
+                    operation_id,
+                    worktree_id,
+                    WorktreeOperation.RETIRE,
+                    self._clock(),
+                ),
+            )
+            try:
+                binding = self._binding_for_info(latest)
+                if binding.worktree_root.exists():
+                    remove_linked_worktree(binding)
+                self.store.append(
+                    worktree_id,
+                    WorktreeOperationFinished(
+                        latest.record_count + 1,
+                        operation_id,
+                        worktree_id,
+                        WorktreeOperation.RETIRE,
+                        WorktreeOutcome.SUCCEEDED,
+                        "retired",
+                        "linked worktree removed; ledger and artifacts retained",
+                        self._clock(),
+                    ),
+                )
+            except (GitWorktreeError, WorktreeStoreError, WorktreeServiceError) as error:
+                outcome = (
+                    WorktreeOutcome.OUTCOME_UNKNOWN
+                    if not self._binding_missing(latest)
+                    else WorktreeOutcome.FAILED
+                )
+                self.store.append(
+                    worktree_id,
+                    WorktreeOperationFinished(
+                        latest.record_count + 1,
+                        operation_id,
+                        worktree_id,
+                        WorktreeOperation.RETIRE,
+                        outcome,
+                        "retire_unknown"
+                        if outcome is WorktreeOutcome.OUTCOME_UNKNOWN
+                        else "retire_failed",
+                        str(error)[:4096],
+                        self._clock(),
+                    ),
+                )
+                raise WorktreeServiceError(str(error)) from None
+        return self.store.inspect(worktree_id)
+
+    def _binding_for_info(self, info: WorktreeInfo) -> LinkedWorktreeBinding:
+        authority = self._authority()
+        return LinkedWorktreeBinding(
+            authority,
+            authority.root / info.header.relative_path,
+            info.worktree_id,
+            info.header.branch,
+            info.header.base_commit,
+            info.header.relative_path,
+        )
+
+    def _binding_missing(self, info: WorktreeInfo) -> bool:
+        return not (self.workspace / info.header.relative_path).exists()
 
     def _authority(self) -> AuthorityRepository:
         try:

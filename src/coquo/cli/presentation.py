@@ -164,6 +164,7 @@ TEAM_HELP = (
     "  /team list [1-100] [status=open|closed]\n"
     "  /team show <team-id> | /team close <team-id>\n"
     "  /team member add|list|show|disable|enable|leave ...\n"
+    "  /team worktree status|diff|recover|retire <worktree-id> ...\n"
     "  /team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...\n"
     "  /team schedule run|start|status|wait|cancel|recover ...\n"
     "  /team message send|list|show|read|cancel ...\n"
@@ -1626,6 +1627,56 @@ def render_team_info(info) -> str:
     return "\n".join(lines)
 
 
+def render_team_worktree(info) -> str:
+    """Render bounded worktree identity and lifecycle evidence."""
+    lines = [
+        f"Worktree ID: {info.worktree_id}",
+        f"State: {info.state}",
+        f"Team ID: {info.header.team_id}",
+        f"Assignment ID: {info.header.assignment_id}",
+        f"Member ID: {info.header.member_id}",
+        f"Role: {info.header.role_contract}",
+        f"Target: {info.header.target_ref}",
+        f"Base commit: {info.header.base_commit}",
+        f"Branch: {info.header.branch}",
+        f"Relative path: {info.header.relative_path}",
+        f"Records: {info.record_count}",
+    ]
+    if info.sealed is not None:
+        lines.extend(
+            [
+                f"Sealed patch: {info.sealed.patch_sha256} ({info.sealed.patch_bytes} bytes)",
+                f"Sealed paths: {info.sealed.changed_paths}",
+                f"Sealed manifest: {info.sealed.manifest_sha256}",
+            ]
+        )
+    if info.integration is not None:
+        lines.extend(
+            [
+                f"Integration target: {info.integration.target_ref}@{info.integration.target_head}",
+                f"Integration result: {info.integration.result_code}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def render_team_worktree_diff(diff) -> str:
+    """Render a bounded diff observation without terminal control injection."""
+    try:
+        patch = diff.patch.decode("utf-8", errors="replace")
+    except AttributeError:
+        patch = ""
+    lines = [
+        f"Worktree ID: {diff.worktree_id}",
+        f"Patch SHA-256: {diff.patch_sha256}",
+        f"Changed paths: {','.join(diff.changed_paths) or '(none)'}",
+        f"Truncated: {'yes' if diff.truncated else 'no'}",
+        "Patch:",
+        _safe_inline(patch),
+    ]
+    return "\n".join(lines)
+
+
 def render_team_message_summary(message) -> str:
     direction = "member -> owner" if message.sender_member_id is not None else "owner -> member"
     endpoint = message.sender_member_id or message.recipient_member_id or "unknown"
@@ -1993,6 +2044,7 @@ _TOOL_HARD_BOUND_SUMMARIES = {
     "team_schedule_wait": "Ordinary parent Prompt only; waits for one owner-bound schedule for at most 30 seconds per request and 60 per Turn.",
     "team_work_review": "Ordinary parent Prompt only; explicitly completes, releases, or cancels reviewed work with matching evidence and approval.",
     "team_close": "Ordinary parent Prompt only; closes a Team only after schedules, assignments, work, replies, and members satisfy durable close gates.",
+    "team_worktree_integrate": "Ordinary parent Prompt only; one exact approval-bound Action applies one matching sealed patch to a clean descendant authority target, leaves it uncommitted, and never merges, retries, or cleans automatically.",
 }
 
 

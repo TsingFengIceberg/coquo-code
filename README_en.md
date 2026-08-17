@@ -17,7 +17,7 @@ Coquo is a learning-first coding-agent CLI prototype for local, single-user use.
 
 The name comes from Latin *coquō*, “I cook”: requirements, context, tools, and model decisions are prepared into verified software changes.
 
-> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and Registry generation 8 with 61 canonical tools (57 exposed to ordinary parent Prompts) are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP execution, declarative Skill loading, and bounded Team coordination. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
+> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and Registry generation 9 with 62 canonical tools (58 exposed to ordinary parent Prompts) are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP execution, declarative Skill loading, and bounded Team coordination. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
 
 ## Contents
 
@@ -252,7 +252,9 @@ Tasks manage recoverable foreground multi-stage work. They can begin through nat
 ```bash
 uv run coquo team create "Code review group"
 uv run coquo team list --status open
-uv run coquo team member add <team-uuid> "Read-only investigator"
+uv run coquo team member add <team-uuid> "Read-only investigator" --role read-only-investigator-v1
+uv run coquo team member add <team-uuid> "Isolated writer" --role isolated-workspace-writer-v1
+uv run coquo team member add <team-uuid> "Isolated coder" --role isolated-coder-v1
 uv run coquo team member disable <team-uuid> <member-uuid> "Temporarily paused"
 uv run coquo team member enable <team-uuid> <member-uuid>
 uv run coquo team member leave <team-uuid> <member-uuid> "Finished"
@@ -274,9 +276,13 @@ uv run coquo team assignment recover <team-uuid>
 uv run coquo team schedule run <team-uuid> --max-assignments 4 --max-parallel 2
 uv run coquo team schedule status <team-uuid>
 uv run coquo team schedule recover <team-uuid>
+uv run coquo team worktree status <worktree-uuid>
+uv run coquo team worktree diff <worktree-uuid>
+uv run coquo team worktree recover <worktree-uuid>
+uv run coquo team worktree retire <worktree-uuid> --confirm
 ```
 
-Teams and members are workspace-bound durable Host identities with append-only audit records. B1-B4 provide identity, assignment, mailbox, reply evidence, and a dependency work board. B5 adds one OS lease per Team, deterministic selection, and process-local schedule waves using at most four existing Child workers, with cancellation and Provider-free recovery; Child terminal state enters review and is never auto-completed or retried. B7/B8 add eleven controls visible only to an ordinary parent Session: the parent model can create a Team, manage fixed read-only members, create messages and work, start or wait for one bounded wave, inspect replies, and explicitly review work. Each control remains subject to separate approval, owner, budget, and content-free audit rules. Team data and reply bodies do not enter ordinary parent history; members gain no write, command, network, MCP, Skill, Task, or recursive delegation capability. Writable B6 members/worktrees, daemons, and long-lived workers remain out of scope.
+Teams and members are workspace-bound durable Host identities with append-only audit records. B1-B5 and B7/B8 provide identity, assignment, mailbox, reply evidence, a dependency work board, bounded schedule, and explicit review. B6 adds three fixed roles: read-only investigator, isolated workspace writer, and isolated coder. Writable members run only in a Host-owned, identity-bound linked worktree and never write the authority workspace directly. At terminal Child state, the Host seals a bounded manifest and patch as untrusted evidence; the parent can request exactly one `team_worktree_integrate` Action, and the Host rechecks PermissionGate approval, ownership, source/target drift, ancestry, cleanliness, digests, and `git apply --check` before applying that exact patch to the authority workspace. Apply leaves the target uncommitted and never auto-commits, merges, retries, or retires; integration is not work completion. Team close does not remove worktrees automatically; `status`, `diff`, `recover`, and explicit `retire --confirm` provide observation and cleanup. Team data and reply bodies do not enter ordinary parent history; Children still receive no Team, Task, delegation, network, MCP, Skill, or integration controls, and all handoffs/replies are untrusted evidence.
 
 ### Manage Child Runs
 
@@ -301,13 +307,14 @@ uv run coquo child deliver <child-run-uuid>
 | --- | --- |
 | `/help [session\|task\|child\|team\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | Show Host controls by category; `task` shows durable Task entry points, `child` shows Child Run metadata entry points, and `team` shows Team/member/assignment entry points |
 | `/team create <name>`, `/team list`, `/team show <id>`, `/team close <id>` | Host-only durable Team identity management |
-| `/team member add|list|show|disable|enable|leave ...` | Host-only fixed read-only member lifecycle management |
+| `/team member add|list|show|disable|enable|leave ...` | Host-only fixed member lifecycle management; `add` accepts `read-only-investigator-v1`, `isolated-workspace-writer-v1`, or `isolated-coder-v1` |
 | `/team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...` | Host-only Team assignment binding, execution, observation, and recovery; every assignment uses a new Child Run/Session |
 | `/team message send|list|show|read|cancel ...` | Host-only durable owner/member mailbox; reading never deletes and replies require explicit read |
 | `/team work create|list|show|assign|complete|release|cancel ...` | Host-only dependency work board with manual assignment, review, completion/release, and close gates |
+| `/team worktree status|diff|recover <id>`, `/team worktree retire <id> --confirm` | Host-only observation of an isolated linked worktree, bounded diff, recovery state, or explicit retirement when eligible |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
-| `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 61 canonical tools, or one tool's argument schema and major hard boundaries |
+| `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 62 canonical tools, or one tool's argument schema and major hard boundaries |
 | `/tools [count]` | Show durable tool-ledger summaries for recent turns, default 5 and maximum 20 |
 | `/tools details [count]` | Expand per-request tool names, outcomes, and safe result codes with a 32 KiB total output bound |
 | `/tool-details [compact\|full]` | Inspect or switch process-local live tool detail; compact is default and full shows bounded structured command argv |
@@ -580,6 +587,6 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 ## Current scope and next step
 
-Coquo currently provides Registry generation 8 with 61 canonical tools and 57 tools exposed to ordinary parent Prompts, covering workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, declarative Skill loading, and bounded Team coordination, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
+Coquo currently provides Registry generation 9 with 62 canonical tools and 58 tools exposed to ordinary parent Prompts, covering workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, declarative Skill loading, and bounded Team coordination, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can use four model tools to delegate to at most four independent Children and eleven Team controls to manage fixed read-only members, a dependency board, bounded schedule waves, and reply review; Children remain read-only, one-Turn, depth-one, and process-local, and all handoffs/replies are untrusted evidence. Team schedules do not retry, auto-complete, or run as daemons; writable B6 members/worktrees, long-lived workers, Task bridging, executable Skills, a marketplace, and browser automation remain deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can use four model tools to delegate to at most four independent Children and Team controls to manage fixed-role members, a dependency board, bounded schedule waves, reply review, and explicit worktree integration. Children remain one-Turn, depth-one, and process-local; writers may modify only their isolated linked worktree, coders remain subject to the existing network-disabled command sandbox, and all handoffs/replies/integration evidence are untrusted. Team schedules do not retry, auto-complete, or run as daemons; long-lived workers, Task bridging, executable Skills, a marketplace, and browser automation remain deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

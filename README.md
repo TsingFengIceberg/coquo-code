@@ -17,7 +17,7 @@ Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI
 
 名称取自拉丁文 *coquō*（“我烹饪”），表达将需求、上下文、工具与模型决策组织成经过验证的软件变更。
 
-> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval，以及Registry generation 8中的61个规范工具（普通父Prompt曝光57个），覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行、声明式Skill加载和有界Team协调。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval，以及Registry generation 9中的62个规范工具（普通父Prompt曝光58个），覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行、声明式Skill加载和有界Team协调。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ## 目录
 
@@ -252,7 +252,9 @@ Task用于管理可恢复的前台多阶段工作，既可由自然语言交互�
 ```bash
 uv run coquo team create "代码检查组"
 uv run coquo team list --status open
-uv run coquo team member add <team-uuid> "只读调查员"
+uv run coquo team member add <team-uuid> "只读调查员" --role read-only-investigator-v1
+uv run coquo team member add <team-uuid> "隔离写入者" --role isolated-workspace-writer-v1
+uv run coquo team member add <team-uuid> "隔离编码员" --role isolated-coder-v1
 uv run coquo team member disable <team-uuid> <member-uuid> "暂时停用"
 uv run coquo team member enable <team-uuid> <member-uuid>
 uv run coquo team member leave <team-uuid> <member-uuid> "完成"
@@ -274,9 +276,13 @@ uv run coquo team assignment recover <team-uuid>
 uv run coquo team schedule run <team-uuid> --max-assignments 4 --max-parallel 2
 uv run coquo team schedule status <team-uuid>
 uv run coquo team schedule recover <team-uuid>
+uv run coquo team worktree status <worktree-uuid>
+uv run coquo team worktree diff <worktree-uuid>
+uv run coquo team worktree recover <worktree-uuid>
+uv run coquo team worktree retire <worktree-uuid> --confirm
 ```
 
-Team与成员是workspace-bound的持久Host身份和append-only审计记录；B1-B4提供身份、assignment、mailbox、reply证据和依赖work board。B5增加每Team单一OS lease、确定性选择和最多4个既有Child worker的process-local schedule wave，支持取消和无Provider恢复；Child终态只进入review，不自动complete或retry。B7/B8增加11个仅普通父Session可见的Team controls，父模型可以创建Team、管理固定只读成员、创建消息和work、启动/等待一波调度、读取reply并明确review；每个控制仍受独立审批、owner、预算和content-free审计约束。Team数据和reply正文不进入普通父历史；成员不获得写、命令、网络、MCP、Skill、Task或递归委派能力，B6 worktree/可写成员、daemon和长期worker仍未实现。
+Team与成员是workspace-bound的持久Host身份和append-only审计记录；B1-B5与B7/B8提供身份、assignment、mailbox、reply证据、依赖work board、bounded schedule和显式review。B6增加三种固定角色：只读调查员、隔离workspace写入者和隔离编码员；可写成员只能在Host拥有并绑定的linked worktree中运行，不能直接写authority workspace。Host会在Child终态封存有界manifest与patch，父Session通过唯一的`team_worktree_integrate` Action并经过PermissionGate、审批预览、目标/来源漂移检查和`git apply --check`后，才可把精确patch应用到authority workspace；apply保持未提交状态，不自动commit、merge、retry或retire，integration也不等于work complete。Team close不会自动删除worktree，`status`、`diff`、`recover`和显式`retire --confirm`用于观察与清理。Team数据和reply正文不进入普通父历史；Child仍不获得Team、Task、委派、网络、MCP、Skill或integration能力，所有handoff/reply都是非可信证据。
 
 ### 管理 Child Run
 
@@ -301,13 +307,14 @@ uv run coquo child deliver <child-run-uuid>
 | --- | --- |
 | `/help [session\|task\|child\|team\|tools\|git\|context\|provider\|search\|mcp\|skills\|hooks\|policy\|input]` | 按类别查看Host控制命令；`task`显示持久任务入口，`child`显示Child Run元数据入口，`team`显示Team/member/assignment入口 |
 | `/team create <name>`、`/team list`、`/team show <id>`、`/team close <id>` | Host-only管理持久Team身份 |
-| `/team member add|list|show|disable|enable|leave ...` | Host-only管理固定只读角色成员生命周期 |
+| `/team member add|list|show|disable|enable|leave ...` | Host-only管理固定成员生命周期；`add`可选择`read-only-investigator-v1`、`isolated-workspace-writer-v1`或`isolated-coder-v1` |
 | `/team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...` | Host-only绑定、执行、观察和恢复Team assignment；每个assignment使用新的Child Run/Session |
 | `/team message send|list|show|read|cancel ...` | Host-only持久owner/member mailbox；读取不删除消息，回复必须显式read |
 | `/team work create|list|show|assign|complete|release|cancel ...` | Host-only依赖work board；人工assign、review、complete/release和关闭门禁 |
+| `/team worktree status|diff|recover <id>`、`/team worktree retire <id> --confirm` | Host-only观察隔离linked worktree、bounded diff、恢复状态，或显式清理已满足条件的worktree |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
-| `/tools catalog [tool-name]` | 显示61个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
+| `/tools catalog [tool-name]` | 显示62个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
 | `/tools [count]` | 显示当前 Session 最近turn的持久工具账本汇总，默认5个、最多20个 |
 | `/tools details [count]` | 展开逐请求工具名、结果状态和安全result code，总输出最多32 KiB |
 | `/tool-details [compact\|full]` | 查看或切换当前进程的live工具详情；默认compact，full会显示有界结构化command argv |
@@ -580,6 +587,6 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-Coquo目前提供Registry generation 8中的61个规范工具，普通父Prompt曝光57个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
+Coquo目前提供Registry generation 9中的62个规范工具，普通父Prompt曝光58个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过11个Team controls管理固定只读成员、work board、bounded schedule和reply review；Child仍固定为只读、单Turn、depth-one和process-local，所有handoff/reply都是非可信证据。Team schedule不重试、不自动complete、不运行成daemon；B6可写成员/worktree、长期worker、Task桥接、可执行Skill、市场及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Child仍固定为单Turn、depth-one和process-local，写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。Team schedule不重试、不自动complete、不运行成daemon；长期worker、Task桥接、可执行Skill、市场及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

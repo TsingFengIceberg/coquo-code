@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed for B6.1 and B6.2. This decision is not an implementation authority until
-the complete writable-Team slices and recovery evidence are accepted.
+Accepted for B6.1-B6.7 after deterministic writable-Team isolation, lifecycle,
+integration, recovery, compatibility, and release-gate evidence.
 
 ## Decision
 
@@ -25,7 +25,17 @@ Child changes are sealed into one bounded immutable local patch artifact and a d
 only manifest. Sealing includes tracked and untracked regular files, rejects unsafe
 paths, metadata, symlinks, submodules, HEAD drift, and bound overflow, and records an
 explicit empty result. The authority workspace remains unchanged until a later,
-explicit integration Action is approved and executed.
+explicit parent-only `team_worktree_integrate` Action is approved and executed.
+
+Integration revalidates the exact assignment, target ref and descendant HEAD, sealed
+base, source worktree digest, manifest and patch artifacts, and clean target state
+immediately before a fixed `git apply --check` followed by one uncommitted `git apply`.
+It records Action and worktree evidence in the authority Session and worktree ledger.
+A conflict, source/target drift, dirty target, or process-loss outcome fails closed or
+remains `outcome_unknown`; it never retries, resets, merges, commits, or asks a model
+to resolve the conflict. Applying a patch is not Team work completion: the parent must
+separately review the matching handoff and integration evidence. Empty sealed work may
+be completed only with explicit no-change evidence.
 
 The ordinary `GitRepository` observation boundary remains strict and continues to
 reject arbitrary linked worktree roots. Only a Host-attested B6 binding may inspect its
@@ -34,17 +44,24 @@ admin directory, generated branch, base commit, and generated relative path.
 
 ## Compatibility
 
-This is Host-only lifecycle state. It changes no ordinary Session, provider, prompt,
-ToolSet, or public CLI contract. Existing authority repositories and read-only Child
-runs retain their behavior. Ledger and patch artifacts are local runtime data and are
-not copied into Session transcripts.
+The lifecycle ledger and patch artifacts remain Host-only local runtime state, but
+B6.6 adds bounded Host commands for worktree status, diff, recovery observation, and
+explicit retirement, plus fixed writable Team roles. B6.5-B6.6 expose exactly one
+integration Action to ordinary parent Sessions; restricted Child, Task, compact, and
+other Team ToolSets do not receive it. Registry generation 9, catalog 62, system
+prompt/provider contract 48, and Effective Context v27/v28 migrate atomically while
+legacy replay remains supported. Artifacts are never copied into model history or
+treated as a security sandbox boundary.
 
 ## Consequences
 
 Parallel writable Children can work without sharing authority writes, while review and
 integration retain a complete bounded artifact and crash-recovery evidence. Retained
 worktrees and artifacts require explicit Host inspection and retirement; Team close,
-schedule completion, process exit, and elapsed time never imply cleanup.
+schedule completion, process exit, and elapsed time never imply cleanup. Integration
+leaves the authority workspace dirty and uncommitted by design, so a later integration
+must wait for an explicit user commit or restoration to return the target to a clean
+descendant state.
 
 ## Rejected alternatives
 

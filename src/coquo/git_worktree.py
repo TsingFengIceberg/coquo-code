@@ -169,11 +169,74 @@ def add_linked_worktree(
     )
 
 
+def remove_linked_worktree(binding: LinkedWorktreeBinding) -> GitWorktreeResult:
+    """Remove one generated linked worktree after an explicit Host decision."""
+    checked = inspect_linked_worktree(binding)
+    return _run_git(
+        checked.authority.root,
+        ("worktree", "remove", "--force", str(checked.worktree_root)),
+        accepted=(0,),
+    )
+
+
 def authority_status(authority: AuthorityRepository) -> bytes:
     return _run_git(
         authority.root,
-        ("status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all"),
+        (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--ignore-submodules=all",
+            "--",
+            ".",
+            ":(exclude).coquo",
+        ),
     ).stdout
+
+
+def authority_ref_head(authority: AuthorityRepository, target_ref: str) -> str:
+    """Return the exact commit currently pointed to by one attached branch."""
+    if _REF.fullmatch(target_ref) is None:
+        raise GitWorktreeError("target ref is invalid")
+    result = _run_git(
+        authority.root,
+        ("rev-parse", "--verify", f"{target_ref}^{{commit}}"),
+    )
+    value = _line(result.stdout)
+    if _SHA.fullmatch(value) is None:
+        raise GitWorktreeError("target ref does not resolve to a supported commit")
+    return value
+
+
+def commit_is_ancestor(authority: AuthorityRepository, ancestor: str, descendant: str) -> bool:
+    """Check ancestry with Git's fixed exit-code contract."""
+    if _SHA.fullmatch(ancestor) is None or _SHA.fullmatch(descendant) is None:
+        raise GitWorktreeError("commit identity is invalid")
+    result = _run_git(
+        authority.root,
+        ("merge-base", "--is-ancestor", ancestor, descendant),
+        accepted=(0, 1),
+    )
+    return result.returncode == 0
+
+
+def check_patch(authority: AuthorityRepository, patch: bytes) -> None:
+    """Run a bounded, non-mutating exact patch check against the authority root."""
+    _run_git_with_input(
+        authority.root,
+        ("apply", "--check", "--binary", "--whitespace=nowarn", "-"),
+        patch,
+    )
+
+
+def apply_patch(authority: AuthorityRepository, patch: bytes) -> None:
+    """Apply one already verified patch, without staging or committing it."""
+    _run_git_with_input(
+        authority.root,
+        ("apply", "--binary", "--whitespace=nowarn", "-"),
+        patch,
+    )
 
 
 def worktree_status(binding: LinkedWorktreeBinding) -> bytes:
@@ -264,6 +327,69 @@ def _run_git(
             cwd=root,
             env=env,
             stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GIT_WORKTREE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise GitWorktreeError("Git worktree operation timed out") from None
+    stdout = process.stdout[:GIT_WORKTREE_OUTPUT_BYTES]
+    stderr = process.stderr[:GIT_WORKTREE_OUTPUT_BYTES]
+    if (
+        len(process.stdout) > GIT_WORKTREE_OUTPUT_BYTES
+        or len(process.stderr) > GIT_WORKTREE_OUTPUT_BYTES
+    ):
+        raise GitWorktreeError("Git worktree output exceeded its bound")
+    if process.returncode not in accepted:
+        raise GitWorktreeError(
+            f"Git worktree operation failed: {stderr.decode('utf-8', 'replace')[:1024]}"
+        )
+    return GitWorktreeResult(process.returncode, stdout, stderr)
+
+
+def _run_git_with_input(
+    root: Path,
+    arguments: tuple[str, ...],
+    payload: bytes,
+    *,
+    environment: Mapping[str, str] | None = None,
+    accepted: tuple[int, ...] = (0,),
+) -> GitWorktreeResult:
+    if not isinstance(payload, bytes) or len(payload) > 4 * 1024 * 1024:
+        raise GitWorktreeError("Git input exceeded its bound")
+    executable = shutil.which("git", path=(environment or os.environ).get("PATH"))
+    if not executable:
+        raise GitWorktreeError("git executable is unavailable")
+    env = {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+        "PATH": (environment or os.environ).get("PATH", os.defpath),
+        "PWD": str(root),
+    }
+    command = (
+        executable,
+        "--no-pager",
+        "-c",
+        "color.ui=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        *arguments,
+    )
+    try:
+        process = subprocess.run(
+            command,
+            cwd=root,
+            env=env,
+            input=payload,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=GIT_WORKTREE_TIMEOUT_SECONDS,

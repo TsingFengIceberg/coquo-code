@@ -32,6 +32,7 @@ class ApprovalPreviewKind(StrEnum):
     FILE_DOWNLOAD = "file-download"
     MCP_TOOL = "mcp-tool"
     HOOK_HANDLER = "hook-handler"
+    TEAM_WORKTREE_INTEGRATION = "team-worktree-integration"
 
 
 @dataclass(frozen=True)

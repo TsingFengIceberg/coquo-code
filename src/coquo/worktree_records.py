@@ -175,8 +175,30 @@ class WorktreeSealed:
     schema_version: int = WORKTREE_SCHEMA_VERSION
 
 
+@dataclass(frozen=True)
+class WorktreeIntegrationEvidence:
+    """Exact, bounded evidence that one sealed patch was applied once."""
+
+    sequence: int
+    operation_id: str
+    worktree_id: str
+    action_digest: str
+    patch_sha256: str
+    manifest_sha256: str
+    target_ref: str
+    target_head: str
+    result_code: str
+    applied_at: str
+    record_type: str = "worktree_integration_evidence"
+    schema_version: int = WORKTREE_SCHEMA_VERSION
+
+
 WorktreeRecord: TypeAlias = (
-    WorktreeHeader | WorktreeOperationStarted | WorktreeOperationFinished | WorktreeSealed
+    WorktreeHeader
+    | WorktreeOperationStarted
+    | WorktreeOperationFinished
+    | WorktreeSealed
+    | WorktreeIntegrationEvidence
 )
 
 
@@ -186,6 +208,7 @@ class WorktreeReplayState:
     records: tuple[WorktreeRecord, ...]
     state: WorktreeState
     sealed: WorktreeSealed | None = None
+    integration: WorktreeIntegrationEvidence | None = None
     live_operation_id: str | None = None
 
 
@@ -259,6 +282,21 @@ def validate_worktree_record(record: WorktreeRecord) -> None:
             raise WorktreeRecordError("changed path bound is invalid")
         _timestamp(record.sealed_at, "sealed_at")
         return
+    if isinstance(record, WorktreeIntegrationEvidence):
+        if record.sequence < 1 or record.record_type != "worktree_integration_evidence":
+            raise WorktreeRecordError("worktree integration evidence is invalid")
+        _id(record.operation_id, "integration operation ID")
+        _id(record.worktree_id, "worktree ID")
+        _sha(record.action_digest, "action digest")
+        _sha(record.patch_sha256, "patch digest")
+        _sha(record.manifest_sha256, "manifest digest")
+        if _REF.fullmatch(record.target_ref) is None:
+            raise WorktreeRecordError("integration target ref is invalid")
+        if _COMMIT.fullmatch(record.target_head) is None:
+            raise WorktreeRecordError("integration target HEAD is invalid")
+        _text(record.result_code, "integration result code", maximum=256)
+        _timestamp(record.applied_at, "integration applied_at")
+        return
     raise WorktreeRecordError("unknown worktree record type")
 
 
@@ -277,6 +315,7 @@ def replay_worktree_records(
     state = WorktreeState.DECLARED
     live: WorktreeOperationStarted | None = None
     sealed: WorktreeSealed | None = None
+    integration: WorktreeIntegrationEvidence | None = None
     for record in records[1:]:
         if isinstance(record, WorktreeOperationStarted):
             if record.worktree_id != header.worktree_id or live is not None:
@@ -326,6 +365,10 @@ def replay_worktree_records(
                         else WorktreeState.SEALED_CHANGES
                     )
                 elif record.operation is WorktreeOperation.INTEGRATE:
+                    if integration is None:
+                        raise WorktreeRecordError(
+                            "successful integration requires exact integration evidence"
+                        )
                     state = WorktreeState.APPLIED
                 else:
                     state = WorktreeState.RETIRED
@@ -344,6 +387,16 @@ def replay_worktree_records(
                 if record.changed_paths == 0
                 else WorktreeState.SEALED_CHANGES
             )
+        elif isinstance(record, WorktreeIntegrationEvidence):
+            if (
+                live is None
+                or live.operation is not WorktreeOperation.INTEGRATE
+                or record.operation_id != live.operation_id
+                or record.worktree_id != header.worktree_id
+                or integration is not None
+            ):
+                raise WorktreeRecordError("worktree integration evidence is out of order")
+            integration = record
         else:
             raise WorktreeRecordError("unknown worktree record in replay")
     return WorktreeReplayState(
@@ -351,6 +404,7 @@ def replay_worktree_records(
         records=tuple(records),
         state=state,
         sealed=sealed,
+        integration=integration,
         live_operation_id=live.operation_id if live is not None else None,
     )
 
@@ -491,6 +545,23 @@ def decode_worktree_record(payload: bytes) -> WorktreeRecord:
         }
         value = _closed(value, fields)
         record = WorktreeSealed(**value)  # type: ignore[arg-type]
+    elif record_type == "worktree_integration_evidence":
+        fields = {
+            "record_type",
+            "schema_version",
+            "sequence",
+            "operation_id",
+            "worktree_id",
+            "action_digest",
+            "patch_sha256",
+            "manifest_sha256",
+            "target_ref",
+            "target_head",
+            "result_code",
+            "applied_at",
+        }
+        value = _closed(value, fields)
+        record = WorktreeIntegrationEvidence(**value)  # type: ignore[arg-type]
     else:
         raise WorktreeRecordError("unknown worktree record type")
     validate_worktree_record(record)

@@ -89,6 +89,7 @@
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation and Audit](#durable-hook-observation-and-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
+- [B6: Writable Team Roles, Host-owned Linked Worktree, and Parent-only Integration](#b6-writable-team-roles-host-owned-linked-worktree-and-parent-only-integration)
 - [Shared Agent Runtime and Durable Child Run Foundation](#shared-agent-runtime-and-durable-child-run-foundation)
 - [ADR index](#adr-index)
 
@@ -1332,6 +1333,68 @@ A successful handler accepts only one closed JSON stdout result whose effect is 
 
 Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks template local-handler`, strict workspace-local `hooks import`, readiness-aware `hooks doctor`, and `hooks runs [session]`; the REPL adds `/hooks runs [count]`. Import always creates disabled revision 1, and enablement requires the pinned fingerprint to match. Approval preview advances to v6, system prompt to v43, provider adapter to v44, HookSet identity to `hooks-v3`, and Effective Context to v21/v22 with v19/v20 retained as legacy Hook-v2; Registry and Session/Task record schemas remain unchanged. See [0127](./decisions/0127-audited-pinned-local-hook-handlers.md).
 
+## B6: Writable Team Roles, Host-owned Linked Worktree, and Parent-only Integration
+
+The role and isolated-worktree boundaries are conceptually informed by the
+MewCode and Claw-Code study materials under `learning-submodules`; Coquo does
+not copy their implementation or prompts and does not depend on those projects
+at runtime.
+
+B6.1–B6.4 separate the authority workspace from the Child execution root and
+constrain writable Team members to two fixed contracts. `isolated-workspace-
+writer-v1` receives bounded file write/edit capability; `isolated-coder-v1`
+additionally receives `run_command` only when the parent has
+`danger-full-access`, the existing Linux command sandbox is ready, and every
+Host boundary remains satisfied. Neither role receives Team, Task, Child
+delegation, network, MCP, Skill, or integration controls; parent capability is
+the ceiling and Team approval cannot raise it. Each assignment uses a
+Host-owned linked worktree under `.coquo/worktrees/<workspace-fingerprint>/`,
+bound to the authority repository, base ref/HEAD, member, assignment, and
+capability snapshot. The worktree is the execution root; the authority
+workspace remains the only integration target. `.coquo/worktrees` is sensitive
+local runtime state, not a security boundary.
+
+When a Child reaches a reviewable terminal state, the Host performs one bounded
+seal: it checks HEAD stability, containment, symlinks, special files, Git
+metadata, gitlinks, size/count limits, and concurrent snapshot consistency, then
+records manifest/patch summaries and SHA-256 digests in the worktree ledger.
+Patch bytes live in a neighboring immutable `0600` local artifact and never in
+Session prose, approval previews, or model context. Terminal text, handoffs,
+and artifacts remain untrusted evidence. Tampering, source drift, target
+conflict or dirtiness, non-ancestral targets, unknown process outcomes, and
+unverifiable effects fail closed without automatic retry, reset, cleanup, or a
+success claim.
+
+B6.5 adds the parent-Session-only `team_worktree_integrate` Action. It is not a
+Team-control shortcut and apply is not completion: the Host first uses the
+PermissionGate and exact approval preview to bind a single-use Action identity,
+then rechecks assignment ownership, sealed terminal evidence, source/target
+ref and HEAD, ancestry, cleanliness, digests, active operations, and
+`git apply --check` before executing fixed-argv `git apply`. A successful apply
+leaves the authority workspace uncommitted; it never auto-merges, rebases,
+commits, retries, or retires. A later integration requires the user to restore
+the target to an explicitly clean state. Conflicts or failed checks do not
+mutate the target. If execution begins but its effect cannot be proven, the
+Host records `integration_unknown`, forbids retry, and requires inspection.
+
+B6.6 migrates the model-visible contract atomically to Registry generation 9,
+catalog 62, ordinary parent ToolSet 58, system prompt v48, Provider adapter
+v48, and Effective Context `ctx-v27`/`ctx-v28`; older Team/Child/Context
+versions remain replayable under the existing compatibility policy. CLI and
+REPL expose member `--role` plus `team worktree
+status|diff|recover|retire --confirm`, but never implicitly integrate, commit,
+push, or delete a worktree. Team close does not retire worktrees; only an
+explicit, reviewable Host retirement can remove an eligible worktree and its
+artifact.
+
+B6.7 verifies the boundaries with two isolated writable Children, artifact
+tampering, source/target drift, conflicts, provision/seal/integration unknown
+outcomes, cancellation with retained worktrees, Provider-free recovery, the
+separation of apply from work completion, legacy replay, CLI/REPL behavior, and
+fake smoke tests. The final offline release gate remains full pytest, Ruff
+check/format, `uv lock --check`, and `git diff --check`; real Providers,
+network, credentials, and API cost are outside that gate. See [0144](./decisions/0144-host-owned-linked-worktree-lifecycle.md) and [0145](./decisions/0145-authority-execution-scope-and-child-actions.md) for the complete rationale and status.
+
 ## ADR index
 
 128. [0128: Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1350,6 +1413,8 @@ Standalone commands add `hooks fingerprint`, handler-aware `hooks add`, `hooks t
 141. [0141: Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)
 142. [0142: Bounded Team Scheduler and Recovery](./decisions/0142-bounded-team-scheduler-and-recovery.md)
 143. [0143: Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md)
+144. [0144: Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
+145. [0145: Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
 
 ## Durable Team Identity and Member Registry
 

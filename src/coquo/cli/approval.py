@@ -356,6 +356,14 @@ def _render_preview(preview: ApprovalPreview, *, color: bool) -> str:
             _YELLOW,
             color=color,
         )
+    if preview.kind == ApprovalPreviewKind.TEAM_WORKTREE_INTEGRATION:
+        return _style(
+            "Apply the exact sealed Team patch to the clean parent workspace; the result stays "
+            "uncommitted and unstaged for explicit review, and no merge, commit, retry, or "
+            "worktree cleanup will be performed automatically.\n",
+            _YELLOW,
+            color=color,
+        )
     raise ValueError("approval preview kind is unsupported")
 
 

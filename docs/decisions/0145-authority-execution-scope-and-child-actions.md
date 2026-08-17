@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed for B6.3. Public writable Team roles and model-visible integration remain
-unavailable until the later B6 slices accept this boundary together.
+Accepted for B6.3-B6.7 after deterministic role, scope, sandbox, Action, recovery,
+legacy-replay, and release-gate evidence.
 
 ## Decision
 
@@ -28,6 +28,11 @@ hooks are not installed for a restricted Child. A writable Child can receive an
 explicit Host-injected built-in Action whitelist; the dispatcher checks the active
 ToolSet and rejects names outside that immutable whitelist before invoking the shared
 Action path. Read-only Children retain their existing no-Action-dispatcher behavior.
+The fixed writable roles are `isolated-workspace-writer-v1` (workspace-write, bounded
+file mutation only) and `isolated-coder-v1` (danger-full-access plus `run_command`),
+with the parent permission ceiling enforced at Team admission. The coder role is
+denied if the Linux command sandbox cannot be established; it never falls back to an
+unsandboxed command process.
 
 On Linux, a linked-worktree command sandbox binds only the exact execution root
 writable. The linked-worktree `.git` pointer is over-mounted read-only after the root
@@ -38,8 +43,10 @@ blocked. Missing or invalid sandbox capability fails before the command starts.
 
 Legacy Action v1 golden digests, Session replay, ordinary read-only tools, and existing
 provider contracts remain supported. New ordinary Actions are v2 with equal authority
-and execution-root fingerprints; no public writable role or new model-visible ToolSet is
-introduced by this ADR alone.
+and execution-root fingerprints. The complete B6 migration is Registry generation 9,
+catalog 62, ordinary parent ToolSet 58, system prompt/provider contract 48, and
+Effective Context v27/v28, with v25/v26 replay preserved. Only ordinary parents see
+the integration Action; Children, compact requests, and restricted ToolSets do not.
 
 ## Consequences
 

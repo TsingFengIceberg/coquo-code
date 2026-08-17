@@ -36,8 +36,21 @@ def test_team_control_parser_canonicalizes_all_control_shapes() -> None:
     assert (
         parse_team_control(
             request("team_add_member", {"team_id": TEAM_ID, "name": "Member"})
-        ).member_id
-        is None
+        ).role_contract
+        == "read-only-investigator-v1"
+    )
+    assert (
+        parse_team_control(
+            request(
+                "team_add_member",
+                {
+                    "team_id": TEAM_ID,
+                    "name": "Coder",
+                    "role": "isolated-coder-v1",
+                },
+            )
+        ).role_contract
+        == "isolated-coder-v1"
     )
     assert (
         parse_team_control(
@@ -80,6 +93,10 @@ def test_team_control_parser_canonicalizes_all_control_shapes() -> None:
     "name,arguments",
     [
         ("team_status", {"team_id": TEAM_ID, "extra": 1}),
+        (
+            "team_add_member",
+            {"team_id": TEAM_ID, "name": "Coder", "role": "unknown-role"},
+        ),
         ("team_message_show", {"team_id": "not-a-uuid", "message_id": MESSAGE_ID}),
         (
             "team_work_create",

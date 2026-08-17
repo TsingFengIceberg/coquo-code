@@ -113,6 +113,7 @@ class TeamWorkService:
             info = assignment_service.inspect(team_id, item.current_assignment_id)
             if handoff.outcome != "completed" or info.assignment.handoff_sha256 is None:
                 raise TeamWorkError("Team work item requires a completed Child handoff")
+            self._require_writable_review_evidence(info)
             with self.teams.open(team_id) as writer:
                 writer.complete_work_item(
                     item.work_item_id,
@@ -123,6 +124,34 @@ class TeamWorkService:
             return self.show(team_id, item.work_item_id)
         except (TeamStoreError, TeamAssignmentError) as error:
             raise TeamWorkError(str(error)) from None
+
+    def _require_writable_review_evidence(self, info) -> None:
+        """Require exact sealed/integrated evidence for writable assignments."""
+        worktree_id = info.assignment.worktree_id
+        if worktree_id is None:
+            return
+        from coquo.worktree_service import WorktreeService
+
+        try:
+            worktree = WorktreeService(self.workspace).store.inspect(worktree_id)
+        except Exception as error:
+            raise TeamWorkError(
+                f"writable Team worktree evidence is unavailable: {error}"
+            ) from None
+        if worktree.header.team_id != info.team.team_id:
+            raise TeamWorkError("writable Team worktree belongs to another Team")
+        if worktree.header.assignment_id != info.assignment.assignment_id:
+            raise TeamWorkError("writable Team worktree does not match the assignment")
+        if worktree.state == "sealed_empty":
+            return
+        if worktree.state != "applied" or worktree.integration is None:
+            raise TeamWorkError(
+                "non-empty writable work requires exact applied integration evidence before completion"
+            )
+        if worktree.integration.patch_sha256 != worktree.sealed.patch_sha256:  # type: ignore[union-attr]
+            raise TeamWorkError("integration evidence does not match sealed patch")
+        if info.assignment.reply_message_id is None:
+            raise TeamWorkError("writable Team completion requires the delivered reply evidence")
 
     def _team(self, team_id: str) -> TeamInfo:
         try:

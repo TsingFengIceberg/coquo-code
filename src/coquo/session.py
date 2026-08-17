@@ -34,6 +34,8 @@ from coquo.team_work import TeamWorkList, TeamWorkService
 from coquo.team_service import TeamAssignmentInfo, TeamAssignmentService, TeamRecoveryResult
 from coquo.team_records import TeamScheduleSource, TeamScheduleState
 from coquo.team_schedule import TeamScheduleError, TeamScheduleService
+from coquo.worktree_service import WorktreeDiff, WorktreeService, WorktreeServiceError
+from coquo.worktree_store import WorktreeStoreError
 from coquo.team_supervisor import (
     TeamScheduleNotification,
     TeamScheduleSupervisor,
@@ -117,6 +119,7 @@ from coquo.core.approval_preview import (
     build_metadata_preview,
 )
 from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
+from coquo.worktree_integration import WorktreeIntegrationError, WorktreeIntegrationService
 from coquo.core.compaction import (
     AUTO_COMPACT_HIGH_WATER_PERCENT,
     COMPACT_MAX_OUTPUT_TOKENS,
@@ -292,6 +295,10 @@ from coquo.tools.team_control import (
     TEAM_WORK_CREATE_TOOL_NAME,
     TEAM_WORK_REVIEW_TOOL_NAME,
     parse_team_control,
+)
+from coquo.tools.team_worktree_integrate import (
+    TEAM_WORKTREE_INTEGRATE_TOOL_NAME,
+    parse_team_worktree_integrate,
 )
 from coquo.session_store import (
     LatestUpdateStatus,
@@ -974,6 +981,7 @@ class ProjectSession:
         self._team_messaging = TeamMessagingService(self.workspace)
         self._team_work = TeamWorkService(self.workspace)
         self._team_schedule_service = TeamScheduleService(self.workspace)
+        self._worktree_integration = WorktreeIntegrationService(self.workspace)
         self._child_supervisor: ChildRunSupervisor | None = None
         self._team_schedule_supervisor: TeamScheduleSupervisor | None = None
         self._writer = writer
@@ -1858,6 +1866,53 @@ class ProjectSession:
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
             return self._team_service.leave_member(team_id, member_id, reason)
+
+    def inspect_team_worktree(self, worktree_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            service = WorktreeService(self.workspace)
+            info = service.store.inspect(worktree_id)
+            self._ensure_team_worktree_owner(info)
+            return info
+
+    def diff_team_worktree(self, worktree_id: str, *, max_bytes: int = 64 * 1024) -> WorktreeDiff:
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            service = WorktreeService(self.workspace)
+            info = service.store.inspect(worktree_id)
+            self._ensure_team_worktree_owner(info)
+            return service.diff(worktree_id, max_bytes=max_bytes)
+
+    def recover_team_worktree(self, worktree_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            service = WorktreeService(self.workspace)
+            info = service.store.inspect(worktree_id)
+            self._ensure_team_worktree_owner(info)
+            return service.recover(worktree_id)
+
+    def retire_team_worktree(self, worktree_id: str):
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            service = WorktreeService(self.workspace)
+            info = service.store.inspect(worktree_id)
+            self._ensure_team_worktree_owner(info)
+            return service.retire(worktree_id)
+
+    def _ensure_team_worktree_owner(self, info) -> None:
+        team = self._team_store.inspect(info.header.team_id)
+        if team.owner_session_id != self._writer.session_id:
+            raise TeamStoreError("Team worktree belongs to another parent Session")
+        assignment = next(
+            (item for item in team.assignments if item.assignment_id == info.header.assignment_id),
+            None,
+        )
+        if assignment is None or assignment.worktree_id != info.worktree_id:
+            raise TeamStoreError("Team worktree assignment binding is not current")
 
     def send_team_message(self, team_id: str, member_id: str, body: str):
         """Persist one owner-to-member message without changing the Session."""
@@ -5432,7 +5487,9 @@ class ProjectSession:
             if parsed.name == TEAM_STATUS_TOOL_NAME:
                 return _team_control_success(
                     request,
-                    _team_status_payload(self._ensure_team_owner(parsed.team_id)),
+                    _team_status_payload(
+                        self._ensure_team_owner(parsed.team_id), workspace=self.workspace
+                    ),
                     "team_observed",
                 )
             if parsed.name == TEAM_MESSAGE_SHOW_TOOL_NAME:
@@ -5621,13 +5678,16 @@ class ProjectSession:
             )
         if parsed.name == TEAM_ADD_MEMBER_TOOL_NAME:
             assert parsed.name_value is not None
-            member = self.add_team_member(target_team_id, parsed.name_value)
+            member = self.add_team_member(
+                target_team_id, parsed.name_value, role_contract=parsed.role_contract
+            )
             return _team_control_success(
                 request,
                 {
                     "team_id": target_team_id,
                     "member_id": member.member_id,
                     "status": member.status.value,
+                    "role": member.role_contract,
                 },
                 "team_member_added",
             )
@@ -6108,6 +6168,7 @@ class ProjectSession:
         prepared_move_directory: PreparedMoveDirectory | None = None
         prepared_download: PreparedDownloadFile | None = None
         prepared_mcp: PreparedMcpCall | None = None
+        prepared_integration = None
         if contract.execution_kind is ToolExecutionKind.MCP_REMOTE:
             catalog = self._mcp_catalog_service.snapshot()
             candidate = next(
@@ -6259,6 +6320,24 @@ class ProjectSession:
                 return _invalid_tool_request(request, error)
             action = prepared_download.action
             precondition = prepared_download.precondition
+        elif request.name == TEAM_WORKTREE_INTEGRATE_TOOL_NAME:
+            if self._child_mode:
+                return _invalid_tool_request(
+                    request, ValueError("team_worktree_integrate is parent-only")
+                )
+            try:
+                parsed = parse_team_worktree_integrate(request)
+                prepared_integration = self._worktree_integration.prepare(
+                    parsed.team_id,
+                    parsed.assignment_id,
+                    parsed.expected_patch_sha256,
+                )
+            except (ValueError, WorktreeIntegrationError) as error:
+                return _invalid_tool_request(request, error)
+            action = PermissionAction.DANGEROUS
+            precondition = ActionPrecondition.worktree_integration(
+                prepared_integration.precondition_sha256
+            )
         else:
             action = PermissionAction.UNKNOWN
             precondition = ActionPrecondition.none()
@@ -6440,6 +6519,11 @@ class ProjectSession:
                 kind=ApprovalPreviewKind.MCP_TOOL,
                 transport=mcp_entry.configuration.transport.value,
             )
+        elif prepared_integration is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.TEAM_WORKTREE_INTEGRATION,
+            )
         coordinator = ActionCoordinator(
             writer=self._writer,
             approval_handler=self._approval_handler,
@@ -6449,6 +6533,7 @@ class ProjectSession:
         mcp_observation: McpRuntimeExecution | None = None
 
         def revalidate(current: ActionIdentity) -> ActionIdentity:
+            nonlocal prepared_integration
             self._assert_action_lease(lease)
             if cancellation is not None:
                 cancellation.check()
@@ -6519,6 +6604,20 @@ class ProjectSession:
                         refreshed.precondition_sha256
                     ),
                 )
+            if prepared_integration is not None:
+                refreshed_request = parse_team_worktree_integrate(request)
+                refreshed = self._worktree_integration.prepare(
+                    refreshed_request.team_id,
+                    refreshed_request.assignment_id,
+                    refreshed_request.expected_patch_sha256,
+                )
+                prepared_integration = refreshed
+                return replace(
+                    current,
+                    precondition=ActionPrecondition.worktree_integration(
+                        refreshed.precondition_sha256
+                    ),
+                )
             return current
 
         def execute(current: ActionIdentity) -> ActionExecutionResult:
@@ -6553,6 +6652,55 @@ class ProjectSession:
                     outcome=outcome,
                     result_code=mcp_result.result_code,
                     audit_message=mcp_result.audit_message,
+                )
+            if prepared_integration is not None:
+                try:
+                    integrated = self._worktree_integration.integrate(
+                        prepared_integration,
+                        action_digest=current.digest,
+                    )
+                except WorktreeIntegrationError as error:
+                    message = str(error)[:4096]
+                    payload = json.dumps(
+                        {
+                            "status": "failed",
+                            "result_code": "integration_failed",
+                            "message": message,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    return ActionExecutionResult(
+                        tool_result=ToolResult(request.tool_use_id, payload, is_error=True),
+                        outcome=ActionExecutionOutcome.FAILED,
+                        result_code="integration_failed",
+                        audit_message=f"team worktree integration failed: {message}",
+                    )
+                payload = json.dumps(
+                    {
+                        "assignment_id": integrated.assignment_id,
+                        "changed_paths": integrated.changed_paths,
+                        "manifest_sha256": integrated.manifest_sha256,
+                        "patch_sha256": integrated.patch_sha256,
+                        "result_code": integrated.result_code,
+                        "status": integrated.status,
+                        "target_head": integrated.target_head,
+                        "target_ref": integrated.target_ref,
+                        "team_id": integrated.team_id,
+                        "worktree_id": integrated.worktree_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                return ActionExecutionResult(
+                    tool_result=ToolResult(request.tool_use_id, payload),
+                    outcome=ActionExecutionOutcome.SUCCEEDED,
+                    result_code=integrated.result_code,
+                    audit_message=(
+                        "sealed Team worktree patch applied; authority changes remain uncommitted"
+                    ),
                 )
             if request.name == READ_FILE_TOOL_NAME:
                 result = self._read_file.execute(request)
@@ -7411,14 +7559,64 @@ def _team_control_error(
     )
 
 
-def _team_status_payload(team: TeamInfo) -> dict[str, object]:
+def _team_status_payload(team: TeamInfo, *, workspace: Path | None = None) -> dict[str, object]:
+    worktrees: list[dict[str, object]] = []
+    if workspace is not None:
+        service = WorktreeService(workspace)
+        for assignment in team.assignments:
+            if assignment.worktree_id is None:
+                continue
+            try:
+                info = service.store.inspect(assignment.worktree_id)
+                worktrees.append(
+                    {
+                        "worktree_id": info.worktree_id,
+                        "assignment_id": info.header.assignment_id,
+                        "member_id": info.header.member_id,
+                        "role": info.header.role_contract,
+                        "state": info.state,
+                        "target_ref": info.header.target_ref,
+                        "base_commit": info.header.base_commit,
+                        "branch": info.header.branch,
+                        "sealed_patch_sha256": (
+                            None if info.sealed is None else info.sealed.patch_sha256
+                        ),
+                        "sealed_manifest_sha256": (
+                            None if info.sealed is None else info.sealed.manifest_sha256
+                        ),
+                        "integration": (
+                            None
+                            if info.integration is None
+                            else {
+                                "target_ref": info.integration.target_ref,
+                                "target_head": info.integration.target_head,
+                                "result_code": info.integration.result_code,
+                            }
+                        ),
+                    }
+                )
+            except (WorktreeStoreError, WorktreeServiceError):
+                worktrees.append(
+                    {
+                        "worktree_id": assignment.worktree_id,
+                        "assignment_id": assignment.assignment_id,
+                        "member_id": assignment.member_id,
+                        "state": "unavailable",
+                    }
+                )
     return {
         "team_id": team.team_id,
         "status": team.status.value,
         "members": tuple(
-            {"member_id": member.member_id, "name": member.name, "status": member.status.value}
+            {
+                "member_id": member.member_id,
+                "name": member.name,
+                "status": member.status.value,
+                "role": member.role_contract,
+            }
             for member in team.members
         ),
+        "worktrees": tuple(worktrees[:32]),
         "schedules": tuple(
             {
                 "schedule_run_id": schedule.schedule_run_id,

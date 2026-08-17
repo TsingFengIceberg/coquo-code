@@ -39,15 +39,16 @@ def test_child_control_definitions_are_closed_ordered_and_exposed_only_to_parent
         item.execution_kind is ToolExecutionKind.CHILD_CONTROL and item.permission_actions == ()
         for item in CHILD_CONTROL_TOOL_CONTRACTS
     )
-    assert ORDINARY_PROMPT_TOOL_NAMES[-15:-11] == CHILD_CONTROL_TOOL_NAMES
-    assert tuple(item.name for item in TOOL_CATALOG[-15:-11]) == CHILD_CONTROL_TOOL_NAMES
-    assert ORDINARY_PROMPT_TOOL_NAMES[-11:] == TEAM_CONTROL_TOOL_NAMES
-    assert tuple(item.name for item in TOOL_CATALOG[-11:]) == TEAM_CONTROL_TOOL_NAMES
-    assert TOOL_REGISTRY_SNAPSHOT.names[-15:-11] == CHILD_CONTROL_TOOL_NAMES
+    assert ORDINARY_PROMPT_TOOL_NAMES[-16:-12] == CHILD_CONTROL_TOOL_NAMES
+    assert tuple(item.name for item in TOOL_CATALOG[-16:-12]) == CHILD_CONTROL_TOOL_NAMES
+    assert ORDINARY_PROMPT_TOOL_NAMES[-12:-1] == TEAM_CONTROL_TOOL_NAMES
+    assert tuple(item.name for item in TOOL_CATALOG[-12:-1]) == TEAM_CONTROL_TOOL_NAMES
+    assert ORDINARY_PROMPT_TOOL_NAMES[-1] == "team_worktree_integrate"
+    assert TOOL_REGISTRY_SNAPSHOT.names[-16:-12] == CHILD_CONTROL_TOOL_NAMES
     assert (
         tuple(
             definition["name"]
-            for definition in model_tool_definitions(ORDINARY_PROMPT_TOOL_NAMES)[-15:-11]
+            for definition in model_tool_definitions(ORDINARY_PROMPT_TOOL_NAMES)[-16:-12]
         )
         == CHILD_CONTROL_TOOL_NAMES
     )

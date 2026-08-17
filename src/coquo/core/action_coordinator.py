@@ -255,6 +255,7 @@ _TOOL_PREVIEW_KINDS = {
     "move_directory": ApprovalPreviewKind.DIRECTORY_MOVE,
     "download_file": ApprovalPreviewKind.FILE_DOWNLOAD,
     "hook_handler": ApprovalPreviewKind.HOOK_HANDLER,
+    "team_worktree_integrate": ApprovalPreviewKind.TEAM_WORKTREE_INTEGRATION,
 }
 
 

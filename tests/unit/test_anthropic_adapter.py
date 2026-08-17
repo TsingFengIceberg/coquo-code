@@ -88,6 +88,7 @@ from coquo.providers.anthropic import (
     child_cancel_tool_definition,
 )
 from coquo.tools.team_control import team_control_tool_snapshots
+from coquo.tools.team_worktree_integrate import team_worktree_integrate_tool_snapshot
 from coquo.providers.errors import ProviderAdapterError
 from coquo.providers.request_context import RequestTokenCountMethod
 from coquo.providers.streaming import ProviderTextDelta
@@ -1337,6 +1338,7 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
                 child_wait_tool_definition(),
                 child_cancel_tool_definition(),
                 *tuple(definition.as_mapping() for definition in team_control_tool_snapshots()),
+                team_worktree_integrate_tool_snapshot().as_mapping(),
             ],
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "stream": False,

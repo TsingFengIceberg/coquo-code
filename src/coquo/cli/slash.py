@@ -92,6 +92,8 @@ from coquo.cli.presentation import (
     render_child_handoff,
     render_team_info,
     render_team_member,
+    render_team_worktree,
+    render_team_worktree_diff,
     render_team_summary,
     render_team_assignment_info,
     render_team_assignment_summary,
@@ -366,6 +368,10 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/team member disable", "Disable one Team member"),
     SlashCompletionSpec("/team member enable", "Enable one Team member"),
     SlashCompletionSpec("/team member leave", "Leave one Team member"),
+    SlashCompletionSpec("/team worktree status", "Show one isolated Team worktree"),
+    SlashCompletionSpec("/team worktree diff", "Show bounded isolated Team worktree changes"),
+    SlashCompletionSpec("/team worktree recover", "Observe isolated Team worktree recovery state"),
+    SlashCompletionSpec("/team worktree retire", "Explicitly retire one isolated Team worktree"),
     SlashCompletionSpec("/team assignment create", "Create a queued Team assignment"),
     SlashCompletionSpec("/team assignment list", "List Team assignments"),
     SlashCompletionSpec("/team assignment show", "Show one Team assignment"),
@@ -537,7 +543,9 @@ class ReplSession(Protocol):
 
     def close_team(self, team_id: str): ...
 
-    def add_team_member(self, team_id: str, name: str): ...
+    def add_team_member(
+        self, team_id: str, name: str, *, role_contract: str = "read-only-investigator-v1"
+    ): ...
 
     def list_team_members(self, team_id: str): ...
 
@@ -548,6 +556,14 @@ class ReplSession(Protocol):
     def enable_team_member(self, team_id: str, member_id: str): ...
 
     def leave_team_member(self, team_id: str, member_id: str, reason: str): ...
+
+    def inspect_team_worktree(self, worktree_id: str): ...
+
+    def diff_team_worktree(self, worktree_id: str, *, max_bytes: int = 64 * 1024): ...
+
+    def recover_team_worktree(self, worktree_id: str): ...
+
+    def retire_team_worktree(self, worktree_id: str): ...
 
     def create_team_assignment(self, team_id: str, member_id: str, objective: str): ...
 
@@ -1106,6 +1122,8 @@ def dispatch_slash(
             f"Unknown Team member command: {subcommand}{_suggestion_line(suggestion)}\n"
             "Type /help team for commands."
         )
+    if command == "/team worktree" or command.startswith("/team worktree "):
+        return _team_worktree(command, session)
     if command == "/team assignment create" or command.startswith("/team assignment create "):
         return _team_assignment_create(command, session)
     if command == "/team assignment list" or command.startswith("/team assignment list "):
@@ -1212,7 +1230,17 @@ def dispatch_slash(
         subcommand = command.split(maxsplit=2)[1]
         suggestion = _suggest_token(
             subcommand,
-            ("create", "list", "show", "close", "member", "assignment", "message", "work"),
+            (
+                "create",
+                "list",
+                "show",
+                "close",
+                "member",
+                "assignment",
+                "message",
+                "work",
+                "worktree",
+            ),
         )
         return _usage(
             f"Unknown Team command: {subcommand}{_suggestion_line(suggestion)}\n"
@@ -2281,14 +2309,85 @@ def _team_close(command: str, session: ReplSession) -> SlashResult:
 
 
 def _team_member_add(command: str, session: ReplSession) -> SlashResult:
-    parts = command.split(maxsplit=4)
-    if len(parts) != 5:
-        return _usage("Usage: /team member add <team-id> <name>")
+    parts = command.split()
+    if len(parts) < 4:
+        if len(parts) == 3:
+            return _usage("Usage: /team member add <team-id> <name>")
+        return _usage(
+            "Usage: /team member add <team-id> <name> [read-only-investigator-v1|isolated-workspace-writer-v1|isolated-coder-v1]"
+        )
+    roles = {
+        "read-only-investigator-v1",
+        "isolated-workspace-writer-v1",
+        "isolated-coder-v1",
+    }
+    role = None
+    if parts[-1] in roles:
+        role = parts.pop()
+    elif parts[-1].startswith("role="):
+        role = parts.pop().split("=", 1)[1]
+    if role is not None and role not in roles:
+        return _usage("Unknown Team member role")
+    team_id = parts[3]
+    name = " ".join(parts[4:])
+    if not name:
+        return _usage("Usage: /team member add <team-id> <name> [role]")
+
+    def add_member():
+        if role is None:
+            return session.add_team_member(team_id, name)
+        return session.add_team_member(team_id, name, role_contract=role)
+
     return _call(
-        lambda: render_team_member(session.add_team_member(parts[3], parts[4])),
+        lambda: render_team_member(add_member()),
         kind="success",
         failure_prefix="Team member creation failed",
     )
+
+
+def _team_worktree(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) < 4:
+        return _usage(
+            "Usage: /team worktree status|diff|recover <worktree-id> or /team worktree retire <worktree-id> --confirm"
+        )
+    operation, worktree_id = parts[3], parts[4] if len(parts) >= 5 else ""
+    if not worktree_id:
+        return _usage(
+            "Usage: /team worktree <status|diff|recover|retire> <worktree-id> [--confirm]"
+        )
+    if operation == "status":
+        return _call(
+            lambda: render_team_worktree(session.inspect_team_worktree(worktree_id)),
+            kind="info",
+            failure_prefix="Team worktree inspection failed",
+        )
+    if operation == "diff":
+        return _call(
+            lambda: render_team_worktree_diff(session.diff_team_worktree(worktree_id)),
+            kind="info",
+            failure_prefix="Team worktree diff failed",
+        )
+    if operation == "recover":
+        return _call(
+            lambda: render_team_worktree(session.recover_team_worktree(worktree_id)),
+            kind="info",
+            failure_prefix="Team worktree recovery failed",
+        )
+    if operation == "retire":
+        if "--cancel" in parts:
+            return SlashResult(
+                handled=True, message="Team worktree retirement cancelled.", kind="info"
+            )
+        if "--confirm" not in parts:
+            return _usage("Retirement requires explicit --confirm (or --cancel).")
+        return _call(
+            lambda: render_team_worktree(session.retire_team_worktree(worktree_id)),
+            kind="success",
+            failure_prefix="Team worktree retirement failed",
+        )
+    suggestion = _suggest_token(operation, ("status", "diff", "recover", "retire"))
+    return _usage(f"Unknown Team worktree command: {operation}{_suggestion_line(suggestion)}")
 
 
 def _team_member_list(command: str, session: ReplSession) -> SlashResult:

@@ -60,6 +60,8 @@ from coquo.cli.presentation import (
     render_child_run_summary,
     render_team_info,
     render_team_member,
+    render_team_worktree,
+    render_team_worktree_diff,
     render_team_summary,
     render_team_assignment_info,
     render_team_assignment_summary,
@@ -196,6 +198,8 @@ from coquo.team_messaging import TeamMessageError, TeamMessagingService
 from coquo.team_work import TeamWorkError, TeamWorkService
 from coquo.team_service import TeamAssignmentError, TeamAssignmentService
 from coquo.team_schedule import TeamScheduleError, TeamScheduleService
+from coquo.team_records import TEAM_MEMBER_ROLE_CONTRACTS
+from coquo.worktree_service import WorktreeService
 from coquo.task_records import TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
@@ -927,6 +931,9 @@ def build_parser() -> argparse.ArgumentParser:
     team_member_add = team_member_commands.add_parser("add", help="add one member")
     team_member_add.add_argument("team_id")
     team_member_add.add_argument("name", type=nonblank_prompt)
+    team_member_add.add_argument(
+        "--role", choices=list(TEAM_MEMBER_ROLE_CONTRACTS), default=TEAM_MEMBER_ROLE_CONTRACTS[0]
+    )
     team_member_list = team_member_commands.add_parser("list", help="list Team members")
     team_member_list.add_argument("team_id")
     team_member_show = team_member_commands.add_parser("show", help="show one Team member")
@@ -943,6 +950,22 @@ def build_parser() -> argparse.ArgumentParser:
     team_member_enable = team_member_commands.add_parser("enable", help="enable one member")
     team_member_enable.add_argument("team_id")
     team_member_enable.add_argument("member_id")
+    team_worktree = team_commands.add_parser("worktree", help="inspect isolated Team worktrees")
+    team_worktree_commands = team_worktree.add_subparsers(
+        dest="team_worktree_command", required=True
+    )
+    for command_name, help_text in (
+        ("status", "show one worktree identity and lifecycle"),
+        ("diff", "show one bounded worktree diff"),
+        ("recover", "observe one worktree recovery state"),
+    ):
+        command = team_worktree_commands.add_parser(command_name, help=help_text)
+        command.add_argument("worktree_id")
+    team_worktree_retire = team_worktree_commands.add_parser(
+        "retire", help="explicitly remove one eligible linked worktree"
+    )
+    team_worktree_retire.add_argument("worktree_id")
+    team_worktree_retire.add_argument("--confirm", action="store_true")
     team_assignment = team_commands.add_parser("assignment", help="manage Team assignments")
     team_assignment_commands = team_assignment.add_subparsers(
         dest="team_assignment_command", required=True
@@ -2674,7 +2697,7 @@ def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     if arguments.team_command == "member":
         if arguments.team_member_command == "add":
             stdout.write(
-                f"{render_team_member(store.add_member(arguments.team_id, arguments.name))}\n"
+                f"{render_team_member(store.add_member(arguments.team_id, arguments.name, role_contract=arguments.role))}\n"
             )
             return 0
         if arguments.team_member_command == "list":
@@ -2705,6 +2728,23 @@ def handle_team_command(arguments: argparse.Namespace, workspace: Path, stdout: 
             stdout.write(f"{render_team_member(member)}\n")
             return 0
         raise TeamStoreError("unknown Team member command")
+    if arguments.team_command == "worktree":
+        service = WorktreeService(workspace)
+        if arguments.team_worktree_command == "status":
+            stdout.write(f"{render_team_worktree(service.store.inspect(arguments.worktree_id))}\n")
+            return 0
+        if arguments.team_worktree_command == "diff":
+            stdout.write(f"{render_team_worktree_diff(service.diff(arguments.worktree_id))}\n")
+            return 0
+        if arguments.team_worktree_command == "recover":
+            stdout.write(f"{render_team_worktree(service.recover(arguments.worktree_id))}\n")
+            return 0
+        if arguments.team_worktree_command == "retire":
+            if not arguments.confirm:
+                raise TeamStoreError("worktree retirement requires --confirm")
+            stdout.write(f"{render_team_worktree(service.retire(arguments.worktree_id))}\n")
+            return 0
+        raise TeamStoreError("unknown Team worktree command")
     if arguments.team_command == "message":
         service = TeamMessagingService(workspace)
         if arguments.team_message_command == "send":

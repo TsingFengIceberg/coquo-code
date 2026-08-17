@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import hashlib
 from threading import Lock
 
 if os.name == "nt":
@@ -17,8 +18,10 @@ else:
 
 from coquo.session_records import workspace_fingerprint
 from coquo.worktree_records import (
+    MAX_WORKTREE_RECORD_BYTES,
     MAX_WORKTREE_PATCH_BYTES,
     WorktreeHeader,
+    WorktreeIntegrationEvidence,
     WorktreeRecord,
     WorktreeRecordError,
     WorktreeSealed,
@@ -50,6 +53,7 @@ class WorktreeInfo:
     state: str
     header: WorktreeHeader
     sealed: WorktreeSealed | None
+    integration: WorktreeIntegrationEvidence | None
     record_count: int
 
 
@@ -169,6 +173,9 @@ class WorktreeStore:
     def artifact_path(self, worktree_id: str) -> Path:
         return self.root / f"{worktree_id}.sealed.patch"
 
+    def manifest_path(self, worktree_id: str) -> Path:
+        return self.root / f"{worktree_id}.sealed.manifest.json"
+
     def lease_path(self, worktree_id: str) -> Path:
         return self.root / f"{worktree_id}.lifecycle-v1.lock"
 
@@ -189,7 +196,13 @@ class WorktreeStore:
         ):
             raise WorktreeStoreError("worktree ledger belongs to another workspace or ID")
         return WorktreeInfo(
-            worktree_id, path, state.state.value, state.header, state.sealed, len(records)
+            worktree_id,
+            path,
+            state.state.value,
+            state.header,
+            state.sealed,
+            state.integration,
+            len(records),
         )
 
     def append(self, worktree_id: str, record: WorktreeRecord) -> WorktreeInfo:
@@ -302,6 +315,58 @@ class WorktreeStore:
             except OSError:
                 pass
         return target
+
+    def write_manifest_artifact(self, worktree_id: str, payload: bytes) -> Path:
+        if not isinstance(payload, bytes) or len(payload) > MAX_WORKTREE_RECORD_BYTES:
+            raise WorktreeStoreError("manifest artifact exceeds bound")
+        self._ensure_root()
+        target = self.manifest_path(worktree_id)
+        if target.exists() or target.is_symlink():
+            existing = target.read_bytes()
+            if existing != payload:
+                raise WorktreeStoreError("sealed manifest artifact already differs")
+            return target
+        temporary = self.root / f".{worktree_id}.manifest.tmp"
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                view = memoryview(payload)
+                while view:
+                    count = os.write(descriptor, view)
+                    if count <= 0:
+                        raise OSError("manifest write made no progress")
+                    view = view[count:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.link(temporary, target, follow_symlinks=False)
+            _fsync_directory(self.root)
+        except FileExistsError:
+            if not target.exists() or target.read_bytes() != payload:
+                raise WorktreeStoreError("sealed manifest artifact collision") from None
+        except OSError:
+            raise WorktreeStoreError("could not install sealed manifest artifact") from None
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        return target
+
+    def read_verified_artifacts(
+        self, worktree_id: str, *, patch_sha256: str, manifest_sha256: str
+    ) -> tuple[bytes, bytes]:
+        patch = _read_path(self.artifact_path(worktree_id), self.workspace)
+        manifest = _read_path(self.manifest_path(worktree_id), self.workspace)
+        if hashlib.sha256(patch).hexdigest() != patch_sha256:
+            raise WorktreeStoreError("sealed patch digest does not match ledger")
+        if hashlib.sha256(manifest).hexdigest() != manifest_sha256:
+            raise WorktreeStoreError("sealed manifest digest does not match ledger")
+        return patch, manifest
 
     def _ensure_root(self) -> None:
         _ensure_directory(self.workspace / ".coquo", self.workspace)

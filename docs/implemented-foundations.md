@@ -89,6 +89,7 @@
 - [Frozen Declarative Preauthorization Hooks](#frozen-declarative-preauthorization-hooks)
 - [Durable Hook Observation 与 Audit](#durable-hook-observation-与-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
+- [B6：Writable Team Roles、Host-owned Linked Worktree 与 Parent-only Integration](#b6writable-team-roleshost-owned-linked-worktree-与-parent-only-integration)
 - [Shared Agent Runtime 与 Durable Child Run Foundation](#shared-agent-runtime-与-durable-child-run-foundation)
 - [ADR 索引](#adr-索引)
 
@@ -1332,6 +1333,18 @@ Hook配置及HookSetSnapshot升级为v3，同时严格读取v1/v2并只写v3。�
 
 Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks template local-handler`、strict workspace-local `hooks import`、readiness-aware `hooks doctor`及`hooks runs [session]`；REPL新增`/hooks runs [count]`。Import始终落为disabled revision 1；enable前必须匹配固定指纹。approval preview升级到v6，system prompt为v43，provider adapter为v44，HookSet为`hooks-v3`，Effective Context为v21/v22并保留v19/v20 legacy Hook-v2；Registry及Session/Task record schema不变。见[0127](./decisions/0127-audited-pinned-local-hook-handlers.md)。
 
+## B6：Writable Team Roles、Host-owned Linked Worktree 与 Parent-only Integration
+
+B6.1–B6.4将authority workspace与Child execution root彻底分开，并把可写Team成员收敛为两个固定契约：`isolated-workspace-writer-v1`只获得受控文件写入/编辑能力，`isolated-coder-v1`在父级`danger-full-access`、可用的现有Linux command sandbox和严格Host边界同时满足时，额外获得`run_command`。两种角色都不能获得Team、Task、Child delegation、网络、MCP、Skill或integration控制；父权限是上限，不会被Team审批提升。每个assignment在Host管理的`.coquo/worktrees/<workspace-fingerprint>/`下创建一个绑定authority repository、base ref/HEAD、member、assignment和capability snapshot的linked worktree；worktree目录是执行根，authority workspace仍是唯一集成目标。`.coquo/worktrees`是敏感local runtime state，不是安全边界。角色与隔离worktree的概念边界参考了learning-submodules中的MewCode/Claw-Code研究材料，但Coquo未复制其实现、prompt或运行依赖。
+
+Host在Child达到可审查终态后执行一次bounded seal：检查HEAD未漂移、路径包含/符号链接/特殊文件/git metadata/gitlink/大小/数量限制和并发快照一致性，并把manifest与patch摘要及SHA-256写入worktree ledger；patch bytes保存在相邻的`0600`不可变本地artifact中，不进入Session正文、approval preview或模型上下文。终端文字、handoff和artifact都只是非可信证据；篡改、来源漂移、目标冲突、脏目标、非祖先目标、未知进程结果和无法验证的副作用均fail closed，不自动重试、reset、清理或声称成功。
+
+B6.5加入父Session专属的`team_worktree_integrate` Action。它不是Team-control捷径，也不把apply当作complete：Host先通过PermissionGate和精确approval preview绑定一次性Action identity，再重查assignment ownership、sealed terminal evidence、source/target ref与HEAD、ancestry、cleanliness、digest、active-operation和`git apply --check`，最后只执行固定参数的`git apply`。应用成功后authority workspace保持未提交、未自动merge/rebase/commit，后续集成必须等待用户在目标上明确恢复干净状态；冲突或check失败不改变目标。Action开始后若进程退出或结果无法证明，记录`integration_unknown`并禁止重试，必须由Host观察恢复。
+
+B6.6同步迁移模型可见契约到Registry generation 9、catalog 62、普通父ToolSet 58、system prompt v48、Provider adapter v48以及Effective Context `ctx-v27`/`ctx-v28`；旧Team/Child/Context版本仍按既有兼容策略replay。CLI与REPL提供成员`--role`以及`team worktree status|diff|recover|retire --confirm`，但不会隐式集成、commit、push或删除worktree。Team close不自动retire；只有显式、可审查的Host retirement才能移除满足条件的worktree和artifact。
+
+B6.7通过双Child隔离运行、artifact tamper、source/target drift、conflict、provision/seal/integration unknown、cancellation保留worktree、Provider-free recovery、apply与work completion分离、legacy replay、CLI/REPL和fake smoke验证上述边界。最终发布门禁仍是全量pytest、Ruff check/format、`uv lock --check`与`git diff --check`；真实Provider、网络、凭据和API cost不属于离线发布门禁。完整理由与状态见[0144](./decisions/0144-host-owned-linked-worktree-lifecycle.md)和[0145](./decisions/0145-authority-execution-scope-and-child-actions.md)。
+
 ## ADR 索引
 
 128. [0128：Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1350,6 +1363,8 @@ Standalone新增`hooks fingerprint`、handler-aware `hooks add`、`hooks templat
 141. [0141：Durable Team Work Board and Manual Review](./decisions/0141-durable-team-work-board-and-manual-review.md)
 142. [0142：Bounded Team Scheduler and Recovery](./decisions/0142-bounded-team-scheduler-and-recovery.md)
 143. [0143：Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md)
+144. [0144：Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
+145. [0145：Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
 
 ## Durable Team Identity 与 Member Registry
 
