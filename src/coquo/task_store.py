@@ -38,6 +38,10 @@ from coquo.task_records import (
     CompletionProposalSource,
     ReflectionRecommendation,
     StageCommitted,
+    StageDelegated,
+    StageExecutionTarget,
+    StageExternalCommitted,
+    StageExternalFailed,
     StageFailed,
     StageFailureReason,
     StageKind,
@@ -85,6 +89,7 @@ from coquo.task_records import (
     decode_task_record,
     encode_task_record,
     replay_task_records,
+    stage_terminal_succeeded,
 )
 from coquo.tools._workspace_paths import (
     WorkspacePathFailure,
@@ -256,6 +261,13 @@ class TaskStageInfo:
     failure_reason: StageFailureReason | None
     kind: StageKind = StageKind.EXECUTION
     usage: StageUsage | None = None
+    delegation_target: StageExecutionTarget | None = None
+    child_run_id: str | None = None
+    team_id: str | None = None
+    assignment_id: str | None = None
+    schedule_run_id: str | None = None
+    assignment_ids: tuple[str, ...] = ()
+    external_evidence_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -711,7 +723,10 @@ class TaskStore:
         return _task_info(
             path,
             state,
-            active_stage=state.active_stage is not None and _task_writer_is_active(path),
+            active_stage=(
+                state.active_stage is not None
+                and (_task_writer_is_active(path) or state.stages[-1].delegated is not None)
+            ),
         )
 
     def hook_evaluations(
@@ -911,6 +926,131 @@ class TaskWriter:
             prompt_sha256=prompt_sha256,
             hook_audit=hook_audit,
         )
+        self._append(record)
+        return record
+
+    def delegate_stage(
+        self,
+        *,
+        target: StageExecutionTarget,
+        child_run_id: str | None = None,
+        team_id: str | None = None,
+        assignment_id: str | None = None,
+        schedule_run_id: str | None = None,
+        assignment_ids: tuple[str, ...] = (),
+        permission_mode: str = "read-only",
+        approval_mode: str = "ask",
+        max_provider_invocations: int | None = None,
+        max_tool_requests: int | None = None,
+        max_output_tokens: int | None = None,
+    ) -> StageDelegated:
+        """Durably bind the active Stage to a Child or Team target."""
+        self._ensure_writable()
+        active = self._require_active_stage()
+        if self._state.stages[-1].delegated is not None:
+            raise TaskStoreError("Task Stage is already delegated")
+        if type(target) is not StageExecutionTarget:
+            raise TaskStoreError("Stage delegation target is invalid")
+        budget = self._state.budget
+        record = StageDelegated(
+            sequence=self._state.next_sequence,
+            stage_id=active.stage_id,
+            stage_number=active.stage_number,
+            target=target,
+            child_run_id=child_run_id,
+            team_id=team_id,
+            assignment_id=assignment_id,
+            schedule_run_id=schedule_run_id,
+            assignment_ids=tuple(assignment_ids),
+            permission_mode=permission_mode,
+            approval_mode=approval_mode,
+            max_provider_invocations=(
+                max_provider_invocations
+                if max_provider_invocations is not None
+                else budget.max_provider_invocations
+            ),
+            max_tool_requests=(
+                max_tool_requests if max_tool_requests is not None else budget.max_tool_requests
+            ),
+            max_output_tokens=(
+                max_output_tokens
+                if max_output_tokens is not None
+                else (budget.max_output_tokens or 1_000_000)
+            ),
+            delegated_at=self._store._clock(),
+        )
+        try:
+            from coquo.task_records import _validate_stage_delegated
+
+            _validate_stage_delegated(record)
+        except Exception as error:
+            raise TaskStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def commit_external_stage(
+        self,
+        evidence_sha256: str,
+        terminal_record_sequence: int,
+        *,
+        target: StageExecutionTarget | None = None,
+    ) -> StageExternalCommitted:
+        """Commit exact terminal evidence from the bound Child or Team target."""
+        self._ensure_writable()
+        active = self._require_active_stage()
+        delegation = self._state.stages[-1].delegated
+        if delegation is None:
+            raise TaskStoreError("Task Stage has no delegation")
+        if target is not None and target is not delegation.target:
+            raise TaskStoreError("external Stage target does not match delegation")
+        record = StageExternalCommitted(
+            sequence=self._state.next_sequence,
+            stage_id=active.stage_id,
+            stage_number=active.stage_number,
+            target=delegation.target,
+            evidence_sha256=evidence_sha256,
+            terminal_record_sequence=terminal_record_sequence,
+            committed_at=self._store._clock(),
+        )
+        try:
+            from coquo.task_records import _validate_stage_external_committed
+
+            _validate_stage_external_committed(record)
+        except Exception as error:
+            raise TaskStoreError(str(error)) from None
+        self._append(record)
+        return record
+
+    def fail_external_stage(
+        self,
+        reason: StageFailureReason,
+        result_code: str,
+        *,
+        target: StageExecutionTarget | None = None,
+    ) -> StageExternalFailed:
+        """Record one fail-closed terminal outcome from a delegated target."""
+        self._ensure_writable()
+        active = self._require_active_stage()
+        delegation = self._state.stages[-1].delegated
+        if delegation is None:
+            raise TaskStoreError("Task Stage has no delegation")
+        if target is not None and target is not delegation.target:
+            raise TaskStoreError("external Stage target does not match delegation")
+        record = StageExternalFailed(
+            sequence=self._state.next_sequence,
+            stage_id=active.stage_id,
+            stage_number=active.stage_number,
+            target=delegation.target,
+            reason=reason,
+            result_code=result_code,
+            failed_at=self._store._clock(),
+        )
+        try:
+            from coquo.task_records import _validate_stage_external_failed
+
+            _validate_stage_external_failed(record)
+        except Exception as error:
+            raise TaskStoreError(str(error)) from None
         self._append(record)
         return record
 
@@ -1690,6 +1830,7 @@ def _task_info(
     stages: list[TaskStageInfo] = []
     for stage in state.stages:
         terminal = stage.terminal
+        delegation = stage.delegated
         if terminal is None:
             outcome = (
                 "stage-in-progress" if active_stage and stage is state.stages[-1] else "interrupted"
@@ -1705,6 +1846,13 @@ def _task_info(
             turn_number = terminal.turn_number
             turn_record_sequence = terminal.turn_record_sequence
             turn_record_sha256 = terminal.turn_record_sha256
+            failure_reason = None
+        elif isinstance(terminal, StageExternalCommitted):
+            outcome = "committed"
+            terminal_at = terminal.committed_at
+            turn_number = None
+            turn_record_sequence = terminal.terminal_record_sequence
+            turn_record_sha256 = terminal.evidence_sha256
             failure_reason = None
         else:
             outcome = "failed"
@@ -1728,6 +1876,17 @@ def _task_info(
                 kind=stage.started.kind,
                 usage=(
                     terminal.usage if isinstance(terminal, (StageCommitted, StageFailed)) else None
+                ),
+                delegation_target=delegation.target if delegation is not None else None,
+                child_run_id=delegation.child_run_id if delegation is not None else None,
+                team_id=delegation.team_id if delegation is not None else None,
+                assignment_id=delegation.assignment_id if delegation is not None else None,
+                schedule_run_id=delegation.schedule_run_id if delegation is not None else None,
+                assignment_ids=delegation.assignment_ids if delegation is not None else (),
+                external_evidence_sha256=(
+                    terminal.evidence_sha256
+                    if isinstance(terminal, StageExternalCommitted)
+                    else None
                 ),
             )
         )
@@ -1849,13 +2008,14 @@ def _task_usage(state: TaskReplayState) -> TaskUsageInfo:
         terminal = stage.terminal
         if terminal is None:
             continue
-        if isinstance(terminal, StageCommitted):
+        if stage_terminal_succeeded(terminal):
             committed += 1
-        if terminal.usage is None:
+        usage = getattr(terminal, "usage", None)
+        if usage is None:
             unavailable += 1
             continue
         for field in values:
-            values[field] += getattr(terminal.usage, field)
+            values[field] += getattr(usage, field)
     return TaskUsageInfo(
         committed_stages=committed,
         unavailable_stages=unavailable,
@@ -1909,7 +2069,7 @@ def _task_plan_info(state: TaskReplayState) -> TaskPlanInfo | None:
                 completed == len(plan.steps)
                 or stage.started.sequence <= accepted_record.sequence
                 or stage.started.kind is not StageKind.EXECUTION
-                or not isinstance(stage.terminal, StageCommitted)
+                or not stage_terminal_succeeded(stage.terminal)
                 or stage.started.objective != plan.steps[completed]
             ):
                 continue

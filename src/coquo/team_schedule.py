@@ -258,6 +258,26 @@ class TeamScheduleService:
         canonical = canonical_team_id(schedule_run_id)
         return next((item for item in team.schedules if item.schedule_run_id == canonical), None)
 
+    def resume(self, team_id: str, schedule_run_id: str) -> TeamScheduleRun:
+        """Reacquire the lease for one exact nonterminal schedule identity.
+
+        Resuming is deliberately a lease-only operation: it does not append a
+        second ``TeamScheduleStarted`` record or select new work.  The caller
+        may pass the returned run to :meth:`run_started`, which reconciles the
+        existing assignment roster before admitting any additional work.
+        """
+        try:
+            team = self.teams.inspect(team_id)
+            schedule = self.status(team.team_id, schedule_run_id)
+            if schedule is None:
+                raise TeamScheduleError("Team schedule run was not found")
+            if schedule.status.terminal:
+                raise TeamScheduleError("Team schedule run is already terminal")
+            lease = self.teams.acquire_schedule(team.team_id)
+            return TeamScheduleRun(self, team.team_id, schedule, lease)
+        except TeamStoreError as error:
+            raise TeamScheduleError(str(error)) from None
+
     def run(
         self,
         team_id: str,

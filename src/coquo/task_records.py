@@ -30,6 +30,9 @@ TASK_ACCEPTANCE_CONTRACT_SCHEMA_VERSION = 1
 STAGE_STARTED_SCHEMA_VERSION = 3
 STAGE_COMMITTED_SCHEMA_VERSION = 3
 STAGE_FAILED_SCHEMA_VERSION = 3
+STAGE_DELEGATED_SCHEMA_VERSION = 1
+STAGE_EXTERNAL_COMMITTED_SCHEMA_VERSION = 1
+STAGE_EXTERNAL_FAILED_SCHEMA_VERSION = 1
 TASK_PLAN_PROPOSED_SCHEMA_VERSION = 3
 TASK_PLAN_ACCEPTED_SCHEMA_VERSION = 1
 TASK_COMPLETION_PROPOSED_SCHEMA_VERSION = 2
@@ -103,6 +106,14 @@ class StageKind(StrEnum):
     PLANNING = "planning"
     REFLECTION = "reflection"
     CORRECTION = "correction"
+
+
+class StageExecutionTarget(StrEnum):
+    """Durable owner of work for one Task Stage."""
+
+    CHILD = "child"
+    TEAM_ASSIGNMENT = "team-assignment"
+    TEAM_SCHEDULE = "team-schedule"
 
 
 class ReflectionRecommendation(StrEnum):
@@ -298,6 +309,59 @@ class StageFailed:
 
 
 @dataclass(frozen=True)
+class StageDelegated:
+    """Bind an active Task Stage to one Child or Team orchestration target."""
+
+    sequence: int
+    stage_id: str
+    stage_number: int
+    target: StageExecutionTarget
+    child_run_id: str | None
+    team_id: str | None
+    assignment_id: str | None
+    schedule_run_id: str | None
+    assignment_ids: tuple[str, ...]
+    permission_mode: str
+    approval_mode: str
+    max_provider_invocations: int
+    max_tool_requests: int
+    max_output_tokens: int
+    delegated_at: str
+    record_type: str = "stage_delegated"
+    schema_version: int = STAGE_DELEGATED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class StageExternalCommitted:
+    """Terminal evidence for a Stage completed outside the owner Session."""
+
+    sequence: int
+    stage_id: str
+    stage_number: int
+    target: StageExecutionTarget
+    evidence_sha256: str
+    terminal_record_sequence: int
+    committed_at: str
+    record_type: str = "stage_external_committed"
+    schema_version: int = STAGE_EXTERNAL_COMMITTED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class StageExternalFailed:
+    """Terminal failure/cancellation/unknown outcome from a delegated target."""
+
+    sequence: int
+    stage_id: str
+    stage_number: int
+    target: StageExecutionTarget
+    reason: StageFailureReason
+    result_code: str
+    failed_at: str
+    record_type: str = "stage_external_failed"
+    schema_version: int = STAGE_EXTERNAL_FAILED_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
 class TaskPlanProposed:
     sequence: int
     plan_id: str
@@ -443,7 +507,9 @@ class TaskContextCheckpoint:
     schema_version: int = TASK_CONTEXT_CHECKPOINT_SCHEMA_VERSION
 
 
-StageTerminal: TypeAlias = StageCommitted | StageFailed
+StageTerminal: TypeAlias = (
+    StageCommitted | StageFailed | StageExternalCommitted | StageExternalFailed
+)
 TaskRecord: TypeAlias = (
     TaskHeader
     | TaskConfiguration
@@ -452,6 +518,9 @@ TaskRecord: TypeAlias = (
     | StageStarted
     | StageCommitted
     | StageFailed
+    | StageDelegated
+    | StageExternalCommitted
+    | StageExternalFailed
     | TaskPlanProposed
     | TaskPlanAccepted
     | TaskCompletionProposed
@@ -470,7 +539,14 @@ TaskRecord: TypeAlias = (
 @dataclass(frozen=True)
 class TaskStageState:
     started: StageStarted
-    terminal: StageTerminal | None
+    delegated: StageDelegated | None = None
+    terminal: StageTerminal | None = None
+
+
+def stage_terminal_succeeded(terminal: StageTerminal | None) -> bool:
+    """Return whether a Stage has a durable successful terminal outcome."""
+
+    return isinstance(terminal, (StageCommitted, StageExternalCommitted))
 
 
 @dataclass(frozen=True)
@@ -561,7 +637,7 @@ class TaskReplayState:
             return TaskStatus.INTERRUPTED
         if self.current_completion_proposal is not None:
             return TaskStatus.COMPLETION_PROPOSED
-        if isinstance(terminal, StageCommitted):
+        if stage_terminal_succeeded(terminal):
             if (
                 self.latest_blocker is not None
                 and self.latest_blocker.stage_id == self.stages[-1].started.stage_id
@@ -601,7 +677,7 @@ class TaskReplayState:
             return None
         proposal = self.completion_proposals[-1]
         latest = self.stages[-1]
-        if not isinstance(latest.terminal, StageCommitted):
+        if not stage_terminal_succeeded(latest.terminal):
             return None
         if proposal.stage_id != latest.started.stage_id:
             return None
@@ -1007,15 +1083,39 @@ def replay_task_records(
                 raise TaskRecordError("Task Stage budget is exhausted")
             seen_stage_ids.add(record.stage_id)
             active = record
-            stages.append(TaskStageState(record, None))
+            stages.append(TaskStageState(record))
             continue
-        if isinstance(record, (StageCommitted, StageFailed)):
+        if isinstance(record, StageDelegated):
+            if active is None:
+                raise TaskRecordError("Stage delegation has no active Stage")
+            _validate_stage_terminal_identity(active, record)
+            if stages[-1].delegated is not None:
+                raise TaskRecordError("Stage may be delegated only once")
+            stages[-1] = TaskStageState(active, record, None)
+            continue
+        if isinstance(
+            record, (StageCommitted, StageFailed, StageExternalCommitted, StageExternalFailed)
+        ):
             if active is None:
                 raise TaskRecordError("Stage terminal record has no active Stage")
             _validate_stage_terminal_identity(active, record)
             if isinstance(record, StageCommitted) and record.session_id != header.owner_session_id:
                 raise TaskRecordError("committed Stage Session must match the Task owner Session")
-            stages[-1] = TaskStageState(active, record)
+            delegated = stages[-1].delegated
+            if (
+                isinstance(record, (StageExternalCommitted, StageExternalFailed))
+                and delegated is None
+            ):
+                raise TaskRecordError("external Stage terminal requires delegation")
+            if isinstance(record, (StageCommitted, StageFailed)) and delegated is not None:
+                raise TaskRecordError("delegated Stage requires an external terminal record")
+            if (
+                isinstance(record, (StageExternalCommitted, StageExternalFailed))
+                and delegated is not None
+            ):
+                if record.target is not delegated.target:
+                    raise TaskRecordError("external Stage target does not match delegation")
+            stages[-1] = TaskStageState(active, delegated, record)
             active = None
             continue
         if active is not None:
@@ -1024,7 +1124,7 @@ def replay_task_records(
             latest = stages[-1] if stages else None
             if (
                 latest is None
-                or not isinstance(latest.terminal, StageCommitted)
+                or not stage_terminal_succeeded(latest.terminal)
                 or latest.started.kind is not StageKind.PLANNING
                 or latest.started.stage_id != record.stage_id
                 or latest.started.stage_number != record.stage_number
@@ -1079,7 +1179,7 @@ def replay_task_records(
             latest = stages[-1] if stages else None
             if (
                 latest is None
-                or not isinstance(latest.terminal, StageCommitted)
+                or not stage_terminal_succeeded(latest.terminal)
                 or latest.started.kind not in {StageKind.EXECUTION, StageKind.CORRECTION}
                 or latest.started.stage_id != record.stage_id
                 or latest.started.stage_number != record.stage_number
@@ -1098,7 +1198,7 @@ def replay_task_records(
             latest = stages[-1] if stages else None
             if (
                 latest is None
-                or not isinstance(latest.terminal, StageCommitted)
+                or not stage_terminal_succeeded(latest.terminal)
                 or latest.started.kind is not StageKind.REFLECTION
                 or latest.started.stage_id != record.stage_id
                 or latest.started.stage_number != record.stage_number
@@ -1117,7 +1217,7 @@ def replay_task_records(
             latest = stages[-1] if stages else None
             if (
                 latest is None
-                or not isinstance(latest.terminal, StageCommitted)
+                or not stage_terminal_succeeded(latest.terminal)
                 or latest.started.stage_id != record.stage_id
                 or latest.started.stage_number != record.stage_number
             ):
@@ -1205,7 +1305,7 @@ def replay_task_records(
                         completed_plan_steps == len(plan.steps)
                         or stage.started.sequence <= accepted_plan_sequence
                         or stage.started.kind is not StageKind.EXECUTION
-                        or not isinstance(stage.terminal, StageCommitted)
+                        or not stage_terminal_succeeded(stage.terminal)
                         or stage.started.objective != plan.steps[completed_plan_steps]
                     ):
                         continue
@@ -1399,6 +1499,50 @@ def _record_to_dict(record: TaskRecord) -> dict[str, object]:
         if record.schema_version >= 3:
             common["hook_audit"] = _hook_audit_to_value(record.hook_audit, "stage_failed")
         return common
+    if isinstance(record, StageDelegated):
+        return {
+            "approval_mode": record.approval_mode,
+            "assignment_id": record.assignment_id,
+            "assignment_ids": list(record.assignment_ids),
+            "child_run_id": record.child_run_id,
+            "delegated_at": record.delegated_at,
+            "max_output_tokens": record.max_output_tokens,
+            "max_provider_invocations": record.max_provider_invocations,
+            "max_tool_requests": record.max_tool_requests,
+            "permission_mode": record.permission_mode,
+            "record_type": record.record_type,
+            "schedule_run_id": record.schedule_run_id,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "stage_id": record.stage_id,
+            "stage_number": record.stage_number,
+            "target": record.target.value,
+            "team_id": record.team_id,
+        }
+    if isinstance(record, StageExternalCommitted):
+        return {
+            "committed_at": record.committed_at,
+            "evidence_sha256": record.evidence_sha256,
+            "record_type": record.record_type,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "stage_id": record.stage_id,
+            "stage_number": record.stage_number,
+            "target": record.target.value,
+            "terminal_record_sequence": record.terminal_record_sequence,
+        }
+    if isinstance(record, StageExternalFailed):
+        return {
+            "failed_at": record.failed_at,
+            "reason": record.reason.value,
+            "record_type": record.record_type,
+            "result_code": record.result_code,
+            "schema_version": record.schema_version,
+            "sequence": record.sequence,
+            "stage_id": record.stage_id,
+            "stage_number": record.stage_number,
+            "target": record.target.value,
+        }
     if isinstance(record, TaskPlanProposed):
         common = {
             "plan_id": record.plan_id,
@@ -1777,6 +1921,110 @@ def _decode_stage_failed(value: dict[str, object]) -> StageFailed:
     return record
 
 
+def _decode_stage_delegated(value: dict[str, object]) -> StageDelegated:
+    _fields(
+        value,
+        "stage_delegated",
+        "approval_mode",
+        "assignment_id",
+        "assignment_ids",
+        "child_run_id",
+        "delegated_at",
+        "max_output_tokens",
+        "max_provider_invocations",
+        "max_tool_requests",
+        "permission_mode",
+        "schedule_run_id",
+        "stage_id",
+        "stage_number",
+        "target",
+        "team_id",
+    )
+    try:
+        target = StageExecutionTarget(value.get("target"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("unsupported Stage delegation target") from None
+    assignment_ids = value.get("assignment_ids")
+    if not isinstance(assignment_ids, list):
+        raise TaskRecordError("Stage delegation assignment_ids must be a list")
+    record = StageDelegated(
+        sequence=value.get("sequence"),
+        stage_id=value.get("stage_id"),
+        stage_number=value.get("stage_number"),
+        target=target,
+        child_run_id=value.get("child_run_id"),
+        team_id=value.get("team_id"),
+        assignment_id=value.get("assignment_id"),
+        schedule_run_id=value.get("schedule_run_id"),
+        assignment_ids=tuple(assignment_ids),
+        permission_mode=value.get("permission_mode"),
+        approval_mode=value.get("approval_mode"),
+        max_provider_invocations=value.get("max_provider_invocations"),
+        max_tool_requests=value.get("max_tool_requests"),
+        max_output_tokens=value.get("max_output_tokens"),
+        delegated_at=value.get("delegated_at"),
+    )
+    _validate_stage_delegated(record)
+    return record
+
+
+def _decode_stage_external_committed(value: dict[str, object]) -> StageExternalCommitted:
+    _fields(
+        value,
+        "stage_external_committed",
+        "committed_at",
+        "evidence_sha256",
+        "stage_id",
+        "stage_number",
+        "target",
+        "terminal_record_sequence",
+    )
+    try:
+        target = StageExecutionTarget(value.get("target"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("unsupported Stage external target") from None
+    record = StageExternalCommitted(
+        sequence=value.get("sequence"),
+        stage_id=value.get("stage_id"),
+        stage_number=value.get("stage_number"),
+        target=target,
+        evidence_sha256=value.get("evidence_sha256"),
+        terminal_record_sequence=value.get("terminal_record_sequence"),
+        committed_at=value.get("committed_at"),
+    )
+    _validate_stage_external_committed(record)
+    return record
+
+
+def _decode_stage_external_failed(value: dict[str, object]) -> StageExternalFailed:
+    _fields(
+        value,
+        "stage_external_failed",
+        "failed_at",
+        "reason",
+        "result_code",
+        "stage_id",
+        "stage_number",
+        "target",
+    )
+    try:
+        target = StageExecutionTarget(value.get("target"))
+        reason = StageFailureReason(value.get("reason"))
+    except (TypeError, ValueError):
+        raise TaskRecordError("unsupported Stage external failure value") from None
+    record = StageExternalFailed(
+        sequence=value.get("sequence"),
+        stage_id=value.get("stage_id"),
+        stage_number=value.get("stage_number"),
+        target=target,
+        reason=reason,
+        result_code=value.get("result_code"),
+        failed_at=value.get("failed_at"),
+    )
+    _validate_stage_external_failed(record)
+    return record
+
+
 def _decode_plan_proposed(value: dict[str, object]) -> TaskPlanProposed:
     version = value.get("schema_version")
     base = (
@@ -2092,6 +2340,9 @@ _DECODERS = {
     "stage_started": _decode_stage_started,
     "stage_committed": _decode_stage_committed,
     "stage_failed": _decode_stage_failed,
+    "stage_delegated": _decode_stage_delegated,
+    "stage_external_committed": _decode_stage_external_committed,
+    "stage_external_failed": _decode_stage_external_failed,
     "task_plan_proposed": _decode_plan_proposed,
     "task_plan_accepted": _decode_plan_accepted,
     "task_completion_proposed": _decode_completion_proposed,
@@ -2116,6 +2367,9 @@ def _validate_record(record: object) -> None:
         StageStarted: _validate_stage_started,
         StageCommitted: _validate_stage_committed,
         StageFailed: _validate_stage_failed,
+        StageDelegated: _validate_stage_delegated,
+        StageExternalCommitted: _validate_stage_external_committed,
+        StageExternalFailed: _validate_stage_external_failed,
         TaskPlanProposed: _validate_plan_proposed,
         TaskPlanAccepted: _validate_plan_accepted,
         TaskCompletionProposed: _validate_completion_proposed,
@@ -2307,6 +2561,104 @@ def _validate_stage_failed(record: object) -> None:
         label="stage_failed",
         expected_event=HookEvent.TASK_STAGE_FAILED,
     )
+
+
+def _validate_stage_delegated(record: object) -> None:
+    if not isinstance(record, StageDelegated):
+        raise TaskRecordError("unsupported stage_delegated record")
+    _positive_sequence(record.sequence, "stage_delegated sequence")
+    _record_identity(record, "stage_delegated", STAGE_DELEGATED_SCHEMA_VERSION)
+    canonical_stage_id(record.stage_id)
+    _positive(record.stage_number, "delegated Stage number")
+    if type(record.target) is not StageExecutionTarget:
+        raise TaskRecordError("unsupported Stage delegation target")
+    for value, label in (
+        (record.child_run_id, "Child Run ID"),
+        (record.team_id, "Team ID"),
+        (record.assignment_id, "Team assignment ID"),
+        (record.schedule_run_id, "Team schedule ID"),
+    ):
+        if value is not None:
+            canonical_task_id(value)
+    if not isinstance(record.assignment_ids, tuple) or any(
+        type(value) is not str for value in record.assignment_ids
+    ):
+        raise TaskRecordError("Stage delegation assignment IDs are invalid")
+    for value in record.assignment_ids:
+        canonical_task_id(value)
+    if len(set(record.assignment_ids)) != len(record.assignment_ids):
+        raise TaskRecordError("Stage delegation assignment IDs must be unique")
+    if record.target is StageExecutionTarget.CHILD:
+        if (
+            record.child_run_id is None
+            or any(
+                value is not None
+                for value in (record.team_id, record.assignment_id, record.schedule_run_id)
+            )
+            or record.assignment_ids
+        ):
+            raise TaskRecordError("Child Stage delegation identity is invalid")
+    elif record.target is StageExecutionTarget.TEAM_ASSIGNMENT:
+        if record.child_run_id is None or record.team_id is None or record.assignment_id is None:
+            raise TaskRecordError("Team assignment delegation identity is incomplete")
+        if record.schedule_run_id is not None or record.assignment_ids:
+            raise TaskRecordError("Team assignment delegation contains schedule identity")
+    elif record.target is StageExecutionTarget.TEAM_SCHEDULE:
+        # A schedule admits its assignment roster lazily.  An empty tuple is
+        # therefore a valid pre-dispatch snapshot; the Team schedule ledger
+        # remains authoritative for the final roster at observation time.
+        if record.team_id is None or record.schedule_run_id is None:
+            raise TaskRecordError("Team schedule delegation identity is incomplete")
+        if record.child_run_id is not None or record.assignment_id is not None:
+            raise TaskRecordError("Team schedule delegation contains assignment identity")
+    for value, label in (
+        (record.permission_mode, "Stage delegation permission mode"),
+        (record.approval_mode, "Stage delegation approval mode"),
+    ):
+        _bounded_text(value, label, max_characters=64, max_bytes=256)
+    for value, label in (
+        (record.max_provider_invocations, "delegated provider budget"),
+        (record.max_tool_requests, "delegated tool budget"),
+        (record.max_output_tokens, "delegated output budget"),
+    ):
+        if type(value) is not int or value < 1:
+            raise TaskRecordError(f"{label} must be positive")
+    _validate_timestamp(record.delegated_at, "Stage delegated_at")
+
+
+def _validate_stage_external_committed(record: object) -> None:
+    if not isinstance(record, StageExternalCommitted):
+        raise TaskRecordError("unsupported stage_external_committed record")
+    _positive_sequence(record.sequence, "stage_external_committed sequence")
+    _record_identity(
+        record,
+        "stage_external_committed",
+        STAGE_EXTERNAL_COMMITTED_SCHEMA_VERSION,
+    )
+    canonical_stage_id(record.stage_id)
+    _positive(record.stage_number, "external committed Stage number")
+    if type(record.target) is not StageExecutionTarget:
+        raise TaskRecordError("unsupported Stage external target")
+    _required_sha256(record.evidence_sha256, "Stage external evidence SHA-256")
+    _positive(record.terminal_record_sequence, "external terminal record sequence")
+    _validate_timestamp(record.committed_at, "Stage external committed_at")
+
+
+def _validate_stage_external_failed(record: object) -> None:
+    if not isinstance(record, StageExternalFailed):
+        raise TaskRecordError("unsupported stage_external_failed record")
+    _positive_sequence(record.sequence, "stage_external_failed sequence")
+    _record_identity(record, "stage_external_failed", STAGE_EXTERNAL_FAILED_SCHEMA_VERSION)
+    canonical_stage_id(record.stage_id)
+    _positive(record.stage_number, "external failed Stage number")
+    if type(record.target) is not StageExecutionTarget:
+        raise TaskRecordError("unsupported Stage external target")
+    if type(record.reason) is not StageFailureReason:
+        raise TaskRecordError("unsupported Stage external failure reason")
+    _bounded_text(
+        record.result_code, "Stage external result code", max_characters=128, max_bytes=512
+    )
+    _validate_timestamp(record.failed_at, "Stage external failed_at")
 
 
 def _validate_plan_proposed(record: object) -> None:
@@ -2569,6 +2921,7 @@ def _record_timestamp(record: TaskRecord) -> str:
         "configured_at",
         "checked_at",
         "started_at",
+        "delegated_at",
         "committed_at",
         "failed_at",
         "proposed_at",

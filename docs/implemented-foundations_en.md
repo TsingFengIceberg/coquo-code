@@ -90,6 +90,7 @@
 - [Durable Hook Observation and Audit](#durable-hook-observation-and-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [B6: Writable Team Roles, Host-owned Linked Worktree, and Parent-only Integration](#b6-writable-team-roles-host-owned-linked-worktree-and-parent-only-integration)
+- [Task–Child–Team Unified Orchestration Bridge](#taskchildteam-unified-orchestration-bridge)
 - [Shared Agent Runtime and Durable Child Run Foundation](#shared-agent-runtime-and-durable-child-run-foundation)
 - [ADR index](#adr-index)
 
@@ -1395,6 +1396,41 @@ fake smoke tests. The final offline release gate remains full pytest, Ruff
 check/format, `uv lock --check`, and `git diff --check`; real Providers,
 network, credentials, and API cost are outside that gate. See [0144](./decisions/0144-host-owned-linked-worktree-lifecycle.md) and [0145](./decisions/0145-authority-execution-scope-and-child-actions.md) for the complete rationale and status.
 
+## Task–Child–Team Unified Orchestration Bridge
+
+Task, Child Run, Team assignment, and Team schedule each remain authoritative
+for their own append-only ledger. The Host-only `TaskOrchestrationService`
+connects them by binding exact identities to a Task Stage, reusing the existing
+ProjectSession and Team service execution paths, verifying terminal evidence,
+and appending one normalized external Stage terminal. External Stages use the
+record-local schema-v1 `stage_delegated`, `stage_external_committed`, and
+`stage_external_failed` records; existing Task, Session, Child, Team, and
+schedule transcripts are not rewritten, and ordinary foreground Stage terminals
+remain distinct.
+
+The bridge order is fixed: validate Task owner/workspace/objective/identity,
+admit the external target, durably append delegation, reuse existing execution
+and supervision, observe cross-ledger terminal state, verify evidence digests,
+and append the Task terminal. A Child requires a published `ChildHandoff`; a
+Team assignment requires `observe_terminal`; a schedule may have a lazy empty
+roster, but before commit the bridge reads the final assignment roster from the
+exact schedule ledger, aggregates every assignment handoff, and produces a
+canonical digest. Cancellation, failure, interruption, missing handoff,
+owner/workspace/identity mismatch, ledger inconsistency, unknown process
+outcomes, and durability uncertainty fail closed and require recovery. The
+bridge never retries, cleans an orphan, invents an ID, or claims success; repeat
+observation does not append another Task terminal record.
+
+Permission/approval, budget, and workspace boundaries propagate only downward
+from the parent ceiling. They cannot be elevated by Team or Child admission and
+do not bypass the PermissionGate, sandbox, timeout, output, edit-conflict,
+causality, or audit boundaries. The bridge adds no model-visible tool and does
+not change the Registry, system prompt, Provider adapter, or Effective Context
+versions. Children still receive no Task, Team, recursive-delegation, MCP,
+Skill, or integration controls. Team schedule resume re-acquires only the exact
+nonterminal schedule lease, appends no second start record, and never rebuilds a
+schedule from Task state. See [0146: Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md).
+
 ## ADR index
 
 128. [0128: Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1415,6 +1451,7 @@ network, credentials, and API cost are outside that gate. See [0144](./decisions
 143. [0143: Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md)
 144. [0144: Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
 145. [0145: Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
+146. [0146: Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)
 
 ## Durable Team Identity and Member Registry
 

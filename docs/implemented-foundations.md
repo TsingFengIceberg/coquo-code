@@ -90,6 +90,7 @@
 - [Durable Hook Observation 与 Audit](#durable-hook-observation-与-audit)
 - [Audited Pinned Local Hook Handlers](#audited-pinned-local-hook-handlers)
 - [B6：Writable Team Roles、Host-owned Linked Worktree 与 Parent-only Integration](#b6writable-team-roleshost-owned-linked-worktree-与-parent-only-integration)
+- [Task–Child–Team 统一编排桥接](#taskchildteam-统一编排桥接)
 - [Shared Agent Runtime 与 Durable Child Run Foundation](#shared-agent-runtime-与-durable-child-run-foundation)
 - [ADR 索引](#adr-索引)
 
@@ -1345,6 +1346,14 @@ B6.6同步迁移模型可见契约到Registry generation 9、catalog 62、普通
 
 B6.7通过双Child隔离运行、artifact tamper、source/target drift、conflict、provision/seal/integration unknown、cancellation保留worktree、Provider-free recovery、apply与work completion分离、legacy replay、CLI/REPL和fake smoke验证上述边界。最终发布门禁仍是全量pytest、Ruff check/format、`uv lock --check`与`git diff --check`；真实Provider、网络、凭据和API cost不属于离线发布门禁。完整理由与状态见[0144](./decisions/0144-host-owned-linked-worktree-lifecycle.md)和[0145](./decisions/0145-authority-execution-scope-and-child-actions.md)。
 
+## Task–Child–Team 统一编排桥接
+
+Task、Child Run、Team assignment和Team schedule继续各自拥有自己的append-only ledger；新增Host-only `TaskOrchestrationService`只负责把精确identity绑定到Task Stage、复用已有ProjectSession/Team service执行路径、验证终态证据并写入一次normalized external Stage terminal。外部Stage使用`stage_delegated`、`stage_external_committed`和`stage_external_failed`三类record-local schema-v1记录；旧Task/Session/Child/Team/schedule transcript不重写，普通foreground Stage仍与external Stage终态区分。
+
+桥接顺序固定为Task owner/workspace/objective/identity校验、外部准入、delegation durable append、复用既有执行/监督、跨ledger终态观察、evidence digest校验和Task terminal append。Child必须有已发布的`ChildHandoff`；Team assignment必须经过`observe_terminal`；schedule允许lazy empty roster，但提交前必须从精确schedule ledger读取最终assignment roster，聚合每个assignment handoff并生成canonical digest。取消、失败、中断、缺少handoff、owner/workspace/identity mismatch、ledger不一致、进程未知或durability不确定均fail closed并要求recovery，不自动retry、清理orphan、猜测ID或声称成功；重复observe不会重复追加Task terminal record。
+
+Permission/approval、budget和workspace边界只按父级上限向下传播，不能由Team/Child提升，也不绕过PermissionGate、sandbox、timeout、output、edit conflict、causality或audit。该桥接不新增model-visible tool，不改变Registry、system prompt、Provider adapter或Effective Context版本；Child仍不能获得Task、Team、递归delegation、MCP、Skill或integration控制。Team schedule resume只重新获取精确nonterminal schedule lease，不追加第二个started record，也不从Task ledger重建schedule。详见[0146：Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)。
+
 ## ADR 索引
 
 128. [0128：Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1365,6 +1374,7 @@ B6.7通过双Child隔离运行、artifact tamper、source/target drift、conflic
 143. [0143：Parent-Owned Team Control Approval and Reply Evidence](./decisions/0143-model-visible-team-controls.md)
 144. [0144：Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
 145. [0145：Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
+146. [0146：Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)
 
 ## Durable Team Identity 与 Member Registry
 
