@@ -1,0 +1,46 @@
+"""Foreground entry point for the restartable Coquo Child worker."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from coquo.background_runtime import (
+    BACKGROUND_IDLE_SECONDS,
+    MAX_BACKGROUND_WORKERS,
+    PersistentChildWorker,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="coquo-background-worker")
+    parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument(
+        "--worker-count",
+        type=int,
+        default=MAX_BACKGROUND_WORKERS,
+        choices=range(1, MAX_BACKGROUND_WORKERS + 1),
+    )
+    parser.add_argument("--idle-seconds", type=float, default=BACKGROUND_IDLE_SECONDS)
+    parser.add_argument("--max-items", type=int)
+    parser.add_argument("--recover-only", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = build_parser().parse_args(argv)
+    worker = PersistentChildWorker(
+        arguments.workspace,
+        worker_count=arguments.worker_count,
+        idle_seconds=arguments.idle_seconds,
+    )
+    result = (
+        worker.recover_orphans()
+        if arguments.recover_only
+        else worker.run(max_items=arguments.max_items)
+    )
+    return 0 if result.outcome != "failed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

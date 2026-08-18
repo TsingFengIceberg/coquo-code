@@ -2803,7 +2803,8 @@ def _ensure_contained_file(path: Path, root: Path, *, suffix: str) -> None:
     if not stat.S_ISREG(info.st_mode):
         raise SessionStoreError(f"session path is not a regular file: {path}")
     try:
-        os.chmod(path, 0o600)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.chmod(path, 0o600)
     except OSError:
         raise SessionStoreError(f"could not secure session file: {path}") from None
 

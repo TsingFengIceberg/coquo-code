@@ -1452,6 +1452,8 @@ schedule from Task state. See [0146: Task–Child–Team Unified Orchestration B
 144. [0144: Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
 145. [0145: Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
 146. [0146: Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)
+147. [0147: Persistent Child Background Runtime](./decisions/0147-persistent-child-background-runtime.md)
+147. [0147: Persistent Child Background Runtime](./decisions/0147-persistent-child-background-runtime.md)
 
 ## Durable Team Identity and Member Registry
 
@@ -1490,10 +1492,11 @@ controls the work result. Team close requires terminal work, assignment, mailbox
 and reply-read gates. Reading never deletes evidence, failed or interrupted work
 does not consume pending messages, and generic or already-admitted v1 Children
 keep their old contract. B5 adds append-only schedule waves, schema-v3 assignment
-provenance, one OS lifetime lease per Team, deterministic selection, process-local
-dispatch through at most four existing Child workers, cancellation, and Provider-free
-abandoned-run recovery; a schedule only moves Child outcomes into review and never
-retries, auto-completes, or runs as a daemon. B7/B8 add a dedicated `TEAM_CONTROL`
+provenance, one OS lifetime lease per Team, deterministic bounded local selection,
+cancellation, and Provider-free abandoned-run recovery. Assignment submission uses
+the persistent Child runtime by default; an explicitly injected supervisor retains
+the process-local worker path. A schedule only moves Child outcomes into review and
+never retries, auto-completes, or runs as a permanent daemon. B7/B8 add a dedicated `TEAM_CONTROL`
 runtime path and eleven controls visible only to an ordinary parent Session. Rejection,
 ownership, budget, and approval failures return bounded ToolResults, while an accepted
 effect remains durable after a later parent-Turn failure. Registry generation 8,
@@ -1546,18 +1549,31 @@ and execution failures derive bounded `failed` evidence. The detached Child
 Session never updates `latest`, and the parent Session/runtime remain unchanged.
 
 The REPL now exposes `/child start <id>` to submit a `ready` Child to a
-process-local bounded FIFO. The supervisor starts at most four daemon workers,
-keeps at most 32 queued IDs, and validates ownership against the parent
-Session. Each worker calls the same A4 executor without sharing the parent
-writer, Provider manager, or runtime state. The parent can commit its own
-prompt while Children run. Worker failures are isolated and publish only a
-bounded volatile notification; the durable Child ledger remains authoritative.
-Close performs a total bounded join of at most one second and never fabricates a terminal state.
-Running cancellation is durably recorded before cooperative signaling; a blocked Provider leaves
-the run `cancelling`. `wait` replays durable state only. New executions use a persistent v2 OS
-lifetime lock, and startup or explicit `child recover` marks abandoned `running`/`cancelling`
-work `interrupted` only after acquiring that lock. Legacy v1 sentinels cannot prove owner death
-and remain fail-closed for human investigation.
+workspace-bound durable queue. `child start` then attempts to launch the
+restartable local `python -m coquo.background_worker` process; the queue keeps
+at most 32 pending items, one worker process uses at most four Child execution
+threads, and an idle worker exits after a bounded interval rather than becoming
+an unlimited daemon. Each worker calls the same A4 executor without sharing the
+parent writer, Provider manager, or runtime state. The parent can commit its own
+prompt while Children run. Queue events are bounded `queued`, `claimed`,
+`heartbeat`, `requeued`, and `terminal` observations; the Child ledger remains
+the only authority for execution and terminal state. Queue, worker lease,
+heartbeat, and worker-state durability failures are fail-closed, and worker
+failures publish only bounded diagnostics.
+
+Running cancellation is durably recorded before cooperative signaling; a blocked
+Provider leaves the run `cancelling`. `wait` replays the durable Child ledger
+without depending on the submitting process. A claimed `ready` Child is
+requeued only after a fresh execution lease proves that no executor owns it;
+claimed `running`/`cancelling` work can only be marked `interrupted` after a
+recovery lease and is never automatically retried. `child status`,
+`/child status`, and `child recover` expose worker identity, heartbeat, active
+submissions, queue state, orphan candidates, and bounded diagnostics. Explicitly
+injected process-local supervisors remain available for deterministic tests and
+callers that intentionally need in-process execution; otherwise ProjectSession
+and Team assignments use this persistent runtime by default. Legacy v1
+sentinels cannot prove owner death and remain fail-closed for human
+investigation. See [0147: Persistent Child Background Runtime](./decisions/0147-persistent-child-background-runtime.md).
 
 Every terminal Child may now append one schema-v1 `child_run_handoff_published` record. A completed handoff uses `committed_turn()` and `turn_evidence()` to bind the exact Child Turn sequence, raw-record SHA-256, and assistant-text digest. Its body is bounded by both 32 KiB characters and UTF-8 bytes with an explicit truncation marker. Failed, cancelled, interrupted, and preparation-failed Children generate only a Host summary containing the stable outcome and result code; objective text, Provider errors, and tracebacks are not copied. An identical publication is idempotent, a different one conflicts, and reading an already-published completed handoff revalidates its Child Session evidence.
 

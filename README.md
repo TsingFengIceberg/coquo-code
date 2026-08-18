@@ -292,6 +292,9 @@ uv run coquo child list --status queued
 uv run coquo child show <child-run-uuid>
 uv run coquo child prepare <child-run-uuid>
 uv run coquo child run <child-run-uuid>
+uv run coquo child start <child-run-uuid>
+uv run coquo child worker
+uv run coquo child status
 uv run coquo child cancel <child-run-uuid> "暂不执行"
 uv run coquo child wait <child-run-uuid> --timeout 30
 uv run coquo child recover [<child-run-uuid>]
@@ -299,7 +302,7 @@ uv run coquo child handoff <child-run-uuid>
 uv run coquo child deliver <child-run-uuid>
 ```
 
-`child prepare` 会冻结有界脱敏的只读执行 envelope，并创建不改变 `latest` 的 detached Child Session；`child run` 随后通过共享 Agent runtime 执行一个前台只读 Turn。REPL中的`/child start <id>`可将ready Child提交给当前进程内最多4个daemon worker。`child cancel`先持久化取消请求再协作式通知运行中的Child；`child wait`只观察durable状态，`child recover`只在能够取得v2 OS执行锁时把遗留的running/cancelling标记为interrupted。`child handoff`发布与精确终态证据绑定的有界非可信结果；`child deliver`先在父Session提交不含正文的receipt，再向Host展示内容，不会把Child输出注入父历史或Effective Context。旧v1 lease保持fail-closed，进程退出后也不会自动重启Child。
+`child prepare` 会冻结有界脱敏的只读执行 envelope，并创建不改变 `latest` 的 detached Child Session；`child run` 随后通过共享 Agent runtime 执行一个前台只读 Turn。`child start` 和 REPL 中的 `/child start <id>` 会把 ready Child 写入 workspace-bound durable queue，并尝试启动可重启的本地 worker process；queue 最多保留32个pending项，单个worker最多使用4个Child执行线程，空闲后有界退出，并非无限常驻daemon。`child status`、`/child status`与`child worker`可观察worker、heartbeat、queue和orphan诊断。`child cancel`先持久化取消请求再协作式通知运行中的Child；`child wait`只观察durable状态，`child recover`只在取得相应执行/recovery lease后把安全可恢复的READY重新入队或把遗留的RUNNING/CANCELLING标记为interrupted，绝不自动重试运行中的Child。`child handoff`发布与精确终态证据绑定的有界非可信结果；`child deliver`先在父Session提交不含正文的receipt，再向Host展示内容，不会把Child输出注入父历史或Effective Context。旧v1 lease保持fail-closed；这不是exactly-once执行，也不是分布式worker fleet。
 
 ### REPL 命令
 
@@ -589,4 +592,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo目前提供Registry generation 9中的62个规范工具，普通父Prompt曝光58个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Host侧的Task–Child–Team统一编排桥接现在会绑定精确identity、复用既有执行ledger并以handoff/evidence收敛Task Stage。Child仍固定为单Turn、depth-one和process-local，写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。Team schedule不重试、不自动complete、不运行成daemon；长期worker、递归多Agent、可执行Skill、市场及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Host侧的Task–Child–Team统一编排桥接现在会绑定精确identity、复用既有执行ledger并以handoff/evidence收敛Task Stage。Child execution envelope仍固定为单Turn、depth-one和受限能力；默认后台提交由workspace-bound durable queue和可重启本地worker承载，显式注入的process-local Supervisor仅保留为兼容测试路径。写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。后台运行不自动重试RUNNING/CANCELLING孤儿，也不声称exactly-once；Team schedule不重试、不自动complete、不运行成永久daemon。递归多Agent、可执行Skill、市场、分布式worker fleet及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

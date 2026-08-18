@@ -2355,12 +2355,14 @@ class ProjectSession:
         info = self._ensure_team_assignment_owner(team_id, assignment_id)
         supervisor = self._child_supervisor
         if supervisor is None:
-            supervisor = ChildRunSupervisor(
+            from coquo.background_runtime import PersistentChildRunRuntime
+
+            PersistentChildRunRuntime(
                 self.workspace,
                 parent_session_id=self._writer.session_id,
-            )
-            self._child_supervisor = supervisor
-        supervisor.submit(info.assignment.child_run_id)
+            ).start(info.assignment.child_run_id)
+        else:
+            supervisor.submit(info.assignment.child_run_id)
         return self._team_service.inspect(team_id, assignment_id)
 
     def wait_team_assignment(
@@ -2378,12 +2380,14 @@ class ProjectSession:
         info = self._ensure_team_assignment_owner(team_id, assignment_id)
         supervisor = self._child_supervisor
         if supervisor is None:
-            supervisor = ChildRunSupervisor(
+            from coquo.background_runtime import PersistentChildRunRuntime
+
+            child_info = PersistentChildRunRuntime(
                 self.workspace,
                 parent_session_id=self._writer.session_id,
-            )
-            self._child_supervisor = supervisor
-        child_info = supervisor.wait(info.assignment.child_run_id, timeout_seconds)
+            ).wait(info.assignment.child_run_id, timeout_seconds)
+        else:
+            child_info = supervisor.wait(info.assignment.child_run_id, timeout_seconds)
         if child_info.parent_session_id != self._writer.session_id:
             raise ChildRunStoreError("Child Run belongs to another parent Session")
         latest = self._team_service.inspect(team_id, assignment_id)
@@ -2480,16 +2484,23 @@ class ProjectSession:
             return ChildRunExecutor(self.workspace).run(child_run_id)
 
     def start_child_run(self, child_run_id: str) -> ChildRunInfo:
-        """Submit one ready Child to the process-local bounded supervisor."""
+        """Durably submit one ready Child, reusing an injected local supervisor when present."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            if self._child_supervisor is None:
-                self._child_supervisor = ChildRunSupervisor(
+            if self._child_supervisor is not None:
+                self._child_supervisor.submit(child_run_id)
+            else:
+                from coquo.background_runtime import PersistentChildRunRuntime
+
+                PersistentChildRunRuntime(
                     self.workspace,
                     parent_session_id=self._writer.session_id,
-                )
-            return self._child_supervisor.submit(child_run_id)
+                ).start(child_run_id)
+            info = self._child_run_store.inspect(child_run_id)
+            if info.parent_session_id != self._writer.session_id:
+                raise ChildRunStoreError("Child Run belongs to another parent Session")
+            return info
 
     def child_notifications(self):
         with self._lock:
@@ -2504,14 +2515,14 @@ class ProjectSession:
             self._ensure_not_compacting()
             supervisor = self._child_supervisor
             if supervisor is None:
-                from coquo.child_supervisor import ChildRunSupervisor
+                from coquo.background_runtime import PersistentChildRunRuntime
 
-                supervisor = ChildRunSupervisor(
+                info = PersistentChildRunRuntime(
                     self.workspace,
                     parent_session_id=self._writer.session_id,
-                )
-                self._child_supervisor = supervisor
-            info = supervisor.wait(child_run_id, timeout_seconds)
+                ).wait(child_run_id, timeout_seconds)
+            else:
+                info = supervisor.wait(child_run_id, timeout_seconds)
             if info.parent_session_id != self._writer.session_id:
                 raise ChildRunStoreError("Child Run belongs to another parent Session")
             return info
@@ -2527,6 +2538,29 @@ class ProjectSession:
                 child_run_id=child_run_id,
                 limit=limit,
             )
+
+    def background_status(self):
+        """Inspect the durable Child queue and restartable worker without invoking a Provider."""
+        with self._lock:
+            self._ensure_open()
+            from coquo.background_runtime import PersistentChildRunRuntime
+
+            return PersistentChildRunRuntime(
+                self.workspace,
+                parent_session_id=self._writer.session_id,
+            ).status()
+
+    def recover_child_background(self):
+        """Reconcile durable Child worker orphans with fail-closed semantics."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            from coquo.background_runtime import PersistentChildRunRuntime
+
+            return PersistentChildRunRuntime(
+                self.workspace,
+                parent_session_id=self._writer.session_id,
+            ).recover_orphans()
 
     def list_child_runs(self, *, status=None) -> tuple[ChildRunInfo, ...]:
         """List Child Run control-plane metadata without changing Session state."""

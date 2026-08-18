@@ -1375,6 +1375,7 @@ Permission/approval、budget和workspace边界只按父级上限向下传播，�
 144. [0144：Host-Owned Linked Worktree Lifecycle and Bounded Change Sealing](./decisions/0144-host-owned-linked-worktree-lifecycle.md)
 145. [0145：Authority/Execution Scope and Restricted Child Actions](./decisions/0145-authority-execution-scope-and-child-actions.md)
 146. [0146：Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)
+147. [0147：Persistent Child Background Runtime](./decisions/0147-persistent-child-background-runtime.md)
 
 ## Durable Team Identity 与 Member Registry
 
@@ -1382,7 +1383,7 @@ B1现在提供workspace-bound的持久Team与成员身份，但不把身份误�
 
 成员记录保留固定角色`read-only-investigator-v1`与不可变UUID/名称，名称在Team完整历史中casefold唯一并最多64名。状态只允许`active <-> disabled -> left`；disable仅阻止未来assignment，left保留历史身份且不可重新加入。`coquo team ...`与REPL `/team ...`是Host-only的创建、列出、查看、关闭和成员状态管理入口，不调用Provider、不创建Child、不写owner Session transcript、不改变latest或Effective Context。REPL mutation要求当前Session是Team immutable owner；standalone命令按精确Team管理而不隐式切换Session。
 
-B1明确不包含assignment、handoff、mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。B2现在把每个assignment绑定到全新的Child Run和detached Session：Team ledger按`pending_child -> child_bound -> terminal_observed`记录关系，Child ledger继续是执行状态权威。B3在此基础上增加append-only owner/member mailbox；新Team Child准入前冻结最多8条inbox消息并预分配delivery/reply ID，精确提交的Child Turn与handoff才允许发布一次member reply并观察delivery。B4增加append-only work item board：依赖只能指向较早item，ready work由Host手动assign，Child终态进入review，Host以明确evidence complete或release；Team close要求work、mailbox、assignment和reply门禁全部满足。消息读取不删除证据，失败或中断不消耗pending消息，generic和已准入v1 Child保持旧契约。B5增加append-only schedule wave、schema-v3 assignment provenance、每Team单一OS lifetime lease、确定性选择、最多4个复用Child worker的process-local调度、取消与无Provider恢复；调度只把Child终态送入review，不自动complete、retry或作为daemon运行。B7/B8增加专用`TEAM_CONTROL`运行路径与11个仅普通父Session可见的Team controls；拒绝、owner错误、预算和审批失败均返回有界ToolResult，accepted effect在父Turn后续失败时仍保留。Registry generation 8、system prompt v47、Provider contract v47、Effective Context v25/v26与旧v23/v24 replay保持一致，Child、Task Stage和compact summary不暴露Team controls。详见[0138](./decisions/0138-durable-team-identity-and-members.md)、[0139](./decisions/0139-recoverable-team-member-child-assignments.md)、[0140](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)、[0141](./decisions/0141-durable-team-work-board-and-manual-review.md)、[0142](./decisions/0142-bounded-team-scheduler-and-recovery.md)与[0143](./decisions/0143-model-visible-team-controls.md)。
+B1明确不包含assignment、handoff、mailbox、消息、shared task board、scheduler、写权限、递归委派、长驻worker或model-visible Team tool。B2现在把每个assignment绑定到全新的Child Run和detached Session：Team ledger按`pending_child -> child_bound -> terminal_observed`记录关系，Child ledger继续是执行状态权威。B3在此基础上增加append-only owner/member mailbox；新Team Child准入前冻结最多8条inbox消息并预分配delivery/reply ID，精确提交的Child Turn与handoff才允许发布一次member reply并观察delivery。B4增加append-only work item board：依赖只能指向较早item，ready work由Host手动assign，Child终态进入review，Host以明确evidence complete或release；Team close要求work、mailbox、assignment和reply门禁全部满足。消息读取不删除证据，失败或中断不消耗pending消息，generic和已准入v1 Child保持旧契约。B5增加append-only schedule wave、schema-v3 assignment provenance、每Team单一OS lifetime lease、确定性选择、取消与无Provider恢复；schedule选择仍有界且本地，assignment提交默认复用persistent Child runtime，显式注入的Supervisor才走process-local worker。调度只把Child终态送入review，不自动complete、retry或作为永久daemon运行。B7/B8增加专用`TEAM_CONTROL`运行路径与11个仅普通父Session可见的Team controls；拒绝、owner错误、预算和审批失败均返回有界ToolResult，accepted effect在父Turn后续失败时仍保留。Registry generation 8、system prompt v47、Provider contract v47、Effective Context v25/v26与旧v23/v24 replay保持一致，Child、Task Stage和compact summary不暴露Team controls。详见[0138](./decisions/0138-durable-team-identity-and-members.md)、[0139](./decisions/0139-recoverable-team-member-child-assignments.md)、[0140](./decisions/0140-durable-team-mailbox-and-assignment-delivery.md)、[0141](./decisions/0141-durable-team-work-board-and-manual-review.md)、[0142](./decisions/0142-bounded-team-scheduler-and-recovery.md)、[0143](./decisions/0143-model-visible-team-controls.md)与[0147](./decisions/0147-persistent-child-background-runtime.md)。
 
 ## Shared Agent Runtime 与 Durable Child Run Foundation
 
@@ -1410,15 +1411,21 @@ Child Run 已有独立 workspace-bound JSONL ledger。Host 可以创建、查看
 记录有界 `failed`，不会伪造完成。Child Session 不更新 `latest`，父 Session 与
 父 runtime 保持不变。
 
-REPL现在可用`/child start <id>`将`ready` Child提交到当前进程内的bounded FIFO。
-Supervisor最多启动4个daemon worker、最多保留32个排队项，并按父Session绑定校验归属；
-每个worker继续调用同一个A4 executor且不共享父writer、Provider manager或runtime状态。
-父Session可以在Child运行时继续提交自己的prompt。worker失败只隔离到该Child并发布有界
-volatile notification，durable Child ledger仍是唯一状态来源；关闭时只做总计不超过1秒的
-bounded join。运行中的取消先落盘`cancel_requested`再协作式通知，Provider阻塞时保持
-`cancelling`；`wait`只回放durable状态，关闭时会请求取消但不会伪造终态。新执行使用持久化
-v2 OS lifetime lock，启动或显式`child recover`只在成功取得该锁时把遗留的`running/cancelling`
-标记为`interrupted`；旧v1 sentinel无法证明owner死亡，保持fail-closed。
+REPL现在可用`/child start <id>`将`ready` Child提交到workspace-bound的durable queue。
+`child start`随后尝试启动一个可重启的本地`python -m coquo.background_worker`进程；队列
+最多保留32个pending项，单个worker进程最多复用4个Child执行线程，空闲后有界退出，不是
+无限常驻daemon。每个worker继续调用同一个A4 executor且不共享父writer、Provider manager
+或runtime状态。队列ledger只记录queued/claimed/heartbeat/requeued/terminal观察，Child
+JSONL ledger仍是执行与终态唯一权威；queue、worker lease、heartbeat和worker-state均
+append/fsync或atomic-write并在路径、权限、sequence、UUID、大小与durability uncertainty
+失败时fail-closed。父Session可以在Child运行时继续提交自己的prompt；worker失败只隔离到
+该Child并发布有界诊断。运行中的取消先落盘`cancel_requested`再由共享executor协作式观察，
+Provider阻塞时保持`cancelling`；`wait`通过durable Child ledger轮询，不依赖提交它的进程。
+READY claim只有在取得新执行锁证明无人执行时才可requeue；RUNNING/CANCELLING claim在取得
+recovery lease后只能标记`interrupted`，绝不自动retry。`child status`、`/child status`和
+`child recover`可观察worker PID/ID、heartbeat、active submissions、queue状态、orphan候选
+和有界诊断。显式注入的process-local Supervisor仍保留给测试与刻意的进程内调用；未注入时
+ProjectSession及Team assignment默认复用这个persistent runtime。详见[0147](./decisions/0147-persistent-child-background-runtime.md)。
 
 每个终态Child现在可以追加一个`child_run_handoff_published` schema-v1 record。completed handoff通过`committed_turn()`和`turn_evidence()`绑定精确Child Turn序号、原始record SHA-256与assistant text digest；正文同时受32 KiB字符和UTF-8字节边界约束，截断带明确marker。failed、cancelled、interrupted及准备失败只生成含稳定outcome/result code的Host摘要，不复制objective、Provider error或traceback。重复相同publication幂等，不同publication冲突，已发布completed handoff读取时仍会重新验证Child Session证据。
 

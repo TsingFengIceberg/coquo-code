@@ -108,6 +108,29 @@ def test_standalone_child_commands_do_not_need_provider(tmp_path: Path) -> None:
     assert SessionStore(tmp_path).inspect(session_id).path.read_bytes() == before
 
 
+def test_standalone_child_background_status_is_observable_without_provider(tmp_path: Path) -> None:
+    writer = SessionStore(tmp_path).create(BindingSnapshot.fake())
+    session_id = writer.session_id
+    writer.release()
+    created = ChildRunStore(tmp_path).create("Queue this", parent_session=session_id)
+    status, _, errors = invoke(tmp_path, ["child", "prepare", created.child_run_id])
+    assert status == 0 and errors == ""
+    from coquo.background_runtime import BackgroundQueueStore
+
+    queue = BackgroundQueueStore(tmp_path)
+    item = queue.enqueue(created.child_run_id, parent_session_id=session_id)
+
+    status, output, errors = invoke(tmp_path, ["child", "status"])
+    assert status == 0 and errors == ""
+    assert "Background worker running: false" in output
+    assert "Pending queue items: 1" in output
+    assert item.submission_id in output
+
+    status, output, errors = invoke(tmp_path, ["child", "worker", "--recover-only"])
+    assert status == 0 and errors == ""
+    assert '"outcome": "recovered"' in output
+
+
 def test_standalone_and_slash_child_handoff(tmp_path: Path) -> None:
     session = Session(tmp_path)
     info = session.create_child_run("do not expose this objective")

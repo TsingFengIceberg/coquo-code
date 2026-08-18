@@ -896,6 +896,20 @@ def test_prepare_resume_is_read_only_and_abort_releases_target_lock(tmp_path: Pa
     reopened.abort()
 
 
+def test_inspecting_prepared_session_does_not_create_metadata_staleness(
+    tmp_path: Path,
+) -> None:
+    session_store = store(tmp_path)
+    writer = session_store.create(BindingSnapshot.fake())
+    writer.release()
+
+    prepared = session_store.prepare_resume(SESSION_ONE)
+    session_store.inspect(SESSION_ONE)
+
+    committed = prepared.commit()
+    committed.writer.release()
+
+
 def test_prepare_resume_defers_tail_recovery_until_commit(tmp_path: Path) -> None:
     session_store = store(tmp_path)
     writer = session_store.create(BindingSnapshot.fake())

@@ -149,14 +149,15 @@ CHILD_HELP = (
     "  /child list [1-100] [status=queued|admitted|ready|running|cancelling|completed|cancelled|interrupted|failed]\n"
     "  /child run <child-run-id>\n"
     "  /child start <child-run-id>\n"
+    "  /child status\n"
     "  /child show <child-run-id>\n"
     "  /child cancel <child-run-id> <reason>\n"
     "  /child wait <child-run-id> [timeout-seconds]\n"
     "  /child recover [child-run-id]\n"
     "  /child handoff <child-run-id>\n"
     "  /child deliver <child-run-id>\n"
-    "Preparation freezes a read-only envelope and detached Child Session; run executes one foreground "
-    "turn through the shared Agent runtime."
+    "Preparation freezes a read-only envelope and detached Child Session; start uses a durable queue "
+    "and restartable bounded worker, while run executes one foreground turn through the shared Agent runtime."
 )
 TEAM_HELP = (
     "Team commands:\n"
@@ -1589,6 +1590,45 @@ def render_child_run_info(info) -> str:
         )
     if getattr(info, "interrupted_result_code", None) is not None:
         lines.append(f"Interruption result: {_safe_inline(info.interrupted_result_code)}")
+    return "\n".join(lines)
+
+
+def render_background_runtime_status(status) -> str:
+    """Render durable Child worker and queue observations without claiming execution."""
+    worker = status.worker
+    lines = [
+        f"Background worker running: {str(status.worker_running).lower()}",
+        f"Pending queue items: {status.pending_count}",
+        f"Claimed queue items: {status.active_count}",
+        f"Terminal queue items: {sum(item.state == 'terminal' for item in status.queue)}",
+        f"Orphan candidates: {len(status.orphaned_submission_ids)}",
+    ]
+    if worker is not None:
+        lines.extend(
+            (
+                f"Worker ID: {worker.worker_id}",
+                f"Worker PID: {worker.pid}",
+                f"Worker state: {worker.state}",
+                f"Worker heartbeat: {worker.heartbeat_at}",
+                f"Active Child Runs: {', '.join(worker.active_child_run_ids) or 'none'}",
+            )
+        )
+        if worker.last_error:
+            lines.append(f"Worker error: {_safe_inline(worker.last_error)}")
+    if status.orphaned_submission_ids:
+        lines.append("Orphan submissions: " + ", ".join(status.orphaned_submission_ids))
+    if status.diagnostic:
+        lines.append(f"Diagnostic: {_safe_inline(status.diagnostic)}")
+    for item in status.queue:
+        lines.append(
+            f"- {item.submission_id}: {item.state} child={item.child_run_id}"
+            + (
+                f" terminal={item.terminal_child_status}"
+                if item.terminal_child_status is not None
+                else ""
+            )
+            + (f" message={_safe_inline(item.message)}" if item.message else "")
+        )
     return "\n".join(lines)
 
 

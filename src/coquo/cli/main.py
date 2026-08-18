@@ -58,6 +58,7 @@ from coquo.cli.presentation import (
     render_tool_ledgers,
     render_child_run_info,
     render_child_run_summary,
+    render_background_runtime_status,
     render_team_info,
     render_team_member,
     render_team_worktree,
@@ -901,6 +902,21 @@ def build_parser() -> argparse.ArgumentParser:
     child_prepare.add_argument("child_run_id")
     child_run = child_commands.add_parser("run", help="run one prepared Child Run")
     child_run.add_argument("child_run_id")
+    child_start = child_commands.add_parser(
+        "start", help="durably queue one prepared Child Run and launch a restartable worker"
+    )
+    child_start.add_argument("child_run_id")
+    child_start.add_argument("--worker-count", type=int, choices=range(1, 5), default=4)
+    child_worker = child_commands.add_parser(
+        "worker", help="run or recover the workspace-bound durable Child worker"
+    )
+    child_worker.add_argument("--worker-count", type=int, choices=range(1, 5), default=4)
+    child_worker.add_argument("--idle-seconds", type=float, default=2.0)
+    child_worker.add_argument("--max-items", type=positive_task_limit)
+    child_worker.add_argument("--recover-only", action="store_true")
+    child_commands.add_parser(
+        "status", help="show durable background worker, queue, lease, and orphan observations"
+    )
     child_cancel = child_commands.add_parser("cancel", help="cancel one queued Child Run")
     child_cancel.add_argument("child_run_id")
     child_cancel.add_argument("reason", type=nonblank_prompt)
@@ -2584,19 +2600,98 @@ def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout:
         info = ChildRunExecutor(workspace).run(arguments.child_run_id)
         stdout.write(f"{render_child_run_info(info)}\n")
         return 0
+    if arguments.child_command == "start":
+        from coquo.background_runtime import PersistentChildRunRuntime
+
+        submission = PersistentChildRunRuntime(
+            workspace,
+            worker_count=arguments.worker_count,
+        ).start(arguments.child_run_id)
+        stdout.write(
+            "Background submission: "
+            + json.dumps(
+                {
+                    "submission_id": submission.item.submission_id,
+                    "child_run_id": submission.item.child_run_id,
+                    "queue_state": submission.item.state,
+                    "worker_started": submission.worker_started,
+                    "worker_pid": submission.worker_pid,
+                    "launch_error": submission.launch_error,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        if submission.launch_error:
+            stdout.write(
+                "The queue item is durable; worker launch failed and requires explicit retry or recovery.\n"
+            )
+        return 0
+    if arguments.child_command == "worker":
+        from coquo.background_runtime import PersistentChildWorker
+
+        worker = PersistentChildWorker(
+            workspace,
+            worker_count=arguments.worker_count,
+            idle_seconds=arguments.idle_seconds,
+        )
+        result = (
+            worker.recover_orphans()
+            if arguments.recover_only
+            else worker.run(max_items=arguments.max_items)
+        )
+        stdout.write(
+            json.dumps(
+                {
+                    "worker_id": result.worker_id,
+                    "outcome": result.outcome,
+                    "processed_child_run_ids": result.processed_child_run_ids,
+                    "recovered_child_run_ids": result.recovered_child_run_ids,
+                    "diagnostics": result.diagnostics,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0 if result.outcome != "failed" else 1
+    if arguments.child_command == "status":
+        from coquo.background_runtime import PersistentChildRunRuntime
+
+        stdout.write(
+            f"{render_background_runtime_status(PersistentChildRunRuntime(workspace).status())}\n"
+        )
+        return 0
     if arguments.child_command == "cancel":
         info = store.request_cancel(arguments.child_run_id, reason=arguments.reason)
         stdout.write(f"{render_child_run_info(info)}\n")
         return 0
     if arguments.child_command == "wait":
-        from coquo.child_supervisor import ChildRunSupervisor
+        from coquo.background_runtime import PersistentChildRunRuntime
 
-        info = ChildRunSupervisor(workspace).wait(arguments.child_run_id, arguments.timeout)
+        info = PersistentChildRunRuntime(workspace).wait(arguments.child_run_id, arguments.timeout)
         stdout.write(f"{render_child_run_info(info)}\n")
         return 0
     if arguments.child_command == "recover":
+        from coquo.background_runtime import PersistentChildWorker
         from coquo.child_recovery import ChildRunRecoveryService
 
+        background_result = PersistentChildWorker(workspace).recover_orphans()
+        stdout.write(
+            "Background recovery: "
+            + json.dumps(
+                {
+                    "outcome": background_result.outcome,
+                    "worker_id": background_result.worker_id,
+                    "recovered_child_run_ids": background_result.recovered_child_run_ids,
+                    "diagnostics": background_result.diagnostics,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         result = ChildRunRecoveryService(workspace).recover(
             child_run_id=arguments.child_run_id,
             limit=arguments.limit,

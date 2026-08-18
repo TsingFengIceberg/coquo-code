@@ -90,6 +90,7 @@ from coquo.cli.presentation import (
     render_child_run_info,
     render_child_run_summary,
     render_child_handoff,
+    render_background_runtime_status,
     render_team_info,
     render_team_member,
     render_team_worktree,
@@ -530,6 +531,10 @@ class ReplSession(Protocol):
     def wait_child_run(self, child_run_id: str, timeout_seconds: float): ...
 
     def recover_child_runs(self, child_run_id: str | None = None, limit: int = 100): ...
+
+    def background_status(self): ...
+
+    def recover_child_background(self): ...
 
     def publish_child_handoff(self, child_run_id: str): ...
 
@@ -1057,6 +1062,8 @@ def dispatch_slash(
         return _child_run(command, session)
     if command == "/child start" or command.startswith("/child start "):
         return _child_start(command, session)
+    if command == "/child status" or command.startswith("/child status "):
+        return _child_background_status(command, session)
     if command == "/child list" or command.startswith("/child list "):
         return _child_list(command, session)
     if command == "/child show" or command.startswith("/child show "):
@@ -1080,6 +1087,7 @@ def dispatch_slash(
                 "prepare",
                 "run",
                 "start",
+                "status",
                 "list",
                 "show",
                 "cancel",
@@ -2135,6 +2143,22 @@ def _child_start(command: str, session: ReplSession) -> SlashResult:
     )
 
 
+def _child_background_status(command: str, session: ReplSession) -> SlashResult:
+    if command != "/child status":
+        return _usage("Usage: /child status")
+    status = getattr(session, "background_status", None)
+    if not callable(status):
+        return _command_error(
+            RuntimeError("durable Child background status is unavailable"),
+            failure_prefix="Child background status failed",
+        )
+    return _call(
+        lambda: render_background_runtime_status(status()),
+        kind="info",
+        failure_prefix="Child background status failed",
+    )
+
+
 def _child_list(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) > 4:
@@ -2214,8 +2238,30 @@ def _child_recover(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) > 3:
         return _usage("Usage: /child recover [child-run-id]")
+
+    def recover() -> str:
+        messages: list[str] = []
+        background = getattr(session, "recover_child_background", None)
+        if callable(background):
+            result = background()
+            messages.append(
+                "Background recovery: "
+                + json.dumps(
+                    {
+                        "outcome": result.outcome,
+                        "worker_id": result.worker_id,
+                        "recovered_child_run_ids": result.recovered_child_run_ids,
+                        "diagnostics": result.diagnostics,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        messages.append(_render_child_recovery(session, parts[2] if len(parts) == 3 else None))
+        return "\n".join(messages)
+
     return _call(
-        lambda: _render_child_recovery(session, parts[2] if len(parts) == 3 else None),
+        recover,
         kind="info",
         failure_prefix="Child Run recovery failed",
     )
