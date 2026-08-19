@@ -19,3 +19,6 @@
 [submodule "learning-submodules/mewcode-miaomiao"]
 	path = learning-submodules/mewcode-miaomiao
 	url = https://github.com/miaomiao40/mewcode.git
+[submodule "learning-submodules/deepseek-harness"]
+	path = learning-submodules/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
