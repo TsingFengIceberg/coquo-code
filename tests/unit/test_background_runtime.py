@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
+from threading import Barrier, Lock, Thread
 
 import pytest
 
@@ -136,3 +137,69 @@ def test_worker_lease_is_exclusive(tmp_path: Path) -> None:
             worker.store.acquire_worker()
     finally:
         first.close()
+
+
+def test_worker_runs_two_children_concurrently_with_bounded_thread_pool(tmp_path: Path) -> None:
+    child_store, first_id = prepared_child(tmp_path)
+    _, second_id = prepared_child(tmp_path)
+    queue = BackgroundQueueStore(tmp_path)
+    first_item = queue.enqueue(first_id)
+    second_item = queue.enqueue(second_id)
+    entered = Barrier(3)
+    release = Barrier(3)
+    state_lock = Lock()
+    active = 0
+    peak = 0
+
+    class FakeExecutor:
+        def run(self, run_id: str):
+            nonlocal active, peak
+            info = child_store.inspect(run_id)
+            child_store.start_execution(
+                run_id,
+                child_session_id=info.child_session_id or "",
+                execution_id=run_id,
+            )
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                entered.wait(timeout=5)
+                release.wait(timeout=5)
+            finally:
+                with state_lock:
+                    active -= 1
+            child_store.finish_completed(
+                run_id,
+                execution_id=run_id,
+                session_record_sequence=1,
+                assistant_text_sha256=sha256(b"done").hexdigest(),
+            )
+            return "done"
+
+    result_holder: list[object] = []
+
+    def run_worker() -> None:
+        result_holder.append(
+            PersistentChildWorker(
+                tmp_path,
+                worker_count=2,
+                executor_factory=lambda _run_id: FakeExecutor(),
+                idle_seconds=0,
+            ).run(max_items=2)
+        )
+
+    worker = Thread(target=run_worker)
+    worker.start()
+    entered.wait(timeout=5)
+    release.wait(timeout=5)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    result = result_holder[0]
+    assert result.outcome == "completed"
+    assert set(result.processed_child_run_ids) == {first_id, second_id}
+    assert peak == 2
+    assert child_store.inspect(first_id).status is ChildRunStatus.COMPLETED
+    assert child_store.inspect(second_id).status is ChildRunStatus.COMPLETED
+    assert queue.inspect(first_item.submission_id).state == "terminal"
+    assert queue.inspect(second_item.submission_id).state == "terminal"

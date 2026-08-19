@@ -1457,7 +1457,26 @@ Executor, and Reviewer results are always `untrusted evidence`. Reviewer
 `passed` enters integration, `rejected` enters rework, and `unknown` enters
 `recovery-required`. Accept is an explicit Host decision only: the workflow
 does not write files, merge, commit, push, invoke a Provider, or silently
-create a Task, Child, or Team. See [0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md).
+create a Task, Child, or Team.
+
+Each external Explorer/Executor stage now persists a bounded projection of the
+exact stage Task ID, target, Child/Team/assignment/schedule identity, handoff
+observation, status, and evidence digest; the external ledger remains
+authoritative. Explorer uses the workflow root Task, while Executor receives a
+separately derived stage Task so unknown external usage remains fail-closed and
+the binding is visible as `Stage Task` in the CLI. Admission, execution,
+observation, and recovery are explicit Host operations. The provider-free
+`workflow start|show|advance|explore-start|execute-start|recover` commands show
+the external IDs and `evidence: untrusted`, and reject provider/profile
+selection. Recovery only re-observes the recorded identity: cancellation,
+missing handoff, unknown process outcome, lease conflict, or uncertain
+durability becomes recovery-required, with no retry, replacement, cleanup,
+merge, commit, or push. The persistent Child worker still uses one workspace
+lease and at most four concurrent threads with durable queue/execution leases,
+heartbeats, terminal events, and orphan recovery; deterministic tests prove
+two-Child parallelism, exclusive leases, cancellation recovery, and identity
+preservation across reload. See [0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)
+and [0149](./decisions/0149-durable-workflow-stage-observation-and-recovery.md).
 
 ## ADR index
 
@@ -1741,3 +1760,4 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 126. [0126: Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
 127. [0127: Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
 128. [0148: Bounded Recursive Read-only Child and Host-owned Workflow Orchestration](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)
+129. [0149: Durable Workflow Stage Observation and Recovery](./decisions/0149-durable-workflow-stage-observation-and-recovery.md)

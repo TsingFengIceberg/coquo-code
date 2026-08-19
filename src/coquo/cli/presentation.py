@@ -60,6 +60,7 @@ from coquo.session import (
     TurnUsageCompleted,
 )
 from coquo.task_runtime import TaskNextAction, TaskRunStopped
+from coquo.workflow_orchestration import WorkflowState
 from coquo.session_records import ActionAuditState, SessionTitleFallbackReason
 from coquo.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from coquo.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
@@ -114,6 +115,7 @@ HELP_TOPICS = (
     "task",
     "child",
     "team",
+    "workflow",
     "tools",
     "git",
     "context",
@@ -1591,6 +1593,44 @@ def render_child_run_info(info) -> str:
         )
     if getattr(info, "interrupted_result_code", None) is not None:
         lines.append(f"Interruption result: {_safe_inline(info.interrupted_result_code)}")
+    return "\n".join(lines)
+
+
+def render_workflow_state(state: WorkflowState) -> str:
+    """Render Host-owned workflow and external stage identities for inspection."""
+    lines = [
+        f"Workflow ID: {state.workflow_id}",
+        f"Task ID: {state.task_id}",
+        f"Phase: {state.phase.value}",
+        f"Revision: {state.revision}",
+        f"Objective: {_safe_inline(state.packet.objective)}",
+        f"Permission profile: {_safe_inline(state.packet.permission_profile)}",
+        f"Stages: {len(state.stages)}",
+    ]
+    for index, stage in enumerate(state.stages, start=1):
+        lines.extend(
+            (
+                f"Stage {index}: role={stage.role.value}, target={stage.target.value}, "
+                f"status={stage.status}, source={stage.source_id}",
+                f"  Stage Task: {stage.task_id}",
+                f"  Child Run: {stage.child_run_id or 'none'}; Team: {stage.team_id or 'none'}; "
+                f"Assignment: {stage.assignment_id or 'none'}; Schedule: {stage.schedule_run_id or 'none'}",
+                f"  Parent/root lineage: n/a in workflow projection; handoff received: "
+                f"{str(stage.handoff_received).lower()}; evidence: untrusted",
+            )
+        )
+        if stage.assignment_ids:
+            lines.append(f"  Assignments: {', '.join(stage.assignment_ids)}")
+        if stage.result_code:
+            lines.append(f"  Result code: {_safe_inline(stage.result_code)}")
+        if stage.diagnostic:
+            lines.append(f"  Diagnostic: {_safe_inline(stage.diagnostic)}")
+    lines.append(f"Evidence records: {len(state.evidence)} (all untrusted)")
+    for item in state.evidence:
+        lines.append(
+            f"  {item.role.value}: source={item.source_id}, status={item.status}, "
+            f"summary={_safe_inline(item.summary)}"
+        )
     return "\n".join(lines)
 
 

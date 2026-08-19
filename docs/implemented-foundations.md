@@ -1360,7 +1360,9 @@ Permission/approval、budget和workspace边界只按父级上限向下传播，�
 
 递归Child使用独立的role prompt contract/fingerprint。depth 1的递归Child在固定只读ToolSet之外只获得Host显式暴露的Child controls；depth 2只读Grandchild不获得这些controls。depth 2的Child delegation记录使用schema v2并记录`parent_child_run_id`与`root_child_run_id`；旧depth 1记录仍可replay，所有身份、capability、owner、prompt fingerprint和schema不一致均fail closed。
 
-同时新增Host-owned高层工作流骨架：Architect → Explorer → Executor → Reviewer → Integrator。它只复用Task及Task–Child–Team bridge的精确identity和执行边界，不复制Provider/Child/Team worker或ledger。Host推进阶段并持久化受界定状态；Explorer、Executor、Reviewer结果一律是`untrusted evidence`。Reviewer `passed`进入integration，`rejected`进入rework，`unknown`进入`recovery-required`；accept只是Host显式决定，不自动写文件、merge、commit、push、调用Provider或创建隐藏的Task/Child/Team。详见[0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)。
+同时新增Host-owned高层工作流骨架：Architect → Explorer → Executor → Reviewer → Integrator。它只复用Task及Task–Child–Team bridge的精确identity和执行边界，不复制Provider/Child/Team worker或ledger。Host推进阶段并持久化受界定状态；Explorer、Executor、Reviewer结果一律是`untrusted evidence`。Reviewer `passed`进入integration，`rejected`进入rework，`unknown`进入`recovery-required`；accept只是Host显式决定，不自动写文件、merge、commit、push、调用Provider或创建隐藏的Task/Child/Team。
+
+工作流现在把每个外部Explorer/Executor stage的精确Stage Task ID、target、Child/Team/assignment/schedule身份、handoff观察、状态和evidence digest持久化为有限投影；外部ledger仍是唯一权威。Explorer使用工作流根Task，Executor先通过`TaskStore.derive`获得独立stage Task，以保留external usage unknown时的fail-closed预算语义，并在CLI中显示`Stage Task`。准入、执行、观察和恢复是四个显式Host操作；`workflow start|show|advance|explore-start|execute-start|recover`均为不调用Provider的control-plane命令，展示Child Run/Team身份和`evidence: untrusted`，拒绝profile/provider选择。恢复只重新观察记录中的精确身份；取消、缺失handoff、未知进程、lease或durability不确定均进入recovery-required，不自动retry、替代创建、清理、merge、commit或push。持久Child worker继续使用单workspace lease、最多四个并发线程、队列/执行lease、heartbeat、terminal event与orphan recovery；新增确定性测试证明双Child并行、lease独占、取消恢复和跨重载身份保持。详见[0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)与[0149](./decisions/0149-durable-workflow-stage-observation-and-recovery.md)。
 
 ## ADR 索引
 
@@ -1574,3 +1576,4 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 126. [0126：Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
 127. [0127：Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
 128. [0148：有界递归只读 Child 与 Host-owned 工作流编排](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)
+129. [0149：持久化工作流阶段观察与恢复](./decisions/0149-durable-workflow-stage-observation-and-recovery.md)

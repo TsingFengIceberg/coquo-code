@@ -71,6 +71,7 @@ from coquo.cli.presentation import (
     render_team_work_item,
     render_team_work_summary,
     render_team_schedule,
+    render_workflow_state,
 )
 from coquo.child_runtime import (
     ChildRunExecutor,
@@ -167,6 +168,11 @@ from coquo.providers.routing import (
     FAKE_PROVIDER_PROFILES,
     resolve_route,
 )
+from coquo.workflow_orchestration import (
+    WorkflowError,
+    WorkflowOrchestrator,
+    WorkflowRole,
+)
 from coquo.session import SessionResumeConflictError, SessionResumeContextError
 from coquo.session_store import (
     MAX_SESSION_SEARCH_MATCHES,
@@ -201,7 +207,7 @@ from coquo.team_service import TeamAssignmentError, TeamAssignmentService
 from coquo.team_schedule import TeamScheduleError, TeamScheduleService
 from coquo.team_records import TEAM_MEMBER_ROLE_CONTRACTS
 from coquo.worktree_service import WorktreeService
-from coquo.task_records import TaskCompletionPolicy
+from coquo.task_records import StageExecutionTarget, TaskCompletionPolicy
 from coquo.task_records import TaskBudget, TaskStatus
 from coquo.tools.delete_directory import DeleteDirectoryTool
 from coquo.tools.delete_file import DeleteFileTool
@@ -1101,6 +1107,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     team_schedule_recover.add_argument("team_id")
     team_schedule_recover.add_argument("schedule_run_id", nargs="?")
+
+    workflow_parser = subcommands.add_parser(
+        "workflow", help="inspect Host-owned Task–Child–Team workflows"
+    )
+    workflow_commands = workflow_parser.add_subparsers(dest="workflow_command", required=True)
+    workflow_start = workflow_commands.add_parser("start", help="create one bounded workflow")
+    workflow_start.add_argument("objective", type=nonblank_prompt)
+    workflow_start.add_argument("--session", dest="owner_session", default="latest")
+    workflow_start.add_argument(
+        "--accept", dest="acceptance_criteria", action="append", default=[], required=True
+    )
+    workflow_show = workflow_commands.add_parser(
+        "show", help="show workflow phase, stage identities, and untrusted evidence"
+    )
+    workflow_show.add_argument("workflow_id")
+    workflow_advance = workflow_commands.add_parser(
+        "advance", help="advance the Host-owned phase without starting external work"
+    )
+    workflow_advance.add_argument("workflow_id")
+    workflow_explore = workflow_commands.add_parser(
+        "explore-start", help="admit the Explorer through the Task–Child bridge"
+    )
+    workflow_explore.add_argument("workflow_id")
+    workflow_execute = workflow_commands.add_parser(
+        "execute-start", help="admit the Executor through Child or Team bridge"
+    )
+    workflow_execute.add_argument("workflow_id")
+    workflow_execute.add_argument(
+        "--target",
+        choices=[item.value for item in StageExecutionTarget],
+        default=StageExecutionTarget.CHILD.value,
+    )
+    workflow_execute.add_argument("--team-id")
+    workflow_execute.add_argument("--member-id")
+    workflow_execute.add_argument("--work-item-id")
+    workflow_execute.add_argument(
+        "--max-assignments", type=team_schedule_assignment_limit, default=32
+    )
+    workflow_execute.add_argument("--max-parallel", type=team_schedule_parallel_limit, default=4)
+    workflow_recover = workflow_commands.add_parser(
+        "recover", help="re-observe one exact external stage without retrying it"
+    )
+    workflow_recover.add_argument("workflow_id")
+    workflow_recover.add_argument(
+        "--role",
+        choices=[WorkflowRole.EXPLORER.value, WorkflowRole.EXECUTOR.value],
+        required=True,
+    )
     return parser
 
 
@@ -2567,6 +2621,57 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     return 0
 
 
+def handle_workflow_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Manage Host-owned workflow state and exact external stage identities."""
+    orchestrator = WorkflowOrchestrator(workspace)
+    if arguments.workflow_command == "start":
+        state = orchestrator.start(
+            arguments.objective,
+            owner_session=arguments.owner_session,
+            acceptance_criteria=tuple(arguments.acceptance_criteria),
+        )
+        stdout.write(f"{render_workflow_state(state)}\n")
+        return 0
+    if arguments.workflow_command == "show":
+        stdout.write(f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n")
+        return 0
+    if arguments.workflow_command == "advance":
+        state = orchestrator.advance(arguments.workflow_id)
+        stdout.write(f"{render_workflow_state(state)}\n")
+        return 0
+    if arguments.workflow_command == "explore-start":
+        result = orchestrator.start_exploration_stage(arguments.workflow_id)
+        child_id = result.child.child_run_id if result.child is not None else "unavailable"
+        stdout.write(
+            f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
+            f"Bridge outcome: {result.outcome}; Child Run ID: {child_id}\n"
+        )
+        return 0
+    if arguments.workflow_command == "execute-start":
+        result = orchestrator.start_execution_stage(
+            arguments.workflow_id,
+            target=StageExecutionTarget(arguments.target),
+            team_id=arguments.team_id,
+            member_id=arguments.member_id,
+            work_item_id=arguments.work_item_id,
+            max_assignments=arguments.max_assignments,
+            max_parallel=arguments.max_parallel,
+        )
+        stdout.write(
+            f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
+            f"Bridge outcome: {result.outcome}\n"
+        )
+        return 0
+    if arguments.workflow_command == "recover":
+        result = orchestrator.recover_stage(arguments.workflow_id, WorkflowRole(arguments.role))
+        stdout.write(
+            f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
+            f"Recovery observation: {result.outcome}; handoff count: {len(result.handoffs)}\n"
+        )
+        return 0
+    raise WorkflowError(f"unknown workflow command: {arguments.workflow_command}")
+
+
 def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
     """Manage Child Run control-plane metadata without invoking a Provider."""
     store = ChildRunStore(workspace)
@@ -3404,6 +3509,16 @@ def main(
                     "provider selection options cannot be combined with task management"
                 )
             return handle_task_command(arguments, workspace, output)
+        if arguments.command == "workflow":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with workflow management"
+                )
+            return handle_workflow_command(arguments, workspace, output)
         if arguments.command == "child":
             if (
                 arguments.profile is not None
@@ -3620,6 +3735,9 @@ def main(
         return 2
     except TaskStoreError as error:
         print(f"task error: {error}", file=errors)
+        return 2
+    except WorkflowError as error:
+        print(f"workflow error: {error}", file=errors)
         return 2
     except ChildRunStoreError as error:
         print(f"child error: {error}", file=errors)
