@@ -580,6 +580,19 @@ class SessionResumeResult:
         return assessment.fit_report if assessment is not None else None
 
 
+@dataclass(frozen=True)
+class ChildStartObservation:
+    """Host-observed identity for one Child background submission."""
+
+    child: ChildRunInfo
+    backend: str
+    submission_id: str | None = None
+    queue_state: str | None = None
+    worker_started: bool = False
+    worker_pid: int | None = None
+    launch_error: str | None = None
+
+
 class SessionResumeContextError(RuntimeError):
     """Raised when a destination Session is known not to fit the current target."""
 
@@ -2485,22 +2498,35 @@ class ProjectSession:
 
     def start_child_run(self, child_run_id: str) -> ChildRunInfo:
         """Durably submit one ready Child, reusing an injected local supervisor when present."""
+        return self.start_child_run_observation(child_run_id).child
+
+    def start_child_run_observation(self, child_run_id: str) -> ChildStartObservation:
+        """Submit one Child and expose the exact Host-observed submission identity."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
             if self._child_supervisor is not None:
-                self._child_supervisor.submit(child_run_id)
-            else:
-                from coquo.background_runtime import PersistentChildRunRuntime
+                info = self._child_supervisor.submit(child_run_id)
+                return ChildStartObservation(info, "process-local-supervisor")
 
-                PersistentChildRunRuntime(
-                    self.workspace,
-                    parent_session_id=self._writer.session_id,
-                ).start(child_run_id)
+            from coquo.background_runtime import PersistentChildRunRuntime
+
+            submission = PersistentChildRunRuntime(
+                self.workspace,
+                parent_session_id=self._writer.session_id,
+            ).start(child_run_id)
             info = self._child_run_store.inspect(child_run_id)
             if info.parent_session_id != self._writer.session_id:
                 raise ChildRunStoreError("Child Run belongs to another parent Session")
-            return info
+            return ChildStartObservation(
+                info,
+                "durable-background-worker",
+                submission_id=submission.item.submission_id,
+                queue_state=submission.item.state,
+                worker_started=submission.worker_started,
+                worker_pid=submission.worker_pid,
+                launch_error=submission.launch_error,
+            )
 
     def child_notifications(self):
         with self._lock:

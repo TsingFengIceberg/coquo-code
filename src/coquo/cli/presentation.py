@@ -54,6 +54,7 @@ from coquo.session import (
     AutoCompactionCommitted,
     AutoCompactionNotApplied,
     AutoCompactionStarted,
+    ChildStartObservation,
     DurableUsageSnapshot,
     SessionTitleFallbackApplied,
     TurnUsageCompleted,
@@ -1593,6 +1594,25 @@ def render_child_run_info(info) -> str:
     return "\n".join(lines)
 
 
+def render_child_start_observation(observation: ChildStartObservation) -> str:
+    """Render Child metadata plus the Host-observed background submission."""
+    lines = [render_child_run_info(observation.child), f"Background backend: {observation.backend}"]
+    if observation.submission_id is None:
+        lines.append("Submission: process-local; no durable queue item")
+        return "\n".join(lines)
+    lines.extend(
+        (
+            f"Submission ID: {observation.submission_id}",
+            f"Queue state: {observation.queue_state or 'unknown'}",
+            f"Worker started: {str(observation.worker_started).lower()}",
+            f"Worker PID: {observation.worker_pid if observation.worker_pid is not None else 'unknown'}",
+        )
+    )
+    if observation.launch_error:
+        lines.append(f"Worker launch error: {_safe_inline(observation.launch_error)}")
+    return "\n".join(lines)
+
+
 def render_background_runtime_status(status) -> str:
     """Render durable Child worker and queue observations without claiming execution."""
     worker = status.worker
@@ -3110,6 +3130,24 @@ def render_task_info(info: TaskInfoView) -> str:
                 f"Stage started: {latest.started_at}",
             )
         )
+        target = getattr(getattr(latest, "delegation_target", None), "value", None)
+        if target is not None:
+            lines.append(f"Delegation target: {target}")
+        for label, attribute in (
+            ("Child Run ID", "child_run_id"),
+            ("Team ID", "team_id"),
+            ("Assignment ID", "assignment_id"),
+            ("Schedule Run ID", "schedule_run_id"),
+        ):
+            value = getattr(latest, attribute, None)
+            if value is not None:
+                lines.append(f"{label}: {value}")
+        assignment_ids = getattr(latest, "assignment_ids", ())
+        if assignment_ids:
+            lines.append("Assignment IDs: " + ", ".join(assignment_ids))
+        evidence = getattr(latest, "external_evidence_sha256", None)
+        if evidence is not None:
+            lines.append(f"External evidence SHA-256: {evidence} (untrusted Child/Team evidence)")
         if latest.turn_number is not None:
             lines.append(
                 f"Turn evidence: Session turn #{latest.turn_number}, "
@@ -3251,6 +3289,24 @@ def render_task_timeline(info: TaskInfoView) -> str:
         elif stage.failure_reason is not None:
             line += f" -> {stage.failure_reason.value}"
         lines.append(line)
+        target = getattr(getattr(stage, "delegation_target", None), "value", None)
+        if target is not None:
+            lines.append(f"  Delegation target: {target}")
+        for label, attribute in (
+            ("Child Run ID", "child_run_id"),
+            ("Team ID", "team_id"),
+            ("Assignment ID", "assignment_id"),
+            ("Schedule Run ID", "schedule_run_id"),
+        ):
+            value = getattr(stage, attribute, None)
+            if value is not None:
+                lines.append(f"  {label}: {value}")
+        assignment_ids = getattr(stage, "assignment_ids", ())
+        if assignment_ids:
+            lines.append("  Assignment IDs: " + ", ".join(assignment_ids))
+        evidence = getattr(stage, "external_evidence_sha256", None)
+        if evidence is not None:
+            lines.append(f"  External evidence SHA-256: {evidence} (untrusted Child/Team evidence)")
         usage = getattr(stage, "usage", None)
         if usage is not None:
             lines.append(

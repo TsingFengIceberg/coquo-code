@@ -7,6 +7,7 @@ from pathlib import Path
 from coquo.cli.main import main
 from coquo.cli.slash import dispatch_slash
 from coquo.child_run_store import ChildRunStore
+from coquo.session import ProjectSession
 from coquo.session_records import BindingSnapshot
 from coquo.session_store import SessionStore
 
@@ -129,6 +130,42 @@ def test_standalone_child_background_status_is_observable_without_provider(tmp_p
     status, output, errors = invoke(tmp_path, ["child", "worker", "--recover-only"])
     assert status == 0 and errors == ""
     assert '"outcome": "recovered"' in output
+
+
+def test_standalone_child_background_lifecycle_is_observable_end_to_end(tmp_path: Path) -> None:
+    status, _, errors = invoke(tmp_path, ["prompt", "seed parent session"])
+    assert status == 0 and errors == ""
+    parent_session_id = SessionStore(tmp_path).inspect("latest").session_id
+
+    status, output, errors = invoke(
+        tmp_path,
+        ["child", "create", "Run one background inspection", "--parent-session", parent_session_id],
+    )
+    assert status == 0 and errors == ""
+    child_id = next(
+        line.split(":", 1)[1].strip()
+        for line in output.splitlines()
+        if line.startswith("Child Run ID:")
+    )
+
+    status, _, errors = invoke(tmp_path, ["child", "prepare", child_id])
+    assert status == 0 and errors == ""
+    status, output, errors = invoke(tmp_path, ["child", "start", child_id, "--worker-count", "2"])
+    assert status == 0 and errors == ""
+    submission = json.loads(output.split(": ", 1)[1])
+    assert submission["child_run_id"] == child_id
+    assert submission["submission_id"]
+    assert submission["queue_state"] == "queued"
+    assert submission["worker_started"] is True
+
+    status, output, errors = invoke(tmp_path, ["child", "wait", child_id, "--timeout", "15"])
+    assert status == 0 and errors == ""
+    assert "Status: completed" in output
+
+    status, output, errors = invoke(tmp_path, ["child", "status"])
+    assert status == 0 and errors == ""
+    assert submission["submission_id"] in output
+    assert "terminal=completed" in output
 
 
 def test_standalone_and_slash_child_handoff(tmp_path: Path) -> None:
@@ -258,3 +295,19 @@ def test_slash_child_start_queues_prepared_run(tmp_path: Path) -> None:
     result = dispatch_slash(f"/child start {info.child_run_id}", session)
     assert result.handled and result.kind == "success"
     session.supervisor.close()
+
+
+def test_repl_child_start_reports_durable_submission_identity(tmp_path: Path) -> None:
+    session = ProjectSession.open(tmp_path, environment={})
+    try:
+        info = session.create_child_run("Inspect through the REPL worker")
+        prepared = session.prepare_child_run(info.child_run_id)
+        result = dispatch_slash(f"/child start {prepared.child_run_id}", session)
+        assert result.handled and result.kind == "success"
+        assert "Background backend: durable-background-worker" in result.message
+        assert "Submission ID:" in result.message
+        assert "Queue state: queued" in result.message
+        completed = session.wait_child_run(prepared.child_run_id, 15)
+        assert completed.status.value == "completed"
+    finally:
+        session.close()

@@ -88,6 +88,7 @@ from coquo.cli.presentation import (
     render_task_next_action,
     render_task_summary,
     render_child_run_info,
+    render_child_start_observation,
     render_child_run_summary,
     render_child_handoff,
     render_background_runtime_status,
@@ -2130,6 +2131,13 @@ def _child_start(command: str, session: ReplSession) -> SlashResult:
     parts = command.split()
     if len(parts) != 3:
         return _usage("Usage: /child start <child-run-id>")
+    observe_start = getattr(session, "start_child_run_observation", None)
+    if callable(observe_start):
+        return _call(
+            lambda: render_child_start_observation(observe_start(parts[2])),
+            kind="success",
+            failure_prefix="Child Run start failed",
+        )
     start = getattr(session, "start_child_run", None)
     if not callable(start):
         return _command_error(

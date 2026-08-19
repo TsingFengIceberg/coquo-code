@@ -7,9 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from coquo.child_run_store import ChildRunStore
+from coquo.child_run_records import ChildRunStatus
 from coquo.child_runtime import build_child_runtime_spec_from_binding
 from coquo.core.contracts import AssistantText, ToolTurnLedger, UserMessage
+from coquo.core.permissions import ApprovalMode
 from coquo.session_records import BindingSnapshot
+from coquo.session import ProjectSession
 from coquo.session_store import SessionStore
 from coquo.task_bridge import (
     TaskBridgeError,
@@ -228,3 +231,69 @@ def test_team_schedule_resume_requires_exact_nonterminal_identity(tmp_path: Path
 
     with pytest.raises(TeamScheduleError, match="already terminal"):
         service.resume(team.team_id, run.schedule_run_id)
+
+
+def test_task_child_bridge_runs_real_child_and_commits_handoff(tmp_path: Path) -> None:
+    session = ProjectSession.open(tmp_path, environment={}, approval_mode=ApprovalMode.AUTO)
+    try:
+        task = TaskStore(tmp_path).create(
+            "Run a real Child stage", owner_session=session.session_id
+        )
+        bridge = TaskOrchestrationService(tmp_path)
+        admitted = bridge.start_child_stage(task.task_id, "Inspect through the Child runtime")
+
+        committed = bridge.run_child_stage(
+            task.task_id,
+            admitted.child.child_run_id,
+            session,
+            background=False,
+        )
+        assert committed.outcome == TaskBridgeOutcome.COMMITTED
+        assert committed.child.status is ChildRunStatus.COMPLETED
+        assert len(committed.handoffs) == 1
+        assert committed.stage.external_evidence_sha256 == committed.handoffs[0].handoff_sha256
+
+        repeated = bridge.observe_child_stage(task.task_id, admitted.child.child_run_id)
+        assert repeated.outcome == TaskBridgeOutcome.COMMITTED
+        assert repeated.task.record_count == committed.task.record_count
+    finally:
+        session.close()
+
+
+def test_task_team_assignment_bridge_runs_real_team_child_and_commits_handoff(
+    tmp_path: Path,
+) -> None:
+    session = ProjectSession.open(tmp_path, environment={}, approval_mode=ApprovalMode.AUTO)
+    try:
+        team = session.create_team("Bridge E2E Team")
+        member = session.add_team_member(team.team_id, "Inspector")
+        task = TaskStore(tmp_path).create(
+            "Run a real Team assignment stage", owner_session=session.session_id
+        )
+        bridge = TaskOrchestrationService(tmp_path)
+        admitted = bridge.start_team_assignment_stage(
+            task.task_id,
+            team.team_id,
+            member.member_id,
+            objective="Inspect through the Team Child runtime",
+        )
+        assignment_id = admitted.assignment.assignment.assignment_id
+
+        committed = bridge.run_team_assignment_stage(
+            task.task_id,
+            assignment_id,
+            session,
+            background=False,
+        )
+        assert committed.outcome == TaskBridgeOutcome.COMMITTED
+        assert committed.assignment.assignment.phase.value == "terminal_observed"
+        assert committed.assignment.child is not None
+        assert committed.assignment.child.status is ChildRunStatus.COMPLETED
+        assert len(committed.handoffs) == 1
+        assert committed.stage.external_evidence_sha256 == committed.handoffs[0].handoff_sha256
+
+        repeated = bridge.observe_team_assignment_stage(task.task_id, assignment_id)
+        assert repeated.outcome == TaskBridgeOutcome.COMMITTED
+        assert repeated.task.record_count == committed.task.record_count
+    finally:
+        session.close()
