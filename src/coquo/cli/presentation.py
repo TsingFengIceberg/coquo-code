@@ -60,7 +60,7 @@ from coquo.session import (
     TurnUsageCompleted,
 )
 from coquo.task_runtime import TaskNextAction, TaskRunStopped
-from coquo.workflow_orchestration import WorkflowState
+from coquo.workflow_orchestration import WorkflowPhase, WorkflowState
 from coquo.session_records import ActionAuditState, SessionTitleFallbackReason
 from coquo.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from coquo.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
@@ -1631,6 +1631,30 @@ def render_workflow_state(state: WorkflowState) -> str:
             f"  {item.role.value}: source={item.source_id}, status={item.status}, "
             f"summary={_safe_inline(item.summary)}"
         )
+    if state.integration is None:
+        lines.append("Integration: not prepared; Host acceptance may still be required")
+    else:
+        integration = state.integration
+        lines.extend(
+            (
+                f"Integration: status={integration.status}, result={integration.result_code}, "
+                f"host_accepted={str(integration.host_accepted).lower()}",
+                f"  Team={integration.team_id}; Assignment={integration.assignment_id}; "
+                f"Worktree={integration.worktree_id}",
+                f"  Patch: {integration.patch_sha256 or 'none'}; Manifest: "
+                f"{integration.manifest_sha256 or 'none'}",
+                f"  Target: {integration.target_ref or 'none'}@{integration.target_head or 'none'}; "
+                f"changed paths={integration.changed_paths}",
+                f"  Permission: {integration.permission_decision} "
+                f"({integration.permission_reason})",
+            )
+        )
+        if integration.diagnostic:
+            lines.append(f"  Integration diagnostic: {_safe_inline(integration.diagnostic)}")
+    if state.phase is WorkflowPhase.RECOVERY_REQUIRED:
+        lines.append("Recovery: required; Host must re-observe the exact external identity")
+    elif state.phase is WorkflowPhase.INTEGRATION:
+        lines.append("Host acceptance: required before workflow completion")
     return "\n".join(lines)
 
 

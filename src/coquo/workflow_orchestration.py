@@ -9,7 +9,7 @@ integration, commit, push, or workspace mutation on its own.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import json
@@ -18,9 +18,24 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
+from coquo.core.permissions import (
+    ApprovalMode,
+    PermissionAction,
+    PermissionDecision,
+    PermissionGate,
+    PermissionMode,
+    PermissionRequest,
+)
 from coquo.task_bridge import TaskBridgeError, TaskBridgeResult, TaskOrchestrationService
 from coquo.task_records import StageExecutionTarget
 from coquo.task_store import TaskStore, TaskStoreError
+from coquo.worktree_integration import (
+    IntegrationPreflight,
+    IntegrationResult,
+    WorktreeIntegrationError,
+    WorktreeIntegrationService,
+)
+from coquo.worktree_records import WorktreeState
 
 
 class WorkflowError(RuntimeError):
@@ -209,6 +224,67 @@ class WorkflowStage:
 
 
 @dataclass(frozen=True)
+class WorkflowIntegration:
+    """Durable Host projection of one exact worktree integration decision.
+
+    The worktree ledger remains authoritative for Git facts.  This projection
+    records only the identity and result needed to prevent an unreviewed or
+    ambiguous integration from being accepted after a reload.
+    """
+
+    team_id: str
+    assignment_id: str
+    worktree_id: str
+    patch_sha256: str | None
+    manifest_sha256: str | None
+    precondition_sha256: str | None
+    target_ref: str | None
+    target_head: str | None
+    base_commit: str | None
+    changed_paths: int
+    status: str
+    result_code: str
+    diagnostic: str
+    permission_decision: str
+    permission_reason: str
+    host_accepted: bool = False
+    recorded_at: str = ""
+    host_accepted_at: str | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.team_id, "integration Team ID", max_chars=256)
+        _text(self.assignment_id, "integration assignment ID", max_chars=256)
+        _text(self.worktree_id, "integration worktree ID", max_chars=256)
+        for value, label in (
+            (self.patch_sha256, "integration patch digest"),
+            (self.manifest_sha256, "integration manifest digest"),
+            (self.precondition_sha256, "integration precondition digest"),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+            ):
+                raise WorkflowError(f"{label} is invalid")
+        for value, label in (
+            (self.target_ref, "integration target ref"),
+            (self.target_head, "integration target head"),
+            (self.base_commit, "integration base commit"),
+        ):
+            if value is not None:
+                _text(value, label, max_chars=256)
+        if type(self.changed_paths) is not int or self.changed_paths < 0:
+            raise WorkflowError("integration changed path count is invalid")
+        _text(self.status, "integration status", max_chars=64)
+        _text(self.result_code, "integration result code", max_chars=128)
+        _text(self.diagnostic, "integration diagnostic", max_chars=4096)
+        _text(self.permission_decision, "integration permission decision", max_chars=32)
+        _text(self.permission_reason, "integration permission reason", max_chars=128)
+        if type(self.host_accepted) is not bool:
+            raise WorkflowError("integration host acceptance is invalid")
+
+
+@dataclass(frozen=True)
 class WorkflowState:
     workflow_id: str
     task_id: str
@@ -219,6 +295,7 @@ class WorkflowState:
     created_at: str = ""
     updated_at: str = ""
     stages: tuple[WorkflowStage, ...] = ()
+    integration: WorkflowIntegration | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -234,6 +311,8 @@ class WorkflowState:
             raise WorkflowError("workflow evidence is invalid")
         if any(type(item) is not WorkflowStage for item in self.stages):
             raise WorkflowError("workflow stages are invalid")
+        if self.integration is not None and type(self.integration) is not WorkflowIntegration:
+            raise WorkflowError("workflow integration projection is invalid")
 
 
 class WorkflowOrchestrator:
@@ -245,12 +324,15 @@ class WorkflowOrchestrator:
         *,
         task_store: TaskStore | None = None,
         bridge_service: TaskOrchestrationService | None = None,
+        integration_service: WorktreeIntegrationService | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve(strict=True)
         self.tasks = task_store or TaskStore(self.workspace)
         self.bridge = bridge_service or TaskOrchestrationService(
             self.workspace, task_store=self.tasks
         )
+        self.integrations = integration_service or WorktreeIntegrationService(self.workspace)
+        self.permissions = PermissionGate()
         self.root = self.workspace / ".coquo" / "workflows"
         self._states: dict[str, WorkflowState] = {}
 
@@ -675,15 +757,213 @@ class WorkflowOrchestrator:
         }[verdict]
         return self._replace(state, phase=target, evidence=state.evidence + (evidence,))
 
+    # ------------------------------------------------------------------
+    # Host-owned Reviewer -> Integrator boundary
+    # ------------------------------------------------------------------
+    def prepare_integration(
+        self,
+        workflow_id: str,
+        *,
+        expected_patch_sha256: str | None = None,
+        permission_mode: PermissionMode | str = PermissionMode.WORKSPACE_WRITE,
+        approval_mode: ApprovalMode | str = ApprovalMode.AUTO,
+    ) -> IntegrationPreflight | None:
+        """Run one non-mutating, exact integration preflight.
+
+        A read-only Child executor has no worktree to integrate; in that case
+        the workflow records an explicit ``not-required`` projection.  A
+        writable Team assignment must provide its sealed patch digest and pass
+        all worktree/authority checks before the Host may call :meth:`integrate`.
+        """
+        state = self._phase(workflow_id, WorkflowPhase.INTEGRATION)
+        self._require_passed_review(state)
+        stage = self._require_stage(state, WorkflowRole.EXECUTOR)
+        if stage.target is not StageExecutionTarget.TEAM_ASSIGNMENT:
+            projection = self._not_required_integration(stage)
+            self._replace(state, integration=projection)
+            return None
+        if stage.team_id is None or stage.assignment_id is None:
+            raise WorkflowError("Executor Team assignment identity is incomplete")
+        try:
+            assignment = self.bridge.team_assignments.inspect(stage.team_id, stage.assignment_id)
+        except Exception as error:
+            raise WorkflowError(f"integration assignment inspection failed: {error}") from None
+        worktree_id = assignment.assignment.worktree_id
+        if worktree_id is None:
+            projection = self._not_required_integration(stage)
+            self._replace(state, integration=projection)
+            return None
+        if expected_patch_sha256 is None:
+            raise WorkflowError("writable integration requires the sealed patch digest")
+        self._check_integration_permission(permission_mode, approval_mode)
+        try:
+            prepared = self.integrations.prepare(
+                stage.team_id, stage.assignment_id, expected_patch_sha256
+            )
+        except (WorktreeIntegrationError, ValueError) as error:
+            projection = WorkflowIntegration(
+                team_id=stage.team_id,
+                assignment_id=stage.assignment_id,
+                worktree_id=worktree_id,
+                patch_sha256=expected_patch_sha256,
+                manifest_sha256=None,
+                precondition_sha256=None,
+                target_ref=None,
+                target_head=None,
+                base_commit=None,
+                changed_paths=0,
+                status="preflight-failed",
+                result_code="integration_preflight_failed",
+                diagnostic=str(error),
+                permission_decision=PermissionDecision.ALLOW.value,
+                permission_reason="explicit_host_integration_preflight",
+                recorded_at=_now(),
+            )
+            self._replace(state, integration=projection)
+            raise WorkflowError(f"integration preflight failed: {error}") from None
+        projection = self._projection_from_preflight(
+            prepared,
+            status="preflighted",
+            result_code="integration_preflight_ok",
+            diagnostic="Host integration preflight passed; no workspace mutation occurred",
+            permission_mode=permission_mode,
+            approval_mode=approval_mode,
+        )
+        self._replace(state, integration=projection)
+        return prepared
+
+    def integrate(
+        self,
+        workflow_id: str,
+        *,
+        action_digest: str,
+        permission_mode: PermissionMode | str = PermissionMode.WORKSPACE_WRITE,
+        approval_mode: ApprovalMode | str = ApprovalMode.AUTO,
+    ) -> IntegrationResult | None:
+        """Apply one prepared sealed patch, never commit/push/retry it."""
+        state = self._phase(workflow_id, WorkflowPhase.INTEGRATION)
+        self._require_passed_review(state)
+        projection = state.integration
+        if projection is None:
+            raise WorkflowError("integration requires an explicit preflight")
+        if projection.status == "not-required":
+            raise WorkflowError("integration is not required for this workflow stage")
+        if projection.status != "preflighted":
+            raise WorkflowError("integration preflight is not ready")
+        if (
+            not isinstance(action_digest, str)
+            or len(action_digest) != 64
+            or any(char not in "0123456789abcdef" for char in action_digest)
+        ):
+            raise WorkflowError("integration action digest is invalid")
+        self._check_integration_permission(permission_mode, approval_mode)
+        prepared = IntegrationPreflight(
+            team_id=projection.team_id,
+            assignment_id=projection.assignment_id,
+            worktree_id=projection.worktree_id,
+            patch_sha256=projection.patch_sha256 or "",
+            manifest_sha256=projection.manifest_sha256 or "",
+            target_ref=projection.target_ref or "",
+            target_head=projection.target_head or "",
+            base_commit=projection.base_commit or "",
+            changed_paths=projection.changed_paths,
+            patch_bytes=0,
+            precondition_sha256=projection.precondition_sha256 or "",
+        )
+        try:
+            result = self.integrations.integrate(prepared, action_digest=action_digest)
+        except (WorktreeIntegrationError, ValueError) as error:
+            unknown = self._integration_is_unknown(projection.worktree_id)
+            updated = replace(
+                projection,
+                status="recovery-required" if unknown else "failed",
+                result_code="integration_unknown" if unknown else "integration_failed",
+                diagnostic=str(error),
+                recorded_at=_now(),
+            )
+            self._replace(
+                state,
+                integration=updated,
+                phase=WorkflowPhase.RECOVERY_REQUIRED if unknown else WorkflowPhase.INTEGRATION,
+            )
+            raise WorkflowError(
+                "integration outcome is unknown; recovery is required"
+                if unknown
+                else f"integration failed: {error}"
+            ) from None
+        updated = replace(
+            projection,
+            status=result.status,
+            result_code=result.result_code,
+            diagnostic=result.message,
+            target_head=result.target_head,
+            host_accepted=False,
+            recorded_at=_now(),
+        )
+        self._replace(state, integration=updated)
+        return result
+
+    def recover_integration(self, workflow_id: str) -> WorkflowIntegration:
+        """Re-observe one exact worktree; never applies a second patch."""
+        state = self.inspect(workflow_id)
+        projection = state.integration
+        if projection is None:
+            raise WorkflowError("workflow has no integration projection")
+        try:
+            info = self.integrations.worktrees.store.inspect(projection.worktree_id)
+        except Exception as error:
+            raise WorkflowError(f"integration recovery inspection failed: {error}") from None
+        state_value = info.state
+        if state_value is WorktreeState.APPLIED:
+            status, code, phase = "applied", "applied", WorkflowPhase.INTEGRATION
+        elif state_value is WorktreeState.INTEGRATION_UNKNOWN:
+            status, code, phase = (
+                "recovery-required",
+                "integration_unknown",
+                WorkflowPhase.RECOVERY_REQUIRED,
+            )
+        elif state_value is WorktreeState.INTEGRATION_FAILED:
+            status, code, phase = "failed", "integration_failed", WorkflowPhase.INTEGRATION
+        else:
+            status, code, phase = (
+                "recovery-required",
+                "integration_state_unresolved",
+                WorkflowPhase.RECOVERY_REQUIRED,
+            )
+        updated = replace(
+            projection,
+            status=status,
+            result_code=code,
+            diagnostic=f"Host re-observed worktree state: {state_value.value}",
+            recorded_at=_now(),
+        )
+        self._replace(state, integration=updated, phase=phase)
+        return updated
+
     def accept(
         self, workflow_id: str, *, summary: str = "Host accepted reviewed workflow"
     ) -> WorkflowState:
         state = self._phase(workflow_id, WorkflowPhase.INTEGRATION)
+        self._require_passed_review(state)
+        if self._requires_integration(state):
+            if state.integration is None:
+                raise WorkflowError("Host acceptance requires an explicit integration preflight")
+            if state.integration.status != "applied":
+                raise WorkflowError(
+                    "Host acceptance requires applied integration evidence; "
+                    f"got {state.integration.status}"
+                )
         evidence = WorkflowEvidence(
             WorkflowRole.INTEGRATOR, "host", "accepted", summary, recorded_at=_now()
         )
+        integration = state.integration
+        if integration is not None:
+            integration = replace(integration, host_accepted=True, host_accepted_at=_now())
         return self._replace(
-            state, phase=WorkflowPhase.COMPLETED, evidence=state.evidence + (evidence,)
+            state,
+            phase=WorkflowPhase.COMPLETED,
+            integration=integration,
+            evidence=state.evidence + (evidence,),
         )
 
     def rework(self, workflow_id: str, *, summary: str) -> WorkflowState:
@@ -710,6 +990,119 @@ class WorkflowOrchestrator:
             state, phase=WorkflowPhase.BLOCKED, evidence=state.evidence + (evidence,)
         )
 
+    def _require_passed_review(self, state: WorkflowState) -> None:
+        review = next(
+            (item for item in reversed(state.evidence) if item.role is WorkflowRole.REVIEWER),
+            None,
+        )
+        if review is None or review.status != WorkflowVerdict.PASSED.value:
+            raise WorkflowError("Host integration requires a passed Reviewer evidence")
+
+    def _requires_integration(self, state: WorkflowState) -> bool:
+        stage = self._latest_stage(state, WorkflowRole.EXECUTOR)
+        if stage is None or stage.target is not StageExecutionTarget.TEAM_ASSIGNMENT:
+            return False
+        if stage.team_id is None or stage.assignment_id is None:
+            raise WorkflowError("Executor Team assignment identity is incomplete")
+        try:
+            assignment = self.bridge.team_assignments.inspect(stage.team_id, stage.assignment_id)
+        except Exception as error:
+            raise WorkflowError(f"integration assignment inspection failed: {error}") from None
+        return assignment.assignment.worktree_id is not None
+
+    def _not_required_integration(self, stage: WorkflowStage) -> WorkflowIntegration:
+        return WorkflowIntegration(
+            team_id=stage.team_id or "not-applicable",
+            assignment_id=stage.assignment_id or "not-applicable",
+            worktree_id="not-applicable",
+            patch_sha256=None,
+            manifest_sha256=None,
+            precondition_sha256=None,
+            target_ref=None,
+            target_head=None,
+            base_commit=None,
+            changed_paths=0,
+            status="not-required",
+            result_code="no-writable-worktree",
+            diagnostic="Executor result has no writable Team worktree; Host acceptance remains explicit",
+            permission_decision=PermissionDecision.ALLOW.value,
+            permission_reason="integration_not_required",
+            recorded_at=_now(),
+        )
+
+    def _check_integration_permission(
+        self,
+        permission_mode: PermissionMode | str,
+        approval_mode: ApprovalMode | str,
+    ) -> None:
+        try:
+            mode = (
+                permission_mode
+                if type(permission_mode) is PermissionMode
+                else PermissionMode(permission_mode)
+            )
+            approval = (
+                approval_mode
+                if type(approval_mode) is ApprovalMode
+                else ApprovalMode(approval_mode)
+            )
+        except ValueError:
+            raise WorkflowError("integration permission or approval mode is invalid") from None
+        result = self.permissions.evaluate(
+            PermissionRequest(mode, approval, PermissionAction.WORKSPACE_OVERWRITE)
+        )
+        if result.decision is PermissionDecision.DENY:
+            raise WorkflowError(f"integration permission denied: {result.reason.value}")
+        if result.decision is PermissionDecision.ASK:
+            raise WorkflowError(f"integration approval required: {result.reason.value}")
+
+    def _projection_from_preflight(
+        self,
+        prepared: IntegrationPreflight,
+        *,
+        status: str,
+        result_code: str,
+        diagnostic: str,
+        permission_mode: PermissionMode | str,
+        approval_mode: ApprovalMode | str,
+    ) -> WorkflowIntegration:
+        mode = (
+            permission_mode
+            if type(permission_mode) is PermissionMode
+            else PermissionMode(permission_mode)
+        )
+        approval = (
+            approval_mode if type(approval_mode) is ApprovalMode else ApprovalMode(approval_mode)
+        )
+        permission = self.permissions.evaluate(
+            PermissionRequest(mode, approval, PermissionAction.WORKSPACE_OVERWRITE)
+        )
+        return WorkflowIntegration(
+            team_id=prepared.team_id,
+            assignment_id=prepared.assignment_id,
+            worktree_id=prepared.worktree_id,
+            patch_sha256=prepared.patch_sha256,
+            manifest_sha256=prepared.manifest_sha256,
+            precondition_sha256=prepared.precondition_sha256,
+            target_ref=prepared.target_ref,
+            target_head=prepared.target_head,
+            base_commit=prepared.base_commit,
+            changed_paths=prepared.changed_paths,
+            status=status,
+            result_code=result_code,
+            diagnostic=diagnostic,
+            permission_decision=permission.decision.value,
+            permission_reason=permission.reason.value,
+            recorded_at=_now(),
+        )
+
+    def _integration_is_unknown(self, worktree_id: str) -> bool:
+        try:
+            state = self.integrations.worktrees.store.inspect(worktree_id).state
+        except Exception:
+            return True
+        return state is WorktreeState.INTEGRATION_UNKNOWN
+
     def _phase(self, workflow_id: str, expected: WorkflowPhase) -> WorkflowState:
         state = self.inspect(workflow_id)
         if state.phase is not expected:
@@ -735,6 +1128,7 @@ class WorkflowOrchestrator:
             created_at=state.created_at,
             updated_at=_now(),
             stages=changes.get("stages", state.stages),
+            integration=changes.get("integration", state.integration),
         )
         self._save(next_state)
         return next_state
@@ -809,6 +1203,30 @@ class WorkflowOrchestrator:
                 }
                 for item in state.stages
             ],
+            "integration": (
+                None
+                if state.integration is None
+                else {
+                    "team_id": state.integration.team_id,
+                    "assignment_id": state.integration.assignment_id,
+                    "worktree_id": state.integration.worktree_id,
+                    "patch_sha256": state.integration.patch_sha256,
+                    "manifest_sha256": state.integration.manifest_sha256,
+                    "precondition_sha256": state.integration.precondition_sha256,
+                    "target_ref": state.integration.target_ref,
+                    "target_head": state.integration.target_head,
+                    "base_commit": state.integration.base_commit,
+                    "changed_paths": state.integration.changed_paths,
+                    "status": state.integration.status,
+                    "result_code": state.integration.result_code,
+                    "diagnostic": state.integration.diagnostic,
+                    "permission_decision": state.integration.permission_decision,
+                    "permission_reason": state.integration.permission_reason,
+                    "host_accepted": state.integration.host_accepted,
+                    "recorded_at": state.integration.recorded_at,
+                    "host_accepted_at": state.integration.host_accepted_at,
+                }
+            ),
             "revision": state.revision,
             "created_at": state.created_at,
             "updated_at": state.updated_at,
@@ -875,6 +1293,34 @@ class WorkflowOrchestrator:
                     )
                     for item in value.get("stages", ())
                 ),
+                integration=(
+                    None
+                    if value.get("integration") is None
+                    else WorkflowIntegration(
+                        team_id=value["integration"]["team_id"],
+                        assignment_id=value["integration"]["assignment_id"],
+                        worktree_id=value["integration"]["worktree_id"],
+                        patch_sha256=value["integration"].get("patch_sha256"),
+                        manifest_sha256=value["integration"].get("manifest_sha256"),
+                        precondition_sha256=value["integration"].get("precondition_sha256"),
+                        target_ref=value["integration"].get("target_ref"),
+                        target_head=value["integration"].get("target_head"),
+                        base_commit=value["integration"].get("base_commit"),
+                        changed_paths=value["integration"]["changed_paths"],
+                        status=value["integration"]["status"],
+                        result_code=value["integration"]["result_code"],
+                        diagnostic=value["integration"]["diagnostic"],
+                        permission_decision=value["integration"].get(
+                            "permission_decision", PermissionDecision.ALLOW.value
+                        ),
+                        permission_reason=value["integration"].get(
+                            "permission_reason", "legacy_workflow_projection"
+                        ),
+                        host_accepted=value["integration"].get("host_accepted", False),
+                        recorded_at=value["integration"].get("recorded_at", ""),
+                        host_accepted_at=value["integration"].get("host_accepted_at"),
+                    )
+                ),
             )
         except (AssertionError, KeyError, TypeError, ValueError, WorkflowError) as error:
             if isinstance(error, WorkflowError):
@@ -890,6 +1336,7 @@ __all__ = [
     "WorkflowPacket",
     "WorkflowEvidence",
     "WorkflowStage",
+    "WorkflowIntegration",
     "WorkflowState",
     "WorkflowOrchestrator",
 ]

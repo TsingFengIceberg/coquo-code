@@ -1466,7 +1466,7 @@ authoritative. Explorer uses the workflow root Task, while Executor receives a
 separately derived stage Task so unknown external usage remains fail-closed and
 the binding is visible as `Stage Task` in the CLI. Admission, execution,
 observation, and recovery are explicit Host operations. The provider-free
-`workflow start|show|advance|explore-start|execute-start|recover` commands show
+`workflow start|show|advance|explore-start|execute-start|recover|review|integrate-preflight|integrate|accept|rework|recover-integration` commands show
 the external IDs and `evidence: untrusted`, and reject provider/profile
 selection. Recovery only re-observes the recorded identity: cancellation,
 missing handoff, unknown process outcome, lease conflict, or uncertain

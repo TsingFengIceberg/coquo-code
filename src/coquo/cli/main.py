@@ -172,6 +172,7 @@ from coquo.workflow_orchestration import (
     WorkflowError,
     WorkflowOrchestrator,
     WorkflowRole,
+    WorkflowVerdict,
 )
 from coquo.session import SessionResumeConflictError, SessionResumeContextError
 from coquo.session_store import (
@@ -1155,6 +1156,41 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[WorkflowRole.EXPLORER.value, WorkflowRole.EXECUTOR.value],
         required=True,
     )
+    workflow_review = workflow_commands.add_parser(
+        "review", help="record one explicit untrusted Reviewer verdict"
+    )
+    workflow_review.add_argument("workflow_id")
+    workflow_review.add_argument("--source-id", required=True)
+    workflow_review.add_argument(
+        "--verdict", choices=[item.value for item in WorkflowVerdict], required=True
+    )
+    workflow_review.add_argument("--summary", type=nonblank_prompt, required=True)
+    workflow_preflight = workflow_commands.add_parser(
+        "integrate-preflight", help="run Host-owned non-mutating integration checks"
+    )
+    workflow_preflight.add_argument("workflow_id")
+    workflow_preflight.add_argument("--patch-sha256")
+    workflow_integrate = workflow_commands.add_parser(
+        "integrate", help="apply one prepared patch without commit, push, or retry"
+    )
+    workflow_integrate.add_argument("workflow_id")
+    workflow_integrate.add_argument("--action-digest", required=True)
+    workflow_accept = workflow_commands.add_parser(
+        "accept", help="explicitly accept a reviewed and integrated workflow"
+    )
+    workflow_accept.add_argument("workflow_id")
+    workflow_accept.add_argument(
+        "--summary", type=nonblank_prompt, default="Host accepted reviewed workflow"
+    )
+    workflow_rework = workflow_commands.add_parser(
+        "rework", help="send a rejected workflow back to execution"
+    )
+    workflow_rework.add_argument("workflow_id")
+    workflow_rework.add_argument("--summary", type=nonblank_prompt, required=True)
+    workflow_recover_integration = workflow_commands.add_parser(
+        "recover-integration", help="re-observe exact integration state without retry"
+    )
+    workflow_recover_integration.add_argument("workflow_id")
     return parser
 
 
@@ -2667,6 +2703,55 @@ def handle_workflow_command(arguments: argparse.Namespace, workspace: Path, stdo
         stdout.write(
             f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
             f"Recovery observation: {result.outcome}; handoff count: {len(result.handoffs)}\n"
+        )
+        return 0
+    if arguments.workflow_command == "review":
+        state = orchestrator.record_review(
+            arguments.workflow_id,
+            source_id=arguments.source_id,
+            verdict=WorkflowVerdict(arguments.verdict),
+            summary=arguments.summary,
+        )
+        stdout.write(f"{render_workflow_state(state)}\n")
+        return 0
+    if arguments.workflow_command == "integrate-preflight":
+        prepared = orchestrator.prepare_integration(
+            arguments.workflow_id,
+            expected_patch_sha256=arguments.patch_sha256,
+        )
+        state = orchestrator.inspect(arguments.workflow_id)
+        if prepared is None:
+            stdout.write(f"{render_workflow_state(state)}\nPreflight: not required\n")
+        else:
+            stdout.write(
+                f"{render_workflow_state(state)}\n"
+                f"Preflight: ready; worktree={prepared.worktree_id}; "
+                f"patch={prepared.patch_sha256}; target={prepared.target_ref}@{prepared.target_head}\n"
+            )
+        return 0
+    if arguments.workflow_command == "integrate":
+        result = orchestrator.integrate(
+            arguments.workflow_id,
+            action_digest=arguments.action_digest,
+        )
+        stdout.write(
+            f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
+            f"Integration: {result.status if result is not None else 'not-required'}\n"
+        )
+        return 0
+    if arguments.workflow_command == "accept":
+        state = orchestrator.accept(arguments.workflow_id, summary=arguments.summary)
+        stdout.write(f"{render_workflow_state(state)}\n")
+        return 0
+    if arguments.workflow_command == "rework":
+        state = orchestrator.rework(arguments.workflow_id, summary=arguments.summary)
+        stdout.write(f"{render_workflow_state(state)}\n")
+        return 0
+    if arguments.workflow_command == "recover-integration":
+        projection = orchestrator.recover_integration(arguments.workflow_id)
+        stdout.write(
+            f"{render_workflow_state(orchestrator.inspect(arguments.workflow_id))}\n"
+            f"Integration recovery: {projection.status}; result={projection.result_code}\n"
         )
         return 0
     raise WorkflowError(f"unknown workflow command: {arguments.workflow_command}")

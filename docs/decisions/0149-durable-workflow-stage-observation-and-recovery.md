@@ -29,7 +29,8 @@ re-observes the recorded identity. Recovery never retries, creates a
 replacement, cleans an orphan, merges files, commits, or pushes.
 
 The CLI exposes provider-independent `workflow start`, `show`, `advance`,
-`explore-start`, `execute-start`, and `recover` controls. Output includes the
+`explore-start`, `execute-start`, `recover`, `review`, `integrate-preflight`,
+`integrate`, `accept`, `rework`, and `recover-integration` controls. Output includes the
 workflow phase, stage Task ID, external IDs, handoff state, and an explicit
 `evidence: untrusted` marker. Provider/profile selection is rejected for these
 control-plane commands.
