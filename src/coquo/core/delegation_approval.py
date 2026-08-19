@@ -11,6 +11,8 @@ from coquo.core.permissions import ApprovalMode
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _CONTEXT_ID = re.compile(r"ctx-v[1-9][0-9]*-[0-9a-f]{64}\Z")
+MAX_DELEGATION_DEPTH = 2
+READ_ONLY_RECURSIVE_CAPABILITY = "read-only-explorer-v1"
 
 
 def _digest(label: bytes, payload: object) -> str:
@@ -34,6 +36,9 @@ class DelegationApprovalIdentity:
     deadline_seconds: int
     depth: int
     approval_mode: ApprovalMode
+    parent_child_run_id: str | None = None
+    root_child_run_id: str | None = None
+    capability: str = READ_ONLY_RECURSIVE_CAPABILITY
 
     def __post_init__(self) -> None:
         from coquo.session_records import canonical_session_id
@@ -57,15 +62,31 @@ class DelegationApprovalIdentity:
         )
         if any(type(value) is not int or value < 1 for value in limits):
             raise ValueError("delegation budgets are invalid")
-        if self.depth != 1:
-            raise ValueError("delegation depth must be one")
+        if type(self.depth) is not int or not 1 <= self.depth <= MAX_DELEGATION_DEPTH:
+            raise ValueError("delegation depth must be between one and two")
+        if self.depth == 1 and self.parent_child_run_id is not None:
+            raise ValueError("root delegation cannot have a parent Child Run")
+        if self.depth == 2 and self.parent_child_run_id is None:
+            raise ValueError("grandchild delegation requires a parent Child Run")
+        for value, label in (
+            (self.parent_child_run_id, "parent Child Run ID"),
+            (self.root_child_run_id, "root Child Run ID"),
+        ):
+            if value is not None:
+                canonical_session_id(value)
+        if self.depth == 1 and self.root_child_run_id is not None:
+            raise ValueError("root delegation cannot carry a root Child Run ID")
+        if self.depth == 2 and self.root_child_run_id is None:
+            raise ValueError("grandchild delegation requires a root Child Run ID")
+        if self.capability != READ_ONLY_RECURSIVE_CAPABILITY:
+            raise ValueError("unsupported delegation capability")
         if type(self.approval_mode) is not ApprovalMode:
             raise ValueError("delegation approval mode is invalid")
 
     @property
     def digest(self) -> str:
         return _digest(
-            b"coquo-delegation-approval-identity-v1",
+            b"coquo-delegation-approval-identity-v2",
             {
                 "approval_mode": self.approval_mode.value,
                 "child_tool_set_id": self.child_tool_set_id,
@@ -79,6 +100,9 @@ class DelegationApprovalIdentity:
                 "parent_session_id": self.parent_session_id,
                 "route_fingerprint": self.route_fingerprint,
                 "tool_use_id": self.tool_use_id,
+                "parent_child_run_id": self.parent_child_run_id,
+                "root_child_run_id": self.root_child_run_id,
+                "capability": self.capability,
             },
         )
 

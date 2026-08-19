@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
+from coquo.background_runtime import BackgroundQueueItem, BackgroundSubmission, utc_now
 from coquo.child_run_store import ChildRunStore
-from coquo.child_runtime import CHILD_TOOL_NAMES
+from coquo.child_runtime import CHILD_TOOL_NAMES, ChildRunExecutor
+from coquo.child_supervisor import ChildRunSupervisor
 from coquo.core.contracts import (
     AssistantText,
     ConversationRequest,
@@ -123,3 +126,150 @@ def test_parent_delegates_two_children_works_and_replays_three_sessions(tmp_path
         assert state.session_bound is not None
         child_session = sessions.inspect(state.session_bound.child_session_id)
         assert child_session.turn_count == 1
+
+
+class RecursiveParentProvider(ScriptedFakeProvider):
+    def __init__(self) -> None:
+        super().__init__(())
+        self.step = 0
+        self.root_child_id: str | None = None
+
+    def respond(self, request: ConversationRequest):
+        self._received_requests.append(request)
+        if self.step == 0:
+            response = ToolUse(
+                "root-spawn",
+                "child_spawn",
+                ToolArguments.from_mapping({"objective": "Delegate one bounded inspection"}),
+            )
+        elif self.step == 1:
+            self.root_child_id = _last_child_id(request, "root-spawn")
+            response = ToolUse(
+                "root-wait",
+                "child_wait",
+                ToolArguments.from_mapping(
+                    {"child_run_id": self.root_child_id, "timeout_seconds": 30}
+                ),
+            )
+        else:
+            response = AssistantText("Recursive Child completed.")
+        self.step += 1
+        return response
+
+
+class RecursiveRootChildProvider(ScriptedFakeProvider):
+    def __init__(self) -> None:
+        super().__init__(())
+        self.step = 0
+        self.grandchild_id: str | None = None
+        self.last_request: ConversationRequest | None = None
+
+    def respond(self, request: ConversationRequest):
+        self._received_requests.append(request)
+        self.last_request = request
+        assert request.enabled_tool_names is not None
+        assert set(CHILD_CONTROL_TOOL_NAMES).issubset(request.enabled_tool_names)
+        if self.step == 0:
+            response = ToolUse(
+                "grand-spawn",
+                "child_spawn",
+                ToolArguments.from_mapping({"objective": "Inspect one fixture"}),
+            )
+        else:
+            self.grandchild_id = _last_child_id(request, "grand-spawn")
+            response = AssistantText("Root Child received the Grandchild result.")
+        self.step += 1
+        return response
+
+
+class RecursiveGrandchildProvider(ScriptedFakeProvider):
+    def respond(self, request: ConversationRequest):
+        self._received_requests.append(request)
+        assert request.enabled_tool_names is not None
+        assert set(request.enabled_tool_names).isdisjoint(CHILD_CONTROL_TOOL_NAMES)
+        return AssistantText("Grandchild observed the fixture.")
+
+
+def test_read_only_child_can_delegate_one_grandchild_and_grandchild_cannot_recurse(
+    tmp_path, monkeypatch
+) -> None:
+    parent_provider = RecursiveParentProvider()
+    root_provider = RecursiveRootChildProvider()
+    grandchild_provider = RecursiveGrandchildProvider()
+    providers = {
+        "root": root_provider,
+        "grandchild": grandchild_provider,
+    }
+
+    class InjectedExecutor:
+        def __init__(self, workspace) -> None:
+            self.workspace = workspace
+
+        def run(self, child_run_id: str, **kwargs):
+            info = ChildRunStore(self.workspace).inspect(child_run_id)
+            depth = info.delegated.depth if info.delegated is not None else 1
+            provider = providers["root" if depth == 1 else "grandchild"]
+            return ChildRunExecutor(
+                self.workspace,
+                fake_provider_factory=lambda: provider,
+            ).run(child_run_id, **kwargs)
+
+    class InlinePersistentRuntime:
+        def __init__(self, workspace, *, parent_session_id=None) -> None:
+            self.workspace = workspace
+            self.parent_session_id = parent_session_id
+
+        def start(self, child_run_id: str):
+            InjectedExecutor(self.workspace).run(child_run_id)
+            return BackgroundSubmission(
+                item=BackgroundQueueItem(
+                    submission_id=str(uuid4()),
+                    child_run_id=child_run_id,
+                    state="completed",
+                    queued_at=utc_now(),
+                    terminal_child_status=ChildRunStore(self.workspace)
+                    .inspect(child_run_id)
+                    .status.value,
+                ),
+                worker_pid=None,
+                worker_started=False,
+            )
+
+    monkeypatch.setattr("coquo.child_runtime.ChildRunExecutor", InjectedExecutor)
+    monkeypatch.setattr(
+        "coquo.background_runtime.PersistentChildRunRuntime", InlinePersistentRuntime
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: parent_provider,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    parent_id = session._writer.session_id
+    supervisor = ChildRunSupervisor(
+        tmp_path,
+        executor_factory=lambda child_id: InjectedExecutor(tmp_path),
+        parent_session_id=parent_id,
+    )
+    session._child_supervisor = supervisor
+    try:
+        assert session.prompt("Run one recursive read-only inspection") == (
+            "Recursive Child completed."
+        )
+        assert parent_provider.root_child_id is not None
+        assert root_provider.grandchild_id is not None
+        root_state = ChildRunStore(tmp_path).replay_state(parent_provider.root_child_id)
+        grand_state = ChildRunStore(tmp_path).replay_state(root_provider.grandchild_id)
+        assert root_state.delegated is not None
+        assert root_state.delegated.depth == 1
+        assert grand_state.delegated is not None
+        assert grand_state.delegated.depth == 2
+        assert grand_state.delegated.parent_child_run_id == parent_provider.root_child_id
+        assert grand_state.delegated.root_child_run_id == parent_provider.root_child_id
+        assert grand_state.delegated.schema_version == 2
+        assert root_state.admitted is not None
+        assert root_state.admitted.role_contract_version == 4
+        assert grand_state.admitted is not None
+        assert grand_state.admitted.role_contract_version == 1
+    finally:
+        session.close()

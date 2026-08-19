@@ -968,6 +968,11 @@ class ProjectSession:
         child_mode: bool = False,
         execution_scope: ExecutionScope | None = None,
         child_action_names: tuple[str, ...] = (),
+        child_depth: int = 0,
+        parent_child_run_id: str | None = None,
+        root_child_run_id: str | None = None,
+        child_delegation_allowed: bool = False,
+        current_child_run_id: str | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve(strict=True)
         self._execution_scope = execution_scope or ExecutionScope.authority(self.workspace)
@@ -975,6 +980,25 @@ class ProjectSession:
             raise ValueError("execution scope authority does not match Session workspace")
         self.execution_workspace = self._execution_scope.execution_root
         self._child_mode = child_mode
+        if type(child_depth) is not int or not 0 <= child_depth <= 2:
+            raise ValueError("Child delegation depth is invalid")
+        if not child_mode and child_depth != 0:
+            raise ValueError("Child delegation depth requires child mode")
+        if child_depth == 2 or (child_mode and child_depth == 1 and not child_delegation_allowed):
+            child_delegation_allowed = False
+        if child_depth == 2 and not parent_child_run_id:
+            raise ValueError("grandchild sessions require a parent Child Run ID")
+        if child_depth == 2 and not root_child_run_id:
+            raise ValueError("grandchild sessions require a root Child Run ID")
+        if child_depth == 0 and current_child_run_id is not None:
+            raise ValueError("current Child Run ID requires a Child session")
+        if child_depth > 0 and not current_child_run_id:
+            raise ValueError("Child sessions require their current Child Run ID")
+        self._child_depth = child_depth
+        self._parent_child_run_id = parent_child_run_id
+        self._root_child_run_id = root_child_run_id
+        self._child_delegation_allowed = child_delegation_allowed
+        self._current_child_run_id = current_child_run_id
         if type(child_action_names) is not tuple or any(
             type(name) is not str or not name for name in child_action_names
         ):
@@ -1111,7 +1135,7 @@ class ProjectSession:
                 if self._child_mode
                 else self._dispatch_action
             )
-        if loop is not None and not self._child_mode:
+        if loop is not None and (not self._child_mode or self._child_delegation_allowed):
             self._loop.install_task_control_dispatcher(
                 _COMMIT_CONTROL_TOOL_NAMES, self._dispatch_task_control
             )
@@ -1169,8 +1193,16 @@ class ProjectSession:
             ),
             task_control_names=() if self._child_mode else _COMMIT_CONTROL_TOOL_NAMES,
             task_control_dispatcher=None if self._child_mode else self._dispatch_task_control,
-            child_control_names=() if self._child_mode else CHILD_CONTROL_TOOL_NAMES,
-            child_control_dispatcher=None if self._child_mode else self._dispatch_child_control,
+            child_control_names=(
+                CHILD_CONTROL_TOOL_NAMES
+                if not self._child_mode or self._child_delegation_allowed
+                else ()
+            ),
+            child_control_dispatcher=(
+                self._dispatch_child_control
+                if not self._child_mode or self._child_delegation_allowed
+                else None
+            ),
             team_control_names=() if self._child_mode else TEAM_CONTROL_TOOL_NAMES,
             team_control_dispatcher=None if self._child_mode else self._dispatch_team_control,
             tool_set_transition_dispatcher=None if self._child_mode else self._transition_tool_set,
@@ -1210,6 +1242,10 @@ class ProjectSession:
         self._active_event_sink = state.event_sink
         self._active_session_title_source_text = state.session_title_source_text
         self._active_prepared_session_title = None
+        state.child_control_state.depth = self._child_depth
+        state.child_control_state.parent_child_run_id = self._parent_child_run_id
+        state.child_control_state.root_child_run_id = self._root_child_run_id
+        state.child_control_state.delegation_allowed = self._child_delegation_allowed
 
     def _bind_runtime_provider(self, state) -> None:
         self._active_turn_runtime = state.provider_runtime
@@ -1289,6 +1325,11 @@ class ProjectSession:
         child_mode: bool = False,
         execution_scope: ExecutionScope | None = None,
         child_action_names: tuple[str, ...] = (),
+        child_depth: int = 0,
+        parent_child_run_id: str | None = None,
+        root_child_run_id: str | None = None,
+        child_delegation_allowed: bool = False,
+        current_child_run_id: str | None = None,
         read_file_factory: Callable[[Path], ReadFileTool] = ReadFileTool,
         glob_factory: Callable[[Path], GlobTool] = GlobTool,
         grep_factory: Callable[[Path], GrepTool] = GrepTool,
@@ -1485,6 +1526,11 @@ class ProjectSession:
                     child_mode=child_mode,
                     execution_scope=selected_execution_scope,
                     child_action_names=child_action_names,
+                    child_depth=child_depth,
+                    parent_child_run_id=parent_child_run_id,
+                    root_child_run_id=root_child_run_id,
+                    child_delegation_allowed=child_delegation_allowed,
+                    current_child_run_id=current_child_run_id,
                 )
             prepared = session_store.prepare_resume(resume)
             writer_holder: dict[str, SessionWriter] = {}
@@ -1607,6 +1653,11 @@ class ProjectSession:
                     child_mode=child_mode,
                     execution_scope=selected_execution_scope,
                     child_action_names=child_action_names,
+                    child_depth=child_depth,
+                    parent_child_run_id=parent_child_run_id,
+                    root_child_run_id=root_child_run_id,
+                    child_delegation_allowed=child_delegation_allowed,
+                    current_child_run_id=current_child_run_id,
                 )
                 session_holder["session"] = session
                 if not child_mode:
@@ -2479,6 +2530,18 @@ class ProjectSession:
                 child_session_id=child_session_id,
                 objective=info.objective,
                 status=status,
+                depth=info.delegated.depth if info.delegated is not None else 1,
+                parent_child_run_id=(
+                    info.delegated.parent_child_run_id if info.delegated is not None else None
+                ),
+                root_child_run_id=(
+                    info.delegated.root_child_run_id if info.delegated is not None else None
+                ),
+                delegation_allowed=(
+                    info.delegated is not None
+                    and info.delegated.depth == 1
+                    and info.delegated.capability == "read-only-explorer-v1"
+                ),
             )
             return self._child_run_store.prepare(
                 info.child_run_id,
@@ -5462,12 +5525,12 @@ class ProjectSession:
     def _dispatch_child_control(
         self, request: ToolUse, context_id: str
     ) -> ChildControlDispatchResult:
-        """Execute one parent-only Child control outside ActionCoordinator."""
-        if self._child_mode:
-            raise RuntimeError("Child controls are unavailable inside a Child")
+        """Execute one Host-owned Child control, including bounded recursion."""
+        if self._child_mode and not self._child_delegation_allowed:
+            raise RuntimeError("Child controls are unavailable inside this Child")
         parsed = parse_child_control(request)
         state = self._runtime.turn_state.child_control_state
-        if state.depth != 0:
+        if state.depth not in {0, 1} or (state.depth == 1 and not state.delegation_allowed):
             raise RuntimeError("recursive Child delegation is unavailable")
         try:
             if parsed.name == CHILD_SPAWN_TOOL_NAME:
@@ -5855,7 +5918,10 @@ class ProjectSession:
             max_tool_requests=CHILD_MAX_TOOL_REQUESTS,
             max_output_tokens=CHILD_MAX_OUTPUT_TOKENS,
             deadline_seconds=CHILD_DEADLINE_SECONDS,
-            depth=1,
+            depth=state.depth + 1,
+            parent_child_run_id=(self._current_child_run_id if state.depth == 1 else None),
+            root_child_run_id=(self._current_child_run_id if state.depth == 1 else None),
+            capability="read-only-explorer-v1",
             approval_mode=self._approval_mode,
         )
         preview = DelegationApprovalPreview(
@@ -5895,7 +5961,11 @@ class ProjectSession:
             route_fingerprint=identity.route_fingerprint,
             child_tool_set_id=identity.child_tool_set_id,
             depth=identity.depth,
+            parent_child_run_id=identity.parent_child_run_id,
+            root_child_run_id=identity.root_child_run_id,
+            capability=identity.capability,
             approval_mode=identity.approval_mode,
+            schema_version=2 if identity.depth == 2 else 1,
             outcome=outcome,
             decision_sha256=delegation_decision_sha256(identity, outcome.value),
         )
@@ -5912,9 +5982,13 @@ class ProjectSession:
             parent_tool_use_id=request.tool_use_id,
             decision_record_sequence=decision.sequence,
             decision_sha256=decision.decision_sha256,
-            depth=1,
+            depth=identity.depth,
             source="model",
             delegated_at=self._writer.now(),
+            parent_child_run_id=identity.parent_child_run_id,
+            root_child_run_id=identity.root_child_run_id,
+            capability=identity.capability,
+            schema_version=2 if identity.depth == 2 else 1,
         )
         info = self._child_run_store.create(
             objective,

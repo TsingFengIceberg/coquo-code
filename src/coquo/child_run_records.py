@@ -17,6 +17,7 @@ from coquo.session_records import workspace_fingerprint
 CHILD_RUN_HEADER_SCHEMA_VERSION = 1
 CHILD_RUN_CANCELLED_SCHEMA_VERSION = 1
 CHILD_RUN_DELEGATED_SCHEMA_VERSION = 1
+CHILD_RUN_DELEGATED_V2_SCHEMA_VERSION = 2
 CHILD_RUN_TEAM_ASSIGNMENT_SCHEMA_VERSION = 1
 CHILD_RUN_TEAM_ASSIGNMENT_V2_SCHEMA_VERSION = 2
 CHILD_RUN_ADMITTED_SCHEMA_VERSION = 1
@@ -95,6 +96,9 @@ class ChildRunDelegated:
     depth: int
     source: str
     delegated_at: str
+    parent_child_run_id: str | None = None
+    root_child_run_id: str | None = None
+    capability: str = "read-only-explorer-v1"
     record_type: str = "child_run_delegated"
     schema_version: int = CHILD_RUN_DELEGATED_SCHEMA_VERSION
 
@@ -442,7 +446,10 @@ def _record_identity(record: ChildRunRecord) -> None:
         if record.record_type != "child_run_cancelled" or record.schema_version != 1:
             raise ChildRunRecordError("unsupported Child Run cancellation schema")
     elif type(record) is ChildRunDelegated:
-        if record.record_type != "child_run_delegated" or record.schema_version != 1:
+        if record.record_type != "child_run_delegated" or record.schema_version not in {
+            CHILD_RUN_DELEGATED_SCHEMA_VERSION,
+            CHILD_RUN_DELEGATED_V2_SCHEMA_VERSION,
+        }:
             raise ChildRunRecordError("unsupported Child Run delegation schema")
     elif type(record) is ChildRunTeamAssignment:
         if record.record_type != "child_run_team_assignment" or record.schema_version not in {
@@ -516,8 +523,27 @@ def validate_child_run_record(record: ChildRunRecord) -> None:
             raise ChildRunRecordError("Child Run decision record sequence is invalid")
         if re.fullmatch(r"[0-9a-f]{64}", record.decision_sha256) is None:
             raise ChildRunRecordError("Child Run decision digest is invalid")
-        if record.depth != 1 or record.source != "model":
+        if record.depth not in {1, 2} or record.source not in {"model", "host"}:
             raise ChildRunRecordError("Child Run delegation source or depth is invalid")
+        if record.schema_version == CHILD_RUN_DELEGATED_SCHEMA_VERSION:
+            if (
+                record.depth != 1
+                or any(
+                    value is not None
+                    for value in (record.parent_child_run_id, record.root_child_run_id)
+                )
+                or record.capability != "read-only-explorer-v1"
+            ):
+                raise ChildRunRecordError(
+                    "legacy Child Run delegation carries recursive provenance"
+                )
+        else:
+            if record.depth != 2 or not record.parent_child_run_id or not record.root_child_run_id:
+                raise ChildRunRecordError("recursive Child Run delegation provenance is incomplete")
+            canonical_child_run_id(record.parent_child_run_id)
+            canonical_child_run_id(record.root_child_run_id)
+            if record.capability != "read-only-explorer-v1":
+                raise ChildRunRecordError("recursive Child Run delegation capability is invalid")
         canonical_child_run_timestamp(record.delegated_at, "Child Run delegated_at")
     elif isinstance(record, ChildRunTeamAssignment):
         if record.sequence != 1:
@@ -790,7 +816,7 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "sequence": record.sequence,
         }
     if isinstance(record, ChildRunDelegated):
-        return {
+        value = {
             "child_run_id": record.child_run_id,
             "decision_record_sequence": record.decision_record_sequence,
             "decision_sha256": record.decision_sha256,
@@ -804,6 +830,15 @@ def _mapping(record: ChildRunRecord) -> dict[str, object]:
             "sequence": record.sequence,
             "source": record.source,
         }
+        if record.schema_version == CHILD_RUN_DELEGATED_V2_SCHEMA_VERSION:
+            value.update(
+                {
+                    "capability": record.capability,
+                    "parent_child_run_id": record.parent_child_run_id,
+                    "root_child_run_id": record.root_child_run_id,
+                }
+            )
+        return value
     if isinstance(record, ChildRunTeamAssignment):
         value = {
             "assigned_at": record.assigned_at,
@@ -1134,6 +1169,9 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             "sequence",
             "source",
         }
+        schema_version = value.get("schema_version")
+        if schema_version == CHILD_RUN_DELEGATED_V2_SCHEMA_VERSION:
+            expected.update({"capability", "parent_child_run_id", "root_child_run_id"})
         if set(value) != expected:
             raise ChildRunRecordError("Child Run delegation has unknown or missing fields")
         record = ChildRunDelegated(
@@ -1147,6 +1185,9 @@ def decode_child_run_record(payload: bytes) -> ChildRunRecord:
             depth=value["depth"],
             source=value["source"],
             delegated_at=value["delegated_at"],
+            parent_child_run_id=value.get("parent_child_run_id"),
+            root_child_run_id=value.get("root_child_run_id"),
+            capability=value.get("capability", "read-only-explorer-v1"),
             record_type=value["record_type"],
             schema_version=value["schema_version"],
         )

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from coquo.child_runtime import (
     CHILD_TOOL_NAMES,
+    RECURSIVE_CHILD_ROLE_CONTRACT_VERSION,
     build_child_role_prompt,
     build_child_runtime_spec_from_binding,
     child_role_prompt_fingerprint,
     child_tool_set,
     provider_binding_from_session,
+    recursive_child_role_prompt_fingerprint,
 )
 from coquo.child_run_records import ChildRunStatus
 from coquo.child_run_store import ChildRunStore
@@ -53,6 +55,19 @@ def test_child_role_contract_is_deterministic_and_bounded() -> None:
     assert "read-only workspace tools" in prompt
 
 
+def test_recursive_child_role_contract_is_explicit_and_distinct() -> None:
+    prompt = build_child_role_prompt(
+        "Inspect the delegated fixture",
+        "42345678-1234-4234-9234-123456789abc",
+        delegation_allowed=True,
+    )
+    assert recursive_child_role_prompt_fingerprint() != child_role_prompt_fingerprint()
+    assert "at most one read-only Grandchild" in prompt
+    assert "depth two" in prompt
+    assert '"delegation_allowed":true' in prompt
+    assert f'"role_contract_version":{RECURSIVE_CHILD_ROLE_CONTRACT_VERSION}' in prompt
+
+
 def test_child_binding_projection_has_no_credential_value() -> None:
     binding = BindingSnapshot.fake()
     projected = provider_binding_from_session(binding)
@@ -74,6 +89,20 @@ def test_child_runtime_spec_freezes_read_only_contract() -> None:
     assert spec.approval_mode == "auto"
     assert spec.tool_names == CHILD_TOOL_NAMES
     assert spec.provider_binding["credential_env"] is None
+
+
+def test_recursive_child_runtime_spec_uses_recursive_role_contract() -> None:
+    binding = BindingSnapshot.fake()
+    spec = build_child_runtime_spec_from_binding(
+        child_run_id="42345678-1234-4234-9234-123456789abc",
+        parent_session_id="52345678-1234-4234-9234-123456789abc",
+        child_session_id="62345678-1234-4234-9234-123456789abc",
+        objective="Inspect files",
+        binding=binding,
+        delegation_allowed=True,
+    )
+    assert spec.role_contract_version == RECURSIVE_CHILD_ROLE_CONTRACT_VERSION
+    assert spec.delegation_allowed is True
 
 
 def test_child_executor_runs_one_turn_with_independent_session(tmp_path) -> None:

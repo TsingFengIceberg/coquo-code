@@ -82,6 +82,7 @@ from coquo.providers.usage import (
 )
 
 SCHEMA_VERSION = 1
+CHILD_DELEGATION_SCHEMA_VERSION = 2
 ACTION_REQUESTED_LEGACY_SCHEMA_VERSION = 1
 ACTION_REQUESTED_SCHEMA_VERSION = 2
 SESSION_HEADER_SCHEMA_VERSION = 2
@@ -558,6 +559,9 @@ class ChildDelegationDecided:
     approval_mode: ApprovalMode
     outcome: ApprovalAuditOutcome
     decision_sha256: str
+    parent_child_run_id: str | None = None
+    root_child_run_id: str | None = None
+    capability: str = "read-only-explorer-v1"
     record_type: str = "child_delegation_decided"
     schema_version: int = SCHEMA_VERSION
 
@@ -1580,6 +1584,12 @@ def _record_to_dict(record: SessionRecord) -> dict[str, object]:
             outcome=record.outcome.value,
             decision_sha256=record.decision_sha256,
         )
+        if record.schema_version == CHILD_DELEGATION_SCHEMA_VERSION:
+            common.update(
+                parent_child_run_id=record.parent_child_run_id,
+                root_child_run_id=record.root_child_run_id,
+                capability=record.capability,
+            )
     elif isinstance(record, TeamControlDecided):
         _validate_team_control_decided(record, parent_session_id=record.parent_session_id)
         common.update(
@@ -1659,6 +1669,8 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             ACTION_REQUESTED_LEGACY_SCHEMA_VERSION,
             ACTION_REQUESTED_SCHEMA_VERSION,
         }
+    elif record_type == "child_delegation_decided":
+        allowed_versions = {SCHEMA_VERSION, CHILD_DELEGATION_SCHEMA_VERSION}
     else:
         allowed_versions = {SCHEMA_VERSION}
     if type(version) is not int or version not in allowed_versions:
@@ -2249,6 +2261,8 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             "outcome",
             "decision_sha256",
         }
+        if version == CHILD_DELEGATION_SCHEMA_VERSION:
+            fields.update({"parent_child_run_id", "root_child_run_id", "capability"})
         _closed_fields(value, fields, record_type)
         record = ChildDelegationDecided(
             sequence=sequence,
@@ -2266,6 +2280,22 @@ def _record_from_dict(value: dict[str, object]) -> SessionRecord:
             approval_mode=_enum_field(value, "approval_mode", record_type, ApprovalMode),
             outcome=_enum_field(value, "outcome", record_type, ApprovalAuditOutcome),
             decision_sha256=_required_field_text(value, "decision_sha256", record_type),
+            parent_child_run_id=(
+                _required_field_text(value, "parent_child_run_id", record_type)
+                if version == CHILD_DELEGATION_SCHEMA_VERSION
+                else None
+            ),
+            root_child_run_id=(
+                _required_field_text(value, "root_child_run_id", record_type)
+                if version == CHILD_DELEGATION_SCHEMA_VERSION
+                else None
+            ),
+            capability=(
+                _required_field_text(value, "capability", record_type)
+                if version == CHILD_DELEGATION_SCHEMA_VERSION
+                else "read-only-explorer-v1"
+            ),
+            schema_version=version,
         )
         _validate_child_delegation_decided(record, parent_session_id=record.parent_session_id)
         return record
@@ -3072,6 +3102,10 @@ def _validate_record_version(record: SessionRecord) -> None:
         ):
             raise SessionRecordError("current action_requested requires ActionIdentity v2")
         return
+    if isinstance(record, ChildDelegationDecided):
+        if record.schema_version not in {SCHEMA_VERSION, CHILD_DELEGATION_SCHEMA_VERSION}:
+            raise SessionRecordError("unsupported session record schema version")
+        return
     if record.schema_version != SCHEMA_VERSION:
         raise SessionRecordError("unsupported session record schema version")
 
@@ -3118,8 +3152,20 @@ def _validate_child_delegation_decided(
             raise SessionRecordError(f"{label} is invalid")
     _required_text(record.route_fingerprint, "Child delegation route fingerprint")
     _required_text(record.child_tool_set_id, "Child delegation ToolSet ID")
-    if record.depth != 1:
-        raise SessionRecordError("Child delegation depth must be one")
+    if record.depth not in {1, 2}:
+        raise SessionRecordError("Child delegation depth must be between one and two")
+    if record.schema_version == SCHEMA_VERSION:
+        if record.depth != 1 or any(
+            value is not None for value in (record.parent_child_run_id, record.root_child_run_id)
+        ):
+            raise SessionRecordError("legacy Child delegation carries recursive provenance")
+    else:
+        if record.depth != 2 or not record.parent_child_run_id or not record.root_child_run_id:
+            raise SessionRecordError("recursive Child delegation provenance is incomplete")
+        canonical_session_id(record.parent_child_run_id)
+        canonical_session_id(record.root_child_run_id)
+    if record.capability != "read-only-explorer-v1":
+        raise SessionRecordError("Child delegation capability is invalid")
     if type(record.approval_mode) is not ApprovalMode:
         raise SessionRecordError("Child delegation approval mode is invalid")
     if type(record.outcome) is not ApprovalAuditOutcome:

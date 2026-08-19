@@ -21,9 +21,14 @@ class ChildControlState:
     spawned_ids: list[str] = field(default_factory=list)
     requested_wait_seconds: int = 0
     depth: int = 0
+    parent_child_run_id: str | None = None
+    root_child_run_id: str | None = None
+    delegation_allowed: bool = False
     pending_approval_identity: DelegationApprovalIdentity | None = None
 
     def reserve_spawn(self) -> int:
+        if self.depth >= 2 or not self.delegation_allowed and self.depth != 0:
+            raise ValueError("Child delegation depth limit is exhausted")
         number = len(self.spawned_ids) + 1
         if number > MAX_CHILD_SPAWNS_PER_TURN:
             raise ValueError("Child spawn limit of 4 per Turn is exhausted")

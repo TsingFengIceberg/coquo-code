@@ -1431,6 +1431,34 @@ Skill, or integration controls. Team schedule resume re-acquires only the exact
 nonterminal schedule lease, appends no second start record, and never rebuilds a
 schedule from Task state. See [0146: Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md).
 
+## Bounded Recursive Read-only Child and Host-owned Workflow Orchestration
+
+This slice permits one conservative recursive capability: the Host may admit a
+depth-one read-only Child, and only when the fixed `read-only-explorer-v1`
+capability is explicitly enabled may that Child create at most one depth-two
+Grandchild. The Grandchild cannot delegate again. The Host owns admission,
+permission ceilings, budgets, cancellation, execution leases, durable Child
+ledgers, handoff delivery, and recovery. Recursive Children receive no Task,
+Team, Skill, Hook, MCP, write, shell, network, or integration controls.
+
+The recursive Child has a distinct role-prompt contract and fingerprint. A
+depth-one recursive Child receives the fixed read-only ToolSet plus the Host's
+explicit Child controls; a depth-two read-only Grandchild receives no Child
+controls. Depth-two delegation uses record-local schema v2 and records
+`parent_child_run_id` and `root_child_run_id`; legacy depth-one records remain
+replayable. Identity, capability, owner, prompt-fingerprint, and schema
+mismatches fail closed.
+
+The Host-owned workflow skeleton is Architect → Explorer → Executor → Reviewer
+→ Integrator. It reuses exact identities and execution boundaries from Task and
+the Task–Child–Team bridge without duplicating Provider, Child, Team workers, or
+ledgers. The Host advances phases and persists bounded state; Explorer,
+Executor, and Reviewer results are always `untrusted evidence`. Reviewer
+`passed` enters integration, `rejected` enters rework, and `unknown` enters
+`recovery-required`. Accept is an explicit Host decision only: the workflow
+does not write files, merge, commit, push, invoke a Provider, or silently
+create a Task, Child, or Team. See [0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md).
+
 ## ADR index
 
 128. [0128: Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1712,3 +1740,4 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 125. [0125: Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
 126. [0126: Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
 127. [0127: Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
+128. [0148: Bounded Recursive Read-only Child and Host-owned Workflow Orchestration](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)

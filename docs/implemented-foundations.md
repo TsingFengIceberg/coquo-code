@@ -1354,6 +1354,14 @@ Task、Child Run、Team assignment和Team schedule继续各自拥有自己的app
 
 Permission/approval、budget和workspace边界只按父级上限向下传播，不能由Team/Child提升，也不绕过PermissionGate、sandbox、timeout、output、edit conflict、causality或audit。该桥接不新增model-visible tool，不改变Registry、system prompt、Provider adapter或Effective Context版本；Child仍不能获得Task、Team、递归delegation、MCP、Skill或integration控制。Team schedule resume只重新获取精确nonterminal schedule lease，不追加第二个started record，也不从Task ledger重建schedule。详见[0146：Task–Child–Team Unified Orchestration Bridge](./decisions/0146-task-child-team-orchestration-bridge.md)。
 
+## 有界递归只读 Child 与 Host-owned 工作流编排
+
+本切片允许一个保守的递归能力：Host可委派depth 1的只读Child；该Child在Host明确启用固定`read-only-explorer-v1`能力时，最多再创建一个depth 2 Grandchild。Grandchild不能继续委派。Host始终拥有准入、权限上限、预算、取消、运行lease、durable Child ledger、handoff与恢复；递归Child不能获得Task、Team、Skill、Hook、MCP、写入、shell、网络或integration能力。
+
+递归Child使用独立的role prompt contract/fingerprint。depth 1的递归Child在固定只读ToolSet之外只获得Host显式暴露的Child controls；depth 2只读Grandchild不获得这些controls。depth 2的Child delegation记录使用schema v2并记录`parent_child_run_id`与`root_child_run_id`；旧depth 1记录仍可replay，所有身份、capability、owner、prompt fingerprint和schema不一致均fail closed。
+
+同时新增Host-owned高层工作流骨架：Architect → Explorer → Executor → Reviewer → Integrator。它只复用Task及Task–Child–Team bridge的精确identity和执行边界，不复制Provider/Child/Team worker或ledger。Host推进阶段并持久化受界定状态；Explorer、Executor、Reviewer结果一律是`untrusted evidence`。Reviewer `passed`进入integration，`rejected`进入rework，`unknown`进入`recovery-required`；accept只是Host显式决定，不自动写文件、merge、commit、push、调用Provider或创建隐藏的Task/Child/Team。详见[0148](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)。
+
 ## ADR 索引
 
 128. [0128：Coquo Product Identity Migration](./decisions/0128-coquo-product-identity-migration.md)
@@ -1565,3 +1573,4 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 125. [0125：Frozen Declarative Preauthorization Hooks](./decisions/0125-frozen-declarative-preauthorization-hooks.md)
 126. [0126：Durable Hook Observation and Audit](./decisions/0126-durable-hook-observation-and-audit.md)
 127. [0127：Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
+128. [0148：有界递归只读 Child 与 Host-owned 工作流编排](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)

@@ -183,6 +183,10 @@ class ChildRunStore:
                     depth=delegation.depth,
                     source=delegation.source,
                     delegated_at=delegation.delegated_at,
+                    parent_child_run_id=delegation.parent_child_run_id,
+                    root_child_run_id=delegation.root_child_run_id,
+                    capability=delegation.capability,
+                    schema_version=delegation.schema_version,
                 )
             )
         state = self._replay(self.root / f"{child_run_id}.jsonl", records)
