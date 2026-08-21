@@ -36,9 +36,8 @@ from coquo.providers.native_search import (
 from coquo.providers.errors import (
     ProviderAdapterError,
     adapter_error,
+    extract_upstream_error_metadata,
     output_limit_error,
-    safe_request_id,
-    safe_retry_after,
 )
 from coquo.providers.request_context import (
     RequestTokenCount,
@@ -1385,9 +1384,10 @@ def normalize_sdk_error(
             message=f"could not connect to {provider_id}",
             retryable=True,
         )
-    status = getattr(error, "status_code", None)
-    request_id = safe_request_id(getattr(error, "request_id", None))
-    retry_after = safe_retry_after(getattr(getattr(error, "response", None), "headers", None))
+    upstream = extract_upstream_error_metadata(error)
+    status = upstream.http_status_code
+    request_id = upstream.request_id
+    retry_after = upstream.retry_after_seconds
     if isinstance(error, openai.AuthenticationError) or status == 401:
         kind, code, message, retryable = (
             ProviderFailureKind.AUTHENTICATION,
@@ -1448,6 +1448,10 @@ def normalize_sdk_error(
         retryable=retryable,
         retry_after_seconds=retry_after,
         request_id=request_id,
+        http_status_code=upstream.http_status_code,
+        upstream_error_code=upstream.upstream_error_code,
+        upstream_error_type=upstream.upstream_error_type,
+        upstream_message=upstream.upstream_message,
     )
 
 

@@ -23,6 +23,7 @@ from coquo.agent.tool_events import (
     ToolResultDetails,
     ToolTurnSummaryCommitted,
 )
+from coquo.core.orchestration import ProviderFailureKind
 from coquo.cli.presentation import (
     BLUE,
     GREEN,
@@ -76,7 +77,7 @@ from coquo.providers.manager import (
     OutputBudgetUpdateResult,
     RuntimeStatus,
 )
-from coquo.providers.errors import output_limit_error
+from coquo.providers.errors import adapter_error, output_limit_error
 from coquo.providers.request_context import (
     ContextFitDecision,
     ContextFitReport,
@@ -237,6 +238,31 @@ def test_output_limit_presentation_includes_requested_and_actual_usage() -> None
         "Provider error [output_limit]: provider response reached the configured output-token limit",
         "Output limit: requested 4096 tokens; provider reported 4096 output tokens and 4900 input tokens.",
         "The provider response was incomplete with partial content and was rejected.",
+    ]
+
+
+def test_provider_error_presentation_includes_bounded_upstream_facts() -> None:
+    error = adapter_error(
+        provider_id="compatible",
+        model_id="model",
+        kind=ProviderFailureKind.INVALID_REQUEST,
+        code="invalid_request",
+        message="compatible rejected the request as invalid",
+        http_status_code=422,
+        upstream_error_type="invalid_request_error",
+        upstream_error_code="context_length_exceeded",
+        upstream_message="prompt is too long",
+        request_id="req_upstream_422",
+        retry_after_seconds=3,
+    )
+
+    assert render_provider_adapter_error(error, prefix="Provider error").splitlines() == [
+        "Provider error [invalid_request] [request req_upstream_422]: compatible rejected the request as invalid",
+        "Upstream HTTP status: 422",
+        "Upstream error type: invalid_request_error",
+        "Upstream error code: context_length_exceeded",
+        "Upstream message: prompt is too long",
+        "Upstream Retry-After: 3s",
     ]
 
 

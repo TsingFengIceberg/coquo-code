@@ -22,6 +22,7 @@ from coquo.agent.runtime import (
     AgentRuntimeServices,
     AgentTurnRequest,
 )
+from coquo.observability import ObservationContext, ObservationStream
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.session_records import workspace_fingerprint
@@ -1099,6 +1100,11 @@ class ProjectSession:
         self._action_uuid_factory = action_uuid_factory
         self._active_action_lease: ActionLease | None = None
         self._active_turn_context: EffectiveContextSnapshot | None = None
+        self._active_observation_context: ObservationContext | None = None
+        self._observation_stream = ObservationStream(
+            source_id=writer.session_id,
+            context=ObservationContext.new(session_id=writer.session_id),
+        )
         self._active_action_binding: BindingSnapshot | None = None
         self._active_tool_set_snapshot: ToolSetSnapshot | None = None
         self._active_hook_set_snapshot: HookSetSnapshot | None = None
@@ -1222,6 +1228,7 @@ class ProjectSession:
         if clear:
             self._active_action_lease = None
             self._active_turn_context = None
+            self._active_observation_context = None
             self._active_action_binding = None
             self._active_tool_set_snapshot = None
             self._active_hook_set_snapshot = None
@@ -1241,6 +1248,7 @@ class ProjectSession:
         self._active_cancellation = state.cancellation
         self._active_event_sink = state.event_sink
         self._active_session_title_source_text = state.session_title_source_text
+        self._active_observation_context = state.observation_context
         self._active_prepared_session_title = None
         state.child_control_state.depth = self._child_depth
         state.child_control_state.parent_child_run_id = self._parent_child_run_id
@@ -4197,9 +4205,10 @@ class ProjectSession:
                 enabled_tool_names = tuple(
                     name for name in enabled_tool_names if name != WEB_SEARCH_TOOL_NAME
                 )
+            observation_context = _turn_observation_context(self._writer.session_id)
             request = AgentTurnRequest(
                 text=text,
-                event_sink=event_sink,
+                event_sink=self._observation_event_sink(event_sink, observation_context),
                 include_tool_details=include_tool_details,
                 cancellation=cancellation,
                 allow_tools=_allow_tools,
@@ -4211,8 +4220,25 @@ class ProjectSession:
                     else self._capture_task_admission_proposal
                 ),
                 failure_usage_sink=_failure_usage_sink,
+                observation_context=observation_context,
             )
             return self._runtime.run_turn(request)
+
+    @property
+    def observation_stream(self) -> ObservationStream:
+        """Read-only access to the bounded process-local live observation rail."""
+        return self._observation_stream
+
+    def _observation_event_sink(
+        self, sink: PromptEventSink | None, context: ObservationContext
+    ) -> PromptEventSink:
+        self._observation_stream.set_context(context)
+
+        def emit(event: PromptEvent) -> None:
+            self._observation_stream.publish_prompt(event)
+            self._emit_prompt_event(sink, event)
+
+        return emit
 
     def list_profiles(self) -> tuple[NamedProviderProfile, ...]:
         self._ensure_open()
@@ -7529,6 +7555,12 @@ def _uuid4_text(value: UUID | str, label: str) -> str:
     if parsed.version != 4 or str(parsed) != str(value):
         raise ValueError(f"{label} must be a canonical UUID4")
     return str(parsed)
+
+
+def _turn_observation_context(session_id: str) -> ObservationContext:
+    """Create process-local correlation for one ordinary Agent Turn."""
+    turn_id = str(uuid4())
+    return ObservationContext(trace_id=turn_id, session_id=session_id, turn_id=turn_id)
 
 
 def _resume_result(

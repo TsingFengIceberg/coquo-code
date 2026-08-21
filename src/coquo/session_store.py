@@ -839,6 +839,12 @@ class SessionStore:
         path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
         return _info(path, self._load_state(path, allow_repair=False))
 
+    def replay_state(self, selector: str | Path) -> ReplayState:
+        """Return one strict read-only replay state for Host-owned projections."""
+        _validate_existing_session_root(self.root, self.workspace)
+        path = self._read_latest() if selector == "latest" else self._select_path_readonly(selector)
+        return self._load_state(path, allow_repair=False)
+
     def preview(self, selector: str | Path, limit: int) -> SessionPreview:
         """Strictly replay bounded recent final-text turns without durable mutation."""
         if type(limit) is not int or not 1 <= limit <= MAX_SESSION_PREVIEW_TURNS:

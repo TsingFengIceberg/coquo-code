@@ -27,6 +27,7 @@ from coquo.core.contracts import ConversationProvider, CommittedTurn, ToolAttemp
 from coquo.core.compaction import decide_auto_compaction
 from coquo.providers.request_context import ContextFitDecision, raise_for_context_fit
 from coquo.providers.usage import ProviderInvocationKind
+from coquo.observability import ObservationContext
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class AgentTurnRequest:
     session_title_source_text: str | None = None
     task_proposal_sink: Callable[..., Any] | None = None
     failure_usage_sink: Callable[[tuple[Any, ...], ToolAttemptUsage], None] | None = None
+    observation_context: ObservationContext | None = None
 
 
 @dataclass
@@ -113,6 +115,7 @@ class AgentRuntimeTurnState:
     session_title_source_text: str | None = None
     child_control_state: ChildControlState = field(default_factory=ChildControlState)
     team_control_state: TeamControlState = field(default_factory=TeamControlState)
+    observation_context: ObservationContext | None = None
 
     @property
     def active(self) -> bool:
@@ -132,6 +135,7 @@ class AgentRuntimeTurnState:
         self.session_title_source_text = None
         self.child_control_state = ChildControlState()
         self.team_control_state = TeamControlState()
+        self.observation_context = None
 
 
 class AgentRuntime:
@@ -197,6 +201,7 @@ class AgentRuntime:
         self._turn_state.prepared = prepared
         self._turn_state.cancellation = request.cancellation
         self._turn_state.event_sink = request.event_sink
+        self._turn_state.observation_context = request.observation_context
         return prepared
 
     def run_prepared(

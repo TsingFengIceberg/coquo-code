@@ -63,6 +63,8 @@
 - [Runtime Context Meter and Provider Token Usage](#runtime-context-meter-and-provider-token-usage)
 - [Context and Compaction Observability](#context-and-compaction-observability)
 - [Provider Output-limit and Compaction Failure Diagnostics](#provider-output-limit-and-compaction-failure-diagnostics)
+- [Upstream Provider API Error Facts and Safe Display](#upstream-provider-api-error-facts-and-safe-display)
+- [Unified Read-only Observation Timeline](#unified-read-only-observation-timeline)
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
@@ -1761,3 +1763,71 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 127. [0127: Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
 128. [0148: Bounded Recursive Read-only Child and Host-owned Workflow Orchestration](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)
 129. [0149: Durable Workflow Stage Observation and Recovery](./decisions/0149-durable-workflow-stage-observation-and-recovery.md)
+130. [0150: Upstream Provider API Error Facts and Safe Display](./decisions/0150-upstream-provider-error-facts-and-safe-display.md)
+131. [0151: Unified Read-only Observation Timeline](./decisions/0151-unified-read-only-observation-timeline.md)
+132. [0152: Observation Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md)
+
+## Upstream Provider API Error Facts and Safe Display
+
+The OpenAI-compatible (including Responses) and Anthropic adapters now retain a
+bounded set of upstream facts in the shared `ProviderFailure`: HTTP status
+codes (100–599), standard `error.type`, `error.code`, upstream message, request
+ID, and a safely parsed numeric `Retry-After`. Coquo's own `kind`,
+`diagnostic_code`, `retryable`, and Host message remain authoritative, so
+upstream facts do not replace Host classification, retry, or stop semantics.
+For example, a 3xx, 4xx, 429, or 5xx response still displays its actual status
+even when the SDK maps it to a generic failure.
+
+CLI Provider failure output renders these fields on separate lines so an
+operator can distinguish authentication, authorization, request, rate-limit,
+model, service, and transport failures. Adapter boundaries enforce bounded
+length, printable characters, and valid status codes; non-JSON or unknown
+bodies are not copied wholesale, and headers, raw bodies, credentials, and
+tokens never enter the failure object, Session, or terminal. This slice only
+improves fact retention and display; it does not add automatic retry, fallback,
+waiting, resend, or telemetry. See [0150: Upstream Provider API Error Facts and
+Safe Display](./decisions/0150-upstream-provider-error-facts-and-safe-display.md).
+
+## Unified Read-only Observation Timeline
+
+O1–O3 add a Host-only `ObservationEvent` projection contract and the
+`observe timeline` command. Existing Session, Task, Child Run, and Team durable
+ledgers are projected into one bounded text or JSONL timeline without creating
+a second log, copying conversation/tool/message/handoff bodies, or migrating
+old schemas. Events retain stable identities, sequence, timestamp, phase/status,
+evidence level, parent event, and selected related IDs. Strictly replayed
+Session/Task/Team facts are `host-verified`; Child lifecycle facts are
+`host-observed`; Child handoffs are `untrusted`. Workspace-wide merging links
+roots through existing Task admission, Stage delegation, Child parent
+delegation, Team control, and assignment IDs; missing relations remain
+unparented instead of being guessed from time or prose. Each in-process Agent
+Turn carries volatile `trace_id`/`turn_id`/`session_id` metadata, and an
+in-process derived context may retain that trace. Detached Child workers do not
+receive an unpersisted parent trace across a restart; they establish their own
+volatile Turn context and correlate through durable parent/session/tool/stage/
+assignment identities. This does not change Session, Provider, system-prompt,
+or model-visible tool contracts. After a restart, historical trace context is
+reconstructed only from existing durable identities. See [0151: Unified
+Read-only Observation Timeline](./decisions/0151-unified-read-only-observation-timeline.md).
+
+## Observation Stream, Diagnosis, and Retention
+
+O4–O9 extend the O1–O3 Host-only contract with a bounded process-local
+`ObservationStream`. Existing PromptEvents are projected as content-free live
+events carrying the current volatile trace/turn correlation; the original
+terminal event sink remains independent, and stream failures cannot change
+Agent causality. Provider lifecycle, context preflight, compaction, usage,
+tool, permission, Task, Child, Team, and worker activity share the same event
+shape. Background queue snapshots become bounded `background_*`
+Host-observed events containing stable IDs, state, timestamps, and worker/lease
+references; the Child ledger remains execution authority.
+
+`observe timeline` now supports bounded trace, status, evidence, record-type,
+and ISO-8601 time-window filters. `observe diagnose` reports missing parent
+links, untrusted handoffs, failed/unknown outcomes, and stale background
+claims, with manual recovery guidance only. It never retries, recovers,
+approves, or mutates a ledger. Process-local events are retained by count and
+optional age without deleting Session, Task, Child, Team, or queue records.
+Prompts, model/tool/handoff bodies, headers, credentials, and tokens are not
+retained, and no remote telemetry is introduced. See [0152: Observation
+Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md).

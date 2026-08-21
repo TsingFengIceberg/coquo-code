@@ -164,7 +164,12 @@ class ProviderFailureKind(StrEnum):
 
 @dataclass(frozen=True)
 class ProviderFailure:
-    """A redacted future-adapter failure with no provider raw response payload."""
+    """A redacted adapter failure with bounded upstream response facts.
+
+    The optional upstream fields intentionally retain only diagnostic facts that
+    are useful at the terminal.  Adapters must never place a complete response
+    body, headers, or credential material in this value.
+    """
 
     provider_id: str
     model_id: str
@@ -174,6 +179,10 @@ class ProviderFailure:
     retryable: bool
     retry_after_seconds: int | None = None
     request_id: str | None = None
+    http_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_type: str | None = None
+    upstream_message: str | None = None
 
 
 class SecretResolver(Protocol):

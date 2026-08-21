@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from types import SimpleNamespace
 
+import httpx
 import openai
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
@@ -65,6 +66,7 @@ from coquo.providers.openai_compat import (
     mkdir_tool_definition,
     move_file_tool_definition,
     move_directory_tool_definition,
+    normalize_sdk_error,
     patch_file_tool_definition,
     parse_compact_summary_response,
     parse_response,
@@ -195,6 +197,35 @@ def route(
         ),
         native_search=NativeSearchConfiguration.unavailable(),
     )
+
+
+def test_sdk_error_preserves_bounded_upstream_metadata() -> None:
+    response = httpx.Response(
+        429,
+        headers={"x-request-id": "req_openai_429", "retry-after": "5"},
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+    error = openai.RateLimitError(
+        "raw provider body sk-secret",
+        response=response,
+        body={
+            "error": {
+                "type": "rate_limit_error",
+                "code": "requests_per_minute",
+                "message": "slow down",
+            }
+        },
+    )
+
+    failure = normalize_sdk_error(error, route=route()).failure
+
+    assert failure.http_status_code == 429
+    assert failure.upstream_error_type == "rate_limit_error"
+    assert failure.upstream_error_code == "requests_per_minute"
+    assert failure.upstream_message == "slow down"
+    assert failure.request_id == "req_openai_429"
+    assert failure.retry_after_seconds == 5
+    assert "sk-secret" not in repr(failure)
 
 
 def request(*history, allow_tools: bool = True) -> ConversationRequest:

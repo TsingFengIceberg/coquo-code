@@ -27,9 +27,8 @@ from coquo.core.session_title import SessionTitleRequest
 from coquo.providers.errors import (
     ProviderAdapterError,
     adapter_error,
+    extract_upstream_error_metadata,
     output_limit_error,
-    safe_request_id,
-    safe_retry_after,
 )
 from coquo.providers.model_context import (
     OFFICIAL_ANTHROPIC_BASE_URL,
@@ -1469,9 +1468,10 @@ def normalize_sdk_error(
             retryable=True,
         )
 
-    status = getattr(error, "status_code", None)
-    request_id = safe_request_id(getattr(error, "request_id", None))
-    retry_after = safe_retry_after(getattr(getattr(error, "response", None), "headers", None))
+    upstream = extract_upstream_error_metadata(error)
+    status = upstream.http_status_code
+    request_id = upstream.request_id
+    retry_after = upstream.retry_after_seconds
     if isinstance(error, anthropic.AuthenticationError) or status == 401:
         kind = ProviderFailureKind.AUTHENTICATION
         code = "authentication_failed"
@@ -1518,6 +1518,10 @@ def normalize_sdk_error(
         retryable=retryable,
         retry_after_seconds=retry_after,
         request_id=request_id,
+        http_status_code=upstream.http_status_code,
+        upstream_error_code=upstream.upstream_error_code,
+        upstream_error_type=upstream.upstream_error_type,
+        upstream_message=upstream.upstream_message,
     )
 
 
@@ -1577,6 +1581,10 @@ def _adapter_error(
     retryable: bool = False,
     retry_after_seconds: int | None = None,
     request_id: str | None = None,
+    http_status_code: int | None = None,
+    upstream_error_code: str | None = None,
+    upstream_error_type: str | None = None,
+    upstream_message: str | None = None,
 ) -> ProviderAdapterError:
     return adapter_error(
         provider_id=PROVIDER_ID,
@@ -1587,4 +1595,8 @@ def _adapter_error(
         retryable=retryable,
         retry_after_seconds=retry_after_seconds,
         request_id=request_id,
+        http_status_code=http_status_code,
+        upstream_error_code=upstream_error_code,
+        upstream_error_type=upstream_error_type,
+        upstream_message=upstream_message,
     )

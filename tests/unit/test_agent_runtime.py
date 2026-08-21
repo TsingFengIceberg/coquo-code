@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from coquo.agent.loop import AgentLoop
 from coquo.agent.runtime import AgentRuntime, AgentTurnRequest
 from coquo.core.contracts import AssistantText
 from coquo.providers.fake import ScriptedFakeProvider
+from coquo.observability import ObservationContext
 from coquo.tools.glob import GlobTool
 from coquo.tools.grep import GrepTool
 from coquo.tools.list_directory import ListDirectoryTool
@@ -26,8 +29,10 @@ def make_runtime(tmp_path, *, commit_turn=None) -> AgentRuntime:
 
 def test_runtime_rejects_reentry_and_clears_after_success(tmp_path) -> None:
     runtime = make_runtime(tmp_path)
-    prepared = runtime.prepare_turn(AgentTurnRequest("hello"))
+    observation = ObservationContext.new(session_id=str(uuid4()), turn_id=str(uuid4()))
+    prepared = runtime.prepare_turn(AgentTurnRequest("hello", observation_context=observation))
     assert runtime.turn_state.active
+    assert runtime.turn_state.observation_context is observation
     with pytest.raises(RuntimeError, match="already has an active turn"):
         runtime.prepare_turn(AgentTurnRequest("nested"))
     assert (
@@ -39,6 +44,7 @@ def test_runtime_rejects_reentry_and_clears_after_success(tmp_path) -> None:
     assert runtime.turn_state.provider_runtime is None
     assert runtime.turn_state.child_control_state.spawned_ids == []
     assert runtime.turn_state.child_control_state.requested_wait_seconds == 0
+    assert runtime.turn_state.observation_context is None
 
 
 def test_runtime_clears_after_commit_failure(tmp_path) -> None:

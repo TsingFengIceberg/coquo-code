@@ -1574,6 +1574,36 @@ def test_sdk_errors_are_safely_normalized(case: ErrorCase) -> None:
         assert normalized.failure.request_id == "req_safe"
 
 
+def test_sdk_error_preserves_bounded_upstream_metadata() -> None:
+    response = httpx.Response(
+        422,
+        headers={"x-request-id": "req_anthropic_422", "retry-after": "7"},
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    error = anthropic.BadRequestError(
+        "raw provider body sk-ant-secret",
+        response=response,
+        body={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": "prompt is too long",
+            },
+        },
+    )
+
+    failure = normalize_sdk_error(error, config=config()).failure
+
+    assert failure.http_status_code == 422
+    assert failure.upstream_error_type == "invalid_request_error"
+    assert failure.upstream_error_code == "context_length_exceeded"
+    assert failure.upstream_message == "prompt is too long"
+    assert failure.request_id == "req_anthropic_422"
+    assert failure.retry_after_seconds == 7
+    assert "sk-ant-secret" not in repr(failure)
+
+
 def test_adapter_backed_loop_preserves_atomic_commit_after_failure(tmp_path) -> None:
     (tmp_path / "README.md").write_text("workspace notes\n", encoding="utf-8")
     failure = status_error(anthropic.InternalServerError, 503)

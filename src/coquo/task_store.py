@@ -729,6 +729,13 @@ class TaskStore:
             ),
         )
 
+    def replay_state(self, task_id: str) -> TaskReplayState:
+        """Return one strict Task replay state for Host-owned projections."""
+        canonical = _store_task_id(task_id)
+        self._validate_existing_root()
+        path = self.root / f"{canonical}.jsonl"
+        return self._load_state(path)
+
     def hook_evaluations(
         self,
         task_id: str,

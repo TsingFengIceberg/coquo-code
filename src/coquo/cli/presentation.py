@@ -705,6 +705,16 @@ def render_provider_adapter_error(
     failure = error.failure
     trace = f" [request {failure.request_id}]" if failure.request_id else ""
     lines = [f"{prefix} [{failure.kind}]{trace}: {failure.message}"]
+    if failure.http_status_code is not None:
+        lines.append(f"Upstream HTTP status: {failure.http_status_code}")
+    if failure.upstream_error_type is not None:
+        lines.append(f"Upstream error type: {failure.upstream_error_type}")
+    if failure.upstream_error_code is not None:
+        lines.append(f"Upstream error code: {failure.upstream_error_code}")
+    if failure.upstream_message is not None and failure.upstream_message != failure.message:
+        lines.append(f"Upstream message: {failure.upstream_message}")
+    if failure.retry_after_seconds is not None:
+        lines.append(f"Upstream Retry-After: {failure.retry_after_seconds}s")
     if failure.kind == ProviderFailureKind.OUTPUT_LIMIT:
         requested = error.requested_output_tokens
         usage = error.usage

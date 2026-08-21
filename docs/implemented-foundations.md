@@ -63,6 +63,8 @@
 - [Runtime Context Meter 与 Provider Token Usage](#runtime-context-meter-与-provider-token-usage)
 - [Context 与 Compaction Observability](#context-与-compaction-observability)
 - [Provider Output-limit 与 Compaction Failure Diagnostics](#provider-output-limit-与-compaction-failure-diagnostics)
+- [上游 Provider API 错误事实与安全展示](#上游-provider-api-错误事实与安全展示)
+- [统一只读可观察性时间线](#统一只读可观察性时间线)
 - [Process-local Runtime Output Budget Control](#process-local-runtime-output-budget-control)
 - [Durable Session Provider Usage Audit](#durable-session-provider-usage-audit)
 - [Bounded Read-only Git Change Observation](#bounded-read-only-git-change-observation)
@@ -1577,3 +1579,55 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 127. [0127：Audited Pinned Local Hook Handlers](./decisions/0127-audited-pinned-local-hook-handlers.md)
 128. [0148：有界递归只读 Child 与 Host-owned 工作流编排](./decisions/0148-bounded-recursive-child-and-host-workflow-orchestration.md)
 129. [0149：持久化工作流阶段观察与恢复](./decisions/0149-durable-workflow-stage-observation-and-recovery.md)
+130. [0150：上游 Provider API 错误事实与安全展示](./decisions/0150-upstream-provider-error-facts-and-safe-display.md)
+131. [0151：统一只读可观察性时间线](./decisions/0151-unified-read-only-observation-timeline.md)
+132. [0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)
+
+## 上游 Provider API 错误事实与安全展示
+
+OpenAI-compatible（包括 Responses 路径）和 Anthropic adapter 现在在统一的
+`ProviderFailure` 中保留上游错误的有限事实：HTTP 状态码（100–599）、标准
+`error.type`、`error.code`、上游 message、request ID 和安全解析的
+`Retry-After` 秒数。Coquo 自己的 `kind`、`diagnostic_code`、`retryable` 和
+Host message 仍然保留，因此上游事实不会替代 Host 的分类、重试或停止语义；
+例如 3xx、4xx、429、5xx 即使被 SDK 归入通用失败，也会显示实际状态码。
+
+CLI 的 Provider failure 输出现在分行显示这些字段，便于判断是认证、权限、
+请求、限流、模型、服务端还是传输问题。所有上游字段在 adapter 边界做长度、
+可打印字符和状态码约束；非 JSON 或未知 body 不会被完整复制，headers、raw
+body、credential 和 token 永不进入错误对象、Session 或终端。该切片只改善事实
+保留与展示，不引入自动 retry、fallback、等待、重新发送或 telemetry。详见
+[0150：上游 Provider API 错误事实与安全展示](./decisions/0150-upstream-provider-error-facts-and-safe-display.md)。
+
+## 统一只读可观察性时间线
+
+O1–O3新增Host-only的`ObservationEvent`投影契约和`observe timeline`命令，
+在不新增第二份日志、不复制对话/工具/消息/handoff正文、不迁移旧schema的前提下，
+从现有Session、Task、Child Run和Team durable ledger生成统一文本或JSONL时间线。
+事件保留稳定身份、sequence、时间、phase/status、证据等级、parent event和有限
+关联ID；Session/Task/Team严格replay的事实标为`host-verified`，Child生命周期为
+`host-observed`，Child handoff为`untrusted`。workspace-wide合并通过已有Task admission、
+Stage delegation、Child parent delegation、Team control和assignment ID建立跨账本父子关系，
+缺失关系则保持无父事件而不按时间或正文猜测。普通进程内Turn携带易失的
+`trace_id/turn_id/session_id`，同进程派生context可继承trace；Detached Child不会跨重启
+接收未持久化的父trace，而是通过durable parent/session/tool/stage/assignment身份关联。
+这不改变Session、Provider、system prompt或model-visible tool contract；重启后的历史trace
+只能依据现有durable身份重建。详见
+[0151：统一只读可观察性时间线](./decisions/0151-unified-read-only-observation-timeline.md)。
+
+## 可观察性事件流、诊断与留存
+
+O4–O9在O1–O3的Host-only契约上增加进程内有界`ObservationStream`，把现有
+PromptEvent投影为不含正文的live事件，并携带当前易失trace/turn关联；原有
+终端event sink仍独立，stream异常不会改变Agent因果结果。Provider生命周期、
+context preflight、compaction、usage、tool、permission、Task、Child、Team和
+worker事件使用同一事件形状；后台队列snapshot投影为`background_*`的
+Host-observed事件，只保留稳定ID、状态、时间及worker/lease引用，Child ledger仍是
+执行事实源。
+
+`observe timeline`新增trace、status、evidence、record type和ISO-8601时间窗口的
+有界过滤；`observe diagnose`只读报告缺失父链接、不可信handoff、失败/未知结果和
+过期后台claim，并给出人工恢复建议，不自动retry、recover、approve或修改账本。
+进程内事件按数量和可选年龄留存，绝不删除Session、Task、Child、Team或queue记录；
+不保存prompt、模型/工具/handoff正文、headers、凭据或token，也不引入远程telemetry。
+详见[0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)。

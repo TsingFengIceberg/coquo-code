@@ -193,6 +193,22 @@ from coquo.skill_candidates import SkillCandidateInfo, SkillCandidateStore
 from coquo.task_store import TaskStore, TaskStoreError
 from coquo.child_run_records import ChildRunStatus
 from coquo.child_run_store import ChildRunStore, ChildRunStoreError
+from coquo.observability import (
+    ObservationContext,
+    ObservationDiagnostic,
+    ObservationEvidence,
+    ObservationError,
+    ObservationEvent,
+    diagnose_observation_events,
+    filter_observation_events,
+    merge_observation_events,
+    project_background_items,
+    project_child_records,
+    project_session_records,
+    project_task_records,
+    project_team_records,
+)
+from coquo.background_runtime import BackgroundQueueStore
 from coquo.team_records import (
     MAX_TEAM_SCHEDULE_ASSIGNMENTS,
     MAX_TEAM_SCHEDULE_PARALLEL,
@@ -318,6 +334,16 @@ def task_list_limit(value: str) -> int:
     limit = positive_task_limit(value)
     if limit > 100:
         raise argparse.ArgumentTypeError("Task list limit must be between 1 and 100")
+    return limit
+
+
+def observation_timeline_limit(value: str) -> int:
+    """Accept one bounded ASCII unified-timeline count."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("observation timeline limit must be an integer")
+    limit = int(value)
+    if not 1 <= limit <= 1000:
+        raise argparse.ArgumentTypeError("observation timeline limit must be between 1 and 1000")
     return limit
 
 
@@ -918,6 +944,38 @@ def build_parser() -> argparse.ArgumentParser:
         "worker", help="run or recover the workspace-bound durable Child worker"
     )
     child_worker.add_argument("--worker-count", type=int, choices=range(1, 5), default=4)
+
+    observe_parser = subcommands.add_parser(
+        "observe", help="inspect one unified read-only observation timeline"
+    )
+    observe_commands = observe_parser.add_subparsers(dest="observe_command", required=True)
+    observe_timeline = observe_commands.add_parser(
+        "timeline", help="project existing Session, Task, Child, Team, or background records"
+    )
+    observe_timeline.add_argument(
+        "source", choices=("all", "session", "task", "child", "team", "background")
+    )
+    observe_timeline.add_argument("source_id", nargs="?")
+    observe_timeline.add_argument("--format", choices=("text", "jsonl"), default="text")
+    observe_timeline.add_argument("--limit", type=observation_timeline_limit, default=200)
+    observe_timeline.add_argument("--trace-id")
+    observe_timeline.add_argument("--status")
+    observe_timeline.add_argument(
+        "--evidence", choices=[item.value for item in ObservationEvidence]
+    )
+    observe_timeline.add_argument("--record-type")
+    observe_timeline.add_argument("--since")
+    observe_timeline.add_argument("--until")
+    observe_diagnose = observe_commands.add_parser(
+        "diagnose", help="diagnose one read-only observation timeline"
+    )
+    observe_diagnose.add_argument(
+        "source", choices=("all", "session", "task", "child", "team", "background")
+    )
+    observe_diagnose.add_argument("source_id", nargs="?")
+    observe_diagnose.add_argument("--format", choices=("text", "json"), default="text")
+    observe_diagnose.add_argument("--limit", type=observation_timeline_limit, default=200)
+    observe_diagnose.add_argument("--stale-after", type=positive_task_limit, default=300)
     child_worker.add_argument("--idle-seconds", type=float, default=2.0)
     child_worker.add_argument("--max-items", type=positive_task_limit)
     child_worker.add_argument("--recover-only", action="store_true")
@@ -2657,6 +2715,183 @@ def handle_task_command(arguments: argparse.Namespace, workspace: Path, stdout: 
     return 0
 
 
+def handle_observe_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Project existing durable ledgers into one bounded, read-only timeline."""
+    if arguments.observe_command not in {"timeline", "diagnose"}:
+        raise ValueError(f"unsupported observe command: {arguments.observe_command}")
+    source = arguments.source
+    if source == "all":
+        if arguments.source_id is not None:
+            raise ObservationError("the all timeline does not accept a source ID")
+        groups = []
+        session_store = SessionStore(workspace)
+        task_store = TaskStore(workspace)
+        child_store = ChildRunStore(workspace)
+        team_store = TeamStore(workspace)
+        for info in session_store.list():
+            state = session_store.replay_state(info.session_id)
+            groups.append(
+                project_session_records(
+                    info.session_id,
+                    state.records,
+                    context=ObservationContext(
+                        trace_id=info.session_id, session_id=info.session_id
+                    ),
+                )
+            )
+        for info in task_store.list():
+            state = task_store.replay_state(info.task_id)
+            groups.append(
+                project_task_records(
+                    info.task_id,
+                    state.records,
+                    context=ObservationContext(
+                        trace_id=info.owner_session_id,
+                        session_id=info.owner_session_id,
+                        task_id=info.task_id,
+                    ),
+                )
+            )
+        for info in child_store.list():
+            state = child_store.replay_state(info.child_run_id)
+            groups.append(
+                project_child_records(
+                    info.child_run_id,
+                    state.records,
+                    context=ObservationContext(
+                        trace_id=info.parent_session_id,
+                        session_id=info.parent_session_id,
+                        child_run_id=info.child_run_id,
+                    ),
+                )
+            )
+        for info in team_store.list():
+            state = team_store.replay_state(info.team_id)
+            groups.append(
+                project_team_records(
+                    info.team_id,
+                    state.records,
+                    context=ObservationContext(
+                        trace_id=info.owner_session_id,
+                        session_id=info.owner_session_id,
+                        team_id=info.team_id,
+                    ),
+                )
+            )
+        events = merge_observation_events(groups)
+    elif source == "background":
+        if arguments.source_id is not None:
+            raise ObservationError("the background timeline does not accept a source ID")
+        items = BackgroundQueueStore(workspace).snapshot()
+        trace_id = next(
+            (item.child_run_id for item in items if getattr(item, "child_run_id", None)),
+            str(uuid4()),
+        )
+        events = project_background_items(items, trace_id=trace_id)
+    elif source == "session":
+        store = SessionStore(workspace)
+        info = store.inspect(arguments.source_id or "latest")
+        state = store.replay_state(info.session_id)
+        context = ObservationContext(trace_id=info.session_id, session_id=info.session_id)
+        events = project_session_records(info.session_id, state.records, context=context)
+    elif source == "task":
+        store = TaskStore(workspace)
+        if arguments.source_id is None:
+            raise ObservationError("a Task timeline requires a source ID")
+        info = store.inspect(arguments.source_id)
+        state = store.replay_state(info.task_id)
+        context = ObservationContext(
+            trace_id=info.owner_session_id,
+            session_id=info.owner_session_id,
+            task_id=info.task_id,
+        )
+        events = project_task_records(info.task_id, state.records, context=context)
+    elif source == "child":
+        store = ChildRunStore(workspace)
+        if arguments.source_id is None:
+            raise ObservationError("a Child timeline requires a source ID")
+        info = store.inspect(arguments.source_id)
+        state = store.replay_state(info.child_run_id)
+        context = ObservationContext(
+            trace_id=info.parent_session_id,
+            session_id=info.parent_session_id,
+            child_run_id=info.child_run_id,
+        )
+        events = project_child_records(info.child_run_id, state.records, context=context)
+    else:
+        store = TeamStore(workspace)
+        if arguments.source_id is None:
+            raise ObservationError("a Team timeline requires a source ID")
+        info = store.inspect(arguments.source_id)
+        state = store.replay_state(info.team_id)
+        context = ObservationContext(
+            trace_id=info.owner_session_id,
+            session_id=info.owner_session_id,
+            team_id=info.team_id,
+        )
+        events = project_team_records(info.team_id, state.records, context=context)
+
+    if arguments.observe_command == "timeline":
+        events = filter_observation_events(
+            events,
+            trace_id=arguments.trace_id,
+            status=arguments.status,
+            evidence=arguments.evidence,
+            record_type=arguments.record_type,
+            since=arguments.since,
+            until=arguments.until,
+        )
+        events = events[-arguments.limit :]
+    else:
+        events = events[-arguments.limit :]
+        diagnostics = diagnose_observation_events(events, stale_after_seconds=arguments.stale_after)
+        if arguments.format == "json":
+            stdout.write(
+                json.dumps(
+                    [item.to_mapping() for item in diagnostics],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            return 0
+        stdout.write(_render_observation_diagnostics(diagnostics))
+        return 0
+    if arguments.format == "jsonl":
+        for event in events:
+            stdout.write(json.dumps(event.to_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    stdout.write(_render_observation_timeline(events))
+    return 0
+
+
+def _render_observation_timeline(events: tuple[ObservationEvent, ...]) -> str:
+    if not events:
+        return "No observation events found.\n"
+    lines = [f"Observation timeline: {len(events)} events"]
+    for event in events:
+        related = ""
+        if event.related_ids:
+            related = " [" + ", ".join(f"{key}={value}" for key, value in event.related_ids) + "]"
+        lines.append(
+            f"{event.occurred_at} {event.source.value}/{event.source_id} "
+            f"{event.phase.value} {event.status} "
+            f"{event.record_type} ({event.evidence.value}){related}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _render_observation_diagnostics(diagnostics: tuple[ObservationDiagnostic, ...]) -> str:
+    if not diagnostics:
+        return "No observation diagnostics found.\n"
+    lines = [f"Observation diagnostics: {len(diagnostics)} findings"]
+    for item in diagnostics:
+        suffix = f" ({item.event_id})" if item.event_id else ""
+        lines.append(f"{item.severity} {item.code}{suffix}: {item.message}")
+        lines.append(f"  Recovery: {item.recovery}")
+    return "\n".join(lines) + "\n"
+
+
 def handle_workflow_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
     """Manage Host-owned workflow state and exact external stage identities."""
     orchestrator = WorkflowOrchestrator(workspace)
@@ -3624,6 +3859,16 @@ def main(
                     "provider selection options cannot be combined with Team management"
                 )
             return handle_team_command(arguments, workspace, output)
+        if arguments.command == "observe":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with observation inspection"
+                )
+            return handle_observe_command(arguments, workspace, output)
         if arguments.command == "demo-read":
             if (
                 arguments.profile is not None
@@ -3838,6 +4083,9 @@ def main(
         return 2
     except TeamAssignmentError as error:
         print(f"team assignment error: {error}", file=errors)
+        return 2
+    except ObservationError as error:
+        print(f"observation error: {error}", file=errors)
         return 2
     except McpConfigurationError as error:
         print(f"MCP configuration error: {error}", file=errors)
