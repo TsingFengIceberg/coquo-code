@@ -1346,6 +1346,21 @@ def test_adapter_sends_only_explicit_native_request_fields() -> None:
     ]
 
 
+def test_adapter_projects_string_adaptive_reasoning_effort_without_legacy_budget() -> None:
+    client = RecordingMessagesClient([message(TextBlock(text="Hello", type="text"))])
+    configured = AnthropicProviderConfig(
+        model_id="claude-opus-4-8",
+        max_output_tokens=64,
+        reasoning_effort="high",
+    )
+    provider = AnthropicConversationProvider(configured, client)
+
+    assert provider.respond(request(UserMessage(text="Hello"))) == AssistantText(text="Hello")
+    assert client.requests[0]["thinking"] == {"type": "adaptive"}
+    assert client.requests[0]["output_config"] == {"effort": "high"}
+    assert "budget_tokens" not in client.requests[0]
+
+
 def compact_request() -> CompactSummaryRequest:
     return CompactSummaryRequest(build_compact_prompt(), '{"turns":[]}', 32)
 

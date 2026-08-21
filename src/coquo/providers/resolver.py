@@ -16,6 +16,8 @@ from coquo.providers.definitions import (
     OPENAI,
     XAI,
     ProviderDefinition,
+    ReasoningEffort,
+    ReasoningProfile,
     RuntimeProviderRoute,
     WireProtocol,
 )
@@ -154,6 +156,8 @@ def resolve_profile_route(
             profile.max_output_tokens,
             profile.temperature,
             native_search,
+            profile.reasoning,
+            profile.default_reasoning_effort,
         )
 
     definition = BUILTIN_PROVIDERS[profile.provider_id]
@@ -198,6 +202,8 @@ def resolve_profile_route(
         profile.max_output_tokens,
         profile.temperature,
         native_search,
+        profile.reasoning,
+        profile.default_reasoning_effort,
     )
 
 
@@ -273,6 +279,8 @@ def _route(
     max_output_tokens: int,
     temperature: float | None,
     native_search: NativeSearchConfiguration | None = None,
+    reasoning_profile: ReasoningProfile | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> RuntimeProviderRoute:
     return RuntimeProviderRoute(
         definition=definition,
@@ -282,6 +290,8 @@ def _route(
         base_url_source=base_url_source,
         max_output_tokens=max_output_tokens,
         temperature=temperature,
+        reasoning_profile=reasoning_profile,
+        reasoning_effort=reasoning_effort,
         native_search=(
             native_search
             if native_search is not None

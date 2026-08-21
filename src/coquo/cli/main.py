@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import math
 import os
@@ -86,6 +87,7 @@ from coquo.core.approvals import ApprovalGrantError
 from coquo.core.contracts import AssistantText, ToolArguments, ToolResult, ToolUse
 from coquo.core.hook_contracts import HookActionOutcome, HookEvent
 from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from coquo.providers.definitions import ReasoningEffort, ReasoningNativeKind, ReasoningProfile
 from coquo.hooks import (
     HookConfigurationError,
     HookEffect,
@@ -268,6 +270,16 @@ def output_token_budget(value: str) -> int:
     return tokens
 
 
+def reasoning_effort(value: str) -> ReasoningEffort:
+    """Accept the interoperable bounded reasoning-effort levels."""
+    try:
+        return ReasoningEffort(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "reasoning effort must be one of: none, minimal, low, medium, high, xhigh, max"
+        ) from None
+
+
 def action_audit_count(value: str) -> int:
     """Accept one bounded ASCII count for terminal audit rendering."""
     if not value.isascii() or not value.isdigit():
@@ -420,6 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="process-local output budget override for prompt or interactive mode",
     )
     parser.add_argument(
+        "--reasoning-effort",
+        dest="invocation_reasoning_effort",
+        type=reasoning_effort,
+        help="provider reasoning effort: low, medium, high, or max",
+    )
+    parser.add_argument(
         "--provider-protocol",
         dest="invocation_provider_protocol",
         choices=["openai-compatible", "openai-responses"],
@@ -506,6 +524,29 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--model-max-output-tokens", type=int)
     add_parser.add_argument("--temperature", type=float)
     add_parser.add_argument(
+        "--default-reasoning-effort",
+        type=reasoning_effort,
+        help="profile default reasoning effort",
+    )
+    add_parser.add_argument(
+        "--reasoning-native-kind",
+        choices=[kind.value for kind in ReasoningNativeKind],
+        help="profile reasoning wire contract",
+    )
+    add_parser.add_argument(
+        "--reasoning-native-level",
+        action="append",
+        default=[],
+        help="profile native reasoning level (repeatable)",
+    )
+    add_parser.add_argument(
+        "--reasoning-map",
+        action="append",
+        default=[],
+        metavar="HOST=NATIVE",
+        help="map one Coquo reasoning level to a profile native level (repeatable)",
+    )
+    add_parser.add_argument(
         "--native-search-adapter",
         choices=adapter_option_values(),
         help="provider-native search adapter (built-ins default to auto; custom defaults to none)",
@@ -554,6 +595,29 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--context-window-tokens", type=int)
     replace_parser.add_argument("--model-max-output-tokens", type=int)
     replace_parser.add_argument("--temperature", type=float)
+    replace_parser.add_argument(
+        "--default-reasoning-effort",
+        type=reasoning_effort,
+        help="profile default reasoning effort",
+    )
+    replace_parser.add_argument(
+        "--reasoning-native-kind",
+        choices=[kind.value for kind in ReasoningNativeKind],
+        help="profile reasoning wire contract",
+    )
+    replace_parser.add_argument(
+        "--reasoning-native-level",
+        action="append",
+        default=[],
+        help="profile native reasoning level (repeatable)",
+    )
+    replace_parser.add_argument(
+        "--reasoning-map",
+        action="append",
+        default=[],
+        metavar="HOST=NATIVE",
+        help="map one Coquo reasoning level to a profile native level (repeatable)",
+    )
     replace_parser.add_argument(
         "--native-search-adapter",
         choices=adapter_option_values(),
@@ -1380,6 +1444,17 @@ def render_runtime_route(
     stdout.write(f"model max output: {model_output} ({capability.model_max_output_source.value})\n")
     stdout.write(f"requested output reserve: {route.max_output_tokens}\n")
     stdout.write(
+        f"reasoning effort: {route.reasoning_effort.value if route.reasoning_effort else '<unset>'}\n"
+    )
+    if route.reasoning_profile is not None:
+        stdout.write(f"reasoning native kind: {route.reasoning_profile.native_kind.value}\n")
+        stdout.write(
+            f"reasoning native levels: {', '.join(route.reasoning_profile.native_levels)}\n"
+        )
+        if route.reasoning_effort is not None:
+            mapped = route.reasoning_profile.map_effort(route.reasoning_effort)
+            stdout.write(f"reasoning effective wire level: {mapped or '<unsupported>'}\n")
+    stdout.write(
         f"native search: {'available' if route.native_search.available else 'unavailable'}\n"
     )
     stdout.write(
@@ -1429,6 +1504,19 @@ def render_profile(
     stdout.write(
         f"temperature: {profile.temperature if profile.temperature is not None else '<default>'}\n"
     )
+    stdout.write(
+        "default reasoning effort: "
+        f"{profile.default_reasoning_effort.value if profile.default_reasoning_effort else '<provider default>'}\n"
+    )
+    if profile.reasoning is not None:
+        stdout.write(f"reasoning native kind: {profile.reasoning.native_kind.value}\n")
+        stdout.write(f"reasoning native levels: {', '.join(profile.reasoning.native_levels)}\n")
+        stdout.write(
+            "reasoning mapping: "
+            f"{', '.join(f'{host}={native}' for host, native in profile.reasoning.mapping)}\n"
+        )
+    else:
+        stdout.write("reasoning mapping: <none; provider default or direct native values>\n")
     route = resolve_profile_route(profile, environment=environment)
     stdout.write(
         "native search: "
@@ -1494,6 +1582,7 @@ def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
     selected_adapter = arguments.native_search_adapter
     if arguments.provider == "custom" and selected_adapter is None and manifest is None:
         selected_adapter = "none"
+    reasoning = _reasoning_profile_from_arguments(arguments)
     return ProviderProfileSpec(
         name=arguments.name,
         provider_id=arguments.provider,
@@ -1509,9 +1598,53 @@ def _profile_spec(arguments: argparse.Namespace) -> ProviderProfileSpec:
         context_window_tokens=arguments.context_window_tokens,
         model_max_output_tokens=arguments.model_max_output_tokens,
         temperature=arguments.temperature,
+        default_reasoning_effort=arguments.default_reasoning_effort,
+        reasoning=reasoning,
         native_search_adapter=selected_adapter,
         native_search_manifest=manifest,
     )
+
+
+def _reasoning_profile_from_arguments(arguments: argparse.Namespace) -> ReasoningProfile | None:
+    native_kind = arguments.reasoning_native_kind
+    native_levels = tuple(arguments.reasoning_native_level)
+    raw_mappings = tuple(arguments.reasoning_map)
+    if native_kind is None and not native_levels and not raw_mappings:
+        if arguments.default_reasoning_effort is not None:
+            raise ProviderProfileError(
+                "--default-reasoning-effort requires --reasoning-native-kind and --reasoning-map"
+            )
+        return None
+    if native_kind is None:
+        raise ProviderProfileError("reasoning mapping requires --reasoning-native-kind")
+    mapping: dict[str, str] = {}
+    for raw_mapping in raw_mappings:
+        host_level, separator, native_level = raw_mapping.partition("=")
+        if not separator or not host_level or not native_level:
+            raise ProviderProfileError(
+                f"invalid --reasoning-map '{raw_mapping}', expected HOST=NATIVE"
+            )
+        try:
+            host = ReasoningEffort(host_level).value
+        except ValueError:
+            raise ProviderProfileError(
+                f"invalid reasoning Host level in --reasoning-map: {host_level}"
+            ) from None
+        if host in mapping:
+            raise ProviderProfileError(f"duplicate reasoning mapping for Host level: {host}")
+        mapping[host] = native_level
+    if not native_levels:
+        native_levels = tuple(sorted(set(mapping.values())))
+    try:
+        return ReasoningProfile.from_mapping(
+            {
+                "native_kind": native_kind,
+                "native_levels": list(native_levels),
+                "mapping": mapping,
+            }
+        )
+    except ValueError as error:
+        raise ProviderProfileError(str(error)) from None
 
 
 def _load_native_search_manifest(path: Path | None) -> NativeSearchManifest | None:
@@ -3744,6 +3877,14 @@ def main(
             raise ProviderProfileError(
                 "--max-output-tokens is only valid with prompt or interactive mode"
             )
+        if arguments.invocation_reasoning_effort is not None and arguments.command not in {
+            None,
+            "prompt",
+            "route",
+        }:
+            raise ProviderProfileError(
+                "--reasoning-effort is only valid with prompt, interactive mode, or route"
+            )
         if arguments.invocation_profile_id is not None:
             arguments.profile = (
                 _store(workspace, env, user_profile_path, project_profile_path)
@@ -3897,6 +4038,12 @@ def main(
                 route = resolve_profile_route(
                     configured, environment=env, model_override=arguments.invocation_model
                 )
+                if arguments.invocation_reasoning_effort is not None:
+                    if route.definition.protocol is WireProtocol.ANTHROPIC_MESSAGES:
+                        raise ProviderProfileError(
+                            "reasoning effort is not yet mapped for Anthropic Messages routes"
+                        )
+                    route = replace(route, reasoning_effort=arguments.invocation_reasoning_effort)
                 return render_runtime_route(
                     route,
                     env,
@@ -3920,6 +4067,12 @@ def main(
                     custom_base_url=arguments.invocation_base_url,
                     custom_api_key_env=arguments.invocation_api_key_env,
                 )
+                if arguments.invocation_reasoning_effort is not None:
+                    if route.definition.protocol is WireProtocol.ANTHROPIC_MESSAGES:
+                        raise ProviderProfileError(
+                            "reasoning effort is not yet mapped for Anthropic Messages routes"
+                        )
+                    route = replace(route, reasoning_effort=arguments.invocation_reasoning_effort)
                 return render_runtime_route(route, env, output)
             if custom_requested:
                 raise ProviderProfileError("custom endpoint options require --model")
@@ -3973,6 +4126,7 @@ def main(
             custom_base_url=arguments.invocation_base_url,
             custom_api_key_env=arguments.invocation_api_key_env,
             max_output_tokens=arguments.invocation_max_output_tokens,
+            reasoning_effort=arguments.invocation_reasoning_effort,
             environment=env,
             user_profile_path=user_profile_path,
             project_profile_path=project_profile_path,

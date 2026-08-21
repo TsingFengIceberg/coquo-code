@@ -26,7 +26,7 @@ from coquo.core.effective_context import CanonicalToolDefinition
 from coquo.core.orchestration import ProviderFailureKind
 from coquo.core.project_instructions import render_project_instructions
 from coquo.core.session_title import SessionTitleRequest
-from coquo.providers.definitions import RuntimeProviderRoute
+from coquo.providers.definitions import RuntimeProviderRoute, wire_reasoning_effort
 from coquo.providers.errors import adapter_error, output_limit_error
 from coquo.providers.native_search import (
     NativeSearchAdapterId,
@@ -317,6 +317,10 @@ def build_request(
         "store": False,
         "stream": False,
     }
+    if route.reasoning_effort is not None:
+        request["reasoning"] = {
+            "effort": wire_reasoning_effort(route.reasoning_effort, route.reasoning_profile)
+        }
     if route.temperature is not None and not fixed_sampling_model(route.wire_model):
         request["temperature"] = route.temperature
     _validate_request_size(route, request)
@@ -344,6 +348,10 @@ def build_compact_summary_request(
         "store": False,
         "stream": False,
     }
+    if route.reasoning_effort is not None:
+        request["reasoning"] = {
+            "effort": wire_reasoning_effort(route.reasoning_effort, route.reasoning_profile)
+        }
     if route.temperature is not None and not fixed_sampling_model(route.wire_model):
         request["temperature"] = route.temperature
     _validate_request_size(route, request)

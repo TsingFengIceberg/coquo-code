@@ -10,7 +10,7 @@ from coquo.providers.anthropic import (
     AnthropicProviderConfig,
     create_anthropic_provider,
 )
-from coquo.providers.definitions import RuntimeProviderRoute, WireProtocol
+from coquo.providers.definitions import RuntimeProviderRoute, WireProtocol, wire_reasoning_effort
 from coquo.providers.errors import ProviderAdapterError, adapter_error
 from coquo.providers.openai_compat import create_openai_compatible_provider
 from coquo.providers.openai_responses import create_openai_responses_provider
@@ -36,6 +36,11 @@ def create_provider(
                 max_output_tokens=route.max_output_tokens,
                 base_url=route.base_url,
                 temperature=route.temperature,
+                reasoning_effort=(
+                    wire_reasoning_effort(route.reasoning_effort, route.reasoning_profile)
+                    if route.reasoning_effort is not None
+                    else None
+                ),
                 native_search=route.native_search,
             ),
             api_key=api_key or "",

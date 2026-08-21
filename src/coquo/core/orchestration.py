@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from coquo.providers.definitions import ReasoningEffort
+
 
 @dataclass(frozen=True)
 class SecretRef:
@@ -76,6 +78,7 @@ class GenerationOptions:
 
     max_output_tokens: int | None = None
     temperature: float | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 @dataclass(frozen=True)

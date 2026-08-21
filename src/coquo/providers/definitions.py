@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -13,7 +14,7 @@ from coquo.providers.native_search import (
 )
 
 
-ADAPTER_CONTRACT_VERSION = 48
+ADAPTER_CONTRACT_VERSION = 49
 
 
 class WireProtocol(StrEnum):
@@ -22,6 +23,107 @@ class WireProtocol(StrEnum):
     ANTHROPIC_MESSAGES = "anthropic_messages"
     OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
     OPENAI_RESPONSES = "openai_responses"
+
+
+class ReasoningEffort(StrEnum):
+    """Provider-neutral reasoning effort levels."""
+
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
+class ReasoningNativeKind(StrEnum):
+    """Supported string-based Provider reasoning contracts."""
+
+    EFFORT = "effort"
+    ANTHROPIC_ADAPTIVE_EFFORT = "anthropic_adaptive_effort"
+
+
+@dataclass(frozen=True)
+class ReasoningProfile:
+    """Profile-declared native effort levels and Host-to-native mappings."""
+
+    native_kind: ReasoningNativeKind
+    native_levels: tuple[str, ...]
+    mapping: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.native_kind, ReasoningNativeKind):
+            raise ValueError("reasoning native kind is invalid")
+        if not self.native_levels:
+            raise ValueError("reasoning native levels must not be empty")
+        if any(
+            not isinstance(level, str) or not level or len(level) > 64 or not level.isascii()
+            for level in self.native_levels
+        ):
+            raise ValueError("reasoning native levels must be non-empty ASCII strings")
+        if len(set(self.native_levels)) != len(self.native_levels):
+            raise ValueError("reasoning native levels must be unique")
+        native_levels = set(self.native_levels)
+        seen_hosts: set[str] = set()
+        for host_level, native_level in self.mapping:
+            if host_level in seen_hosts:
+                raise ValueError("reasoning mapping contains duplicate Host levels")
+            seen_hosts.add(host_level)
+            if host_level not in {level.value for level in ReasoningEffort}:
+                raise ValueError(f"reasoning mapping Host level is invalid: {host_level}")
+            if native_level not in native_levels:
+                raise ValueError("reasoning mapping refers to an undeclared native level")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> ReasoningProfile:
+        if not isinstance(value, Mapping):
+            raise ValueError("profile reasoning must be an object")
+        unknown = set(value) - {"native_kind", "native_levels", "mapping"}
+        if unknown:
+            raise ValueError(f"profile reasoning contains unknown field: {sorted(unknown)[0]}")
+        kind_value = value.get("native_kind")
+        try:
+            native_kind = ReasoningNativeKind(kind_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"unsupported reasoning native kind: {kind_value}") from None
+        raw_levels = value.get("native_levels")
+        if not isinstance(raw_levels, list) or not raw_levels:
+            raise ValueError("profile reasoning native_levels must be a non-empty array")
+        if any(not isinstance(level, str) for level in raw_levels):
+            raise ValueError("profile reasoning native_levels must contain strings")
+        raw_mapping = value.get("mapping")
+        if not isinstance(raw_mapping, Mapping):
+            raise ValueError("profile reasoning mapping must be an object")
+        mapping: list[tuple[str, str]] = []
+        for host_level, native_level in raw_mapping.items():
+            if not isinstance(host_level, str) or not isinstance(native_level, str):
+                raise ValueError("profile reasoning mapping must contain string pairs")
+            mapping.append((host_level, native_level))
+        return cls(native_kind, tuple(raw_levels), tuple(sorted(mapping)))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "native_kind": self.native_kind.value,
+            "native_levels": list(self.native_levels),
+            "mapping": dict(self.mapping),
+        }
+
+    def map_effort(self, value: ReasoningEffort) -> str | None:
+        return dict(self.mapping).get(value.value)
+
+
+def wire_reasoning_effort(
+    value: ReasoningEffort,
+    reasoning_profile: ReasoningProfile | None = None,
+) -> str:
+    """Map a Host effort through an optional profile-declared native mapping."""
+    if reasoning_profile is None:
+        return value.value
+    mapped = reasoning_profile.map_effort(value)
+    if mapped is None:
+        raise ValueError(f"reasoning effort is not mapped by the active profile: {value.value}")
+    return mapped
 
 
 @dataclass(frozen=True)
@@ -49,6 +151,8 @@ class RuntimeProviderRoute:
     base_url_source: str
     max_output_tokens: int = 1024
     temperature: float | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    reasoning_profile: ReasoningProfile | None = None
     native_search: NativeSearchConfiguration = NativeSearchConfiguration.unavailable()
 
     def fingerprint(self) -> str:
@@ -71,6 +175,12 @@ def route_fingerprint(route: RuntimeProviderRoute) -> str:
         "base_url_source": route.base_url_source,
         "max_output_tokens": route.max_output_tokens,
         "temperature": route.temperature,
+        "reasoning_effort": (
+            route.reasoning_effort.value if route.reasoning_effort is not None else None
+        ),
+        "reasoning_profile": (
+            route.reasoning_profile.to_dict() if route.reasoning_profile is not None else None
+        ),
         "native_search": route.native_search.fingerprint_payload(),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(

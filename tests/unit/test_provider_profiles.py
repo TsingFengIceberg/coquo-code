@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from coquo.providers.definitions import WireProtocol
+from coquo.providers.definitions import ReasoningEffort, ReasoningNativeKind, WireProtocol
 from coquo.providers.profile import (
     NamedProviderProfile,
     ProviderProfileError,
@@ -415,6 +415,106 @@ def test_profile_model_max_output_override_is_validated_and_fingerprinted() -> N
             base_url="http://127.0.0.1:11434/v1",
             max_output_tokens=4_097,
             model_max_output_tokens=4_096,
+        )
+
+
+def test_profile_reasoning_mapping_round_trips_and_changes_fingerprint() -> None:
+    reasoning = {
+        "native_kind": "effort",
+        "native_levels": ["quick", "deep"],
+        "mapping": {"low": "quick", "high": "deep"},
+    }
+    configured = ProviderProfileSpec.from_mapping(
+        {
+            "name": "mapped",
+            "provider_id": "custom",
+            "protocol": "openai_chat_completions",
+            "model": "vendor/model",
+            "base_url": "https://gateway.example/v1",
+            "default_reasoning_effort": "high",
+            "reasoning": reasoning,
+        }
+    )
+
+    assert configured.default_reasoning_effort is ReasoningEffort.HIGH
+    assert configured.reasoning is not None
+    assert configured.reasoning.native_kind is ReasoningNativeKind.EFFORT
+    assert configured.to_dict()["reasoning"] == reasoning
+    assert configured.reasoning.map_effort(ReasoningEffort.HIGH) == "deep"
+    assert (
+        configured.fingerprint()
+        != ProviderProfileSpec(
+            name="mapped",
+            provider_id="custom",
+            protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+            model="vendor/model",
+            base_url="https://gateway.example/v1",
+        ).fingerprint()
+    )
+
+
+def test_profile_reasoning_rejects_numeric_legacy_budget_and_unmapped_default() -> None:
+    base = {
+        "name": "mapped",
+        "provider_id": "custom",
+        "protocol": "openai_chat_completions",
+        "model": "vendor/model",
+        "base_url": "https://gateway.example/v1",
+    }
+    with pytest.raises(ProviderProfileError, match="string pairs"):
+        ProviderProfileSpec.from_mapping(
+            {
+                **base,
+                "reasoning": {
+                    "native_kind": "effort",
+                    "native_levels": ["quick"],
+                    "mapping": {"low": 128},
+                },
+            }
+        )
+    with pytest.raises(ProviderProfileError, match="unknown field"):
+        ProviderProfileSpec.from_mapping(
+            {
+                **base,
+                "reasoning": {
+                    "native_kind": "effort",
+                    "native_levels": ["quick"],
+                    "mapping": {"low": "quick"},
+                    "budget_tokens": 128,
+                },
+            }
+        )
+    with pytest.raises(ProviderProfileError, match="no native mapping"):
+        ProviderProfileSpec.from_mapping(
+            {
+                **base,
+                "default_reasoning_effort": "max",
+                "reasoning": {
+                    "native_kind": "effort",
+                    "native_levels": ["quick"],
+                    "mapping": {"low": "quick"},
+                },
+            }
+        )
+
+
+def test_anthropic_profile_requires_adaptive_string_effort_contract() -> None:
+    base = {
+        "name": "anthropic",
+        "provider_id": "anthropic",
+        "protocol": "anthropic_messages",
+        "model": "claude-opus-4-8",
+    }
+    with pytest.raises(ProviderProfileError, match="require anthropic_adaptive_effort"):
+        ProviderProfileSpec.from_mapping(
+            {
+                **base,
+                "reasoning": {
+                    "native_kind": "effort",
+                    "native_levels": ["low"],
+                    "mapping": {"low": "low"},
+                },
+            }
         )
 
 

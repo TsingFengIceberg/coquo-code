@@ -25,7 +25,7 @@ from coquo.core.effective_context import CanonicalToolDefinition
 from coquo.core.orchestration import ProviderFailureKind
 from coquo.core.project_instructions import render_project_instructions
 from coquo.core.session_title import SessionTitleRequest
-from coquo.providers.definitions import RuntimeProviderRoute
+from coquo.providers.definitions import RuntimeProviderRoute, wire_reasoning_effort
 from coquo.providers.native_search import (
     NativeSearchAdapterId,
     NativeSearchCitationFormat,
@@ -682,6 +682,10 @@ def build_request(
     }
     token_field = token_limit_field(route.wire_model)
     request[token_field] = route.max_output_tokens
+    if route.reasoning_effort is not None:
+        request["reasoning_effort"] = wire_reasoning_effort(
+            route.reasoning_effort, route.reasoning_profile
+        )
     if route.temperature is not None and not fixed_sampling_model(route.wire_model):
         request["temperature"] = route.temperature
     _validate_request_size(route, request)

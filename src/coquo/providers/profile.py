@@ -11,7 +11,13 @@ import re
 from uuid import UUID, uuid4, uuid5
 
 from coquo.core.orchestration import OrchestrationError
-from coquo.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
+from coquo.providers.definitions import (
+    BUILTIN_PROVIDERS,
+    ReasoningEffort,
+    ReasoningNativeKind,
+    ReasoningProfile,
+    WireProtocol,
+)
 from coquo.providers.native_search import (
     NativeSearchAdapterId,
     NativeSearchManifest,
@@ -40,6 +46,8 @@ _PROFILE_SPEC_FIELDS = {
     "context_window_tokens",
     "model_max_output_tokens",
     "temperature",
+    "default_reasoning_effort",
+    "reasoning",
     "native_search_adapter",
     "native_search_manifest",
 }
@@ -65,6 +73,8 @@ class ProviderProfileSpec:
     context_window_tokens: int | None = None
     model_max_output_tokens: int | None = None
     temperature: float | None = None
+    default_reasoning_effort: ReasoningEffort | None = None
+    reasoning: ReasoningProfile | None = None
     native_search_adapter: str | None = None
     native_search_manifest: NativeSearchManifest | None = None
 
@@ -117,6 +127,36 @@ class ProviderProfileSpec:
                 raise ProviderProfileError("profile temperature must be a number")
             if not math.isfinite(float(self.temperature)) or not 0.0 <= self.temperature <= 2.0:
                 raise ProviderProfileError("profile temperature must be between 0.0 and 2.0")
+        if self.default_reasoning_effort is not None and not isinstance(
+            self.default_reasoning_effort, ReasoningEffort
+        ):
+            raise ProviderProfileError("profile default reasoning effort is invalid")
+        if self.reasoning is not None and not isinstance(self.reasoning, ReasoningProfile):
+            raise ProviderProfileError("profile reasoning mapping is invalid")
+        if self.reasoning is not None:
+            if (
+                self.protocol == WireProtocol.ANTHROPIC_MESSAGES
+                and self.reasoning.native_kind is not ReasoningNativeKind.ANTHROPIC_ADAPTIVE_EFFORT
+            ):
+                raise ProviderProfileError(
+                    "Anthropic profiles require anthropic_adaptive_effort reasoning"
+                )
+            if (
+                self.protocol != WireProtocol.ANTHROPIC_MESSAGES
+                and self.reasoning.native_kind is ReasoningNativeKind.ANTHROPIC_ADAPTIVE_EFFORT
+            ):
+                raise ProviderProfileError(
+                    "anthropic_adaptive_effort requires an Anthropic Messages profile"
+                )
+        if self.default_reasoning_effort is not None and self.reasoning is None:
+            raise ProviderProfileError(
+                "profile default reasoning effort requires a reasoning mapping"
+            )
+        if (
+            self.default_reasoning_effort is not None
+            and self.reasoning.map_effort(self.default_reasoning_effort) is None
+        ):
+            raise ProviderProfileError("profile default reasoning effort has no native mapping")
         if self.native_search_adapter is not None:
             valid_adapters = {
                 "auto",
@@ -231,6 +271,10 @@ class ProviderProfileSpec:
             "max_output_tokens": self.max_output_tokens,
             "temperature": self.temperature,
         }
+        if self.default_reasoning_effort is not None:
+            data["default_reasoning_effort"] = self.default_reasoning_effort.value
+        if self.reasoning is not None:
+            data["reasoning"] = self.reasoning.to_dict()
         if include_context_window:
             data["context_window_tokens"] = self.context_window_tokens
         if include_model_max_output:
@@ -312,6 +356,8 @@ class NamedProviderProfile(ProviderProfileSpec):
             context_window_tokens=self.context_window_tokens,
             model_max_output_tokens=self.model_max_output_tokens,
             temperature=self.temperature,
+            default_reasoning_effort=self.default_reasoning_effort,
+            reasoning=self.reasoning,
             native_search_adapter=self.native_search_adapter,
             native_search_manifest=self.native_search_manifest,
         )
@@ -346,7 +392,7 @@ def legacy_profile_id(name: str) -> str:
 def profile_fingerprint(profile: ProviderProfileSpec) -> str:
     """Hash normalized profile configuration without name, identity, or credential state."""
     payload = {
-        "fingerprint_version": 4,
+        "fingerprint_version": 5,
         "provider_id": profile.provider_id,
         "protocol": profile.protocol.value,
         "model": profile.model,
@@ -356,6 +402,12 @@ def profile_fingerprint(profile: ProviderProfileSpec) -> str:
         "context_window_tokens": profile.context_window_tokens,
         "model_max_output_tokens": profile.model_max_output_tokens,
         "temperature": profile.temperature,
+        "default_reasoning_effort": (
+            profile.default_reasoning_effort.value
+            if profile.default_reasoning_effort is not None
+            else None
+        ),
+        "reasoning": profile.reasoning.to_dict() if profile.reasoning is not None else None,
         "native_search_adapter": profile.native_search_adapter,
         "native_search_manifest": (
             profile.native_search_manifest.to_dict()
@@ -411,6 +463,8 @@ def _decode_profile_mapping(
     api_key_env = value.get("api_key_env")
     native_search_adapter = value.get("native_search_adapter")
     raw_native_search_manifest = value.get("native_search_manifest")
+    raw_default_reasoning_effort = value.get("default_reasoning_effort")
+    raw_reasoning = value.get("reasoning")
     if not isinstance(name, str):
         raise ProviderProfileError("profile name must be text")
     if not isinstance(provider_id, str):
@@ -423,6 +477,22 @@ def _decode_profile_mapping(
         raise ProviderProfileError("profile API key environment variable must be text or null")
     if native_search_adapter is not None and not isinstance(native_search_adapter, str):
         raise ProviderProfileError("profile native-search adapter must be text or null")
+    default_reasoning_effort = None
+    if raw_default_reasoning_effort is not None:
+        try:
+            default_reasoning_effort = ReasoningEffort(raw_default_reasoning_effort)
+        except (TypeError, ValueError):
+            raise ProviderProfileError(
+                f"unsupported profile default reasoning effort: {raw_default_reasoning_effort}"
+            ) from None
+    reasoning = None
+    if raw_reasoning is not None:
+        if not isinstance(raw_reasoning, Mapping):
+            raise ProviderProfileError("profile reasoning must be an object or null")
+        try:
+            reasoning = ReasoningProfile.from_mapping(raw_reasoning)
+        except ValueError as error:
+            raise ProviderProfileError(str(error)) from None
     native_search_manifest = None
     if raw_native_search_manifest is not None:
         if not isinstance(raw_native_search_manifest, Mapping):
@@ -443,6 +513,8 @@ def _decode_profile_mapping(
         "context_window_tokens": value.get("context_window_tokens"),
         "model_max_output_tokens": value.get("model_max_output_tokens"),
         "temperature": value.get("temperature"),
+        "default_reasoning_effort": default_reasoning_effort,
+        "reasoning": reasoning,
         "native_search_adapter": native_search_adapter,
         "native_search_manifest": native_search_manifest,
     }

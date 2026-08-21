@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from coquo.providers.definitions import ADAPTER_CONTRACT_VERSION, WireProtocol
+from coquo.providers.definitions import (
+    ADAPTER_CONTRACT_VERSION,
+    ReasoningEffort,
+    ReasoningProfile,
+    WireProtocol,
+)
 from coquo.providers.profile import NamedProviderProfile, ProviderProfileSpec
 from coquo.providers.resolver import (
     RuntimeRouteError,
@@ -181,6 +186,38 @@ def test_profile_resolver_is_identity_independent() -> None:
     )
 
 
+def test_profile_resolver_carries_reasoning_mapping_and_default_to_route() -> None:
+    spec = ProviderProfileSpec(
+        name="mapped",
+        provider_id="custom",
+        protocol=WireProtocol.OPENAI_CHAT_COMPLETIONS,
+        model="vendor/model",
+        base_url="https://gateway.example/v1",
+        default_reasoning_effort=ReasoningEffort.HIGH,
+        reasoning=ReasoningProfile.from_mapping(
+            {
+                "native_kind": "effort",
+                "native_levels": ["quick", "deep"],
+                "mapping": {"high": "deep"},
+            }
+        ),
+    )
+
+    route = resolve_profile_route(spec, environment={})
+
+    assert route.reasoning_effort is ReasoningEffort.HIGH
+    assert route.reasoning_profile is spec.reasoning
+    assert (
+        route.fingerprint()
+        != resolve_runtime_route(
+            "vendor/model",
+            environment={},
+            custom_protocol="openai-compatible",
+            custom_base_url="https://gateway.example/v1",
+        ).fingerprint()
+    )
+
+
 def test_route_fingerprint_is_canonical_and_credential_state_independent() -> None:
     first = resolve_runtime_route("openai/gpt-5", environment={"OPENAI_API_KEY": "first"})
     second = resolve_runtime_route("openai/gpt-5", environment={"OPENAI_API_KEY": "second"})
@@ -189,7 +226,7 @@ def test_route_fingerprint_is_canonical_and_credential_state_independent() -> No
         environment={"OPENAI_API_KEY": "first", "OPENAI_BASE_URL": "https://proxy.test/v1"},
     )
 
-    assert ADAPTER_CONTRACT_VERSION == 48
+    assert ADAPTER_CONTRACT_VERSION == 49
     assert first.fingerprint() == second.fingerprint()
     assert len(first.fingerprint()) == 64
     assert first.fingerprint() != overridden.fingerprint()

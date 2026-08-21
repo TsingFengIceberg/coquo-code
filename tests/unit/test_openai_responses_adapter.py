@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import ANY
 
@@ -19,6 +20,7 @@ from coquo.core.contracts import (
 )
 from coquo.core.orchestration import ProviderFailureKind
 from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.definitions import ReasoningEffort, ReasoningProfile
 from coquo.providers.native_search import (
     NativeSearchContextSize,
     NativeSearchMode,
@@ -115,6 +117,33 @@ def test_projection_combines_host_functions_with_provider_web_search() -> None:
     assert created["store"] is False
     assert created["max_output_tokens"] == route().max_output_tokens
     assert "parallel_tool_calls" not in created
+
+
+def test_request_preserves_max_reasoning_effort_without_profile_mapping() -> None:
+    effort_route = route()
+    effort_route = replace(effort_route, reasoning_effort=ReasoningEffort.MAX)
+
+    created = build_request(effort_route, request(UserMessage("reason")))
+
+    assert created["reasoning"] == {"effort": "max"}
+
+
+def test_request_maps_host_effort_through_profile_native_name() -> None:
+    effort_route = replace(
+        route(),
+        reasoning_effort=ReasoningEffort.XHIGH,
+        reasoning_profile=ReasoningProfile.from_mapping(
+            {
+                "native_kind": "effort",
+                "native_levels": ["standard", "ultra"],
+                "mapping": {"xhigh": "ultra"},
+            }
+        ),
+    )
+
+    created = build_request(effort_route, request(UserMessage("reason")))
+
+    assert created["reasoning"] == {"effort": "ultra"}
 
 
 def test_text_only_projection_omits_all_tools_including_native_search() -> None:

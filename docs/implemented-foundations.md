@@ -1582,6 +1582,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 130. [0150：上游 Provider API 错误事实与安全展示](./decisions/0150-upstream-provider-error-facts-and-safe-display.md)
 131. [0151：统一只读可观察性时间线](./decisions/0151-unified-read-only-observation-timeline.md)
 132. [0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)
+133. [0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1631,3 +1632,19 @@ Host-observed事件，只保留稳定ID、状态、时间及worker/lease引用�
 进程内事件按数量和可选年龄留存，绝不删除Session、Task、Child、Team或queue记录；
 不保存prompt、模型/工具/handoff正文、headers、凭据或token，也不引入远程telemetry。
 详见[0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)。
+
+## Provider 推理强度模式
+
+Runtime现在提供Host-owned的进程内推理强度并集
+`none|minimal|low|medium|high|xhigh|max`，它与`max_output_tokens`分离：前者
+控制Provider推理策略，后者限制可见输出大小。CLI一次调用可使用全部七档，
+REPL可用`/effort`查看、`/effort <level>`切换或`/effort reset`恢复；切换只
+允许发生在turn之间，并以脱敏的`runtime_changed` binding审计，不写入reasoning正文。
+
+Profile在配置时声明native kind、native levels、Host到native的映射以及可选默认档位。
+OpenAI-compatible Chat Completions和Responses由adapter发送映射后的原生字段；
+Anthropic Messages使用字符串adaptive effort（`thinking`与`output_config.effort`），
+不支持旧式数字`budget_tokens`。缺少映射时明确失败，不再隐式把`max`改成`high`；
+旧binding缺少新字段时按unset回放。Child只继承脱敏的路由事实，不因推理强度提高权限、
+工具或预算。档位不会改变并发、Child数量或循环上限。
+详见[0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)。

@@ -10,9 +10,11 @@ from coquo.core.compaction import CompactionCandidateError
 from coquo.providers.manager import (
     CurrentTargetContextAssessment,
     OutputBudgetUpdateResult,
+    ReasoningEffortUpdateResult,
     RuntimeStatus,
     RuntimeSwitchResult,
 )
+from coquo.providers.definitions import ReasoningEffort
 from coquo.providers.request_context import ContextFitDecision
 from coquo.providers.usage import ProviderUsageTotals, RuntimeUsageTracker
 from coquo.session import (
@@ -1810,6 +1812,54 @@ def test_output_command_inspects_sets_resets_and_validates_budget(tmp_path) -> N
 
     for invalid in ("/output 0", "/output -1", "/output 100000001", "/output 1 2"):
         assert dispatch_slash(invalid, session).message == "Usage: /output [1-100000000|reset]"
+
+
+def test_effort_command_accepts_all_host_levels_and_reports_complete_union(tmp_path) -> None:
+    class EffortSession(Session):
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            self.effort = None
+            self.updates = []
+
+        def status(self):
+            return RuntimeStatus(
+                mode="real",
+                profile="one",
+                selection_source="project",
+                provider_id="custom",
+                protocol="openai_chat_completions",
+                selected_model="model-one",
+                wire_model="model-one",
+                base_url="http://127.0.0.1:11434/v1",
+                base_url_source="profile",
+                credential_required=False,
+                credential_present=False,
+                reasoning_effort=self.effort.value if self.effort is not None else None,
+            )
+
+        def set_reasoning_effort(self, value):
+            previous = self.effort
+            self.effort = value
+            self.updates.append(value)
+            return ReasoningEffortUpdateResult(
+                self.status(),
+                previous.value if previous is not None else None,
+                previous is not value,
+            )
+
+    session = EffortSession(tmp_path)
+
+    inspected = dispatch_slash("/effort", session)
+    assert "none, minimal, low, medium, high, xhigh, max" in inspected.message
+    for effort in ReasoningEffort:
+        changed = dispatch_slash(f"/effort {effort.value}", session)
+        assert changed.kind == "success"
+        assert session.updates[-1] is effort
+    reset = dispatch_slash("/effort reset", session)
+    assert reset.kind == "success"
+    assert session.updates[-1] is None
+    invalid = dispatch_slash("/effort ultra", session)
+    assert invalid.message == "Usage: /effort [none|minimal|low|medium|high|xhigh|max|reset]"
 
 
 def test_non_slash_text_is_not_handled(tmp_path) -> None:

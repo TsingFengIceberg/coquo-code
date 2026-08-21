@@ -32,7 +32,7 @@ from coquo.core.contracts import (
 from coquo.core.orchestration import ProviderFailureKind
 from coquo.core.project_instructions import ProjectInstructionsLoader
 from coquo.core.session_title import build_session_title_request
-from coquo.providers.definitions import OPENAI
+from coquo.providers.definitions import OPENAI, ReasoningEffort, ReasoningProfile
 from coquo.providers.definitions import WireProtocol
 from coquo.providers.native_search import NativeSearchConfiguration
 from coquo.providers.errors import ProviderAdapterError
@@ -1091,6 +1091,34 @@ def test_request_selects_token_field_and_omits_fixed_sampling_temperature() -> N
     assert reasoning_request["max_completion_tokens"] == 64
     assert "max_tokens" not in reasoning_request
     assert "temperature" not in reasoning_request
+
+
+def test_request_preserves_max_reasoning_effort_without_profile_mapping() -> None:
+    effort_route = route("openai/gpt-5", max_output_tokens=64)
+    effort_route = replace(effort_route, reasoning_effort=ReasoningEffort.MAX)
+
+    created = build_request(effort_route, request(UserMessage(text="Hello")))
+
+    assert created["reasoning_effort"] == "max"
+
+
+def test_request_maps_host_effort_through_profile_native_name() -> None:
+    effort_route = route("openai/gpt-5", max_output_tokens=64)
+    effort_route = replace(
+        effort_route,
+        reasoning_effort=ReasoningEffort.HIGH,
+        reasoning_profile=ReasoningProfile.from_mapping(
+            {
+                "native_kind": "effort",
+                "native_levels": ["quick", "deep"],
+                "mapping": {"high": "deep"},
+            }
+        ),
+    )
+
+    created = build_request(effort_route, request(UserMessage(text="Hello")))
+
+    assert created["reasoning_effort"] == "deep"
 
 
 def test_openrouter_preserves_nested_wire_slug_and_custom_preserves_model() -> None:

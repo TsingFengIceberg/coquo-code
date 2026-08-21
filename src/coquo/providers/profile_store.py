@@ -624,6 +624,8 @@ def _owned_profile(
         context_window_tokens=spec.context_window_tokens,
         model_max_output_tokens=spec.model_max_output_tokens,
         temperature=spec.temperature,
+        default_reasoning_effort=spec.default_reasoning_effort,
+        reasoning=spec.reasoning,
         native_search_adapter=spec.native_search_adapter,
         native_search_manifest=spec.native_search_manifest,
         profile_id=profile_id,

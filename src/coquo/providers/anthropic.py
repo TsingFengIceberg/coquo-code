@@ -83,6 +83,7 @@ class AnthropicProviderConfig:
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     base_url: str = "https://api.anthropic.com"
     temperature: float | None = None
+    reasoning_effort: str | None = None
     native_search: NativeSearchConfiguration = NativeSearchConfiguration.unavailable()
 
     def __post_init__(self) -> None:
@@ -92,6 +93,10 @@ class AnthropicProviderConfig:
             raise ValueError("Anthropic max output tokens must be at least 1")
         if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
             raise ValueError("Anthropic temperature must be between 0.0 and 2.0")
+        if self.reasoning_effort is not None and (
+            not self.reasoning_effort.strip() or not self.reasoning_effort.isascii()
+        ):
+            raise ValueError("Anthropic reasoning effort must be a non-empty ASCII string")
 
 
 class AnthropicModelsClient(Protocol):
@@ -478,6 +483,9 @@ def build_input_projection(
         projection["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         if native_search_enabled:
             _apply_native_search_projection(projection, config.native_search, native_search_options)
+    if config.reasoning_effort is not None:
+        projection["thinking"] = {"type": "adaptive"}
+        projection["output_config"] = {"effort": config.reasoning_effort}
     return projection
 
 

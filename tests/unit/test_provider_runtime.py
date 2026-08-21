@@ -18,7 +18,7 @@ from coquo.core.contracts import (
     UserMessage,
 )
 from coquo.core.session_title import build_session_title_request
-from coquo.providers.definitions import WireProtocol
+from coquo.providers.definitions import ReasoningEffort, ReasoningProfile, WireProtocol
 from coquo.providers.errors import ProviderAdapterError, output_limit_error
 from coquo.providers.manager import (
     RuntimeProviderManager,
@@ -725,6 +725,65 @@ def test_direct_runtime_supports_process_local_model_switch(tmp_path) -> None:
     assert status.model_override == "model-two"
     assert status.selected_model == "model-two"
     assert constructed[-1].wire_model == "model-two"
+
+
+def test_manager_sets_and_resets_process_local_reasoning_effort(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    routes = []
+
+    def factory(route, *, environment):
+        routes.append(route)
+        return RecordingProvider(route.wire_model)
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=factory,
+    )
+
+    changed = manager.set_reasoning_effort(ReasoningEffort.MAX)
+    reset = manager.set_reasoning_effort(None)
+
+    assert changed.changed is True
+    assert changed.status.reasoning_effort == "max"
+    assert reset.changed is True
+    assert reset.status.reasoning_effort is None
+    assert routes[-2].reasoning_effort is ReasoningEffort.MAX
+    assert routes[-1].reasoning_effort is None
+
+
+def test_manager_preserves_profile_reasoning_default_without_invocation_override(tmp_path) -> None:
+    store = configured_store(tmp_path)
+    profile = store.get_profile("one")
+    store.replace_profile(
+        profile.profile_id,
+        replace(
+            profile.to_spec(),
+            default_reasoning_effort=ReasoningEffort.HIGH,
+            reasoning=ReasoningProfile.from_mapping(
+                {
+                    "native_kind": "effort",
+                    "native_levels": ["deep"],
+                    "mapping": {"high": "deep"},
+                }
+            ),
+        ),
+        expected_revision=profile.revision,
+    )
+    routes = []
+
+    manager = RuntimeProviderManager(
+        store,
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: (
+            routes.append(route) or RecordingProvider(route.wire_model)
+        ),
+    )
+
+    assert routes[0].reasoning_effort is ReasoningEffort.HIGH
+    assert manager.status().reasoning_effort == "high"
 
 
 def test_manager_set_model_tracks_profile_by_id_across_rename(tmp_path) -> None:

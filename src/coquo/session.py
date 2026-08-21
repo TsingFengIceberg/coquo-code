@@ -225,12 +225,14 @@ from coquo.providers.manager import (
     CompactionRuntimeSnapshot,
     CurrentTargetContextAssessment,
     OutputBudgetUpdateResult,
+    ReasoningEffortUpdateResult,
     RuntimeProviderManager,
     RuntimeStatus,
     RuntimeSwitchAuditError,
     RuntimeSwitchResult,
     TurnRuntimeSnapshot,
 )
+from coquo.providers.definitions import ReasoningEffort
 from coquo.providers.native_search import (
     NativeSearchContextSize,
     NativeSearchMode,
@@ -1318,6 +1320,7 @@ class ProjectSession:
         custom_base_url: str | None = None,
         custom_api_key_env: str | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         environment: Mapping[str, str] | None = None,
         user_profile_path: Path | None = None,
         project_profile_path: Path | None = None,
@@ -1405,6 +1408,7 @@ class ProjectSession:
             "custom_base_url": custom_base_url,
             "custom_api_key_env": custom_api_key_env,
             "max_output_tokens": max_output_tokens,
+            "reasoning_effort": reasoning_effort,
         }
         if provider_factory is not None:
             manager_arguments["provider_factory"] = provider_factory
@@ -4291,6 +4295,22 @@ class ProjectSession:
                 max_output_tokens,
                 committed_context=self._loop.effective_context_snapshot(),
             )
+
+    def set_reasoning_effort(
+        self, reasoning_effort: ReasoningEffort | None
+    ) -> ReasoningEffortUpdateResult:
+        """Set or reset a process-local reasoning effort without changing history."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+            result = self._manager.set_reasoning_effort(reasoning_effort)
+            try:
+                self._writer.runtime_changed(
+                    binding_from_status(result.status), reason="reasoning_effort"
+                )
+            except Exception as error:
+                raise RuntimeSwitchAuditError(RuntimeSwitchResult(result.status, None)) from error
+            return result
 
     def inspect_web_search_sources(self) -> WebSearchSourceConfiguration:
         """Inspect process-local search source activation without provider or Session work."""
@@ -7632,6 +7652,7 @@ def binding_from_status(status: RuntimeStatus) -> BindingSnapshot:
         generation=status.generation,
         adapter_version=f"route-contract-v{status.adapter_contract_version}",
         route_fingerprint=status.route_fingerprint,
+        reasoning_effort=status.reasoning_effort,
     )
 
 

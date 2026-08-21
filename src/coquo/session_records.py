@@ -80,6 +80,7 @@ from coquo.providers.usage import (
     ProviderInvocationUsage,
     ProviderTokenUsage,
 )
+from coquo.providers.definitions import ReasoningEffort
 
 SCHEMA_VERSION = 1
 CHILD_DELEGATION_SCHEMA_VERSION = 2
@@ -166,6 +167,7 @@ class BindingSnapshot:
     generation: int
     adapter_version: str
     route_fingerprint: str
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         _optional_text(self.profile_id, "binding profile_id")
@@ -206,6 +208,12 @@ class BindingSnapshot:
             raise SessionRecordError("binding generation must be a non-negative integer")
         _required_text(self.adapter_version, "binding adapter_version")
         _required_sha256(self.route_fingerprint, "binding route_fingerprint")
+        if self.reasoning_effort is not None and self.reasoning_effort not in {
+            effort.value for effort in ReasoningEffort
+        }:
+            raise SessionRecordError(
+                "binding reasoning_effort must be none, minimal, low, medium, high, xhigh, max, or null"
+            )
 
     @classmethod
     def fake(
@@ -2390,6 +2398,7 @@ def _binding_to_dict(binding: BindingSnapshot) -> dict[str, object]:
         "generation": binding.generation,
         "adapter_version": binding.adapter_version,
         "route_fingerprint": binding.route_fingerprint,
+        "reasoning_effort": binding.reasoning_effort,
     }
 
 
@@ -2414,8 +2423,12 @@ def _binding_from_value(value: object) -> BindingSnapshot:
         "generation",
         "adapter_version",
         "route_fingerprint",
+        "reasoning_effort",
     }
-    _closed_fields(value, fields, "binding")
+    legacy_fields = fields - {"reasoning_effort"}
+    value_fields = set(value)
+    if value_fields != legacy_fields and value_fields != fields:
+        _closed_fields(value, fields, "binding")
     return BindingSnapshot(
         profile_id=_nullable_field_text(value, "profile_id", "binding"),
         profile_revision=_nullable_field_int(value, "profile_revision", "binding"),
@@ -2434,6 +2447,11 @@ def _binding_from_value(value: object) -> BindingSnapshot:
         generation=_required_field_int(value, "generation", "binding"),
         adapter_version=_required_field_text(value, "adapter_version", "binding"),
         route_fingerprint=_required_field_text(value, "route_fingerprint", "binding"),
+        reasoning_effort=(
+            _nullable_field_text(value, "reasoning_effort", "binding")
+            if "reasoning_effort" in value
+            else None
+        ),
     )
 
 

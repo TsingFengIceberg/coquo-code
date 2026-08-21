@@ -22,7 +22,13 @@ from coquo.core.session_title import (
     SessionTitleRequest,
     SessionTitleUnavailableError,
 )
-from coquo.providers.definitions import ADAPTER_CONTRACT_VERSION, RuntimeProviderRoute
+from coquo.providers.definitions import (
+    ADAPTER_CONTRACT_VERSION,
+    ReasoningEffort,
+    ReasoningNativeKind,
+    RuntimeProviderRoute,
+    WireProtocol,
+)
 from coquo.providers.errors import ProviderAdapterError
 from coquo.providers.factory import create_provider
 from coquo.providers.fake import ScriptedFakeProvider
@@ -91,6 +97,15 @@ class OutputBudgetUpdateResult:
     changed: bool
 
 
+@dataclass(frozen=True)
+class ReasoningEffortUpdateResult:
+    """One process-local reasoning-effort update."""
+
+    status: RuntimeStatus
+    previous_effort: str | None
+    changed: bool
+
+
 class RuntimeSwitchAuditError(RuntimeError):
     """Raised when an applied switch cannot be persisted to the Session audit."""
 
@@ -119,6 +134,7 @@ class RuntimeStatus:
     default_max_output_tokens: int | None = None
     max_output_tokens_source: str = "unavailable"
     temperature: float | None = None
+    reasoning_effort: str | None = None
     profile_id: str | None = None
     profile_revision: int | None = None
     profile_fingerprint: str | None = None
@@ -598,6 +614,7 @@ class RuntimeProviderManager:
         custom_base_url: str | None = None,
         custom_api_key_env: str | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         provider_factory: ProviderFactory = create_provider,
         fake_factory: Callable[[], ConversationProvider] = ScriptedFakeProvider,
         context_resolver: ModelContextCapabilityResolver | None = None,
@@ -630,13 +647,16 @@ class RuntimeProviderManager:
         self._capability = ModelContextCapability.unknown(None)
         self._usage_tracker = RuntimeUsageTracker(self._generation)
         _validate_output_budget(max_output_tokens)
+        _validate_reasoning_effort(reasoning_effort)
 
         if profile is not None:
             selected_profile = store.get_profile(profile)
             base_route = resolve_profile_route(
                 selected_profile, environment=environment, model_override=model
             )
-            route = _route_with_output_budget(base_route, max_output_tokens)
+            route = _route_with_optional_reasoning_effort(
+                _route_with_output_budget(base_route, max_output_tokens), reasoning_effort
+            )
             candidate = self._prepare_candidate(
                 route,
                 *_profile_overrides(selected_profile, model_override=model),
@@ -656,7 +676,9 @@ class RuntimeProviderManager:
                 custom_base_url=custom_base_url,
                 custom_api_key_env=custom_api_key_env,
             )
-            route = _route_with_output_budget(base_route, max_output_tokens)
+            route = _route_with_optional_reasoning_effort(
+                _route_with_output_budget(base_route, max_output_tokens), reasoning_effort
+            )
             candidate = self._prepare_candidate(route, None)
             self._direct_route = base_route
             self._default_max_output_tokens = base_route.max_output_tokens
@@ -669,13 +691,17 @@ class RuntimeProviderManager:
                 raise RuntimeProviderStateError(
                     "output budget override requires a real provider runtime"
                 )
+            if reasoning_effort is not None and store.active_selection() is None:
+                raise RuntimeProviderStateError("reasoning effort requires a real provider runtime")
             active = store.active_selection()
             if active is None:
                 self._provider = fake_factory()
             else:
                 selected_profile = store.get_profile_by_id(active.profile_id)
                 base_route = resolve_profile_route(selected_profile, environment=environment)
-                route = _route_with_output_budget(base_route, max_output_tokens)
+                route = _route_with_optional_reasoning_effort(
+                    _route_with_output_budget(base_route, max_output_tokens), reasoning_effort
+                )
                 candidate = self._prepare_candidate(
                     route,
                     selected_profile.context_window_tokens,
@@ -1192,6 +1218,59 @@ class RuntimeProviderManager:
         _close_provider(old)
         return OutputBudgetUpdateResult(self.status(), fit_report, previous, True)
 
+    def set_reasoning_effort(
+        self,
+        reasoning_effort: ReasoningEffort | None,
+    ) -> ReasoningEffortUpdateResult:
+        """Set or reset process-local provider reasoning effort between turns."""
+        _validate_reasoning_effort(reasoning_effort)
+        with self._lock:
+            self._ensure_switchable()
+            route = self._route
+            if route is None:
+                raise RuntimeProviderStateError("reasoning effort requires a real provider runtime")
+            generation = self._generation
+            previous = route.reasoning_effort
+            if previous is reasoning_effort:
+                return ReasoningEffortUpdateResult(
+                    self.status(), previous.value if previous else None, False
+                )
+            candidate_route = _route_with_reasoning_effort(route, reasoning_effort)
+            loaded = self._loaded_profile
+            model_override = self._model_override
+        profile_overrides = (
+            _profile_overrides(loaded, model_override=model_override)
+            if loaded is not None
+            else (None, None)
+        )
+        candidate = self._prepare_candidate(candidate_route, *profile_overrides)
+        try:
+            with self._lock:
+                self._ensure_switchable()
+                if self._generation != generation:
+                    raise RuntimeProviderStateError(
+                        "provider runtime changed during reasoning effort preparation"
+                    )
+                if loaded is not None:
+                    current = self._store.get_profile_by_id(loaded.profile_id)
+                    if current.revision != loaded.revision:
+                        raise RuntimeProviderStateError(
+                            "provider profile changed during reasoning effort preparation"
+                        )
+                old = self._provider
+                self._activate(candidate)
+                self._generation += 1
+                self._usage_tracker.retarget(self._generation)
+        except Exception:
+            _close_provider(candidate.provider)
+            raise
+        _close_provider(old)
+        return ReasoningEffortUpdateResult(
+            self.status(),
+            previous.value if previous is not None else None,
+            True,
+        )
+
     def assess_current_context(
         self,
         request: ConversationRequest,
@@ -1451,6 +1530,42 @@ def _validate_output_budget(value: int | None) -> None:
         )
 
 
+def _validate_reasoning_effort(value: ReasoningEffort | None) -> None:
+    if value is not None and not isinstance(value, ReasoningEffort):
+        raise RuntimeProviderStateError(
+            "reasoning effort must be none, minimal, low, medium, high, xhigh, max, or unset"
+        )
+
+
+def _route_with_reasoning_effort(
+    route: RuntimeProviderRoute,
+    reasoning_effort: ReasoningEffort | None,
+) -> RuntimeProviderRoute:
+    _validate_reasoning_effort(reasoning_effort)
+    if reasoning_effort is not None and route.reasoning_profile is not None:
+        if route.reasoning_profile.map_effort(reasoning_effort) is None:
+            raise RuntimeProviderStateError(
+                f"reasoning effort is not mapped by the active profile: {reasoning_effort.value}"
+            )
+        if (
+            route.definition.protocol is WireProtocol.ANTHROPIC_MESSAGES
+            and route.reasoning_profile.native_kind
+            is not ReasoningNativeKind.ANTHROPIC_ADAPTIVE_EFFORT
+        ):
+            raise RuntimeProviderStateError("Anthropic reasoning profiles must use adaptive effort")
+    return replace(route, reasoning_effort=reasoning_effort)
+
+
+def _route_with_optional_reasoning_effort(
+    route: RuntimeProviderRoute,
+    reasoning_effort: ReasoningEffort | None,
+) -> RuntimeProviderRoute:
+    """Apply an invocation override while preserving a profile default when absent."""
+    if reasoning_effort is None:
+        return route
+    return _route_with_reasoning_effort(route, reasoning_effort)
+
+
 def _route_with_output_budget(
     route: RuntimeProviderRoute,
     max_output_tokens: int | None,
@@ -1517,6 +1632,9 @@ def _status_for_route(
             max_output_tokens_source or ("profile" if profile is not None else "route")
         ),
         temperature=route.temperature,
+        reasoning_effort=(
+            route.reasoning_effort.value if route.reasoning_effort is not None else None
+        ),
         profile_id=profile.profile_id if profile is not None else None,
         profile_revision=profile.revision if profile is not None else None,
         profile_fingerprint=profile.fingerprint() if profile is not None else None,

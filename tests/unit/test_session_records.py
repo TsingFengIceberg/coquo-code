@@ -1007,6 +1007,61 @@ def test_canonical_codec_is_compact_sorted_and_contains_no_secret_value(tmp_path
     assert line == encode_record(decode_record(line))
 
 
+def test_binding_codec_replays_legacy_binding_without_reasoning_effort(tmp_path: Path) -> None:
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=BindingSnapshot.fake(),
+    )
+    value = json.loads(encode_record(header))
+    value["binding"].pop("reasoning_effort")
+
+    decoded = decode_record(json.dumps(value).encode())
+
+    assert isinstance(decoded, SessionHeader)
+    assert decoded.binding.reasoning_effort is None
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_binding_codec_accepts_every_host_reasoning_effort(tmp_path: Path, effort: str) -> None:
+    binding = BindingSnapshot(
+        profile_id=None,
+        profile_revision=None,
+        profile_name=None,
+        profile_fingerprint=None,
+        provider_id="custom",
+        protocol="openai_chat_completions",
+        selected_model="vendor/model",
+        wire_model="vendor/model",
+        base_url="https://example.test/v1",
+        base_url_source="profile",
+        source="profile",
+        credential_env=None,
+        max_output_tokens=1024,
+        temperature=None,
+        generation=1,
+        adapter_version="openai-compat-v1",
+        route_fingerprint="b" * 64,
+        reasoning_effort=effort,
+    )
+    header = SessionHeader(
+        sequence=0,
+        session_id=SESSION_ID,
+        workspace=str(tmp_path.resolve()),
+        workspace_fingerprint=workspace_fingerprint(tmp_path),
+        created_at=NOW,
+        binding=binding,
+    )
+
+    decoded = decode_record(encode_record(header))
+
+    assert isinstance(decoded, SessionHeader)
+    assert decoded.binding.reasoning_effort == effort
+
+
 @pytest.mark.parametrize(
     "mutate,match",
     [

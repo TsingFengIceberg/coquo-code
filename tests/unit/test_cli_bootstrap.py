@@ -17,7 +17,7 @@ from coquo.agent.tool_events import (
     ToolRequestFinished,
     ToolRequestStarted,
 )
-from coquo.cli.main import main
+from coquo.cli.main import build_parser, main
 from coquo.core.actions import ActionIdentity, ActionLease, ActionPrecondition
 from coquo.core.contracts import (
     AssistantText,
@@ -944,12 +944,52 @@ def test_global_model_route_renders_real_provider_metadata_without_secret_values
         "context window: unknown (unknown)\n"
         "model max output: unknown (unknown)\n"
         "requested output reserve: 1024\n"
+        "reasoning effort: <unset>\n"
         "native search: available\n"
         "native search adapter: openai-responses-web-search-v1\n"
         "native search source: built-in\n"
         "context diagnostic: live context discovery is unsupported\n"
     )
     assert "secret-must-not-render" not in output.getvalue()
+
+
+def test_cli_accepts_max_reasoning_effort() -> None:
+    arguments = build_parser().parse_args(
+        ["--model", "openai/gpt-5", "--reasoning-effort", "max", "prompt", "Hello"]
+    )
+
+    assert arguments.invocation_reasoning_effort.value == "max"
+
+
+def test_cli_accepts_profile_reasoning_mapping_options() -> None:
+    arguments = build_parser().parse_args(
+        [
+            "provider",
+            "add",
+            "mapped",
+            "--provider",
+            "custom",
+            "--model",
+            "vendor/model",
+            "--base-url",
+            "https://gateway.example/v1",
+            "--reasoning-native-kind",
+            "effort",
+            "--reasoning-native-level",
+            "quick",
+            "--reasoning-native-level",
+            "deep",
+            "--reasoning-map",
+            "high=deep",
+            "--default-reasoning-effort",
+            "high",
+        ]
+    )
+
+    assert arguments.reasoning_native_kind == "effort"
+    assert arguments.reasoning_native_level == ["quick", "deep"]
+    assert arguments.reasoning_map == ["high=deep"]
+    assert arguments.default_reasoning_effort.value == "high"
 
 
 def test_route_command_renders_the_offline_default_plan_without_secret_identifiers() -> None:

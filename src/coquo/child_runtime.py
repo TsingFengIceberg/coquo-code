@@ -380,6 +380,7 @@ def provider_binding_snapshot(status: RuntimeStatus) -> dict[str, object]:
         "model_override": status.model_override,
         "max_output_tokens": status.max_output_tokens,
         "temperature": status.temperature,
+        "reasoning_effort": status.reasoning_effort,
         "generation": status.generation,
         "adapter_contract_version": status.adapter_contract_version,
     }
@@ -409,6 +410,7 @@ def provider_binding_from_session(binding: BindingSnapshot) -> dict[str, object]
         "route_fingerprint": binding.route_fingerprint,
         "max_output_tokens": binding.max_output_tokens,
         "temperature": binding.temperature,
+        "reasoning_effort": binding.reasoning_effort,
         "generation": binding.generation,
         "adapter_contract_version": binding.adapter_version,
     }
@@ -613,6 +615,9 @@ class ChildRunExecutor:
                     "max_output_tokens": (
                         admitted.max_output_tokens if binding.get("mode") != "fake" else None
                     ),
+                    "reasoning_effort": (
+                        binding.get("reasoning_effort") if binding.get("mode") != "fake" else None
+                    ),
                 }
                 execution_scope = ExecutionScope.authority(self.workspace)
                 permission_mode = PermissionMode(admitted.permission_mode)
@@ -801,6 +806,7 @@ class ChildRunExecutor:
             "profile_id",
             "profile_revision",
             "profile_fingerprint",
+            "reasoning_effort",
         ):
             if expected.get(key) != getattr(status, key, None):
                 raise RuntimeError("Child Provider route changed after admission")

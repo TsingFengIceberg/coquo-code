@@ -49,6 +49,7 @@ from coquo.mcp.client import McpLiveProcessStatus, McpProbeResult, McpServerStat
 from coquo.cli.failure_guidance import tool_result_guidance
 from coquo.cli.markdown_renderer import render_plain_document
 from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.definitions import ReasoningEffort
 from coquo.providers.request_context import ContextFitDecision, ContextFitReport
 from coquo.session import (
     AutoCompactionCommitted,
@@ -751,6 +752,7 @@ class RuntimeStatusView(Protocol):
     max_output_tokens: int | None
     default_max_output_tokens: int | None
     max_output_tokens_source: str
+    reasoning_effort: str | None
     native_search_available: bool
     native_search_enabled: bool
     native_search_adapter: str | None
@@ -2051,7 +2053,8 @@ def render_runtime_status(status: RuntimeStatusView) -> str:
         f"Provider native search: {native_search}\n"
         f"Context window: {context}{diagnostic}\n"
         f"Model max output: {model_output}{output_diagnostic}\n"
-        f"Requested output reserve: {output_reserve} ({status.max_output_tokens_source})"
+        f"Requested output reserve: {output_reserve} ({status.max_output_tokens_source})\n"
+        f"Reasoning effort: {status.reasoning_effort or '<unset>'}"
     )
 
 
@@ -2444,6 +2447,33 @@ def render_output_budget_update(result) -> tuple[str, MessageKind]:
         "will run full preflight."
     )
     return "\n".join(lines), "warning"
+
+
+def render_reasoning_effort(status: RuntimeStatusView) -> tuple[str, MessageKind]:
+    """Render the current process-local reasoning effort."""
+    if status.mode != "real":
+        return "Reasoning effort is unavailable without a real provider runtime.", "warning"
+    current = status.reasoning_effort or "unset"
+    return (
+        f"Reasoning effort: {current}\n"
+        f"Supported levels: {', '.join(effort.value for effort in ReasoningEffort)}\n"
+        "Scope: current process only; provider profile and Session history are unchanged.",
+        "info",
+    )
+
+
+def render_reasoning_effort_update(result) -> tuple[str, MessageKind]:
+    """Render one applied process-local reasoning-effort update."""
+    status = result.status
+    current = status.reasoning_effort or "unset"
+    if not result.changed:
+        return f"Reasoning effort unchanged at {current}.", "info"
+    previous = result.previous_effort or "unset"
+    return (
+        f"Reasoning effort changed: {previous} -> {current}.\n"
+        "Provider profile and Session history were not modified.",
+        "success",
+    )
 
 
 def render_output_budget_rejection(report: ContextFitReport) -> str:
@@ -2840,6 +2870,7 @@ def render_prompt_event(
             invocation_index=event.invocation_index,
             invocation_limit=event.invocation_limit,
         ), "info"
+
     if isinstance(event, ProviderInvocationUsageReceived):
         if event.usage is None:
             detail = "unknown (provider did not return usable metadata)"

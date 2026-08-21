@@ -59,6 +59,8 @@ from coquo.cli.presentation import (
     render_output_budget,
     render_output_budget_rejection,
     render_output_budget_update,
+    render_reasoning_effort,
+    render_reasoning_effort_update,
     render_recent_history,
     render_runtime_status,
     render_runtime_switch,
@@ -114,6 +116,7 @@ from coquo.cli.presentation import (
 )
 from coquo.core.compaction import CompactionError
 from coquo.core.permissions import ApprovalMode, PermissionMode
+from coquo.providers.definitions import ReasoningEffort
 from coquo.core.task_admission import canonical_task_admission_id
 from coquo.cli.failure_guidance import command_failure_guidance
 from coquo.cli.turn_runner import TaskTurnRequest
@@ -160,6 +163,7 @@ TOP_LEVEL_COMMANDS = (
     "/instructions",
     "/usage",
     "/output",
+    "/effort",
     "/compact",
     "/compactions",
     "/provider",
@@ -235,6 +239,7 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/usage session", "Show durable Session usage"),
     SlashCompletionSpec("/usage turns", "Show recent durable turn usage"),
     SlashCompletionSpec("/output", "Inspect or change output budget", True),
+    SlashCompletionSpec("/effort", "Inspect or change reasoning effort", True),
     SlashCompletionSpec("/compact", "Compact earlier complete turns", True),
     SlashCompletionSpec("/compactions", "Show durable compaction history", True),
     SlashCompletionSpec("/provider", "Provider commands", True),
@@ -484,6 +489,8 @@ class ReplSession(Protocol):
     def turn_usage_history(self, limit: int = 10): ...
 
     def set_output_budget(self, max_output_tokens: int | None): ...
+
+    def set_reasoning_effort(self, reasoning_effort: ReasoningEffort | None): ...
 
     def compact_context(self): ...
 
@@ -1018,6 +1025,8 @@ def dispatch_slash(
         return _commit(command, session)
     if command == "/output" or command.startswith("/output "):
         return _output(command, session)
+    if command == "/effort" or command.startswith("/effort "):
+        return _effort(command, session)
     if command == "/compact preview":
         try:
             message, kind = render_compact_preview(session.preview_compaction())
@@ -1849,6 +1858,22 @@ def _output(command: str, session: ReplSession) -> SlashResult:
         )
     except Exception as error:
         return _command_error(error, failure_prefix="Output budget change failed")
+
+
+def _effort(command: str, session: ReplSession) -> SlashResult:
+    parts = command.split()
+    if len(parts) == 1:
+        message, kind = render_reasoning_effort(session.status())
+        return SlashResult(handled=True, message=message, kind=kind)
+    supported = {effort.value for effort in ReasoningEffort}
+    if len(parts) != 2 or parts[1] not in {*supported, "reset"}:
+        return _usage("Usage: /effort [none|minimal|low|medium|high|xhigh|max|reset]")
+    effort = None if parts[1] == "reset" else ReasoningEffort(parts[1])
+    try:
+        message, kind = render_reasoning_effort_update(session.set_reasoning_effort(effort))
+        return SlashResult(handled=True, message=message, kind=kind)
+    except Exception as error:
+        return _command_error(error, failure_prefix="Reasoning effort change failed")
 
 
 @dataclass(frozen=True)

@@ -1766,6 +1766,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 130. [0150: Upstream Provider API Error Facts and Safe Display](./decisions/0150-upstream-provider-error-facts-and-safe-display.md)
 131. [0151: Unified Read-only Observation Timeline](./decisions/0151-unified-read-only-observation-timeline.md)
 132. [0152: Observation Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md)
+133. [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -1831,3 +1832,25 @@ optional age without deleting Session, Task, Child, Team, or queue records.
 Prompts, model/tool/handoff bodies, headers, credentials, and tokens are not
 retained, and no remote telemetry is introduced. See [0152: Observation
 Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md).
+
+## Provider Reasoning Effort Modes
+
+Runtime now exposes the broad Host-owned process-local reasoning union
+`none|minimal|low|medium|high|xhigh|max`. It is separate from
+`max_output_tokens`: effort selects a provider reasoning policy, while the
+output budget limits visible response size. One-shot and interactive
+invocations accept all seven levels; the REPL uses `/effort`,
+`/effort <level>`, and `/effort reset`. Changes are only allowed between turns
+and are recorded as redacted `runtime_changed` binding audit; no reasoning text
+is persisted.
+
+Profiles declare the native kind, supported native level names, explicit
+Host-to-native mappings, and an optional default. OpenAI-compatible Chat
+Completions and Responses send the mapped native effort field. Anthropic
+Messages uses the string adaptive contract (`thinking` plus
+`output_config.effort`); legacy numeric `budget_tokens` is unsupported. Missing
+mappings fail closed and there is no implicit `max -> high` conversion. Legacy
+bindings without the field replay as unset. Children inherit only redacted
+route provenance and gain no additional permissions, tools, or budgets from a
+higher effort mode; effort does not alter concurrency, Child count, or loop
+limits. See [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md).
