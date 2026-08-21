@@ -4,7 +4,9 @@ import io
 import json
 from pathlib import Path
 
-from coquo.cli.main import main
+import pytest
+
+from coquo.cli.main import build_parser, main
 from coquo.cli.slash import dispatch_slash
 from coquo.child_run_store import ChildRunStore
 from coquo.session import ProjectSession
@@ -166,6 +168,15 @@ def test_standalone_child_background_lifecycle_is_observable_end_to_end(tmp_path
     assert status == 0 and errors == ""
     assert submission["submission_id"] in output
     assert "terminal=completed" in output
+
+
+def test_child_wait_rejects_timeout_above_runtime_bound_without_traceback(capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(
+            ["child", "wait", "00000000-0000-4000-8000-000000000000", "--timeout", "60"]
+        )
+    assert caught.value.code == 2
+    assert "Child wait timeout must be between 0 and 30 seconds" in capsys.readouterr().err
 
 
 def test_standalone_and_slash_child_handoff(tmp_path: Path) -> None:

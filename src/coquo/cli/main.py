@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -345,6 +346,17 @@ def observation_timeline_limit(value: str) -> int:
     if not 1 <= limit <= 1000:
         raise argparse.ArgumentTypeError("observation timeline limit must be between 1 and 1000")
     return limit
+
+
+def child_wait_timeout(value: str) -> float:
+    """Accept the bounded durable Child wait timeout."""
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("Child wait timeout must be a number") from None
+    if not math.isfinite(timeout) or not 0 <= timeout <= 30:
+        raise argparse.ArgumentTypeError("Child wait timeout must be between 0 and 30 seconds")
+    return timeout
 
 
 def team_schedule_assignment_limit(value: str) -> int:
@@ -987,7 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
     child_cancel.add_argument("reason", type=nonblank_prompt)
     child_wait = child_commands.add_parser("wait", help="wait for one Child Run")
     child_wait.add_argument("child_run_id")
-    child_wait.add_argument("--timeout", type=float, default=30.0)
+    child_wait.add_argument("--timeout", type=child_wait_timeout, default=30.0)
     child_recover = child_commands.add_parser("recover", help="recover abandoned Child Runs")
     child_recover.add_argument("child_run_id", nargs="?")
     child_recover.add_argument("--limit", type=task_list_limit, default=100)

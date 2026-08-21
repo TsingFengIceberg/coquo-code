@@ -146,6 +146,10 @@ def stream_usage_chunk(prompt_tokens: int, completion_tokens: int):
     )
 
 
+def stream_empty_prefix_chunk():
+    return SimpleNamespace(choices=[], usage=None)
+
+
 def stream_tool_delta(*, call_id=None, name=None, arguments=None, index=0):
     return SimpleNamespace(
         index=index,
@@ -347,6 +351,33 @@ def test_compatible_stream_requests_and_normalizes_final_usage_chunk() -> None:
     assert outcome.usage == ProviderTokenUsage(22, 4)
     assert client.requests[0]["stream_options"] == {"include_usage": True}
     assert stream.closed is True
+
+
+def test_compatible_stream_accepts_one_empty_prefix_chunk() -> None:
+    stream = ClosableStream(
+        [
+            stream_empty_prefix_chunk(),
+            stream_chunk(content="done", finish_reason="stop"),
+            stream_usage_chunk(22, 4),
+        ]
+    )
+    client = RecordingChatClient([stream])
+    outcome = OpenAICompatibleConversationProvider(route(), client).respond_stream_outcome(
+        request(UserMessage("hello")), event_sink=lambda _event: None
+    )
+
+    assert outcome.response == AssistantText("done")
+    assert outcome.usage == ProviderTokenUsage(22, 4)
+    assert stream.closed is True
+
+
+def test_compatible_stream_rejects_repeated_empty_prefix_chunks() -> None:
+    with pytest.raises(ProviderAdapterError, match="repeated empty prefix"):
+        parse_response_stream(
+            [stream_empty_prefix_chunk(), stream_empty_prefix_chunk()],
+            route=route(),
+            event_sink=lambda _event: None,
+        )
 
 
 def completion(

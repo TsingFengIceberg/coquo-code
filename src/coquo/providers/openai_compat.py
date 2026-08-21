@@ -1111,6 +1111,7 @@ def parse_response_stream(
     text_bytes = 0
     stream_usage: ProviderTokenUsage | None = None
     saw_usage_metadata = False
+    saw_empty_prefix_chunk = False
 
     for chunk_index, chunk in enumerate(iterator, start=1):
         if chunk_index > MAX_PROVIDER_STREAM_EVENTS:
@@ -1118,6 +1119,11 @@ def parse_response_stream(
         choices = getattr(chunk, "choices", None)
         raw_usage = getattr(chunk, "usage", None)
         chunk_usage = _parse_compatible_usage(raw_usage)
+        if choices == [] and raw_usage is None and not saw_chunk and finish_reason is None:
+            if saw_empty_prefix_chunk:
+                raise _invalid_response(route, "provider stream repeated empty prefix chunk")
+            saw_empty_prefix_chunk = True
+            continue
         if choices == [] and finish_reason is not None and raw_usage is not None:
             if saw_usage_metadata:
                 raise _invalid_response(route, "provider stream repeated usage metadata")
