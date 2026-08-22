@@ -114,6 +114,21 @@ class ChildRunSupervisor:
     def inspect(self, child_run_id: str) -> ChildRunInfo:
         return self.store.inspect(child_run_id)
 
+    def recover_orphans(self, *, child_run_id: str | None = None, limit: int = 100):
+        """Reconcile abandoned executions without touching live worker leases.
+
+        Recovery is deliberately delegated to the durable lease-aware service:
+        an active worker is reported as ``still_owned`` and is never marked
+        interrupted by this process.
+        """
+        from coquo.child_recovery import ChildRunRecoveryService
+
+        return ChildRunRecoveryService(self.workspace).recover(
+            parent_session_id=self._parent_session_id,
+            child_run_id=child_run_id,
+            limit=limit,
+        )
+
     def drain_notifications(self, limit: int = MAX_CHILD_NOTIFICATIONS):
         if type(limit) is not int or not 1 <= limit <= MAX_CHILD_NOTIFICATIONS:
             raise ValueError("notification limit is invalid")

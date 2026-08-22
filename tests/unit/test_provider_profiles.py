@@ -518,6 +518,25 @@ def test_anthropic_profile_requires_adaptive_string_effort_contract() -> None:
         )
 
 
+def test_anthropic_adaptive_profile_declares_the_complete_host_effort_union() -> None:
+    levels = [effort.value for effort in ReasoningEffort]
+    configured = ProviderProfileSpec.from_mapping(
+        {
+            "name": "anthropic-matrix",
+            "provider_id": "anthropic",
+            "protocol": "anthropic_messages",
+            "model": "claude-opus-4-8",
+            "reasoning": {
+                "native_kind": "anthropic_adaptive_effort",
+                "native_levels": [f"adaptive-{level}" for level in levels],
+                "mapping": {level: f"adaptive-{level}" for level in levels},
+            },
+        }
+    )
+    assert configured.reasoning is not None
+    assert configured.reasoning.map_effort(ReasoningEffort.MAX) == "adaptive-max"
+
+
 def test_schema_v2_rejects_context_override_and_v3_accepts_it(tmp_path) -> None:
     user_path = tmp_path / "user.json"
     profile_id = "00000000-0000-4000-8000-000000000001"

@@ -1767,6 +1767,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 131. [0151: Unified Read-only Observation Timeline](./decisions/0151-unified-read-only-observation-timeline.md)
 132. [0152: Observation Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md)
 133. [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
+134. [0154: Child/Team Recovery Boundaries and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -1854,3 +1855,21 @@ bindings without the field replay as unset. Children inherit only redacted
 route provenance and gain no additional permissions, tools, or budgets from a
 higher effort mode; effort does not alter concurrency, Child count, or loop
 limits. See [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md).
+
+## Child/Team Recovery Boundaries and Provider Effort Matrix
+
+Concurrent Child replay now uses a bounded stable read snapshot, so a
+transient append-size change is retried instead of being reported as transcript
+corruption; persistent drift still fails closed. Supervisor recovery follows the
+durable execution lease: a live worker is reported as `still_owned`, and only
+after it releases the lease may recovery append `interrupted`. It never retries,
+resumes, or executes a READY Child.
+
+Task-to-Child and Task-to-Team observation converges only after terminal evidence
+and an identity-matching handoff are available. Failed, cancelled, and
+interrupted Children produce one idempotent failed Task stage; missing or
+inconsistent handoffs remain recovery errors. The Provider effort regression
+matrix covers every Host level across OpenAI Chat/Responses and Anthropic
+adaptive string mappings; unmapped levels fail closed and numeric
+`budget_tokens` remains unsupported. See [0154: Child/Team Recovery Boundaries
+and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md).

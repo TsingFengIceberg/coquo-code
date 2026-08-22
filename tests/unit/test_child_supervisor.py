@@ -231,6 +231,46 @@ def test_supervisor_wait_timeout_and_cancel_active_worker(tmp_path) -> None:
     supervisor.close()
 
 
+def test_supervisor_recovery_does_not_interrupt_a_live_worker(tmp_path) -> None:
+    store, ids = prepared_runs(tmp_path, 1)
+    started = Event()
+    release = Event()
+
+    class UncooperativeExecutor:
+        def run(self, _child_run_id: str, *, cancellation=None):
+            del cancellation
+            info = store.inspect(_child_run_id)
+            lease = store.acquire_execution(_child_run_id)
+            store.start_execution(
+                _child_run_id,
+                child_session_id=info.child_session_id or "",
+                execution_id="92345678-1234-4234-9234-123456789abc",
+            )
+            started.set()
+            release.wait(timeout=2)
+            lease.close()
+
+    supervisor = ChildRunSupervisor(
+        tmp_path,
+        executor_factory=lambda _child_id: UncooperativeExecutor(),
+        worker_count=1,
+        parent_session_id=store.inspect(ids[0]).parent_session_id,
+    )
+    supervisor.submit(ids[0])
+    assert started.wait(timeout=2)
+
+    live = supervisor.recover_orphans(child_run_id=ids[0])
+    assert live.recovered == ()
+    assert live.diagnostics[0].outcome == "still_owned"
+    assert store.inspect(ids[0]).status is ChildRunStatus.RUNNING
+
+    release.set()
+    supervisor.close(join_timeout=2)
+    recovered = supervisor.recover_orphans(child_run_id=ids[0])
+    assert tuple(item.child_run_id for item in recovered.recovered) == (ids[0],)
+    assert store.inspect(ids[0]).status is ChildRunStatus.INTERRUPTED
+
+
 def test_supervisor_notification_rendering_is_bounded() -> None:
     from coquo.child_supervisor import ChildSupervisorNotification
 

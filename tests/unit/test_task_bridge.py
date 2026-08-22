@@ -143,6 +143,90 @@ def test_child_bridge_rejects_wrong_identity_and_owner(tmp_path: Path) -> None:
     assert bridge.observe_child_stage(task.task_id).outcome == TaskBridgeOutcome.PENDING
 
 
+def test_child_bridge_converges_abandoned_running_child_to_failed_once(tmp_path: Path) -> None:
+    owner_session_id, binding = _owner(tmp_path)
+    task = _task(tmp_path, owner_session_id)
+    bridge = TaskOrchestrationService(tmp_path)
+    admitted = bridge.start_child_stage(task.task_id, "Recover an abandoned Child")
+    child = admitted.child
+    spec = build_child_runtime_spec_from_binding(
+        child_run_id=child.child_run_id,
+        parent_session_id=owner_session_id,
+        child_session_id="82345678-1234-4234-9234-123456789abc",
+        objective=child.objective,
+        binding=binding,
+    )
+    store = ChildRunStore(tmp_path)
+    store.prepare(
+        child.child_run_id,
+        runtime_spec=spec,
+        session_store=SessionStore(tmp_path),
+        binding=binding,
+    )
+    lease = store.acquire_execution(child.child_run_id)
+    store.start_execution(
+        child.child_run_id,
+        child_session_id=spec.child_session_id,
+        execution_id="92345678-1234-4234-9234-123456789abc",
+    )
+    lease.close()
+    store.finish_interrupted(child.child_run_id)
+
+    failed = bridge.observe_child_stage(task.task_id)
+    assert failed.outcome == TaskBridgeOutcome.FAILED
+    assert failed.result_code == "execution_abandoned"
+    record_count = failed.task.record_count
+    repeated = bridge.observe_child_stage(task.task_id)
+    assert repeated.outcome == TaskBridgeOutcome.FAILED
+    assert repeated.task.record_count == record_count
+
+
+def test_team_bridge_requires_terminal_handoff_before_task_commit(tmp_path: Path) -> None:
+    owner_session_id, binding = _owner(tmp_path)
+    task = _task(tmp_path, owner_session_id)
+    team_store = TeamStore(tmp_path)
+    team = team_store.create("Recovery Team", owner_session=owner_session_id)
+    member = team_store.add_member(team.team_id, "Worker")
+    bridge = TaskOrchestrationService(tmp_path)
+    admitted = bridge.start_team_assignment_stage(
+        task.task_id,
+        team.team_id,
+        member.member_id,
+        objective="Recover a failed Team Child",
+    )
+    child_id = admitted.assignment.assignment.child_run_id
+    store = ChildRunStore(tmp_path)
+    child = store.inspect(child_id)
+    spec = build_child_runtime_spec_from_binding(
+        child_run_id=child_id,
+        parent_session_id=owner_session_id,
+        child_session_id="82345678-1234-4234-9234-123456789abc",
+        objective=child.objective,
+        binding=binding,
+    )
+    store.prepare(
+        child_id,
+        runtime_spec=spec,
+        session_store=SessionStore(tmp_path),
+        binding=binding,
+    )
+    store.finish_failed(
+        child_id,
+        execution_id=None,
+        phase="pre_start",
+        result_code="provider_unavailable",
+        message="provider unavailable",
+    )
+
+    failed = bridge.observe_team_assignment_stage(task.task_id)
+    assert failed.outcome == TaskBridgeOutcome.FAILED
+    assert failed.result_code == "provider_unavailable"
+    assert failed.assignment.assignment.phase.value == "terminal_observed"
+    repeated = bridge.observe_team_assignment_stage(task.task_id)
+    assert repeated.outcome == TaskBridgeOutcome.FAILED
+    assert repeated.task.record_count == failed.task.record_count
+
+
 def test_team_assignment_bridge_cancel_and_commit(tmp_path: Path) -> None:
     owner_session_id, binding = _owner(tmp_path)
     task = _task(tmp_path, owner_session_id)

@@ -1583,6 +1583,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 131. [0151：统一只读可观察性时间线](./decisions/0151-unified-read-only-observation-timeline.md)
 132. [0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)
 133. [0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
+134. [0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1648,3 +1649,16 @@ Anthropic Messages使用字符串adaptive effort（`thinking`与`output_config.e
 旧binding缺少新字段时按unset回放。Child只继承脱敏的路由事实，不因推理强度提高权限、
 工具或预算。档位不会改变并发、Child数量或循环上限。
 详见[0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)。
+
+## Child/Team恢复边界与Provider档位矩阵
+
+并行Child读取Session transcript时，Host只读回放使用有界稳定快照重试，短暂的
+追加尺寸变化不会再被误报为损坏；持续变化仍然fail-closed。Supervisor的恢复
+通过durable execution lease判断所有权：活动worker只能报告`still_owned`，释放lease
+后才允许恢复为`interrupted`，不自动重试、恢复执行或执行READY Child。
+
+Task到Child/Team的观察只有在terminal记录和身份一致的handoff都可验证时才收敛。
+失败、取消和中断统一进入一次幂等的Task失败阶段；handoff缺失或不一致保持恢复错误。
+Provider档位回归矩阵覆盖所有Host档位在OpenAI Chat/Responses及Anthropic adaptive
+字符串映射中的行为，未映射档位fail-closed，旧式数字`budget_tokens`继续不支持。
+详见[0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)。

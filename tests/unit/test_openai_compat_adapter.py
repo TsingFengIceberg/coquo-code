@@ -1121,6 +1121,39 @@ def test_request_maps_host_effort_through_profile_native_name() -> None:
     assert created["reasoning_effort"] == "deep"
 
 
+def test_request_maps_every_host_effort_level_and_fails_closed_when_unmapped() -> None:
+    levels = tuple(effort.value for effort in ReasoningEffort)
+    profile = ReasoningProfile.from_mapping(
+        {
+            "native_kind": "effort",
+            "native_levels": [f"native-{level}" for level in levels],
+            "mapping": {level: f"native-{level}" for level in levels},
+        }
+    )
+    mapped = replace(
+        route("openai/gpt-5", max_output_tokens=64),
+        reasoning_effort=ReasoningEffort.MAX,
+        reasoning_profile=profile,
+    )
+    assert build_request(mapped, request(UserMessage(text="Hello")))["reasoning_effort"] == (
+        "native-max"
+    )
+
+    unmapped = replace(
+        mapped,
+        reasoning_effort=ReasoningEffort.HIGH,
+        reasoning_profile=ReasoningProfile.from_mapping(
+            {
+                "native_kind": "effort",
+                "native_levels": ["native-max"],
+                "mapping": {"max": "native-max"},
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="not mapped"):
+        build_request(unmapped, request(UserMessage(text="Hello")))
+
+
 def test_openrouter_preserves_nested_wire_slug_and_custom_preserves_model() -> None:
     openrouter = resolve_runtime_route("openrouter/anthropic/claude-opus-4-8", environment={})
     assert build_request(openrouter, request(UserMessage(text="Hi")))["model"] == (

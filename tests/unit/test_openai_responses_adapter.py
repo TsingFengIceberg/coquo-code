@@ -146,6 +146,39 @@ def test_request_maps_host_effort_through_profile_native_name() -> None:
     assert created["reasoning"] == {"effort": "ultra"}
 
 
+def test_responses_effort_matrix_uses_profile_mapping_and_rejects_gaps() -> None:
+    levels = tuple(effort.value for effort in ReasoningEffort)
+    profile = ReasoningProfile.from_mapping(
+        {
+            "native_kind": "effort",
+            "native_levels": [f"wire-{level}" for level in levels],
+            "mapping": {level: f"wire-{level}" for level in levels},
+        }
+    )
+    mapped = replace(
+        route(),
+        reasoning_effort=ReasoningEffort.XHIGH,
+        reasoning_profile=profile,
+    )
+    assert build_request(mapped, request(UserMessage("reason")))["reasoning"] == {
+        "effort": "wire-xhigh"
+    }
+
+    unmapped = replace(
+        mapped,
+        reasoning_effort=ReasoningEffort.LOW,
+        reasoning_profile=ReasoningProfile.from_mapping(
+            {
+                "native_kind": "effort",
+                "native_levels": ["wire-high"],
+                "mapping": {"high": "wire-high"},
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="not mapped"):
+        build_request(unmapped, request(UserMessage("reason")))
+
+
 def test_text_only_projection_omits_all_tools_including_native_search() -> None:
     projection = build_input_projection(route(), request(UserMessage("title"), allow_tools=False))
 

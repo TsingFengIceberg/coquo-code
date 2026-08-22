@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 from threading import Lock
 from typing import BinaryIO
 from uuid import UUID, uuid4
@@ -1482,19 +1483,26 @@ class SessionStore:
 
     def _load_state(self, path: Path, *, allow_repair: bool) -> ReplayState:
         _ensure_contained_file(path, self.root, suffix=".jsonl")
-        try:
-            size = path.stat().st_size
-        except OSError:
-            raise SessionStoreError(f"session transcript is inaccessible: {path}") from None
-        if size > MAX_TRANSCRIPT_BYTES:
-            raise SessionStoreError(
-                f"session transcript exceeds {MAX_TRANSCRIPT_BYTES} bytes: {path}"
-            )
-        try:
-            data = path.read_bytes()
-        except OSError:
-            raise SessionStoreError(f"could not read session transcript: {path}") from None
-        if len(data) != size:
+        data: bytes | None = None
+        for attempt in range(8):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                raise SessionStoreError(f"session transcript is inaccessible: {path}") from None
+            if size > MAX_TRANSCRIPT_BYTES:
+                raise SessionStoreError(
+                    f"session transcript exceeds {MAX_TRANSCRIPT_BYTES} bytes: {path}"
+                )
+            try:
+                candidate = path.read_bytes()
+            except OSError:
+                raise SessionStoreError(f"could not read session transcript: {path}") from None
+            if len(candidate) == size:
+                data = candidate
+                break
+            if attempt < 7:
+                time.sleep(0.001)
+        if data is None:
             raise SessionStoreError("session transcript changed while it was being read")
 
         repaired: Recovery | None = None
