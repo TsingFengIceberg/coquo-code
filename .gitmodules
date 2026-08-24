@@ -22,3 +22,9 @@
 [submodule "learning-submodules/deepseek-harness"]
 	path = learning-submodules/deepseek-harness
 	url = https://github.com/deepseek-ai/deepseek-harness.git
+[submodule "learning-submodules/deer-flow"]
+	path = learning-submodules/deer-flow
+	url = https://github.com/bytedance/deer-flow.git
+[submodule "learning-submodules/hermes-agent"]
+	path = learning-submodules/hermes-agent
+	url = https://github.com/NousResearch/hermes-agent.git

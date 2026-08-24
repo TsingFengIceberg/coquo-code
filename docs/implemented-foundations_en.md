@@ -1769,6 +1769,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 133. [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 134. [0154: Child/Team Recovery Boundaries and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 135. [0155: Live Provider Round and Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md)
+136. [0156: Long-Term Memory Contract and Local Store](./decisions/0156-long-term-memory-contract-and-local-store.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -1905,3 +1906,29 @@ left to a separate versioned design. This slice borrows Claw-Code's conceptual
 separation of runs, assistant rounds, and tool results without copying its TUI,
 prompts, wire format, or implementation. See [0155: Live Provider Round and
 Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md).
+
+## Long-Term Memory Contract and Local Store
+
+The first long-term semantic-memory slice keeps project instructions, Session
+history, context compaction, and Task/Child/Team execution ledgers separate.
+`MemoryRecord` uses explicit `user|workspace|task|team|child` scopes, a
+candidate/confirmed/stale/deleted/evicted lifecycle, confidence, source
+Session/turn provenance, and bounded timestamps. Confirmation requires an
+explicit confirmation time; deletion and eviction are terminal. DeerFlow is the
+fact-governance reference and Hermes is the provider-lifecycle reference, but
+this slice adds no remote backend or model extraction.
+
+The local backend is an append-only `.coquo/memory/events.jsonl` event log with
+an exclusive lock. Each event stores the complete current record; append and
+fsync happen before the replay view changes. Unknown fields, malformed schema,
+duplicate creation, post-terminal changes, oversized events, and path/symlink
+violations are rejected. Host configuration is separate from Provider profiles:
+`.coquo/memory/config.json` defaults to `enabled=false` and provides
+`recall=off|on`, `write=off|propose|auto`, `tools`, and the fixed `local`
+provider. With the master switch disabled, effective recall, write, and tool
+exposure are all disabled. `coquo memory status|configure|enable|disable` and
+explicit `add|list|show|search|confirm|update|stale|delete` commands manage the
+local ledger only; they do not invoke a Provider, mutate a Session, or add
+model-visible tools. Automatic recall, candidate extraction, remote Providers,
+and Child/Team sharing remain later slices. See [0156: Long-Term Memory Contract
+and Local Store](./decisions/0156-long-term-memory-contract-and-local-store.md).

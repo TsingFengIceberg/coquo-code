@@ -1585,6 +1585,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 133. [0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 134. [0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 135. [0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)
+136. [0156：长期语义记忆契约与本地存储](./decisions/0156-long-term-memory-contract-and-local-store.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1685,3 +1686,9 @@ eval保持原有stdout/stderr安静契约，公开NDJSON事件格式留待独立
 参考Claw-Code对run、assistant round与tool result的概念分层，但不复制其TUI、prompt、
 wire format或实现。详见
 [0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)。
+
+## 长期语义记忆契约与本地存储
+
+第一阶段长期语义记忆与项目指令、Session历史、context compaction以及Task/Child/Team执行账本保持分层。`MemoryRecord`使用`user|workspace|task|team|child`显式作用域、候选/确认/过期/删除/淘汰生命周期、置信度、来源Session/turn与有界时间戳；确认需要显式确认时间，删除与淘汰是终态。DeerFlow提供事实治理参考，Hermes提供Provider生命周期参考，但本切片不接入远程后端或模型抽取。
+
+本地后端使用workspace内`.coquo/memory/events.jsonl`追加式事件日志和独占锁；每个事件保存完整当前记录，append+fsync后才更新replay内存，严格拒绝未知字段、坏schema、重复创建、终态后变更、超限事件和路径/symlink越界。Host配置独立于Provider profile，`.coquo/memory/config.json`默认`enabled=false`，提供`recall=off|on`、`write=off|propose|auto`、`tools`与固定`local` provider；主开关关闭时有效召回、写入和工具暴露全部关闭。`coquo memory status|configure|enable|disable`以及显式`add|list|show|search|confirm|update|stale|delete`只管理本地账本，不调用Provider、不改变Session、不新增model-visible工具。自动召回、候选提取、远程Provider和Child/Team共享留待后续切片。详见[0156：长期语义记忆契约与本地存储](./decisions/0156-long-term-memory-contract-and-local-store.md)。

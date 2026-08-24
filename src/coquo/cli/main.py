@@ -184,6 +184,16 @@ from coquo.session_store import (
     SessionStore,
     SessionStoreError,
 )
+from coquo.memory import (
+    MemoryError as SemanticMemoryError,
+    MemoryRecallMode,
+    MemoryScope,
+    MemoryStatus,
+    MemoryWriteMode,
+)
+from coquo.memory_config import MemoryConfigStore
+from coquo.memory_store import MemoryStore, MemoryStoreError
+from coquo.session_records import workspace_fingerprint
 from coquo.skills import (
     SkillCatalogError,
     SkillInventoryLoader,
@@ -941,6 +951,60 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show bounded per-request tool names, outcomes, and safe result codes",
     )
+    memory_parser = subcommands.add_parser(
+        "memory", help="inspect and manage local long-term semantic memory"
+    )
+    memory_commands = memory_parser.add_subparsers(dest="memory_command", required=True)
+    memory_commands.add_parser("status", help="show the effective memory switch and storage path")
+    memory_commands.add_parser("enable", help="enable configured memory capabilities")
+    memory_commands.add_parser("disable", help="disable effective memory capabilities")
+    memory_configure = memory_commands.add_parser("configure", help="update memory switches")
+    memory_enabled = memory_configure.add_mutually_exclusive_group()
+    memory_enabled.add_argument("--enable", dest="memory_enabled", action="store_true")
+    memory_enabled.add_argument("--disable", dest="memory_enabled", action="store_false")
+    memory_configure.set_defaults(memory_enabled=None)
+    memory_configure.add_argument("--recall", choices=[mode.value for mode in MemoryRecallMode])
+    memory_configure.add_argument("--write", choices=[mode.value for mode in MemoryWriteMode])
+    memory_tools = memory_configure.add_mutually_exclusive_group()
+    memory_tools.add_argument("--tools", dest="memory_tools", action="store_true")
+    memory_tools.add_argument("--no-tools", dest="memory_tools", action="store_false")
+    memory_configure.set_defaults(memory_tools=None)
+    memory_add = memory_commands.add_parser("add", help="add one explicit pending memory candidate")
+    memory_add.add_argument("content", type=nonblank_prompt)
+    memory_add.add_argument(
+        "--scope", choices=[scope.value for scope in MemoryScope], default="workspace"
+    )
+    memory_add.add_argument("--scope-id")
+    memory_add.add_argument("--category", default="fact")
+    memory_add.add_argument("--confidence", type=float, default=0.5)
+    memory_add.add_argument("--source-session")
+    memory_add.add_argument("--source-turn", type=positive_turn_number)
+    memory_list = memory_commands.add_parser("list", help="list bounded local memory records")
+    memory_list.add_argument("--scope", choices=[scope.value for scope in MemoryScope])
+    memory_list.add_argument("--scope-id")
+    memory_list.add_argument("--status", choices=[status.value for status in MemoryStatus])
+    memory_list.add_argument("--limit", type=task_list_limit, default=20)
+    memory_show = memory_commands.add_parser("show", help="show one local memory record")
+    memory_show.add_argument("memory_id")
+    memory_search = memory_commands.add_parser("search", help="search local memory content")
+    memory_search.add_argument("query", type=nonblank_prompt)
+    memory_search.add_argument("--scope", choices=[scope.value for scope in MemoryScope])
+    memory_search.add_argument("--scope-id")
+    memory_search.add_argument("--limit", type=task_list_limit, default=20)
+    memory_confirm = memory_commands.add_parser(
+        "confirm", help="confirm one pending memory candidate"
+    )
+    memory_confirm.add_argument("memory_id")
+    memory_update = memory_commands.add_parser(
+        "update", help="update one non-terminal memory record"
+    )
+    memory_update.add_argument("memory_id")
+    memory_update.add_argument("--content")
+    memory_update.add_argument("--category")
+    memory_update.add_argument("--confidence", type=float)
+    for action, status in (("stale", MemoryStatus.STALE), ("delete", MemoryStatus.DELETED)):
+        command = memory_commands.add_parser(action, help=f"mark one memory as {status.value}")
+        command.add_argument("memory_id")
     task_parser = subcommands.add_parser("task", help="create and inspect durable workspace Tasks")
     task_commands = task_parser.add_subparsers(dest="task_command", required=True)
     task_create = task_commands.add_parser("create", help="create one ready Task")
@@ -2331,6 +2395,136 @@ def render_session_info(info, stdout: TextIO) -> None:
     stdout.write(f"closed: {'yes' if info.closed else 'no'}\n")
     stdout.write(f"last provider: {info.binding.provider_id}\n")
     stdout.write(f"last model: {info.binding.selected_model or '<none>'}\n")
+
+
+def _memory_scope_id(arguments: argparse.Namespace, workspace: Path) -> str:
+    scope = MemoryScope(arguments.scope)
+    if arguments.scope_id is not None:
+        return arguments.scope_id
+    if scope is MemoryScope.WORKSPACE:
+        return workspace_fingerprint(workspace)
+    raise MemoryStoreError(f"memory scope {scope.value} requires --scope-id")
+
+
+def _render_memory_record(record) -> str:
+    return json.dumps(record.to_mapping(), ensure_ascii=False, sort_keys=True)
+
+
+def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Manage local semantic-memory policy and explicit records without a Provider."""
+    config_store = MemoryConfigStore(workspace)
+    config = config_store.load()
+    memory = MemoryStore(workspace)
+    command = arguments.memory_command
+    if command == "status":
+        records = memory.list(limit=100)
+        total_records = memory.count()
+        counts = {
+            status.value: sum(record.status is status for record in records)
+            for status in MemoryStatus
+        }
+        stdout.write(f"enabled: {'yes' if config.enabled else 'no'}\n")
+        stdout.write(f"configured recall: {config.recall.value}\n")
+        stdout.write(f"effective recall: {config.effective_recall.value}\n")
+        stdout.write(f"configured write: {config.write.value}\n")
+        stdout.write(f"effective write: {config.effective_write.value}\n")
+        stdout.write(f"configured tools: {'yes' if config.tools else 'no'}\n")
+        stdout.write(f"effective tools: {'yes' if config.effective_tools else 'no'}\n")
+        stdout.write(f"provider: {config.provider}\n")
+        stdout.write(f"records: {total_records}\n")
+        if total_records <= 100:
+            stdout.write("statuses: " + ", ".join(f"{key}={counts[key]}" for key in counts) + "\n")
+        else:
+            stdout.write("statuses: unavailable above the bounded inspection limit\n")
+        stdout.write(f"storage: {memory.events_path}\n")
+        return 0
+    if command == "enable":
+        config = config_store.update(enabled=True)
+        stdout.write(
+            f"Memory enabled; effective recall={config.effective_recall.value}, write={config.effective_write.value}.\n"
+        )
+        return 0
+    if command == "disable":
+        config = config_store.update(enabled=False)
+        stdout.write("Memory disabled; effective recall=off, write=off, tools=no.\n")
+        return 0
+    if command == "configure":
+        config = config_store.update(
+            enabled=arguments.memory_enabled,
+            recall=None if arguments.recall is None else MemoryRecallMode(arguments.recall),
+            write=None if arguments.write is None else MemoryWriteMode(arguments.write),
+            tools=arguments.memory_tools,
+        )
+        stdout.write(
+            f"Memory configuration saved: enabled={'yes' if config.enabled else 'no'}, "
+            f"recall={config.recall.value}, write={config.write.value}, "
+            f"tools={'yes' if config.tools else 'no'}.\n"
+        )
+        return 0
+    if command == "add":
+        scope = MemoryScope(arguments.scope)
+        record = memory.create_candidate(
+            arguments.content,
+            scope=scope,
+            scope_id=_memory_scope_id(arguments, workspace),
+            category=arguments.category,
+            confidence=arguments.confidence,
+            source_session_id=arguments.source_session,
+            source_turn=arguments.source_turn,
+        )
+        stdout.write(_render_memory_record(record) + "\n")
+        return 0
+    if command == "list":
+        scope = None if arguments.scope is None else MemoryScope(arguments.scope)
+        status = None if arguments.status is None else MemoryStatus(arguments.status)
+        for record in memory.list(
+            scope=scope,
+            scope_id=arguments.scope_id,
+            status=status,
+            limit=arguments.limit,
+        ):
+            stdout.write(_render_memory_record(record) + "\n")
+        return 0
+    if command == "show":
+        stdout.write(_render_memory_record(memory.get(arguments.memory_id)) + "\n")
+        return 0
+    if command == "search":
+        scope = None if arguments.scope is None else MemoryScope(arguments.scope)
+        for record in memory.search(
+            arguments.query,
+            scope=scope,
+            scope_id=arguments.scope_id,
+            limit=arguments.limit,
+        ):
+            stdout.write(_render_memory_record(record) + "\n")
+        return 0
+    if command == "confirm":
+        stdout.write(_render_memory_record(memory.confirm(arguments.memory_id)) + "\n")
+        return 0
+    if command == "update":
+        if (
+            arguments.content is None
+            and arguments.category is None
+            and arguments.confidence is None
+        ):
+            raise MemoryStoreError("memory update requires at least one field")
+        stdout.write(
+            _render_memory_record(
+                memory.update(
+                    arguments.memory_id,
+                    content=arguments.content,
+                    category=arguments.category,
+                    confidence=arguments.confidence,
+                )
+            )
+            + "\n"
+        )
+        return 0
+    if command in {"stale", "delete"}:
+        status = MemoryStatus.STALE if command == "stale" else MemoryStatus.DELETED
+        stdout.write(_render_memory_record(memory.transition(arguments.memory_id, status)) + "\n")
+        return 0
+    raise MemoryStoreError("unknown memory command")
 
 
 def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
@@ -3973,6 +4167,16 @@ def main(
                     "provider selection options cannot be combined with session inspection"
                 )
             return handle_session_command(arguments, workspace, output)
+        if arguments.command == "memory":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with memory management"
+                )
+            return handle_memory_command(arguments, workspace, output)
         if arguments.command == "task":
             if (
                 arguments.profile is not None
@@ -4230,6 +4434,12 @@ def main(
         return 2
     except SessionStoreError as error:
         print(f"session error: {error}", file=errors)
+        return 2
+    except MemoryStoreError as error:
+        print(f"memory error: {error}", file=errors)
+        return 2
+    except SemanticMemoryError as error:
+        print(f"memory error: {error}", file=errors)
         return 2
     except TaskStoreError as error:
         print(f"task error: {error}", file=errors)
