@@ -7,6 +7,9 @@ from coquo.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationStarted,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
     ToolEventStatus,
@@ -36,6 +39,43 @@ def test_terminal_event_sink_writes_and_flushes_one_stable_line() -> None:
 
     assert stream.getvalue() == "[tool 1/6] succeeded code=ok\n"
     assert stream.flush_count == 1
+
+
+def test_terminal_event_sink_flushes_provider_round_boundaries_immediately() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(stream, color=False)
+
+    sink(ProviderInvocationStarted(1, 24))
+    sink(
+        ProviderInvocationFinished(
+            1,
+            24,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        )
+    )
+
+    assert stream.getvalue() == (
+        "Model round [1/24]: started\nModel round [1/24]: 1 tool request received\n"
+    )
+    assert stream.flush_count == 2
+
+
+def test_terminal_event_sink_can_keep_non_tty_provider_rounds_quiet() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(stream, color=False, show_provider_rounds=False)
+
+    sink(ProviderInvocationStarted(1, 24))
+    sink(
+        ProviderInvocationFinished(
+            1,
+            24,
+            ProviderInvocationOutcome.FINAL_TEXT,
+        )
+    )
+
+    assert stream.getvalue() == ""
+    assert stream.flush_count == 0
 
 
 def test_terminal_event_sink_announces_one_committed_task_admission() -> None:

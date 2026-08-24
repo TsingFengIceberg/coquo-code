@@ -8,6 +8,7 @@ from enum import StrEnum
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
@@ -86,6 +87,10 @@ from coquo.agent.tool_events import (
     AgentPromptEvent,
     HookLifecycleObserved,
     McpNotificationActivityReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
+    ProviderInvocationStarted,
     TaskAdmissionProposed,
     TaskLifecycleCommitted,
     SkillCandidateCommitted,
@@ -7307,6 +7312,16 @@ class ProjectSession:
                 self._active_event_sink,
                 SessionTitleGenerationStarted(attempt, SESSION_TITLE_MAX_ATTEMPTS),
             )
+            invocation_index = used + 1
+            self._emit_prompt_event(
+                self._active_event_sink,
+                ProviderInvocationStarted(
+                    invocation_index,
+                    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                    ProviderInvocationPurpose.SESSION_TITLE,
+                ),
+            )
+            started = time.monotonic_ns()
             attempts += 1
             try:
                 response = runtime.generate_session_title(
@@ -7315,7 +7330,31 @@ class ProjectSession:
                         rejected_titles=tuple(rejected),
                     )
                 )
+                if self._active_cancellation is not None:
+                    self._active_cancellation.check()
+            except TurnCancelled:
+                self._emit_prompt_event(
+                    self._active_event_sink,
+                    ProviderInvocationFinished(
+                        invocation_index,
+                        MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                        ProviderInvocationOutcome.CANCELLED,
+                        elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                        purpose=ProviderInvocationPurpose.SESSION_TITLE,
+                    ),
+                )
+                raise
             except ProviderAdapterError as error:
+                self._emit_prompt_event(
+                    self._active_event_sink,
+                    ProviderInvocationFinished(
+                        invocation_index,
+                        MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                        ProviderInvocationOutcome.FAILED,
+                        elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                        purpose=ProviderInvocationPurpose.SESSION_TITLE,
+                    ),
+                )
                 fallback_reason = (
                     SessionTitleFallbackReason.PROVIDER_OUTPUT_LIMIT
                     if error.failure.kind == ProviderFailureKind.OUTPUT_LIMIT
@@ -7323,10 +7362,28 @@ class ProjectSession:
                 )
                 break
             except Exception:
+                self._emit_prompt_event(
+                    self._active_event_sink,
+                    ProviderInvocationFinished(
+                        invocation_index,
+                        MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                        ProviderInvocationOutcome.FAILED,
+                        elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                        purpose=ProviderInvocationPurpose.SESSION_TITLE,
+                    ),
+                )
                 fallback_reason = SessionTitleFallbackReason.PROVIDER_FAILURE
                 break
-            if self._active_cancellation is not None:
-                self._active_cancellation.check()
+            self._emit_prompt_event(
+                self._active_event_sink,
+                ProviderInvocationFinished(
+                    invocation_index,
+                    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                    ProviderInvocationOutcome.FINAL_TEXT,
+                    elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                    purpose=ProviderInvocationPurpose.SESSION_TITLE,
+                ),
+            )
             try:
                 candidate = parse_session_title_response(response)
             except SessionTitleCandidateError:
@@ -8158,6 +8215,11 @@ def _invalid_tool_request(request: ToolUse, error: Exception) -> ToolDispatchRes
         ToolEventStatus.ERROR,
         "invalid_request",
     )
+
+
+def _provider_elapsed_milliseconds(started: int) -> int:
+    elapsed = max(0, (time.monotonic_ns() - started) // 1_000_000)
+    return min(elapsed, 86_400_000)
 
 
 def _safe_failure_message(error: BaseException) -> str:

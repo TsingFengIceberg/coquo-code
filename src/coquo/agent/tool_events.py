@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 import json
 from pathlib import PurePosixPath, PureWindowsPath
@@ -53,6 +53,22 @@ class ToolEventStatus(StrEnum):
     FAILED = "failed"
     PARTIAL = "partial"
     OUTCOME_UNKNOWN = "outcome-unknown"
+
+
+class ProviderInvocationOutcome(StrEnum):
+    """Content-free Host classification for one completed Provider request."""
+
+    FINAL_TEXT = "final-text"
+    TOOL_REQUEST = "tool-request"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ProviderInvocationPurpose(StrEnum):
+    """Host-owned purpose for one invocation in the shared Turn budget."""
+
+    TURN = "turn"
+    SESSION_TITLE = "session-title"
 
 
 @dataclass(frozen=True)
@@ -140,6 +156,53 @@ class AssistantFinalTextStreamCommitted:
         if not isinstance(self.text, str) or not self.text:
             raise ValueError("committed assistant stream text must be non-empty")
         ProviderTextDelta(self.text)
+
+
+@dataclass(frozen=True)
+class ProviderInvocationStarted:
+    """Announce one Provider request before preflight or network I/O begins."""
+
+    invocation_index: int
+    invocation_limit: int
+    purpose: ProviderInvocationPurpose = ProviderInvocationPurpose.TURN
+
+    def __post_init__(self) -> None:
+        _validate_invocation_identity(self.invocation_index, self.invocation_limit)
+        if type(self.purpose) is not ProviderInvocationPurpose:
+            raise ValueError("provider invocation purpose is invalid")
+
+
+@dataclass(frozen=True)
+class ProviderInvocationFinished:
+    """Close one started Provider request without exposing response content."""
+
+    invocation_index: int
+    invocation_limit: int
+    outcome: ProviderInvocationOutcome
+    tool_count: int = 0
+    elapsed_milliseconds: int | None = field(default=None, compare=False)
+    purpose: ProviderInvocationPurpose = ProviderInvocationPurpose.TURN
+
+    def __post_init__(self) -> None:
+        _validate_invocation_identity(self.invocation_index, self.invocation_limit)
+        if type(self.outcome) is not ProviderInvocationOutcome:
+            raise ValueError("provider invocation outcome is invalid")
+        if self.elapsed_milliseconds is not None and (
+            type(self.elapsed_milliseconds) is not int
+            or not 0 <= self.elapsed_milliseconds <= 86_400_000
+        ):
+            raise ValueError("provider invocation elapsed duration is invalid")
+        if type(self.purpose) is not ProviderInvocationPurpose:
+            raise ValueError("provider invocation purpose is invalid")
+        if type(self.tool_count) is not int or not 0 <= self.tool_count <= 32:
+            raise ValueError("provider invocation tool count is invalid")
+        if self.outcome == ProviderInvocationOutcome.TOOL_REQUEST:
+            if self.tool_count < 1:
+                raise ValueError("tool-request Provider invocation must report tools")
+            if self.purpose == ProviderInvocationPurpose.SESSION_TITLE:
+                raise ValueError("Session-title Provider invocation must not report tools")
+        elif self.tool_count != 0:
+            raise ValueError("non-tool Provider invocation must not report tools")
 
 
 @dataclass(frozen=True)
@@ -417,6 +480,8 @@ AgentPromptEvent = (
     AssistantToolTextReceived
     | AssistantStreamEvent
     | ToolPromptEvent
+    | ProviderInvocationStarted
+    | ProviderInvocationFinished
     | ProviderInvocationPreflighted
     | ProviderInvocationUsageReceived
     | ProviderSearchActivityReceived

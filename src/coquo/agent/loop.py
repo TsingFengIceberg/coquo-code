@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 import json
+import time
 
 from coquo.agent.tool_events import (
     AgentPromptEvent,
@@ -13,7 +14,10 @@ from coquo.agent.tool_events import (
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
     HookLifecycleObserved,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
     ProviderInvocationPreflighted,
+    ProviderInvocationStarted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
     ProviderSearchSummaryReceived,
@@ -38,7 +42,7 @@ from coquo.agent.child_control import ChildControlDispatcher, ChildControlDispat
 from coquo.agent.team_control import TeamControlDispatcher, TeamControlDispatchResult
 from coquo.core.actions import ActionLease
 from coquo.core.compaction import EffectiveContextSummary
-from coquo.core.cancellation import TurnCancellation
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
 from coquo.core.contracts import (
     AssistantToolBatch,
     AssistantText,
@@ -996,13 +1000,70 @@ class AgentLoop:
                     ProviderSearchActivityReceived(event.phase),
                 )
 
-        outcome = respond_with_streaming(
-            provider,
-            request,
-            event_sink=receive_provider_event,
-            prefer_stream=event_sink is not None,
-            preflight_sink=receive_preflight,
-            cancellation=cancellation,
+        self._emit_prompt_event(
+            event_sink,
+            ProviderInvocationStarted(
+                invocation_index,
+                MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ),
+        )
+        started = time.monotonic_ns()
+        try:
+            outcome = respond_with_streaming(
+                provider,
+                request,
+                event_sink=receive_provider_event,
+                prefer_stream=event_sink is not None,
+                preflight_sink=receive_preflight,
+                cancellation=cancellation,
+            )
+            visible_response = (
+                outcome.response.response
+                if isinstance(outcome.response, ProviderResponseEnvelope)
+                else outcome.response
+            )
+            if isinstance(visible_response, AssistantText):
+                invocation_outcome = ProviderInvocationOutcome.FINAL_TEXT
+                tool_count = 0
+            elif isinstance(visible_response, AssistantToolBatch):
+                invocation_outcome = ProviderInvocationOutcome.TOOL_REQUEST
+                tool_count = len(visible_response.tool_uses)
+            elif isinstance(visible_response, ToolUse):
+                invocation_outcome = ProviderInvocationOutcome.TOOL_REQUEST
+                tool_count = 1
+            else:
+                raise ValueError("provider returned an invalid response")
+        except TurnCancelled:
+            self._emit_prompt_event(
+                event_sink,
+                ProviderInvocationFinished(
+                    invocation_index,
+                    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                    ProviderInvocationOutcome.CANCELLED,
+                    elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                ),
+            )
+            raise
+        except Exception:
+            self._emit_prompt_event(
+                event_sink,
+                ProviderInvocationFinished(
+                    invocation_index,
+                    MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                    ProviderInvocationOutcome.FAILED,
+                    elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                ),
+            )
+            raise
+        self._emit_prompt_event(
+            event_sink,
+            ProviderInvocationFinished(
+                invocation_index,
+                MAX_PROVIDER_INVOCATIONS_PER_TURN,
+                invocation_outcome,
+                tool_count,
+                _provider_elapsed_milliseconds(started),
+            ),
         )
         return outcome
 
@@ -1645,6 +1706,11 @@ class AgentLoop:
             sink(usage)
         except Exception:
             pass
+
+
+def _provider_elapsed_milliseconds(started: int) -> int:
+    elapsed = max(0, (time.monotonic_ns() - started) // 1_000_000)
+    return min(elapsed, 86_400_000)
 
 
 def render_tool_ledger_for_model(ledger: ToolTurnLedger) -> str:

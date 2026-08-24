@@ -828,7 +828,7 @@ Observation与result details只在当前live event链路存在，不写Session�
 
 真实TTY不再按“读一次PromptSession、同步跑完整turn、再创建下一次PromptSession”工作，而由一个non-full-screen `prompt_toolkit.Application`长期持有输入区、状态栏、补全、history、审批焦点和inline scrollback。提交后buffer立即清空并保持新prompt可见；busy期间允许编辑一份draft，但Enter不会排队、插入或触发slash mutation。审批保存并恢复draft，Ctrl-C请求取消，Ctrl-D等待active worker完成清理后退出。
 
-一个closed `TerminalViewState`、纯reducer与有界local queue把单后台worker的assistant、tool、context、usage、compaction和failure事件交给唯一TTY renderer。只有连续assistant delta可合并；工具、审批、失败和durable final事实不可丢失。Renderer和terminal sink仍是best-effort，不能改变执行、Action Audit或turn commit。One-shot、redirect、injected stream与non-TTY继续走旧同步路径。
+一个closed `TerminalViewState`、纯reducer与有界local queue把单后台worker的assistant、tool、context、usage、compaction和failure事件交给唯一TTY renderer。Assistant delta保持独立FIFO事件，以便每个已收到的stream chunk单独flush；工具、审批、失败和durable final事实不可丢失。Renderer和terminal sink仍是best-effort，不能改变执行、Action Audit或turn commit。One-shot、redirect、injected stream与non-TTY继续走旧同步路径。
 
 `TurnCancellation`贯穿ProjectSession、AgentLoop、provider stream、tool边界、approval broker和`run_command`。Command会轮询取消并执行既有有界TERM到KILL process-group cleanup；blocking provider SDK只能在调用返回或下一stream chunk时观察取消，系统不使用unsafe thread exception injection。该Host-only改造保持canonical system prompt v21、provider adapter contract v24、21-tool catalog、Effective Context identity及全部Session/Action Audit schema不变。完整决策见[0067：Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md)。
 
@@ -1584,6 +1584,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 132. [0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)
 133. [0153：Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 134. [0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)
+135. [0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1662,3 +1663,25 @@ Task到Child/Team的观察只有在terminal记录和身份一致的handoff都可
 Provider档位回归矩阵覆盖所有Host档位在OpenAI Chat/Responses及Anthropic adaptive
 字符串映射中的行为，未映射档位fail-closed，旧式数字`budget_tokens`继续不支持。
 详见[0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)。
+
+## 实时Provider回合与工具时间线
+
+一个用户prompt仍只产生一个持久化Session Turn，但Agent loop内部的每次模型请求
+现在以Host-only的`ProviderInvocationStarted/Finished`成对呈现。开始事件在preflight
+或Provider I/O之前发出；结束事件只携带invocation序号、上限、`turn | session-title`
+用途、`final-text`、`tool-request`、`failed`或`cancelled`结果、有限工具数量及Host测得的
+有界耗时，不保留模型响应、reasoning或原始工具参数。首Turn自动Session标题调用也按
+真实共享预算编号显示，因此不再出现无法解释的round 1直接跳到round 3。现有工具
+开始/结束、安全摘要和assistant delta继续复用。
+
+持久TTY现在显示逻辑Turn起点、逐个Model round、工具执行、流式最终文本和Provider
+等待秒数；动态等待行是临时的，每轮永久结束行同时保留耗时，复制scrollback也能
+分辨供应商慢响应与终端延迟。只有Session prompt从durable commit路径返回后才显示
+`Turn committed`。
+Provider round超过5秒仍未完成时，TTY还会每5秒追加一条低频Host-only的`still waiting`
+心跳，明确显示当前round和累计等待时间；心跳不包含Provider响应、请求正文或工具参数。
+生命周期事件保持FIFO且不可丢弃，队列保留独立文本delta以便逐块刷新。非TTY成功的prompt和
+eval保持原有stdout/stderr安静契约，公开NDJSON事件格式留待独立版本化设计。该切片
+参考Claw-Code对run、assistant round与tool result的概念分层，但不复制其TUI、prompt、
+wire format或实现。详见
+[0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)。

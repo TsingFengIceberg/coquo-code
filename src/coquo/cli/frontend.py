@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from threading import Condition
 
-from coquo.agent.tool_events import AssistantResponseTextDeltaReceived
 from coquo.core.action_coordinator import ApprovalPromptRequest
 
 
@@ -210,8 +209,27 @@ def _activity_status(event: object) -> str:
         return "Responding"
     if name in {"AssistantToolTextReceived", "AssistantToolTextStreamCompleted"}:
         return "Planning actions"
+    if name == "ProviderInvocationStarted":
+        purpose = getattr(getattr(event, "purpose", None), "value", "turn")
+        activity = "naming Session" if purpose == "session-title" else "starting"
+        return (
+            f"Model round {getattr(event, 'invocation_index')}/"
+            f"{getattr(event, 'invocation_limit')}: {activity}"
+        )
     if name == "ProviderInvocationPreflighted":
-        return "Preparing provider request"
+        return (
+            f"Model round {getattr(event, 'invocation_index')}/"
+            f"{getattr(event, 'invocation_limit')}: waiting for provider"
+        )
+    if name == "ProviderInvocationFinished":
+        outcome = getattr(event, "outcome").value
+        purpose = getattr(getattr(event, "purpose", None), "value", "turn")
+        if purpose == "session-title":
+            outcome = f"session title {outcome}"
+        return (
+            f"Model round {getattr(event, 'invocation_index')}/"
+            f"{getattr(event, 'invocation_limit')}: {outcome} received"
+        )
     if name == "ProviderInvocationUsageReceived":
         return "Processing provider response"
     if name == "ProviderSearchActivityReceived":
@@ -259,7 +277,7 @@ def _activity_status(event: object) -> str:
 
 
 class FrontendEventQueue:
-    """Bounded local queue that only coalesces consecutive assistant text deltas."""
+    """Bounded local queue that preserves every frontend event in FIFO order."""
 
     def __init__(self, capacity: int = 256) -> None:
         if type(capacity) is not int or capacity < 2:
@@ -270,12 +288,9 @@ class FrontendEventQueue:
         self._closed = False
 
     def put(self, event: FrontendEvent) -> bool:
-        """Enqueue one event; return false only when a text delta was coalesced."""
+        """Enqueue one event; return false only when the queue is closed."""
         with self._condition:
             if self._closed:
-                return False
-            if self._coalesce_delta(event):
-                self._condition.notify()
                 return False
             while len(self._items) >= self._capacity and not self._closed:
                 self._condition.wait()
@@ -300,26 +315,3 @@ class FrontendEventQueue:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
-
-    def _coalesce_delta(self, event: FrontendEvent) -> bool:
-        if not self._items or not _is_delta(event):
-            return False
-        previous = self._items[-1]
-        if not _is_delta(previous) or previous.turn_id != event.turn_id:
-            return False
-        assert isinstance(previous, PromptActivity) and isinstance(event, PromptActivity)
-        before = previous.event
-        after = event.event
-        assert isinstance(before, AssistantResponseTextDeltaReceived)
-        assert isinstance(after, AssistantResponseTextDeltaReceived)
-        self._items[-1] = PromptActivity(
-            event.turn_id,
-            AssistantResponseTextDeltaReceived(before.text + after.text),
-        )
-        return True
-
-
-def _is_delta(event: FrontendEvent) -> bool:
-    return isinstance(event, PromptActivity) and isinstance(
-        event.event, AssistantResponseTextDeltaReceived
-    )

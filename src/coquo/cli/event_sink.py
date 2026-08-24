@@ -9,6 +9,8 @@ from coquo.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextReceived,
     AssistantToolTextStreamCompleted,
+    ProviderInvocationFinished,
+    ProviderInvocationStarted,
 )
 from coquo.cli.markdown_renderer import (
     DEFAULT_TERMINAL_WIDTH,
@@ -41,6 +43,7 @@ class TerminalEventSink:
         render_markdown: bool = False,
         show_role_markers: bool = False,
         show_waiting: bool = False,
+        show_provider_rounds: bool = True,
         tool_detail_mode: ToolDetailMode = ToolDetailMode.COMPACT,
         markdown_width: int | None = None,
     ) -> None:
@@ -71,6 +74,7 @@ class TerminalEventSink:
         )
         self._show_role_markers = show_role_markers
         self._show_waiting = show_waiting
+        self._show_provider_rounds = show_provider_rounds
         self._waiting_visible = False
         self._assistant_output_active = False
         self._plain_at_line_start = False
@@ -127,6 +131,10 @@ class TerminalEventSink:
         self._write_complete_assistant(text)
 
     def __call__(self, event: object) -> None:
+        if not self._show_provider_rounds and isinstance(
+            event, (ProviderInvocationStarted, ProviderInvocationFinished)
+        ):
+            return
         if isinstance(event, AssistantToolTextReceived):
             self._write_complete_assistant(event.text)
             self._assistant_output_active = False

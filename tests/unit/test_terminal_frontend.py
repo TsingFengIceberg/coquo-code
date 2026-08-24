@@ -18,7 +18,11 @@ from rich.cells import cell_len
 from coquo.agent.tool_events import (
     AssistantFinalTextStreamCommitted,
     AssistantResponseTextDeltaReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
     ProviderInvocationPreflighted,
+    ProviderInvocationStarted,
     TaskLifecycleCommitted,
     ToolEventStatus,
     ToolRequestFinished,
@@ -132,9 +136,38 @@ def test_terminal_reducer_exposes_provider_tool_and_result_phases() -> None:
     )
     state = reduce_terminal_state(
         state,
+        PromptActivity(1, ProviderInvocationStarted(1, 24)),
+    )
+    assert state.status == "Model round 1/24: starting"
+
+    state = reduce_terminal_state(
+        state,
         PromptActivity(1, ProviderInvocationPreflighted(1, 24, report)),
     )
-    assert state.status == "Preparing provider request"
+    assert state.status == "Model round 1/24: waiting for provider"
+
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(
+            1,
+            ProviderInvocationFinished(
+                1,
+                24,
+                ProviderInvocationOutcome.TOOL_REQUEST,
+                1,
+            ),
+        ),
+    )
+    assert state.status == "Model round 1/24: tool-request received"
+
+    state = reduce_terminal_state(
+        state,
+        PromptActivity(
+            1,
+            ProviderInvocationStarted(2, 24, ProviderInvocationPurpose.SESSION_TITLE),
+        ),
+    )
+    assert state.status == "Model round 2/24: naming Session"
 
     state = reduce_terminal_state(
         state,
@@ -160,15 +193,16 @@ def test_terminal_reducer_exposes_provider_tool_and_result_phases() -> None:
     assert state.exit_after_turn is False
 
 
-def test_frontend_queue_coalesces_only_consecutive_text_deltas() -> None:
-    queue = FrontendEventQueue(capacity=2)
+def test_frontend_queue_preserves_each_text_delta_in_arrival_order() -> None:
+    queue = FrontendEventQueue(capacity=4)
     assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("a")))
-    assert not queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("b")))
+    assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("b")))
     queue.put(TurnFinished(1, "ab"))
 
     events = queue.drain()
     assert events == (
-        PromptActivity(1, AssistantResponseTextDeltaReceived("ab")),
+        PromptActivity(1, AssistantResponseTextDeltaReceived("a")),
+        PromptActivity(1, AssistantResponseTextDeltaReceived("b")),
         TurnFinished(1, "ab"),
     )
 
@@ -531,6 +565,7 @@ class _HistorySession:
 
 def test_persistent_application_exposes_ephemeral_animated_activity_line(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue = FrontendEventQueue()
     broker = TerminalApprovalBroker(
@@ -561,8 +596,96 @@ def test_persistent_application_exposes_ephemeral_animated_activity_line(
             TurnSubmitted(1, "Preparing turn"),
         )
         assert terminal._activity_visible() is True
+        monkeypatch.setattr("coquo.cli.terminal_app.time.monotonic", lambda: 100.0)
+        asyncio.run(terminal._handle_event(PromptActivity(1, ProviderInvocationStarted(1, 24))))
+        monkeypatch.setattr("coquo.cli.terminal_app.time.monotonic", lambda: 101.25)
+        assert terminal._activity_line().value == ("  - Model round 1/24: starting · 1.2s...")
+        asyncio.run(
+            terminal._handle_event(
+                PromptActivity(
+                    1,
+                    ProviderInvocationFinished(
+                        1,
+                        24,
+                        ProviderInvocationOutcome.FINAL_TEXT,
+                    ),
+                )
+            )
+        )
+        assert terminal._provider_invocation_started_at is None
         terminal._state = reduce_terminal_state(terminal._state, TurnFinished(1, "done"))
-        assert terminal._activity_visible() is False
+    assert terminal._activity_visible() is False
+
+
+def test_persistent_application_persists_provider_round_boundaries_immediately(
+    tmp_path: Path,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=True,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        asyncio.run(terminal._handle_event(TurnSubmitted(1)))
+        asyncio.run(terminal._handle_event(PromptActivity(1, ProviderInvocationStarted(1, 24))))
+        assert "Model round [1/24]: started" in stdout.getvalue()
+        asyncio.run(
+            terminal._handle_event(
+                PromptActivity(
+                    1,
+                    ProviderInvocationFinished(
+                        1,
+                        24,
+                        ProviderInvocationOutcome.TOOL_REQUEST,
+                        1,
+                        32_500,
+                    ),
+                )
+            )
+        )
+
+    assert "Model round [1/24]: 1 tool request received (32.5s)" in stdout.getvalue()
+
+
+def test_persistent_application_emits_provider_wait_heartbeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = FrontendEventQueue()
+    broker = TerminalApprovalBroker(
+        lambda turn_id, request: queue.put(ApprovalPending(turn_id, request))
+    )
+    stdout = io.StringIO()
+    with create_pipe_input() as pipe:
+        terminal = TerminalApplication(
+            _HistorySession(),
+            stdout=stdout,
+            cwd=tmp_path,
+            color=False,
+            render_markdown=False,
+            queue=queue,
+            approval_broker=broker,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        monkeypatch.setattr("coquo.cli.terminal_app.time.monotonic", lambda: 100.0)
+        asyncio.run(terminal._handle_event(TurnSubmitted(1)))
+        asyncio.run(terminal._handle_event(PromptActivity(1, ProviderInvocationStarted(1, 24))))
+        monkeypatch.setattr("coquo.cli.terminal_app.time.monotonic", lambda: 105.1)
+        asyncio.run(terminal._emit_provider_wait_heartbeat())
+
+    assert "Provider still waiting: model round [1/24] (5.1s)" in stdout.getvalue()
 
 
 def test_persistent_application_commit_status_does_not_split_or_duplicate_stream(
@@ -1055,7 +1178,8 @@ def test_persistent_application_approval_temporarily_owns_input_and_restores_dra
     rendered = stdout.getvalue()
     assert r"\x1b" not in rendered
     plain = ANSI_ESCAPE.sub("", rendered)
-    assert "\n› do work\n\n  │ [tool 1/32] write_file" in plain
+    assert "\n› do work\n\n  │ Turn 1: started\n  │ [tool 1/32] write_file" in plain
+    assert "  │ Turn 1: committed" in plain
     assert "  │ [tool 1/32] write_file path='note.txt' content_bytes=6" in plain
     assert "  │ Approval required" in plain
     assert "  │ Prepared candidate (6 bytes):" in plain

@@ -8,6 +8,10 @@ import pytest
 
 from coquo.agent.tool_events import (
     AssistantToolTextReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
+    ProviderInvocationStarted,
     SkillCandidateCommitted,
     SkillCandidateInstalled,
     ToolEventStatus,
@@ -852,6 +856,25 @@ def test_project_session_prepares_title_after_first_response_before_tool_dispatc
     assert events[prepared_index] == SessionTitlePrepared(
         "Early MCP title", SessionNameSource.MODEL
     )
+    provider_events = [
+        event
+        for event in events
+        if isinstance(event, (ProviderInvocationStarted, ProviderInvocationFinished))
+    ]
+    assert [event.invocation_index for event in provider_events] == [1, 1, 2, 2, 3, 3]
+    assert [event.purpose for event in provider_events] == [
+        ProviderInvocationPurpose.TURN,
+        ProviderInvocationPurpose.TURN,
+        ProviderInvocationPurpose.SESSION_TITLE,
+        ProviderInvocationPurpose.SESSION_TITLE,
+        ProviderInvocationPurpose.TURN,
+        ProviderInvocationPurpose.TURN,
+    ]
+    assert all(
+        event.elapsed_milliseconds is not None
+        for event in provider_events
+        if isinstance(event, ProviderInvocationFinished)
+    )
     assert session.session_info().name == "Early MCP title"
     committed = next(
         record for record in session._writer.state.records if isinstance(record, TurnCommitted)
@@ -925,11 +948,69 @@ def test_project_session_records_title_fallback_reason(
     session.prompt("Review title fallback", event_sink=events.append)
 
     assert provider.title_calls == expected_calls
+    title_finishes = [
+        event
+        for event in events
+        if isinstance(event, ProviderInvocationFinished)
+        and event.purpose == ProviderInvocationPurpose.SESSION_TITLE
+    ]
+    assert len(title_finishes) == expected_calls
+    assert title_finishes[-1].outcome == (
+        ProviderInvocationOutcome.FINAL_TEXT
+        if failure_mode == "invalid_candidate"
+        else ProviderInvocationOutcome.FAILED
+    )
     assert session.session_info().name == "Review title fallback"
     assert session.session_info().name_source == SessionNameSource.FALLBACK
     assert session.session_info().title_fallback_reason == expected_reason
     assert SessionTitleFallbackApplied(expected_reason) in events
     assert len(session.history) == 2
+    session.close()
+
+
+def test_project_session_closes_visible_title_round_when_turn_is_cancelled(tmp_path: Path) -> None:
+    cancellation = TurnCancellation()
+
+    class CancellingTitleProvider(RecordingProvider):
+        def respond_outcome(self, request):
+            self.requests.append(request)
+            return ProviderResponseOutcome(
+                AssistantText("done"), False, ProviderTokenUsage(100, 10)
+            )
+
+        def count_session_title_input_tokens(self, request):
+            return RequestTokenCount(20, RequestTokenCountMethod.ESTIMATED)
+
+        def generate_session_title_outcome(self, request):
+            cancellation.request()
+            return ProviderResponseOutcome(
+                AssistantText("Cancelled title"), False, ProviderTokenUsage(20, 4)
+            )
+
+    provider = CancellingTitleProvider("title-model")
+    session = ProjectSession.open(
+        tmp_path,
+        model="custom/title-model",
+        custom_protocol="openai-compatible",
+        custom_base_url="http://127.0.0.1:11434/v1",
+        environment={},
+        provider_factory=lambda route, *, environment: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    events = []
+
+    with pytest.raises(TurnCancelled):
+        session.prompt("Cancel while naming", event_sink=events.append, cancellation=cancellation)
+
+    title_finishes = [
+        event
+        for event in events
+        if isinstance(event, ProviderInvocationFinished)
+        and event.purpose == ProviderInvocationPurpose.SESSION_TITLE
+    ]
+    assert len(title_finishes) == 1
+    assert title_finishes[0].outcome == ProviderInvocationOutcome.CANCELLED
+    assert session.history == ()
     session.close()
 
 

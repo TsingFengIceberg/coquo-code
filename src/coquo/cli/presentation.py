@@ -12,6 +12,10 @@ from coquo.agent.tool_events import (
     HookLifecycleObserved,
     McpNotificationActivityReceived,
     ProviderInvocationPreflighted,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
+    ProviderInvocationStarted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
     ProviderSearchSummaryReceived,
@@ -2864,12 +2868,49 @@ def render_prompt_event(
         )
     if isinstance(event, ToolTurnSummaryCommitted):
         return f"Tool summary: {' '.join(_tool_ledger_fields(event.ledger))}", "info"
+    if isinstance(event, ProviderInvocationStarted):
+        detail = (
+            "session title started"
+            if event.purpose == ProviderInvocationPurpose.SESSION_TITLE
+            else "started"
+        )
+        return (
+            f"Model round [{event.invocation_index}/{event.invocation_limit}]: {detail}",
+            "info",
+        )
     if isinstance(event, ProviderInvocationPreflighted):
         return render_context_meter(
             event.report,
             invocation_index=event.invocation_index,
             invocation_limit=event.invocation_limit,
         ), "info"
+
+    if isinstance(event, ProviderInvocationFinished):
+        if event.outcome == ProviderInvocationOutcome.FINAL_TEXT:
+            detail = "final response received"
+            kind: MessageKind = "success"
+        elif event.outcome == ProviderInvocationOutcome.TOOL_REQUEST:
+            noun = "tool request" if event.tool_count == 1 else "tool requests"
+            detail = f"{event.tool_count} {noun} received"
+            kind = "info"
+        elif event.outcome == ProviderInvocationOutcome.CANCELLED:
+            detail = "cancelled"
+            kind = "warning"
+        else:
+            detail = "failed"
+            kind = "error"
+        if event.purpose == ProviderInvocationPurpose.SESSION_TITLE:
+            detail = (
+                "session title received"
+                if event.outcome == ProviderInvocationOutcome.FINAL_TEXT
+                else f"session title {detail}"
+            )
+        if event.elapsed_milliseconds is not None:
+            detail += f" ({_format_elapsed_milliseconds(event.elapsed_milliseconds)})"
+        return (
+            f"Model round [{event.invocation_index}/{event.invocation_limit}]: {detail}",
+            kind,
+        )
 
     if isinstance(event, ProviderInvocationUsageReceived):
         if event.usage is None:
@@ -3717,6 +3758,12 @@ def _totals_inline(totals: ProviderUsageTotals) -> str:
         f"{_format_tokens(totals.output_tokens)} out · "
         f"known={totals.known_invocations} unknown={totals.unknown_invocations}"
     )
+
+
+def _format_elapsed_milliseconds(value: int) -> str:
+    if value < 1_000:
+        return f"{value}ms"
+    return f"{value / 1_000:.1f}s"
 
 
 def _format_tokens(value: int | None) -> str:

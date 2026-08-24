@@ -5,6 +5,11 @@ from uuid import uuid4
 
 import pytest
 
+from coquo.agent.tool_events import (
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationStarted,
+)
 from coquo.observability import (
     ObservationContext,
     ObservationEvidence,
@@ -186,6 +191,32 @@ def test_live_stream_is_bounded_content_free_and_correlated() -> None:
     assert events[-1].trace_id == context.trace_id
     assert all("PRIVATE BODY" not in observation_event_json(event) for event in events)
     assert events[0].parent_event_id is not None
+
+
+def test_live_stream_projects_provider_round_boundaries_without_response_content() -> None:
+    session_id = _id()
+    stream = ObservationStream(
+        source_id=session_id,
+        context=ObservationContext.new(session_id=session_id),
+    )
+
+    stream.publish_prompt(ProviderInvocationStarted(1, 24))
+    stream.publish_prompt(
+        ProviderInvocationFinished(
+            1,
+            24,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            2,
+        )
+    )
+
+    events = stream.snapshot()
+    assert [event.record_type for event in events] == [
+        "live_provider_invocation_started",
+        "live_provider_invocation_finished",
+    ]
+    assert [event.status for event in events] == ["started", "tool-request"]
+    assert all("response" not in observation_event_json(event) for event in events)
 
 
 def test_background_projection_filters_and_diagnosis_are_read_only() -> None:

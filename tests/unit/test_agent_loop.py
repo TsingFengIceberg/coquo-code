@@ -20,6 +20,9 @@ from coquo.agent.tool_events import (
     AssistantResponseTextDeltaReceived,
     AssistantToolTextStreamCompleted,
     AssistantToolTextReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationStarted,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -28,6 +31,7 @@ from coquo.agent.tool_events import (
     ToolTurnSummaryCommitted,
 )
 from coquo.core.compaction import EffectiveContextSummary
+from coquo.core.cancellation import TurnCancelled
 from coquo.core.contracts import (
     AssistantToolBatch,
     ToolArguments,
@@ -266,11 +270,24 @@ def test_loop_executes_one_tool_batch_sequentially_and_returns_all_results(tmp_p
     )
     assert provider.received_requests[1].history[-3:] == loop.history[1:4]
     assert events[:-1] == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            2,
+        ),
         AssistantToolTextReceived("Inspecting both."),
         ToolRequestStarted("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, "pattern='*.py'"),
         ToolRequestFinished("glob", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
         ToolRequestStarted("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, "path='a.py'"),
         ToolRequestFinished("read_file", 2, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
+        ProviderInvocationStarted(2, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            2,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.FINAL_TEXT,
+        ),
     ]
     assert isinstance(events[-1], ToolTurnSummaryCommitted)
     assert events[-1].ledger.requested == events[-1].ledger.dispatched == 2
@@ -1365,6 +1382,13 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
         == "done"
     )
     assert events[:-1] == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        ),
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='a.txt'"),
         ToolRequestFinished(
             "read_file",
@@ -1374,6 +1398,13 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
             "ok",
             truncated=True,
         ),
+        ProviderInvocationStarted(2, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            2,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        ),
         ToolRequestStarted("grep", 2, MAX_TOOL_REQUESTS_PER_TURN, "include='*.txt' query_bytes=12"),
         ToolRequestFinished(
             "grep",
@@ -1381,6 +1412,12 @@ def test_tool_events_preserve_sequential_order_status_code_and_truncation(tmp_pa
             MAX_TOOL_REQUESTS_PER_TURN,
             ToolEventStatus.DENIED,
             "denied_read_only_mode",
+        ),
+        ProviderInvocationStarted(3, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            3,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.FINAL_TEXT,
         ),
     ]
     assert isinstance(events[-1], ToolTurnSummaryCommitted)
@@ -1412,6 +1449,69 @@ def test_tool_event_sink_failure_does_not_change_execution_or_commit(tmp_path) -
     assert loop.turns[-1].assistant == AssistantText("done")
 
 
+def test_provider_invocation_finish_records_bounded_elapsed_time(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = ScriptedFakeProvider([AssistantText("done")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    clock = iter((1_000_000_000, 33_500_000_000))
+    monkeypatch.setattr("coquo.agent.loop.time.monotonic_ns", lambda: next(clock))
+    events = []
+
+    assert loop.run("inspect", event_sink=events.append) == "done"
+
+    finished = next(event for event in events if isinstance(event, ProviderInvocationFinished))
+    assert finished.elapsed_milliseconds == 32_500
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    (
+        (RuntimeError("upstream failed"), ProviderInvocationOutcome.FAILED),
+        (TurnCancelled(), ProviderInvocationOutcome.CANCELLED),
+    ),
+)
+def test_provider_invocation_closes_on_failure_and_cancellation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    expected_outcome: ProviderInvocationOutcome,
+) -> None:
+    provider = ScriptedFakeProvider([AssistantText("unused")])
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    events = []
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr("coquo.agent.loop.respond_with_streaming", fail)
+
+    with pytest.raises(type(error)):
+        loop.run("inspect", event_sink=events.append)
+
+    assert events == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            expected_outcome,
+        ),
+    ]
+    assert loop.history == ()
+
+
 def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -> None:
     call = ToolUse("read-1", "read_file", ToolArguments.from_mapping({"path": "a.txt"}))
     provider = ScriptedFakeProvider([call])
@@ -1439,6 +1539,13 @@ def test_dispatch_exception_emits_outcome_unknown_without_committing(tmp_path) -
         )
 
     assert events == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        ),
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='a.txt'"),
         ToolRequestFinished(
             "read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.OUTCOME_UNKNOWN
@@ -1471,9 +1578,22 @@ def test_assistant_tool_text_is_displayed_executed_continued_and_committed(tmp_p
     assert loop.run("inspect", event_sink=events.append) == "The file contains notes."
     result = ToolResult("read-1", "notes\n")
     assert events[:-1] == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        ),
         AssistantToolTextReceived("I will read the file."),
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='README.md'"),
         ToolRequestFinished("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
+        ProviderInvocationStarted(2, MAX_PROVIDER_INVOCATIONS_PER_TURN),
+        ProviderInvocationFinished(
+            2,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.FINAL_TEXT,
+        ),
     ]
     assert isinstance(events[-1], ToolTurnSummaryCommitted)
     assert provider.received_requests[1].history[-2:] == (call, result)
@@ -1525,13 +1645,26 @@ def test_streaming_loop_orders_complete_tool_text_execution_and_durable_final_co
 
     assert loop.run("inspect", event_sink=events.append) == "Done."
     assert events[:-1] == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
         AssistantResponseTextDeltaReceived("I will "),
         AssistantResponseTextDeltaReceived("read."),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+        ),
         AssistantToolTextStreamCompleted("I will read."),
         ToolRequestStarted("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, "path='README.md'"),
         ToolRequestFinished("read_file", 1, MAX_TOOL_REQUESTS_PER_TURN, ToolEventStatus.SUCCEEDED),
+        ProviderInvocationStarted(2, MAX_PROVIDER_INVOCATIONS_PER_TURN),
         AssistantResponseTextDeltaReceived("Do"),
         AssistantResponseTextDeltaReceived("ne."),
+        ProviderInvocationFinished(
+            2,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.FINAL_TEXT,
+        ),
         AssistantFinalTextStreamCommitted("Done."),
     ]
     assert isinstance(events[-1], ToolTurnSummaryCommitted)
@@ -1569,8 +1702,14 @@ def test_streaming_loop_does_not_confirm_or_commit_final_text_when_durability_fa
         loop.run("persist", event_sink=events.append)
 
     assert events == [
+        ProviderInvocationStarted(1, MAX_PROVIDER_INVOCATIONS_PER_TURN),
         AssistantResponseTextDeltaReceived("not "),
         AssistantResponseTextDeltaReceived("durable"),
+        ProviderInvocationFinished(
+            1,
+            MAX_PROVIDER_INVOCATIONS_PER_TURN,
+            ProviderInvocationOutcome.FINAL_TEXT,
+        ),
     ]
     assert loop.history == ()
 

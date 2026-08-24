@@ -11,7 +11,11 @@ from coquo.agent.loop import AgentLoop
 from coquo.agent.tool_events import (
     AssistantToolTextReceived,
     McpNotificationActivityReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
     ProviderInvocationPreflighted,
+    ProviderInvocationStarted,
     ProviderInvocationUsageReceived,
     ProviderSearchActivityReceived,
     ProviderSearchSummaryReceived,
@@ -395,6 +399,46 @@ def test_context_meter_toolbar_and_usage_summary_are_bounded_and_explicit() -> N
     assert "Latest turn: 70.0k in / 846 out" in render_usage_summary(usage)
     assert "Latest compaction invocation: none" in render_usage_summary(usage)
     assert "Turn usage:" in render_prompt_event(TurnUsageCompleted(usage))[0]
+
+
+def test_provider_invocation_events_render_round_boundaries_without_content() -> None:
+    assert render_prompt_event(ProviderInvocationStarted(2, 24)) == (
+        "Model round [2/24]: started",
+        "info",
+    )
+    assert render_prompt_event(
+        ProviderInvocationFinished(2, 24, ProviderInvocationOutcome.TOOL_REQUEST, 2)
+    ) == ("Model round [2/24]: 2 tool requests received", "info")
+    assert render_prompt_event(
+        ProviderInvocationFinished(3, 24, ProviderInvocationOutcome.FINAL_TEXT)
+    ) == ("Model round [3/24]: final response received", "success")
+    assert render_prompt_event(
+        ProviderInvocationFinished(3, 24, ProviderInvocationOutcome.FAILED)
+    ) == ("Model round [3/24]: failed", "error")
+    assert render_prompt_event(
+        ProviderInvocationFinished(3, 24, ProviderInvocationOutcome.CANCELLED)
+    ) == ("Model round [3/24]: cancelled", "warning")
+    assert render_prompt_event(
+        ProviderInvocationFinished(
+            1,
+            24,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+            32_500,
+        )
+    ) == ("Model round [1/24]: 1 tool request received (32.5s)", "info")
+    assert render_prompt_event(
+        ProviderInvocationStarted(2, 24, ProviderInvocationPurpose.SESSION_TITLE)
+    ) == ("Model round [2/24]: session title started", "info")
+    assert render_prompt_event(
+        ProviderInvocationFinished(
+            2,
+            24,
+            ProviderInvocationOutcome.FINAL_TEXT,
+            elapsed_milliseconds=425,
+            purpose=ProviderInvocationPurpose.SESSION_TITLE,
+        )
+    ) == ("Model round [2/24]: session title received (425ms)", "success")
 
 
 def test_durable_usage_presentation_distinguishes_unknown_and_legacy() -> None:

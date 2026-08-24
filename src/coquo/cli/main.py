@@ -3724,6 +3724,7 @@ def handle_eval_command(
             color=color_enabled(stderr, environment),
             stream_deltas=False,
             render_markdown=stderr.isatty(),
+            show_provider_rounds=stderr.isatty(),
         )
         source_project_profile = (
             project_profile_path
@@ -4165,6 +4166,7 @@ def main(
                     color=color_enabled(errors, env),
                     stream_deltas=False,
                     render_markdown=errors.isatty(),
+                    show_provider_rounds=errors.isatty(),
                 )
                 try:
                     response = session.prompt(arguments.prompt, event_sink=event_sink)

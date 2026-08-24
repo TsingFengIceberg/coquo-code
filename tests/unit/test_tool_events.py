@@ -9,6 +9,10 @@ from coquo.agent.tool_events import (
     MAX_TOOL_EVENT_SUMMARY_CHARACTERS,
     MAX_TOOL_RESULT_DETAIL_LINES,
     McpNotificationActivityReceived,
+    ProviderInvocationFinished,
+    ProviderInvocationOutcome,
+    ProviderInvocationPurpose,
+    ProviderInvocationStarted,
     ToolDispatchResult,
     ToolEventStatus,
     ToolRequestFinished,
@@ -261,6 +265,28 @@ def test_full_command_details_escape_controls_and_bound_long_argv() -> None:
 
 
 def test_event_models_reject_invalid_identity_status_and_controls() -> None:
+    with pytest.raises(ValueError, match="identity"):
+        ProviderInvocationStarted(0, 24)
+    with pytest.raises(ValueError, match="outcome"):
+        ProviderInvocationFinished(1, 24, "failed")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must report tools"):
+        ProviderInvocationFinished(1, 24, ProviderInvocationOutcome.TOOL_REQUEST)
+    with pytest.raises(ValueError, match="must not report tools"):
+        ProviderInvocationFinished(1, 24, ProviderInvocationOutcome.FINAL_TEXT, 1)
+    with pytest.raises(ValueError, match="elapsed duration"):
+        ProviderInvocationFinished(
+            1, 24, ProviderInvocationOutcome.FINAL_TEXT, elapsed_milliseconds=-1
+        )
+    with pytest.raises(ValueError, match="purpose"):
+        ProviderInvocationStarted(1, 24, "title")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must not report tools"):
+        ProviderInvocationFinished(
+            1,
+            24,
+            ProviderInvocationOutcome.TOOL_REQUEST,
+            1,
+            purpose=ProviderInvocationPurpose.SESSION_TITLE,
+        )
     with pytest.raises(ValueError, match="call index"):
         ToolRequestStarted("read_file", 0, 6, "path='a.txt'")
     with pytest.raises(ValueError, match="control"):

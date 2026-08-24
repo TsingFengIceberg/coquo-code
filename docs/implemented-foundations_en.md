@@ -828,7 +828,7 @@ Observations and result details exist only in the current live-event path and ar
 
 A real TTY no longer follows “read one PromptSession, synchronously run the complete turn, then create the next PromptSession.” One non-full-screen `prompt_toolkit.Application` now retains the input area, toolbar, completion, history, approval focus, and inline scrollback. Submission clears the buffer immediately and leaves the next prompt visible. A draft remains editable while busy, but Enter cannot queue, insert, or dispatch a slash mutation. Approval saves and restores the draft, Ctrl-C requests cancellation, and Ctrl-D waits for active-worker cleanup before exit.
 
-A closed `TerminalViewState`, pure reducer, and bounded local queue move assistant, tool, context, usage, compaction, and failure events from one background worker to the sole TTY renderer. Only consecutive assistant deltas may be coalesced; tool, approval, failure, and durable-final facts cannot be lost. Renderer and terminal-sink failures remain best-effort and cannot affect execution, Action Audit, or turn commit. One-shot, redirect, injected-stream, and non-TTY paths remain synchronous.
+A closed `TerminalViewState`, pure reducer, and bounded local queue move assistant, tool, context, usage, compaction, and failure events from one background worker to the sole TTY renderer. Assistant deltas remain separate FIFO events so each received stream chunk can be flushed independently; tool, approval, failure, and durable-final facts cannot be lost. Renderer and terminal-sink failures remain best-effort and cannot affect execution, Action Audit, or turn commit. One-shot, redirect, injected-stream, and non-TTY paths remain synchronous.
 
 `TurnCancellation` crosses ProjectSession, AgentLoop, provider streams, tool boundaries, the approval broker, and `run_command`. Commands poll cancellation and use the existing bounded TERM-to-KILL process-group cleanup. A blocking provider SDK call can observe cancellation only after return or at the next stream chunk, and no unsafe thread exception injection is used. This Host-only redesign preserves canonical system prompt v21, provider adapter contract v24, the 21-tool catalog, Effective Context identity, and every Session/Action Audit schema. See [0067: Persistent Inline Terminal Frontend](./decisions/0067-persistent-inline-terminal-frontend.md).
 
@@ -1768,6 +1768,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 132. [0152: Observation Stream, Diagnosis, and Retention](./decisions/0152-observation-stream-diagnosis-and-retention.md)
 133. [0153: Provider Reasoning Effort Modes](./decisions/0153-provider-reasoning-effort-modes.md)
 134. [0154: Child/Team Recovery Boundaries and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md)
+135. [0155: Live Provider Round and Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -1873,3 +1874,34 @@ matrix covers every Host level across OpenAI Chat/Responses and Anthropic
 adaptive string mappings; unmapped levels fail closed and numeric
 `budget_tokens` remains unsupported. See [0154: Child/Team Recovery Boundaries
 and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md).
+
+## Live Provider Round and Tool Timeline
+
+One user prompt remains one durable Session Turn, while each model request
+inside its Agent loop is now presented through paired Host-only
+`ProviderInvocationStarted/Finished` events. The start precedes preflight or
+Provider I/O; the finish retains only the invocation index, limit, `turn` or
+`session-title` purpose, `final-text`, `tool-request`, `failed`, or `cancelled`
+outcome, a bounded tool count, and bounded Host-measured elapsed time. It does
+not retain model responses, reasoning, or raw tool input. The automatic
+first-Turn Session-title request is also displayed at its real shared-budget
+index, so round 1 no longer appears to jump inexplicably to round 3. Existing
+tool lifecycle safe summaries and assistant deltas are reused.
+
+The persistent TTY now shows the logical Turn start, each model round, tool
+execution, streamed final text, and Provider elapsed wait. The dynamic wait
+line is ephemeral, while each permanent completion line retains elapsed time
+so copied scrollback distinguishes a slow Provider response from terminal
+delivery delay. `Turn committed` appears only after the Session prompt returns
+from its durable commit path.
+When a Provider round remains open for more than five seconds, the TTY also
+adds a low-frequency Host-only `still waiting` heartbeat every five seconds,
+showing the current round and accumulated wait without exposing a Provider
+response, request body, or tool arguments.
+Lifecycle events remain FIFO and non-droppable, while assistant text deltas
+are preserved as separate events for independent flushing. Successful non-TTY prompt and eval output keeps its
+quiet stdout/stderr compatibility contract; a public NDJSON event format is
+left to a separate versioned design. This slice borrows Claw-Code's conceptual
+separation of runs, assistant rounds, and tool results without copying its TUI,
+prompts, wire format, or implementation. See [0155: Live Provider Round and
+Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md).

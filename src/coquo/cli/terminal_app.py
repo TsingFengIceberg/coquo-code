@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import replace
 import io
 import sys
+import time
 from pathlib import Path
 from typing import TextIO
 
@@ -58,6 +59,7 @@ from coquo.cli.presentation import (
     render_host_message,
     render_message_separator,
     render_prompt,
+    render_prompt_event,
     render_prompt_toolbar,
     render_turn_trace,
 )
@@ -71,12 +73,15 @@ from coquo.cli.prompt_editor import (
 )
 from coquo.cli.slash import SessionSwitchCatalog, ToolDetailSettings, dispatch_slash
 from coquo.cli.turn_runner import TaskTurnRequest, TurnRunner
+from coquo.agent.tool_events import ProviderInvocationFinished, ProviderInvocationStarted
 from coquo.core.action_coordinator import ApprovalResolution
 from coquo.session import (
     SessionTitleGenerationStarted,
     SessionTitlePrepared,
     TurnCommitStarted,
 )
+
+PROVIDER_WAIT_HEARTBEAT_SECONDS = 5.0
 
 
 def supports_terminal_application(stdin: TextIO, stdout: TextIO) -> bool:
@@ -212,6 +217,9 @@ class TerminalApplication:
         self._turn_starting = False
         self._cancel_pending_start = False
         self._turn_output_started = False
+        self._provider_invocation_started_at: float | None = None
+        self._provider_invocation_active: ProviderInvocationStarted | None = None
+        self._provider_wait_last_heartbeat: float | None = None
         self._history_entries = _session_prompt_history(session)
         self._history = InMemoryHistory(self._history_entries)
         self._buffer = Buffer(
@@ -295,8 +303,39 @@ class TerminalApplication:
                 await self._handle_event(event)
             except Exception:
                 self._renderer.reset()
+        await self._emit_provider_wait_heartbeat()
         self._drain_child_notifications()
         self._application.invalidate()
+
+    async def _emit_provider_wait_heartbeat(self) -> None:
+        active = self._provider_invocation_active
+        started = self._provider_invocation_started_at
+        if active is None or started is None:
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - started)
+        last = self._provider_wait_last_heartbeat
+        if last is not None and now - last < PROVIDER_WAIT_HEARTBEAT_SECONDS:
+            return
+        if elapsed < PROVIDER_WAIT_HEARTBEAT_SECONDS:
+            return
+        self._provider_wait_last_heartbeat = now
+        purpose = (
+            "session title"
+            if getattr(active.purpose, "value", "turn") == "session-title"
+            else "Provider"
+        )
+        await self._write_turn_output(
+            render_turn_trace(
+                f"{purpose} still waiting: model round "
+                f"[{active.invocation_index}/{active.invocation_limit}] "
+                f"({elapsed:.1f}s)",
+                "info",
+                color=self._color,
+                width=self._current_width(),
+            )
+            + "\n"
+        )
 
     def _drain_child_notifications(self) -> None:
         drain = getattr(self._session, "child_notifications", None)
@@ -318,7 +357,17 @@ class TerminalApplication:
     async def _handle_event(self, event: FrontendEvent) -> None:
         previous = self._state
         self._state = reduce_terminal_state(self._state, event)
-        if isinstance(event, ApprovalPending):
+        if isinstance(event, TurnSubmitted):
+            await self._write_turn_output(
+                render_turn_trace(
+                    f"Turn {event.turn_id}: started",
+                    "info",
+                    color=self._color,
+                    width=self._current_width(),
+                )
+                + "\n"
+            )
+        elif isinstance(event, ApprovalPending):
             if self._state.phase != TerminalPhase.APPROVAL:
                 self._approval_broker.resolve(ApprovalResolution.CANCEL)
                 return
@@ -334,6 +383,14 @@ class TerminalApplication:
                 + "\n"
             )
         elif isinstance(event, PromptActivity):
+            if isinstance(event.event, ProviderInvocationStarted):
+                self._provider_invocation_started_at = time.monotonic()
+                self._provider_invocation_active = event.event
+                self._provider_wait_last_heartbeat = self._provider_invocation_started_at
+            elif isinstance(event.event, ProviderInvocationFinished):
+                self._provider_invocation_started_at = None
+                self._provider_invocation_active = None
+                self._provider_wait_last_heartbeat = None
             if isinstance(event.event, SessionTitlePrepared):
                 if self._session_info_before_prepared_title is None:
                     self._session_info_before_prepared_title = self._session_info
@@ -346,11 +403,26 @@ class TerminalApplication:
                 return
             if isinstance(event.event, (SessionTitleGenerationStarted, TurnCommitStarted)):
                 return
+            if isinstance(event.event, (ProviderInvocationStarted, ProviderInvocationFinished)):
+                message, kind = render_prompt_event(event.event)
+                await self._write_turn_output(
+                    render_turn_trace(
+                        message,
+                        kind,
+                        color=self._color,
+                        width=self._current_width(),
+                    )
+                    + "\n"
+                )
+                return
             self._renderer.resize(self._current_width())
             rendered = self._renderer.render(event.event)
             if rendered:
                 await self._write_turn_output(rendered)
         elif isinstance(event, TurnFailed):
+            self._provider_invocation_started_at = None
+            self._provider_invocation_active = None
+            self._provider_wait_last_heartbeat = None
             if self._session_info_before_prepared_title is not None:
                 self._session_info = self._session_info_before_prepared_title
                 self._session_info_before_prepared_title = None
@@ -367,9 +439,23 @@ class TerminalApplication:
                 + "\n"
             )
         elif isinstance(event, TurnFinished):
+            self._provider_invocation_started_at = None
+            self._provider_invocation_active = None
+            self._provider_wait_last_heartbeat = None
             if event.response and not self._renderer.final_text_was_streamed:
                 self._renderer.resize(self._current_width())
                 await self._write_turn_output(self._renderer.render_final(event.response))
+            if previous.phase == TerminalPhase.COMPLETING:
+                await self._write_turn_output(
+                    "\n"
+                    + render_turn_trace(
+                        f"Turn {event.turn_id}: committed",
+                        "success",
+                        color=self._color,
+                        width=self._current_width(),
+                    )
+                    + "\n"
+                )
             await self._write(
                 f"\n{render_message_separator(self._current_width(), color=self._color)}\n"
             )
@@ -415,7 +501,7 @@ class TerminalApplication:
                         )
                         + "\n"
                     )
-        elif isinstance(event, (TurnSubmitted, TurnCompleting)):
+        elif isinstance(event, TurnCompleting):
             return
 
     def _accept(self, buffer: Buffer) -> bool:
@@ -679,7 +765,12 @@ class TerminalApplication:
         return self._turn_starting or self._state.busy
 
     def _activity_line(self):
-        return ANSI(render_activity_line(self._state.status, color=self._color))
+        status = self._state.status
+        if self._provider_invocation_started_at is not None:
+            elapsed = max(0.0, time.monotonic() - self._provider_invocation_started_at)
+            spinner = "|/-\\"[int(elapsed * 8) % 4]
+            status = f"{spinner} {status} · {elapsed:.1f}s"
+        return ANSI(render_activity_line(status, color=self._color))
 
     def _current_width(self) -> int:
         try:
