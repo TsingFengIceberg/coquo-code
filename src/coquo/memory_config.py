@@ -16,9 +16,10 @@ import stat
 from threading import RLock
 from typing import Any
 
-from coquo.memory import MemoryError, MemoryRecallMode, MemoryWriteMode
+from coquo.memory import MemoryError, MemoryRecallMode, MemoryRetrievalMode, MemoryWriteMode
 
-MEMORY_CONFIG_SCHEMA_VERSION = 1
+MEMORY_CONFIG_SCHEMA_VERSION = 2
+MEMORY_CONFIG_LEGACY_SCHEMA_VERSION = 1
 MEMORY_CONFIG_MAX_BYTES = 32 * 1024
 
 
@@ -29,6 +30,7 @@ class MemoryConfig:
     enabled: bool = False
     recall: MemoryRecallMode = MemoryRecallMode.OFF
     write: MemoryWriteMode = MemoryWriteMode.OFF
+    retrieval: MemoryRetrievalMode = MemoryRetrievalMode.TEXT
     tools: bool = False
     provider: str = "local"
 
@@ -39,6 +41,8 @@ class MemoryConfig:
             raise MemoryError("memory recall mode is invalid")
         if not isinstance(self.write, MemoryWriteMode):
             raise MemoryError("memory write mode is invalid")
+        if not isinstance(self.retrieval, MemoryRetrievalMode):
+            raise MemoryError("memory retrieval mode is invalid")
         if self.provider != "local":
             raise MemoryError("only the local memory provider is available in this slice")
 
@@ -60,6 +64,7 @@ class MemoryConfig:
             "enabled": self.enabled,
             "recall": self.recall.value,
             "write": self.write.value,
+            "retrieval": self.retrieval.value,
             "tools": self.tools,
             "provider": self.provider,
         }
@@ -68,18 +73,40 @@ class MemoryConfig:
     def from_mapping(cls, value: Any) -> "MemoryConfig":
         if not isinstance(value, dict):
             raise MemoryError("memory configuration must be an object")
-        expected = {"schema_version", "enabled", "recall", "write", "tools", "provider"}
-        if set(value) != expected or value.get("schema_version") != MEMORY_CONFIG_SCHEMA_VERSION:
+        common = {
+            "schema_version",
+            "enabled",
+            "recall",
+            "write",
+            "tools",
+            "provider",
+        }
+        version = value.get("schema_version")
+        if version == MEMORY_CONFIG_LEGACY_SCHEMA_VERSION and set(value) in (
+            common,
+            common | {"retrieval"},
+        ):
+            try:
+                retrieval = MemoryRetrievalMode(value.get("retrieval", "text"))
+            except (ValueError, TypeError):
+                raise MemoryError("memory recall, write, or retrieval mode is invalid") from None
+        elif version == MEMORY_CONFIG_SCHEMA_VERSION and set(value) == common | {"retrieval"}:
+            try:
+                retrieval = MemoryRetrievalMode(value["retrieval"])
+            except (ValueError, TypeError):
+                raise MemoryError("memory recall, write, or retrieval mode is invalid") from None
+        else:
             raise MemoryError("memory configuration schema is invalid")
         try:
             recall = MemoryRecallMode(value["recall"])
             write = MemoryWriteMode(value["write"])
         except (ValueError, TypeError):
-            raise MemoryError("memory recall or write mode is invalid") from None
+            raise MemoryError("memory recall, write, or retrieval mode is invalid") from None
         return cls(
             enabled=value["enabled"],
             recall=recall,
             write=write,
+            retrieval=retrieval,
             tools=value["tools"],
             provider=value["provider"],
         )
@@ -128,32 +155,31 @@ class MemoryConfigStore:
         if len(raw) > MEMORY_CONFIG_MAX_BYTES:
             raise MemoryError("memory configuration exceeds its size limit")
         with self._transaction():
-            temporary = self.path.with_name(f".{self.path.name}.tmp-{os.getpid()}")
-            try:
-                descriptor = os.open(
-                    temporary,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_TRUNC
-                    | os.O_CLOEXEC
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                try:
-                    if os.write(descriptor, raw) != len(raw):
-                        raise OSError("memory configuration write was incomplete")
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                os.replace(temporary, self.path)
-                _fsync_directory(self.root)
-            except OSError:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise MemoryError("memory configuration could not be written") from None
+            self._save_locked(raw)
         return config
+
+    def _save_locked(self, raw: bytes) -> None:
+        temporary = self.path.with_name(f".{self.path.name}.tmp-{os.getpid()}")
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                if os.write(descriptor, raw) != len(raw):
+                    raise OSError("memory configuration write was incomplete")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, self.path)
+            _fsync_directory(self.root)
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise MemoryError("memory configuration could not be written") from None
 
     @contextmanager
     def _transaction(self):
@@ -190,28 +216,49 @@ class MemoryConfigStore:
         enabled: bool | None = None,
         recall: MemoryRecallMode | None = None,
         write: MemoryWriteMode | None = None,
+        retrieval: MemoryRetrievalMode | None = None,
         tools: bool | None = None,
     ) -> MemoryConfig:
-        current = self.load()
-        updated = replace(
-            current,
-            enabled=current.enabled if enabled is None else enabled,
-            recall=current.recall if recall is None else recall,
-            write=current.write if write is None else write,
-            tools=current.tools if tools is None else tools,
-        )
-        return self.save(updated)
+        with self._transaction():
+            current = self.load()
+            updated = replace(
+                current,
+                enabled=current.enabled if enabled is None else enabled,
+                recall=current.recall if recall is None else recall,
+                write=current.write if write is None else write,
+                retrieval=current.retrieval if retrieval is None else retrieval,
+                tools=current.tools if tools is None else tools,
+            )
+            raw = (
+                json.dumps(
+                    updated.to_mapping(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            if len(raw) > MEMORY_CONFIG_MAX_BYTES:
+                raise MemoryError("memory configuration exceeds its size limit")
+            self._save_locked(raw)
+            return updated
 
     def _ensure_root(self) -> None:
         parent = self.root.parent
-        if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
+        try:
+            parent.mkdir(mode=0o700, exist_ok=True)
+        except OSError:
+            raise MemoryError(".coquo could not be created") from None
+        if parent.is_symlink() or not parent.is_dir():
             raise MemoryError(".coquo must be a regular directory")
-        if not parent.exists():
-            parent.mkdir(mode=0o700)
         if self.root.exists() and (self.root.is_symlink() or not self.root.is_dir()):
             raise MemoryError("memory directory must be a regular directory")
-        if not self.root.exists():
-            self.root.mkdir(mode=0o700)
+        try:
+            self.root.mkdir(mode=0o700, exist_ok=True)
+        except OSError:
+            raise MemoryError("memory directory could not be created") from None
+        if self.root.is_symlink() or not self.root.is_dir():
+            raise MemoryError("memory directory must be a regular directory")
         try:
             os.chmod(parent, stat.S_IRWXU)
             os.chmod(self.root, stat.S_IRWXU)

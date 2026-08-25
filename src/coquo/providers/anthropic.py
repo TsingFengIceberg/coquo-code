@@ -16,6 +16,7 @@ from coquo.core.contracts import (
     AssistantText,
     ConversationItem,
     ConversationRequest,
+    MemoryEvidence,
     ProviderResponse,
     ToolResult,
     ToolUse,
@@ -470,6 +471,7 @@ def build_input_projection(
                 request_snapshot.history,
                 config=config,
                 committed_context=committed_context,
+                memory_evidence=request_snapshot.memory_evidence,
             ),
         ],
     }
@@ -765,6 +767,7 @@ def serialize_history(
     *,
     config: AnthropicProviderConfig,
     committed_context: bool = False,
+    memory_evidence: tuple[MemoryEvidence, ...] = (),
 ) -> list[dict[str, object]]:
     """Convert neutral causal history for invocation or committed-context counting."""
     if not history:
@@ -773,6 +776,10 @@ def serialize_history(
         raise _invalid_history(config, "conversation history must not be empty")
 
     messages: list[dict[str, object]] = []
+    messages.extend(
+        {"role": "user", "content": [{"type": "text", "text": item.rendered}]}
+        for item in memory_evidence
+    )
     expected = "user"
     pending_tool_use_ids: tuple[str, ...] = ()
     pending_result_blocks: list[dict[str, object]] = []

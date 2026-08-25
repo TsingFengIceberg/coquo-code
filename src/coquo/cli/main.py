@@ -187,6 +187,7 @@ from coquo.session_store import (
 from coquo.memory import (
     MemoryError as SemanticMemoryError,
     MemoryRecallMode,
+    MemoryRetrievalMode,
     MemoryScope,
     MemoryStatus,
     MemoryWriteMode,
@@ -965,6 +966,9 @@ def build_parser() -> argparse.ArgumentParser:
     memory_configure.set_defaults(memory_enabled=None)
     memory_configure.add_argument("--recall", choices=[mode.value for mode in MemoryRecallMode])
     memory_configure.add_argument("--write", choices=[mode.value for mode in MemoryWriteMode])
+    memory_configure.add_argument(
+        "--retrieval", choices=[mode.value for mode in MemoryRetrievalMode]
+    )
     memory_tools = memory_configure.add_mutually_exclusive_group()
     memory_tools.add_argument("--tools", dest="memory_tools", action="store_true")
     memory_tools.add_argument("--no-tools", dest="memory_tools", action="store_false")
@@ -991,10 +995,27 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--scope", choices=[scope.value for scope in MemoryScope])
     memory_search.add_argument("--scope-id")
     memory_search.add_argument("--limit", type=task_list_limit, default=20)
+    memory_conflicts = memory_commands.add_parser(
+        "conflicts", help="list same-scope confirmed memory facts for review"
+    )
+    memory_conflicts.add_argument("memory_id")
+    memory_conflicts.add_argument("--limit", type=task_list_limit, default=20)
     memory_confirm = memory_commands.add_parser(
         "confirm", help="confirm one pending memory candidate"
     )
     memory_confirm.add_argument("memory_id")
+    memory_reinforce = memory_commands.add_parser(
+        "reinforce", help="reinforce one confirmed memory record"
+    )
+    memory_reinforce.add_argument("memory_id")
+    memory_reinforce.add_argument("--confidence-delta", type=float, default=0.05)
+    memory_review = memory_commands.add_parser(
+        "review-stale", help="mark confirmed records older than a timestamp stale"
+    )
+    memory_review.add_argument("before")
+    memory_review.add_argument("--limit", type=task_list_limit, default=20)
+    memory_evict = memory_commands.add_parser("evict", help="evict oldest active memory records")
+    memory_evict.add_argument("--limit", type=task_list_limit, default=1)
     memory_update = memory_commands.add_parser(
         "update", help="update one non-terminal memory record"
     )
@@ -1002,6 +1023,13 @@ def build_parser() -> argparse.ArgumentParser:
     memory_update.add_argument("--content")
     memory_update.add_argument("--category")
     memory_update.add_argument("--confidence", type=float)
+    memory_consolidate = memory_commands.add_parser(
+        "consolidate", help="merge one candidate and explicitly stale duplicate candidates"
+    )
+    memory_consolidate.add_argument("memory_id")
+    memory_consolidate.add_argument("content", type=nonblank_prompt)
+    memory_consolidate.add_argument("--duplicate-id", action="append", default=[])
+    memory_consolidate.add_argument("--reason", default="host_consolidation")
     for action, status in (("stale", MemoryStatus.STALE), ("delete", MemoryStatus.DELETED)):
         command = memory_commands.add_parser(action, help=f"mark one memory as {status.value}")
         command.add_argument("memory_id")
@@ -2428,6 +2456,7 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
         stdout.write(f"effective recall: {config.effective_recall.value}\n")
         stdout.write(f"configured write: {config.write.value}\n")
         stdout.write(f"effective write: {config.effective_write.value}\n")
+        stdout.write(f"configured retrieval: {config.retrieval.value}\n")
         stdout.write(f"configured tools: {'yes' if config.tools else 'no'}\n")
         stdout.write(f"effective tools: {'yes' if config.effective_tools else 'no'}\n")
         stdout.write(f"provider: {config.provider}\n")
@@ -2453,11 +2482,15 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
             enabled=arguments.memory_enabled,
             recall=None if arguments.recall is None else MemoryRecallMode(arguments.recall),
             write=None if arguments.write is None else MemoryWriteMode(arguments.write),
+            retrieval=(
+                None if arguments.retrieval is None else MemoryRetrievalMode(arguments.retrieval)
+            ),
             tools=arguments.memory_tools,
         )
         stdout.write(
             f"Memory configuration saved: enabled={'yes' if config.enabled else 'no'}, "
             f"recall={config.recall.value}, write={config.write.value}, "
+            f"retrieval={config.retrieval.value}, "
             f"tools={'yes' if config.tools else 'no'}.\n"
         )
         return 0
@@ -2498,8 +2531,28 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
         ):
             stdout.write(_render_memory_record(record) + "\n")
         return 0
+    if command == "conflicts":
+        for record in memory.possible_conflicts(arguments.memory_id, limit=arguments.limit):
+            stdout.write(_render_memory_record(record) + "\n")
+        return 0
     if command == "confirm":
         stdout.write(_render_memory_record(memory.confirm(arguments.memory_id)) + "\n")
+        return 0
+    if command == "reinforce":
+        stdout.write(
+            _render_memory_record(
+                memory.reinforce(arguments.memory_id, confidence_delta=arguments.confidence_delta)
+            )
+            + "\n"
+        )
+        return 0
+    if command == "review-stale":
+        for record in memory.review_stale(arguments.before, limit=arguments.limit):
+            stdout.write(_render_memory_record(record) + "\n")
+        return 0
+    if command == "evict":
+        for record in memory.evict_oldest(limit=arguments.limit):
+            stdout.write(_render_memory_record(record) + "\n")
         return 0
     if command == "update":
         if (
@@ -2515,6 +2568,19 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
                     content=arguments.content,
                     category=arguments.category,
                     confidence=arguments.confidence,
+                )
+            )
+            + "\n"
+        )
+        return 0
+    if command == "consolidate":
+        stdout.write(
+            _render_memory_record(
+                memory.consolidate(
+                    arguments.memory_id,
+                    content=arguments.content,
+                    duplicate_ids=tuple(arguments.duplicate_id),
+                    reason=arguments.reason,
                 )
             )
             + "\n"

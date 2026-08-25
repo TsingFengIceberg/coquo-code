@@ -15,6 +15,7 @@ from coquo.core.contracts import (
     AssistantToolBatch,
     ConversationItem,
     ConversationRequest,
+    MemoryEvidence,
     ProviderOwnedItem,
     ProviderResponse,
     ProviderResponseEnvelope,
@@ -279,6 +280,7 @@ def build_input_projection(
             route=route,
             committed_context=committed_context,
             effective_summary=request_snapshot.effective_summary,
+            memory_evidence=request_snapshot.memory_evidence,
         ),
     }
     if request_snapshot.allow_tools:
@@ -384,6 +386,7 @@ def serialize_history(
     route: RuntimeProviderRoute,
     committed_context: bool = False,
     effective_summary: object | None = None,
+    memory_evidence: tuple[MemoryEvidence, ...] = (),
 ) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     if effective_summary is not None:
@@ -397,6 +400,7 @@ def serialize_history(
                 {"role": "assistant", "content": acknowledgement},
             ]
         )
+    items.extend({"role": "user", "content": item.rendered} for item in memory_evidence)
     expected = "user"
     pending_ids: tuple[str, ...] = ()
     for item in history:

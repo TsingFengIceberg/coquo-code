@@ -58,6 +58,7 @@ class AgentRuntimeServices:
     hook_set_factory: Callable[[], Any]
     skill_resource_reader: Callable[..., Any]
     provider_manager: Any = None
+    memory_recall_factory: Callable[[str], tuple[Any, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,7 @@ class AgentRuntimeFactory:
             skill_inventory_factory=services.skill_inventory_factory,
             hook_set_factory=services.hook_set_factory,
             skill_resource_reader=services.skill_resource_reader,
+            memory_recall_factory=services.memory_recall_factory,
         )
         if callbacks.action_dispatcher is not None:
             loop.install_action_dispatcher(callbacks.action_dispatcher)

@@ -51,6 +51,7 @@ from coquo.core.contracts import (
     ConversationProvider,
     ConversationRequest,
     ConversationTurn,
+    MemoryEvidence,
     ProviderResponseEnvelope,
     SystemPromptSnapshot,
     ToolOutcomeEntry,
@@ -141,6 +142,7 @@ ActionDispatcher = Callable[[ToolUse, ActionLease], ToolResult | ToolDispatchRes
 AgentEventSink = Callable[[AgentPromptEvent], None]
 ToolUsageSink = Callable[[ToolAttemptUsage], None]
 FirstProviderResponseHook = Callable[[], int]
+MemoryRecallFactory = Callable[[str], tuple[MemoryEvidence, ...]]
 
 
 def _no_project_instructions() -> None:
@@ -335,6 +337,7 @@ class AgentLoop:
         hook_set_factory: Callable[[], HookSetSnapshot] = _empty_hook_set,
         skill_resource_reader: SkillResourceReader | None = None,
         action_dispatcher: ActionDispatcher | None = None,
+        memory_recall_factory: MemoryRecallFactory | None = None,
     ) -> None:
         """Store a provider, confined tool, validated history, and durable commit hook."""
         self._provider = provider
@@ -388,6 +391,7 @@ class AgentLoop:
         self._hook_set_factory = hook_set_factory
         self._skill_resource_reader = skill_resource_reader
         self._action_dispatcher = action_dispatcher
+        self._memory_recall_factory = memory_recall_factory or (lambda _prompt: ())
         self._task_control_names: frozenset[str] = frozenset()
         self._task_control_dispatcher: TaskControlDispatcher | None = None
         self._child_control_names: frozenset[str] = frozenset()
@@ -442,6 +446,7 @@ class AgentLoop:
         tool_set_snapshot: ToolSetSnapshot | None = None,
         skill_inventory_snapshot: SkillInventorySnapshot | None = None,
         hook_set_snapshot: HookSetSnapshot | None = None,
+        memory_evidence: tuple[MemoryEvidence, ...] = (),
     ) -> EffectiveContextSnapshot:
         """Rebuild committed identity while retaining one already pinned instruction snapshot."""
         if project_instructions is not None and not isinstance(
@@ -460,7 +465,11 @@ class AgentLoop:
         if hook_set_snapshot is None:
             hook_set_snapshot = self._hook_set_factory()
         return self._effective_context_snapshot(
-            project_instructions, tool_set_snapshot, skill_inventory_snapshot, hook_set_snapshot
+            project_instructions,
+            tool_set_snapshot,
+            skill_inventory_snapshot,
+            hook_set_snapshot,
+            memory_evidence=memory_evidence,
         )
 
     def _effective_context_snapshot(
@@ -469,6 +478,8 @@ class AgentLoop:
         tool_set: ToolSetSnapshot,
         skill_inventory: SkillInventorySnapshot,
         hook_set: HookSetSnapshot,
+        *,
+        memory_evidence: tuple[MemoryEvidence, ...] = (),
     ) -> EffectiveContextSnapshot:
         if not isinstance(tool_set, ToolSetSnapshot):
             raise ValueError("effective context tool set snapshot is invalid")
@@ -493,6 +504,7 @@ class AgentLoop:
             full_history=self._full_history,
             effective_history=self._effective_history,
             effective_summary=self._effective_summary,
+            memory_evidence=memory_evidence,
         )
 
     def committed_context_request(self) -> ConversationRequest:
@@ -520,11 +532,17 @@ class AgentLoop:
         tool_set = self._apply_skill_restrictions(
             self._effective_history, registry.select(enabled_tool_names)
         )
+        memory_evidence = self._memory_recall_factory(prompt)
+        if not isinstance(memory_evidence, tuple) or not all(
+            isinstance(item, MemoryEvidence) for item in memory_evidence
+        ):
+            raise ValueError("memory recall factory returned invalid evidence")
         context = self._effective_context_snapshot(
             self._project_instructions_factory(),
             tool_set,
             inventory,
             hooks,
+            memory_evidence=memory_evidence,
         )
         return PreparedAgentTurn(
             user=user,

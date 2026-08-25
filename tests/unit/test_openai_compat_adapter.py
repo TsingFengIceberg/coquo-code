@@ -25,6 +25,7 @@ from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ConversationRequest,
+    MemoryEvidence,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -1255,6 +1256,38 @@ def test_effective_summary_is_projected_before_retained_history() -> None:
         "content": summary.assistant_acknowledgement,
     }
     assert body["messages"][3] == {"role": "user", "content": "recent"}
+
+
+def test_memory_evidence_projection_is_exact_ordered_and_count_create_equivalent() -> None:
+    summary = EffectiveContextSummary("old state")
+    evidence = (
+        MemoryEvidence("memory-1", "workspace", "first fact", "fact", 0.8),
+        MemoryEvidence("memory-2", "task", "second fact", "policy", 0.9),
+    )
+    snapshot = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("recent"),),
+        effective_summary=summary,
+        allow_tools=False,
+        memory_evidence=evidence,
+    )
+
+    counted = build_input_projection(route(), snapshot)
+    created = build_request(route(), snapshot)
+
+    assert counted["messages"] == created["messages"]
+    assert [item["role"] for item in counted["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "user",
+        "user",
+    ]
+    assert counted["messages"][1]["content"] == summary.user_text
+    assert counted["messages"][3]["content"] == evidence[0].rendered
+    assert counted["messages"][4]["content"] == evidence[1].rendered
+    assert counted["messages"][5]["content"] == "recent"
 
 
 def test_adapter_backed_loop_preserves_atomic_tool_causality(tmp_path) -> None:

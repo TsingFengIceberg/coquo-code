@@ -9,13 +9,13 @@ from coquo.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v49-0865fa87ad53317d5cd8a8cfe8477d87d010d7b6ffb93cdc67675bb4b2f05efa"
+EXPECTED_FINGERPRINT = "v50-51c96ecf999127d6f13f98f84057a8762001dd7484a554893d72202326a6bbe5"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 49
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 50
     for text in (
         "`child_spawn`",
         "read-only Child Turn",
@@ -39,6 +39,10 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
         "leaves the authority workspace uncommitted",
         "outcome-unknown",
         "explicit Host retirement action",
+        "`memory_search`",
+        "explicit memory master and tools switches",
+        "Child runtimes receive no memory tools or memory scopes",
+        "Memory tools cannot grant another tool",
     ):
         assert text in prompt.text
     assert prompt.fingerprint == EXPECTED_FINGERPRINT

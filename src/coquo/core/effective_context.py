@@ -14,6 +14,7 @@ from coquo.core.contracts import (
     ConversationItem,
     ConversationRequest,
     ConversationTurn,
+    MemoryEvidence,
     ProviderOwnedItem,
     SystemPromptSnapshot,
     ToolArguments,
@@ -46,6 +47,10 @@ LEGACY_PRE_WORKTREE_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 25
 LEGACY_PRE_WORKTREE_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 26
 EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 27
 COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 28
+MEMORY_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = 29
+MEMORY_COMPACTED_CONTEXT_REPRESENTATION_VERSION = 30
+EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = MEMORY_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+COMPACTED_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION = MEMORY_COMPACTED_CONTEXT_REPRESENTATION_VERSION
 EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY = "full_committed_history"
 EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT = "compact_checkpoint"
 _EFFECTIVE_CONTEXT_ID_DOMAIN = b"coquo-effective-context-id\0"
@@ -118,6 +123,7 @@ class EffectiveContextSnapshot:
     tool_set_id: str | None = None
     skill_inventory_id: str | None = None
     hook_set_id: str | None = None
+    memory_evidence: tuple[MemoryEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         supported = {
@@ -152,6 +158,15 @@ class EffectiveContextSnapshot:
         }
         if self.representation_version not in supported:
             raise ValueError("unsupported effective-context representation version")
+        if not isinstance(self.memory_evidence, tuple) or not all(
+            isinstance(item, MemoryEvidence) for item in self.memory_evidence
+        ):
+            raise ValueError("effective context memory evidence is invalid")
+        if (
+            self.representation_version < MEMORY_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION
+            and self.memory_evidence
+        ):
+            raise ValueError("legacy effective context cannot contain memory evidence")
         if self.source not in {
             EFFECTIVE_CONTEXT_SOURCE_FULL_COMMITTED_HISTORY,
             EFFECTIVE_CONTEXT_SOURCE_COMPACT_CHECKPOINT,
@@ -366,6 +381,19 @@ class EffectiveContextSnapshot:
                 "continuation_version": self.effective_summary.continuation_version,
                 "user_text": self.effective_summary.user_text,
             }
+        if self.representation_version >= MEMORY_EFFECTIVE_CONTEXT_REPRESENTATION_VERSION:
+            manifest["memory_evidence"] = [
+                {
+                    "memory_id": item.memory_id,
+                    "scope": item.scope,
+                    "content": item.content,
+                    "category": item.category,
+                    "confidence": float(item.confidence),
+                    "source_session_id": item.source_session_id,
+                    "source_turn": item.source_turn,
+                }
+                for item in self.memory_evidence
+            ]
         payload = _canonical_json(manifest, label="effective context").encode("utf-8")
         digest = hashlib.sha256(_EFFECTIVE_CONTEXT_ID_DOMAIN + payload).hexdigest()
         return f"ctx-v{self.representation_version}-{digest}"
@@ -389,6 +417,7 @@ class EffectiveContextSnapshot:
             enabled_tool_names=enabled_tool_names,
             tool_definitions=self.tool_definitions if allow_tools else None,
             tool_set_id=self.tool_set_id if allow_tools else None,
+            memory_evidence=self.memory_evidence,
         )
 
 

@@ -1909,14 +1909,63 @@ Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md).
 
 ## Long-Term Memory Contract and Local Store
 
+New long-term-memory configuration writes use schema v2 while the reader keeps
+the original and transitional v1 shapes compatible without rewriting them.
+Legacy v1 resolves to `retrieval=text` when that field is absent and advances
+only after an explicit update. Corrupt or unreadable configuration fails before
+Provider invocation instead of silently masquerading as disabled memory. Recall
+queries only confirmed records, never touch candidate/stale matches, deduplicate
+all derived-query results, and append at most one `recalled` event for each item
+that actually enters a Prepared Turn. Event count is independent from record
+count and is checked before append, so the store cannot write an event that
+makes its own log exceed the replay bound.
+
+Explicit `remember:` extraction still follows durable `turn_committed`, but it
+now passes through the existing PermissionGate and durable Action Audit:
+read-only denies it, `approval=ask` acceptance/rejection/cancellation remains
+authoritative, and `write=auto` is not an approval bypass. Team memory
+grant/revoke is also a Host Action exposed only through `/team memory
+grant|revoke <team-id>`; resume restores a successful grant only
+after the Team still exists and the Session is still its owner. Model
+`memory_add` records trusted Session/turn provenance, while bounded update and
+delete reasons remain in the append-only event log.
+
+Consolidation validates every duplicate before its first append and reports a
+truthful `partial` observation if lower-level I/O fails after an event becomes
+durable. Automatic capacity eviction also emits a content-free observation.
+Tests for Anthropic, OpenAI Chat Completions, and OpenAI Responses fix identical
+count/create ordering: an optional compacted summary first, multiple
+`[UNTRUSTED MEMORY EVIDENCE]` user-data items next, and current committed
+history last.
+
+The implementation now also exposes `retrieval=text|semantic`; without a
+local backend, semantic mode explicitly degrades to bounded `text-fallback`.
+Only an explicit user `remember:`, `remember that`, or `请记住` request after a
+successful `turn_committed` creates a candidate. `write=propose` leaves it
+pending and `write=auto` confirms it after bounded validation; arbitrary model
+output is never extracted. Deduplication, consolidation, conflict enumeration,
+reinforcement, stale review, and capacity eviction append events with bounded
+reasons, and confirmed conflicts are never silently overwritten.
+
+Access is controlled by a Host-owned `MemoryAccessContext`, not by model text.
+The ordinary Host receives the current workspace scope; an active Host Task may
+add its Host-derived Task scope; a Team scope appears only after an explicit
+revocable Host grant. Child runtimes receive no read or write scopes and do not
+extract memory; unresolved scope is fail-closed. Memory remains untrusted
+evidence and cannot grant tools, permissions, approvals, or execution
+authority. Model-visible memory tools are enabled only under the two explicit
+Host switches and reuse PermissionGate, Action Audit, and untrusted ToolResult;
+remote Providers remain a later backend option.
+
 The first long-term semantic-memory slice keeps project instructions, Session
 history, context compaction, and Task/Child/Team execution ledgers separate.
 `MemoryRecord` uses explicit `user|workspace|task|team|child` scopes, a
 candidate/confirmed/stale/deleted/evicted lifecycle, confidence, source
 Session/turn provenance, and bounded timestamps. Confirmation requires an
 explicit confirmation time; deletion and eviction are terminal. DeerFlow is the
-fact-governance reference and Hermes is the provider-lifecycle reference, but
-this slice adds no remote backend or model extraction.
+fact-governance reference and Hermes is the provider-lifecycle reference; this
+slice adds no remote backend and never extracts arbitrary model output, only
+explicit memory markers after a durable turn commit.
 
 The local backend is an append-only `.coquo/memory/events.jsonl` event log with
 an exclusive lock. Each event stores the complete current record; append and
@@ -1926,9 +1975,17 @@ violations are rejected. Host configuration is separate from Provider profiles:
 `.coquo/memory/config.json` defaults to `enabled=false` and provides
 `recall=off|on`, `write=off|propose|auto`, `tools`, and the fixed `local`
 provider. With the master switch disabled, effective recall, write, and tool
-exposure are all disabled. `coquo memory status|configure|enable|disable` and
-explicit `add|list|show|search|confirm|update|stale|delete` commands manage the
-local ledger only; they do not invoke a Provider, mutate a Session, or add
-model-visible tools. Automatic recall, candidate extraction, remote Providers,
-and Child/Team sharing remain later slices. See [0156: Long-Term Memory Contract
+exposure are all disabled. The first runtime slice now performs bounded
+workspace recall during turn preparation: only confirmed records in the current
+workspace scope are selected when both `enabled=true` and `recall=on` are
+effective. The selected records are frozen in the Prepared Turn and sent as a
+separate `[UNTRUSTED MEMORY EVIDENCE]` user-data block; they are not appended to
+the Session transcript and cannot affect permissions or Action Audit. Isolated
+Child runtimes receive an empty recall provider. `coquo memory
+status|configure|enable|disable` and explicit
+`add|list|show|search|confirm|update|stale|delete` commands manage the local
+ledger only; they do not invoke a Provider, mutate a Session, or add
+model-visible tools. Candidate extraction runs only after durable
+`turn_committed`; Child/Team sharing is Host-authorized and fail-closed. Remote
+Providers remain a later backend option. See [0156: Long-Term Memory Contract
 and Local Store](./decisions/0156-long-term-memory-contract-and-local-store.md).

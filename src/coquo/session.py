@@ -27,6 +27,12 @@ from coquo.observability import ObservationContext, ObservationStream
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.session_records import workspace_fingerprint
+from coquo.memory import MemoryAccessContext
+from coquo.memory_config import MemoryConfigStore
+from coquo.memory_store import MemoryStoreError
+from coquo.memory_observability import MemoryObservationLedger
+from coquo.memory_recall import MemoryRecallService, empty_memory_recall
+from coquo.memory_extraction import MemoryCandidateExtractor
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
@@ -156,6 +162,7 @@ from coquo.core.contracts import (
     ConversationItem,
     ConversationProvider,
     ConversationTurn,
+    ToolArguments,
     ToolAttemptUsage,
     ToolResult,
     ToolUse,
@@ -262,6 +269,7 @@ from coquo.providers.usage import (
 )
 from coquo.session_records import (
     ActionAuditState,
+    ActionAuditStatus,
     ActionExecutionOutcome,
     BindingSnapshot,
     ChildDelegationDecided,
@@ -388,7 +396,11 @@ from coquo.tools.delete_directory import (
 from coquo.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, ArchiveListTool
 from coquo.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, ChecksumFileTool
 from coquo.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
-from coquo.tools.catalog import ORDINARY_PROMPT_TOOL_NAMES, ORDINARY_TOOL_NAMES
+from coquo.tools.catalog import (
+    ORDINARY_PROMPT_TOOL_NAMES,
+    ORDINARY_TOOL_NAMES,
+    registry_snapshot_with_memory,
+)
 from coquo.tools.task_coordination import (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
@@ -525,6 +537,11 @@ from coquo.tools.web_fetch import (
     WebFetchOutcome,
     WebFetchPreparationError,
     WebFetchTool,
+)
+from coquo.tools.memory import (
+    MEMORY_TOOL_NAMES,
+    MemoryTool,
+    PreparedMemoryAction,
 )
 from coquo.tools.catalog import (
     MAX_PROVIDER_INVOCATIONS_PER_TURN,
@@ -1027,6 +1044,11 @@ class ProjectSession:
         self._team_work = TeamWorkService(self.workspace)
         self._team_schedule_service = TeamScheduleService(self.workspace)
         self._worktree_integration = WorktreeIntegrationService(self.workspace)
+        self._memory_observations = MemoryObservationLedger()
+        self._memory_tool = MemoryTool(
+            self.workspace,
+            observation_ledger=self._memory_observations,
+        )
         self._child_supervisor: ChildRunSupervisor | None = None
         self._team_schedule_supervisor: TeamScheduleSupervisor | None = None
         self._writer = writer
@@ -1097,6 +1119,26 @@ class ProjectSession:
             self.execution_workspace
         )
         self._hook_store = hook_store or HookStore.for_workspace(self.workspace)
+        self._memory_scope_id = workspace_fingerprint(self.workspace)
+        self._memory_team_scope_id: str | None = None
+        self._memory_recall_service = (
+            None
+            if self._child_mode
+            else MemoryRecallService(
+                self.workspace,
+                access_factory=self._memory_access_context,
+                observation_ledger=self._memory_observations,
+            )
+        )
+        self._memory_candidate_extractor = (
+            None
+            if self._child_mode
+            else MemoryCandidateExtractor(
+                self.workspace,
+                access_factory=self._memory_access_context,
+                observation_ledger=self._memory_observations,
+            )
+        )
         if type(permission_mode) is not PermissionMode:
             raise ValueError("permission mode is invalid")
         if type(approval_mode) is not ApprovalMode:
@@ -1105,6 +1147,7 @@ class ProjectSession:
         self._approval_mode = approval_mode
         self._approval_handler = approval_handler or _cancel_approval
         self._action_uuid_factory = action_uuid_factory
+        self._restore_team_memory_scope()
         self._active_action_lease: ActionLease | None = None
         self._active_turn_context: EffectiveContextSnapshot | None = None
         self._active_observation_context: ObservationContext | None = None
@@ -1189,12 +1232,74 @@ class ProjectSession:
             self._project_instructions_loader.load,
             (lambda: TOOL_REGISTRY_SNAPSHOT)
             if self._child_mode
-            else self._mcp_catalog_service.registry_snapshot,
+            else lambda: registry_snapshot_with_memory(
+                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            ),
             skill_inventory_factory,
             hook_set_factory,
             self._skill_inventory_loader.read_resource,
             provider_manager=self._manager,
+            memory_recall_factory=(
+                empty_memory_recall
+                if self._memory_recall_service is None
+                else self._memory_recall_service.recall
+            ),
         )
+
+    def _memory_access_context(self) -> MemoryAccessContext:
+        """Resolve memory capability from Host runtime identity only."""
+        if self._child_mode:
+            return MemoryAccessContext.child(self._current_child_run_id or self._writer.session_id)
+        task_id = (
+            self._active_task_control_scope.task_id
+            if self._active_task_control_scope is not None
+            else None
+        )
+        return MemoryAccessContext.host(
+            self._memory_scope_id,
+            task_id=task_id,
+            team_id=self._memory_team_scope_id,
+        )
+
+    def _memory_tools_enabled(self) -> bool:
+        if self._child_mode:
+            return False
+        return MemoryConfigStore(self.workspace).load().effective_tools
+
+    def memory_observations(self, limit: int = 256) -> tuple:
+        """Return bounded, content-free process-local memory observations."""
+        return self._memory_observations.snapshot(limit)
+
+    def _restore_team_memory_scope(self) -> None:
+        """Replay the latest successful Host grant/revoke, failing closed on drift."""
+        selected: str | None = None
+        for audit in self._writer.state.action_audits:
+            if audit.status is not ActionAuditStatus.SUCCEEDED:
+                continue
+            values = audit.identity.arguments.as_mapping()
+            if audit.identity.tool_name == "memory_team_scope_grant":
+                team_id = values.get("team_id")
+                if isinstance(team_id, str):
+                    selected = team_id
+            elif audit.identity.tool_name == "memory_team_scope_revoke":
+                team_id = values.get("team_id")
+                if selected == team_id:
+                    selected = None
+        if selected is None:
+            return
+        try:
+            info = self._team_store.inspect(selected)
+        except TeamStoreError:
+            self._memory_observations.record(
+                "team_scope_restore", "denied", actor="host", reason="team_missing"
+            )
+            return
+        if info.owner_session_id != self._writer.session_id:
+            self._memory_observations.record(
+                "team_scope_restore", "denied", actor="host", reason="owner_mismatch"
+            )
+            return
+        self._memory_team_scope_id = selected
 
     def _runtime_callbacks(self, writer: SessionWriter) -> AgentRuntimeCallbacks:
         return AgentRuntimeCallbacks(
@@ -1585,7 +1690,9 @@ class ProjectSession:
                     tool_registry_factory=(
                         (lambda: TOOL_REGISTRY_SNAPSHOT)
                         if child_mode
-                        else resume_mcp_catalog.registry_snapshot
+                        else lambda: registry_snapshot_with_memory(
+                            resolved_workspace, resume_mcp_catalog.registry_snapshot()
+                        )
                     ),
                     skill_inventory_factory=(
                         (lambda: SkillInventorySnapshot((), ()))
@@ -2296,6 +2403,78 @@ class ProjectSession:
         if info.owner_session_id != self._writer.session_id:
             raise TeamStoreError("Team belongs to another parent Session")
         return info
+
+    def grant_team_memory_scope(self, team_id: str) -> MemoryAccessContext:
+        """Explicitly grant this Host Session access to one Team scope."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            MemoryAccessContext.host(self._memory_scope_id, team_id=team_id)
+            self._run_team_memory_scope_action("memory_team_scope_grant", team_id)
+            return self._memory_access_context()
+
+    def revoke_team_memory_scope(self, team_id: str) -> MemoryAccessContext:
+        """Revoke the current explicit Team memory grant."""
+        with self._lock:
+            self._ensure_open()
+            self._ensure_team_owner(team_id)
+            self._run_team_memory_scope_action("memory_team_scope_revoke", team_id)
+            return self._memory_access_context()
+
+    def _run_team_memory_scope_action(self, tool_name: str, team_id: str) -> None:
+        status = self._manager.status()
+        binding = binding_from_status(status)
+        context_id = self._loop.effective_context_snapshot().context_id
+        lease = ActionLease(
+            session_id=self._writer.session_id,
+            lease_id=_uuid4_text(self._action_uuid_factory(), "action lease ID"),
+            runtime_generation=status.generation,
+            context_id=context_id,
+        )
+        request_id = _uuid4_text(self._action_uuid_factory(), "action request ID")
+        identity = ActionIdentity(
+            request_id=request_id,
+            tool_use_id=f"host-{tool_name}-{request_id}",
+            tool_name=tool_name,
+            arguments=ToolArguments.from_mapping({"team_id": team_id}),
+            action=PermissionAction.WORKSPACE_READ,
+            workspace_fingerprint=self._session_store.workspace_fingerprint,
+            lease=lease,
+            precondition=ActionPrecondition.none(),
+            **self._action_scope_fields(),
+        )
+
+        def revalidate(current: ActionIdentity) -> ActionIdentity:
+            self._ensure_team_owner(team_id)
+            return current
+
+        def execute(_identity: ActionIdentity) -> ActionExecutionResult:
+            if tool_name == "memory_team_scope_grant":
+                self._memory_team_scope_id = team_id
+                result_code = "memory_team_scope_granted"
+            else:
+                if self._memory_team_scope_id == team_id:
+                    self._memory_team_scope_id = None
+                result_code = "memory_team_scope_revoked"
+            return ActionExecutionResult(
+                ToolResult(identity.tool_use_id, result_code),
+                ActionExecutionOutcome.SUCCEEDED,
+                result_code,
+                "Team memory scope control succeeded",
+            )
+
+        ActionCoordinator(
+            writer=self._writer,
+            approval_handler=self._approval_handler,
+            uuid_factory=self._action_uuid_factory,
+        ).run(
+            identity=identity,
+            binding=binding,
+            permission_mode=self._permission_mode,
+            approval_mode=self._approval_mode,
+            revalidate=revalidate,
+            execute=execute,
+        )
 
     def create_team_assignment(
         self, team_id: str, member_id: str, objective: str
@@ -4126,7 +4305,9 @@ class ProjectSession:
                     self._archive_list,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                     project_instructions_factory=self._project_instructions_loader.load,
-                    tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
+                    tool_registry_factory=lambda: registry_snapshot_with_memory(
+                        self.workspace, self._mcp_catalog_service.registry_snapshot()
+                    ),
                     skill_inventory_factory=self._skill_inventory_loader.load,
                     hook_set_factory=self._hook_store.snapshot,
                     skill_resource_reader=self._skill_inventory_loader.read_resource,
@@ -4210,6 +4391,8 @@ class ProjectSession:
             enabled_tool_names = (
                 ORDINARY_PROMPT_TOOL_NAMES if _enabled_tool_names is None else _enabled_tool_names
             )
+            if _enabled_tool_names is None and self._memory_tools_enabled():
+                enabled_tool_names = (*enabled_tool_names, *MEMORY_TOOL_NAMES)
             if not any(source in {"brave", "tavily"} for source in self._search_source_order):
                 enabled_tool_names = tuple(
                     name for name in enabled_tool_names if name != WEB_SEARCH_TOOL_NAME
@@ -5366,6 +5549,7 @@ class ProjectSession:
         skill_inventory_factory=None,
         hook_set_factory=None,
         skill_resource_reader=None,
+        memory_recall_factory=None,
     ) -> AgentLoop:
         services = AgentRuntimeServices(
             read_file,
@@ -5391,6 +5575,7 @@ class ProjectSession:
             skill_inventory_factory or (lambda: SkillInventorySnapshot((), ())),
             hook_set_factory or (lambda: HookSetSnapshot(())),
             skill_resource_reader or (lambda *_args, **_kwargs: ""),
+            memory_recall_factory=memory_recall_factory,
         )
         return AgentRuntimeFactory.create(
             state,
@@ -5421,10 +5606,17 @@ class ProjectSession:
             self._archive_list,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
             project_instructions_factory=self._project_instructions_loader.load,
-            tool_registry_factory=self._mcp_catalog_service.registry_snapshot,
+            tool_registry_factory=lambda: registry_snapshot_with_memory(
+                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            ),
             skill_inventory_factory=self._skill_inventory_loader.load,
             hook_set_factory=self._hook_store.snapshot,
             skill_resource_reader=self._skill_inventory_loader.read_resource,
+            memory_recall_factory=(
+                empty_memory_recall
+                if self._memory_recall_service is None
+                else self._memory_recall_service.recall
+            ),
         )
         loop.install_action_dispatcher(self._dispatch_action)
         loop.install_task_control_dispatcher(
@@ -5453,7 +5645,9 @@ class ProjectSession:
             for contract in prepared.registry_snapshot.contracts
         )
         if has_mcp:
-            current = self._mcp_catalog_service.registry_snapshot()
+            current = registry_snapshot_with_memory(
+                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            )
             if (
                 current.snapshot_id != prepared.registry_snapshot.snapshot_id
                 or current.generation != prepared.registry_snapshot.generation
@@ -6352,6 +6546,7 @@ class ProjectSession:
         prepared_web_fetch: PreparedWebFetch | None = None
         prepared_move_directory: PreparedMoveDirectory | None = None
         prepared_download: PreparedDownloadFile | None = None
+        prepared_memory: PreparedMemoryAction | None = None
         prepared_mcp: PreparedMcpCall | None = None
         prepared_integration = None
         if contract.execution_kind is ToolExecutionKind.MCP_REMOTE:
@@ -6505,6 +6700,18 @@ class ProjectSession:
                 return _invalid_tool_request(request, error)
             action = prepared_download.action
             precondition = prepared_download.precondition
+        elif request.name in MEMORY_TOOL_NAMES:
+            try:
+                prepared_memory = self._memory_tool.prepare(
+                    request,
+                    self._memory_access_context(),
+                    source_session_id=self._writer.session_id,
+                    source_turn=len(self._writer.state.turns) + 1,
+                )
+            except (MemoryStoreError, ValueError) as error:
+                return _invalid_tool_request(request, error)
+            action = prepared_memory.action
+            precondition = ActionPrecondition.none()
         elif request.name == TEAM_WORKTREE_INTEGRATE_TOOL_NAME:
             if self._child_mode:
                 return _invalid_tool_request(
@@ -6887,6 +7094,22 @@ class ProjectSession:
                         "sealed Team worktree patch applied; authority changes remain uncommitted"
                     ),
                 )
+            if prepared_memory is not None:
+                result = self._memory_tool.execute(prepared_memory)
+                return ActionExecutionResult(
+                    tool_result=result,
+                    outcome=(
+                        ActionExecutionOutcome.FAILED
+                        if result.is_error
+                        else ActionExecutionOutcome.SUCCEEDED
+                    ),
+                    result_code="memory_error" if result.is_error else "memory_ok",
+                    audit_message=(
+                        "memory operation failed"
+                        if result.is_error
+                        else "memory operation succeeded"
+                    ),
+                )
             if request.name == READ_FILE_TOOL_NAME:
                 result = self._read_file.execute(request)
             elif request.name == GLOB_TOOL_NAME:
@@ -7230,6 +7453,7 @@ class ProjectSession:
             context.project_instructions,
             tool_set_snapshot=tool_set,
             hook_set_snapshot=hook_set,
+            memory_evidence=context.memory_evidence,
         )
         if (
             self._writer.session_id != lease.session_id
@@ -7455,6 +7679,8 @@ class ProjectSession:
             session_name_source=session_name_source,
             session_title_fallback_reason=session_title_fallback_reason,
         )
+        if self._memory_candidate_extractor is not None:
+            self._run_memory_candidate_extraction(writer, turn)
         terminal = next(
             (
                 entry
@@ -7469,6 +7695,88 @@ class ProjectSession:
                 terminal.subject_id,
                 turn.hook_audit,
                 event_sink=self._active_event_sink,
+            )
+
+    def _run_memory_candidate_extraction(self, writer: SessionWriter, turn: CommittedTurn) -> None:
+        extractor = self._memory_candidate_extractor
+        if extractor is None:
+            return
+        prepared = extractor.prepare(turn)
+        if prepared is None:
+            return
+        lease = self._active_action_lease
+        binding = self._active_action_binding
+        if lease is None or binding is None:
+            self._memory_observations.record(
+                "candidate_extraction", "failed", actor="host", reason="missing_turn_identity"
+            )
+            return
+        source_turn = len(writer.state.turns)
+        identity = ActionIdentity(
+            request_id=_uuid4_text(self._action_uuid_factory(), "action request ID"),
+            tool_use_id=f"host-memory-candidate-extract-{source_turn}",
+            tool_name="memory_candidate_extract",
+            arguments=ToolArguments.from_mapping({"source_turn": source_turn}),
+            action=PermissionAction.WORKSPACE_CREATE,
+            workspace_fingerprint=self._session_store.workspace_fingerprint,
+            lease=lease,
+            precondition=ActionPrecondition.none(),
+            **self._action_scope_fields(),
+        )
+
+        def execute(_identity: ActionIdentity) -> ActionExecutionResult:
+            result = extractor.after_commit(
+                turn,
+                session_id=writer.session_id,
+                source_turn=source_turn,
+                authorized=True,
+                prepared=prepared,
+            )
+            if result.partial:
+                outcome = ActionExecutionOutcome.PARTIAL
+                code = "memory_candidate_partial"
+                is_error = True
+            elif result.memory_id is None:
+                outcome = ActionExecutionOutcome.FAILED
+                code = "memory_candidate_failed"
+                is_error = True
+            else:
+                outcome = ActionExecutionOutcome.SUCCEEDED
+                code = (
+                    "memory_candidate_confirmed" if result.confirmed else "memory_candidate_created"
+                )
+                is_error = False
+            return ActionExecutionResult(
+                ToolResult(identity.tool_use_id, code, is_error=is_error),
+                outcome,
+                code,
+                "automatic memory candidate extraction completed"
+                if not is_error
+                else "automatic memory candidate extraction did not complete",
+            )
+
+        coordinated = ActionCoordinator(
+            writer=writer,
+            approval_handler=self._approval_handler,
+            uuid_factory=self._action_uuid_factory,
+        ).run(
+            identity=identity,
+            binding=binding,
+            permission_mode=self._permission_mode,
+            approval_mode=self._approval_mode,
+            revalidate=lambda current: current,
+            execute=execute,
+        )
+        if not coordinated.executed:
+            self._memory_observations.record(
+                "candidate_extraction",
+                "denied",
+                actor="host",
+                reason=(
+                    "permission_denied"
+                    if coordinated.permission_result.decision.value == "deny"
+                    else "approval_not_granted"
+                ),
             )
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:

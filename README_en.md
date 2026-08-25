@@ -17,7 +17,7 @@ Coquo is a learning-first coding-agent CLI prototype for local, single-user use.
 
 The name comes from Latin *coquō*, “I cook”: requirements, context, tools, and model decisions are prepared into verified software changes.
 
-> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, and Registry generation 9 with 62 canonical tools (58 exposed to ordinary parent Prompts) are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP execution, declarative Skill loading, and bounded Team coordination. See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
+> **Current status:** named Provider Profiles, real and offline runtimes, resumable Sessions, foreground multi-Stage Tasks, both Eval layers, disabled-by-default local long-term memory, and Registry generation 9 with 62 canonical tools (58 exposed to ordinary parent Prompts) are implemented across local coding, Git observation, web search and fetch, structured reads, controlled file transfer, audited MCP execution, declarative Skill loading, and bounded Team coordination. Explicitly enabling model memory tools dynamically gives that Turn generation 10 with 66 canonical tools (62 exposed to ordinary parent Prompts). See [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for exact capabilities and security boundaries.
 
 ## Contents
 
@@ -27,6 +27,7 @@ The name comes from Latin *coquō*, “I cook”: requirements, context, tools, 
   - [Configure providers](#configure-providers)
   - [Inspect routes and context windows](#inspect-routes-and-context-windows)
   - [Manage Sessions](#manage-sessions)
+  - [Manage long-term memory](#manage-long-term-memory)
 - [Manage Tasks](#manage-tasks)
 - [Manage Teams](#manage-teams)
 - [Manage Child Runs](#manage-child-runs)
@@ -69,6 +70,7 @@ The command's own help is always the authoritative parameter reference:
 uv run coquo --help
 uv run coquo provider --help
 uv run coquo session --help
+uv run coquo memory --help
 uv run coquo task --help
 ```
 
@@ -231,6 +233,18 @@ uv run coquo --resume <session-uuid>
 
 A Session is workspace-bound and stores successful turns in append-only JSONL. New turns also persist a per-request Host tool ledger for actual successes, errors, skips, and budget rejections without relying on model self-reporting. Use the `session` and `--resume` commands above to inspect, audit, and restore it; see [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) for complete replay, screening, and durability semantics.
 
+### Manage long-term memory
+
+```bash
+uv run coquo memory status
+uv run coquo memory configure --enable --recall on --write propose --retrieval text --no-tools
+uv run coquo memory add "Run the complete test suite before release"
+uv run coquo memory confirm <memory-uuid>
+uv run coquo memory search "complete test suite"
+```
+
+Long-term memory is workspace-scoped and disabled by default. Only confirmed records are recalled within fixed bounds, and the model receives them as `[UNTRUSTED MEMORY EVIDENCE]` data rather than instructions. Explicit `remember:`, `remember that`, or `请记住` requests are processed after a successful Turn commit according to the `write` policy and remain subject to PermissionGate, approval, and Action Audit; model CRUD tools additionally require `--tools`. Until a local embedding backend exists, `semantic` retrieval explicitly degrades to text matching; see [ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md) for complete scope, lifecycle, recovery, and security boundaries.
+
 ### Manage Tasks
 
 ```bash
@@ -315,6 +329,7 @@ uv run coquo child deliver <child-run-uuid>
 | `/team message send|list|show|read|cancel ...` | Host-only durable owner/member mailbox; reading never deletes and replies require explicit read |
 | `/team work create|list|show|assign|complete|release|cancel ...` | Host-only dependency work board with manual assignment, review, completion/release, and close gates |
 | `/team worktree status|diff|recover <id>`, `/team worktree retire <id> --confirm` | Host-only observation of an isolated linked worktree, bounded diff, recovery state, or explicit retirement when eligible |
+| `/team memory grant <team-id>`, `/team memory revoke <team-id>` | Host-only grant or revoke of the current Session's access to one still-owned Team memory scope, with ownership revalidation on resume |
 | `/history <count>` | Show recent complete turns in the current Session |
 | `/actions last`, `/actions [count] [status=<status>] [tool=<name>]` | Show the latest action quickly, or filter redacted current-Session Action Audits by status and tool name |
 | `/tools catalog [tool-name]` | Show permission and Prompt/Stage availability for all 62 canonical tools, or one tool's argument schema and major hard boundaries |
@@ -591,6 +606,6 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 ## Current scope and next step
 
-Coquo currently provides Registry generation 9 with 62 canonical tools and 58 tools exposed to ordinary parent Prompts, covering workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, declarative Skill loading, and bounded Team coordination, plus durable Task coordination tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, and offline Evals are integrated.
+Coquo currently defaults to Registry generation 9 with 62 canonical tools and 58 tools exposed to ordinary parent Prompts, covering workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, declarative Skill loading, and bounded Team coordination; explicitly enabling model memory tools dynamically expands this to generation 10 with 66 canonical tools and 62 ordinary-parent tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, offline Evals, and disabled-by-default workspace long-term memory are integrated.
 
 The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can use four model tools to delegate to at most four independent Children and Team controls to manage fixed-role members, a dependency board, bounded schedule waves, reply review, and explicit worktree integration. The Host-side Task–Child–Team orchestration bridge now binds exact identities, reuses the existing execution ledgers, and converges Task Stages from handoff/evidence. The default Child execution envelope remains one-Turn, depth-one, and capability-restricted; only when the Host explicitly enables the fixed read-only explorer capability may a depth-one Child create one depth-two Grandchild, and that Grandchild cannot delegate further. Default background submission uses a workspace-bound durable queue and restartable local worker, while an explicitly injected process-local Supervisor remains only as a compatibility/testing path. Writers may modify only their isolated linked worktree, coders remain subject to the existing network-disabled command sandbox, and all handoffs/replies/integration evidence are untrusted. Background recovery never automatically retries claimed `running`/`cancelling` work and does not claim exactly-once execution; Team schedules do not retry, auto-complete, or run as a permanent daemon. Arbitrary recursive multi-agent execution, recursive Teams, executable Skills, a marketplace, a distributed worker fleet, and browser automation remain deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

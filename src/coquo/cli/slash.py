@@ -369,6 +369,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/team list", "List durable Teams"),
     SlashCompletionSpec("/team show", "Show one durable Team"),
     SlashCompletionSpec("/team close", "Close one durable Team"),
+    SlashCompletionSpec("/team memory grant", "Grant this Session one Team memory scope"),
+    SlashCompletionSpec("/team memory revoke", "Revoke this Session's Team memory scope"),
     SlashCompletionSpec("/team member add", "Add one Team member"),
     SlashCompletionSpec("/team member list", "List Team members"),
     SlashCompletionSpec("/team member show", "Show one Team member"),
@@ -555,6 +557,10 @@ class ReplSession(Protocol):
     def inspect_team(self, team_id: str): ...
 
     def close_team(self, team_id: str): ...
+
+    def grant_team_memory_scope(self, team_id: str): ...
+
+    def revoke_team_memory_scope(self, team_id: str): ...
 
     def add_team_member(
         self, team_id: str, name: str, *, role_contract: str = "read-only-investigator-v1"
@@ -1119,6 +1125,12 @@ def dispatch_slash(
         return _team_show(command, session)
     if command == "/team close" or command.startswith("/team close "):
         return _team_close(command, session)
+    if command == "/team memory grant" or command.startswith("/team memory grant "):
+        return _team_memory_scope(command, session, grant=True)
+    if command == "/team memory revoke" or command.startswith("/team memory revoke "):
+        return _team_memory_scope(command, session, grant=False)
+    if command.startswith("/team memory "):
+        return _usage("Usage: /team memory grant|revoke <team-id>")
     if command == "/team member add" or command.startswith("/team member add "):
         return _team_member_add(command, session)
     if command == "/team member list" or command.startswith("/team member list "):
@@ -1253,6 +1265,7 @@ def dispatch_slash(
                 "list",
                 "show",
                 "close",
+                "memory",
                 "member",
                 "assignment",
                 "message",
@@ -2384,6 +2397,20 @@ def _team_close(command: str, session: ReplSession) -> SlashResult:
         lambda: render_team_info(session.close_team(parts[2])),
         kind="success",
         failure_prefix="Team close failed",
+    )
+
+
+def _team_memory_scope(command: str, session: ReplSession, *, grant: bool) -> SlashResult:
+    parts = command.split()
+    if len(parts) != 4:
+        return _usage("Usage: /team memory grant|revoke <team-id>")
+    team_id = parts[3]
+    operation = session.grant_team_memory_scope if grant else session.revoke_team_memory_scope
+    outcome = "granted" if grant else "revoked"
+    return _call(
+        lambda: (operation(team_id), f"Team memory scope {outcome}: {team_id}")[1],
+        kind="success",
+        failure_prefix=f"Team memory scope {outcome} failed",
     )
 
 

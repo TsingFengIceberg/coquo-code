@@ -17,7 +17,7 @@ Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI
 
 名称取自拉丁文 *coquō*（“我烹饪”），表达将需求、上下文、工具与模型决策组织成经过验证的软件变更。
 
-> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval，以及Registry generation 9中的62个规范工具（普通父Prompt曝光58个），覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行、声明式Skill加载和有界Team协调。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
+> **当前状态：** 已支持命名Provider Profile、真实与离线runtime、可恢复Session、前台多Stage Task、两层Eval、默认关闭的本地长期记忆，以及Registry generation 9中的62个规范工具（普通父Prompt曝光58个），覆盖本地编码、Git观察、网页搜索与抓取、结构化读取、受控文件传输、受审计MCP工具执行、声明式Skill加载和有界Team协调。显式启用模型记忆工具时，当前Turn会动态使用generation 10中的66个规范工具（普通父Prompt曝光62个）。精确能力与安全边界见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
 ## 目录
 
@@ -27,6 +27,7 @@ Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI
   - [配置 Provider](#配置-provider)
   - [检查 Route 与 Context Window](#检查-route-与-context-window)
   - [管理 Session](#管理-session)
+  - [管理长期记忆](#管理长期记忆)
 - [管理 Task](#管理-task)
 - [管理 Team](#管理-team)
 - [管理 Child Run](#管理-child-run)
@@ -69,6 +70,7 @@ uv run python -m coquo --help
 uv run coquo --help
 uv run coquo provider --help
 uv run coquo session --help
+uv run coquo memory --help
 uv run coquo task --help
 ```
 
@@ -231,6 +233,18 @@ uv run coquo --resume <session-uuid>
 
 Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保存Host逐请求工具账本，记录实际成功、错误、跳过和预算拒绝，不依赖模型自报。使用上面的`session`与`--resume`命令即可检查、审计和恢复；完整replay、screening与durability语义见[已实现Foundation与设计演进](./docs/implemented-foundations.md)。
 
+### 管理长期记忆
+
+```bash
+uv run coquo memory status
+uv run coquo memory configure --enable --recall on --write propose --retrieval text --no-tools
+uv run coquo memory add "发布前必须运行完整测试"
+uv run coquo memory confirm <memory-uuid>
+uv run coquo memory search "完整测试"
+```
+
+长期记忆按workspace默认关闭，只有confirmed记录会被有界召回，并作为`[UNTRUSTED MEMORY EVIDENCE]`数据而非指令传给模型。显式`remember:`、`remember that`或`请记住`请求只在成功提交Turn后按`write`策略处理，并继续受PermissionGate、审批和Action Audit约束；模型CRUD工具还要求单独启用`--tools`。当前`semantic`检索在尚无本地embedding后端时会明确降级为文本匹配；完整作用域、生命周期、恢复和安全边界见[ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md)。
+
 ### 管理 Task
 
 ```bash
@@ -315,6 +329,7 @@ uv run coquo child deliver <child-run-uuid>
 | `/team message send|list|show|read|cancel ...` | Host-only持久owner/member mailbox；读取不删除消息，回复必须显式read |
 | `/team work create|list|show|assign|complete|release|cancel ...` | Host-only依赖work board；人工assign、review、complete/release和关闭门禁 |
 | `/team worktree status|diff|recover <id>`、`/team worktree retire <id> --confirm` | Host-only观察隔离linked worktree、bounded diff、恢复状态，或显式清理已满足条件的worktree |
+| `/team memory grant <team-id>`、`/team memory revoke <team-id>` | Host-only授予或撤销当前Session对一个仍由其拥有的Team memory scope；恢复时重新验证所有权 |
 | `/history <count>` | 显示当前 Session 最近的完整回合 |
 | `/actions last`、`/actions [count] [status=<状态>] [tool=<名称>]` | 快速查看最近一次动作，或按状态和工具名筛选当前Session的脱敏Action Audit |
 | `/tools catalog [tool-name]` | 显示62个规范工具的权限与Prompt/Stage可用性，或查看单个工具的参数schema和主要硬边界 |
@@ -591,6 +606,6 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 ## 当前范围与下一步
 
-Coquo目前提供Registry generation 9中的62个规范工具，普通父Prompt曝光58个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL及离线Eval均已接入。
+Coquo目前默认提供Registry generation 9中的62个规范工具，普通父Prompt曝光58个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调；显式启用模型记忆工具时动态扩展为generation 10中的66个规范工具与62个普通父Prompt工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL、离线Eval及默认关闭的workspace长期记忆均已接入。
 
 项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Host侧的Task–Child–Team统一编排桥接现在会绑定精确identity、复用既有执行ledger并以handoff/evidence收敛Task Stage。默认Child execution envelope仍固定为单Turn、depth-one和受限能力；只有Host显式启用固定的只读explorer能力时，depth-one Child才可再创建一个depth-two Grandchild，Grandchild不能继续委派。默认后台提交由workspace-bound durable queue和可重启本地worker承载，显式注入的process-local Supervisor仅保留为兼容测试路径。写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。后台运行不自动重试RUNNING/CANCELLING孤儿，也不声称exactly-once；Team schedule不重试、不自动complete、不运行成永久daemon。任意递归多Agent、递归Team、可执行Skill、市场、分布式worker fleet及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -14,12 +15,14 @@ from coquo.memory import (
     MEMORY_MAX_EVENTS,
     MEMORY_MAX_EVENT_BYTES,
     MEMORY_MAX_EVENT_LOG_BYTES,
+    MEMORY_MAX_ACTIVE_RECORDS,
     MEMORY_MAX_SEARCH_RESULTS,
     MemoryError,
     MemoryRecord,
     MemoryScope,
     MemoryStatus,
 )
+from coquo.memory_observability import MemoryObservationLedger
 
 if os.name == "nt":
     import msvcrt
@@ -31,10 +34,23 @@ class MemoryStoreError(MemoryError):
     """Raised when the local memory log cannot be safely read or written."""
 
 
+class _ReplayState(dict[str, MemoryRecord]):
+    """Current records plus the independent append-only event count."""
+
+    def __init__(self, *args, event_count: int = 0, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.event_count = event_count
+
+
 class MemoryStore:
     """Append-only, replayable memory event log under the workspace ``.coquo``."""
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        observation_ledger: MemoryObservationLedger | None = None,
+    ) -> None:
         original = Path(workspace)
         resolved = original.resolve(strict=True)
         if original.is_symlink() or not resolved.is_dir():
@@ -44,6 +60,7 @@ class MemoryStore:
         self.events_path = self.root / "events.jsonl"
         self.lock_path = self.root / ".memory.lock"
         self._thread_lock = RLock()
+        self._observations = observation_ledger or MemoryObservationLedger()
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -117,7 +134,9 @@ class MemoryStore:
             raise MemoryStoreError(str(error)) from None
         with self._transaction():
             records = self._read_records()
+            self._evict_for_capacity(records)
             self._append(record, "created", records)
+        self._observe("create", "candidate", record)
         return record
 
     def confirm(self, memory_id: str) -> MemoryRecord:
@@ -129,6 +148,7 @@ class MemoryStore:
             except MemoryError as error:
                 raise MemoryStoreError(str(error)) from None
             self._append(updated, "confirmed", records)
+        self._observe("confirm", "completed", updated)
         return updated
 
     def update(
@@ -138,7 +158,9 @@ class MemoryStore:
         content: str | None = None,
         category: str | None = None,
         confidence: float | None = None,
+        reason: str | None = None,
     ) -> MemoryRecord:
+        _validate_reason(reason)
         with self._transaction():
             records = self._read_records()
             current = self._require(records, memory_id)
@@ -150,10 +172,13 @@ class MemoryStore:
                 )
             except MemoryError as error:
                 raise MemoryStoreError(str(error)) from None
-            self._append(updated, "updated", records)
+            self._append(updated, "updated", records, reason=reason)
+        self._observe("update", "completed", updated)
         return updated
 
-    def transition(self, memory_id: str, status: MemoryStatus) -> MemoryRecord:
+    def transition(
+        self, memory_id: str, status: MemoryStatus, *, reason: str | None = None
+    ) -> MemoryRecord:
         if status not in {
             MemoryStatus.STALE,
             MemoryStatus.DELETED,
@@ -161,6 +186,7 @@ class MemoryStore:
             MemoryStatus.CONFIRMED,
         }:
             raise MemoryStoreError("unsupported memory transition")
+        _validate_reason(reason)
         with self._transaction():
             records = self._read_records()
             current = self._require(records, memory_id)
@@ -168,7 +194,8 @@ class MemoryStore:
                 updated = current.transition(status)
             except MemoryError as error:
                 raise MemoryStoreError(str(error)) from None
-            self._append(updated, status.value, records)
+            self._append(updated, status.value, records, reason=reason)
+        self._observe(status.value, "completed", updated)
         return updated
 
     def search(
@@ -178,6 +205,8 @@ class MemoryStore:
         scope: MemoryScope | None = None,
         scope_id: str | None = None,
         limit: int = MEMORY_MAX_SEARCH_RESULTS,
+        statuses: frozenset[MemoryStatus] | None = None,
+        touch: bool = True,
     ) -> tuple[MemoryRecord, ...]:
         if not isinstance(query, str) or not query.strip():
             raise MemoryStoreError("memory search query must not be blank")
@@ -185,33 +214,271 @@ class MemoryStore:
             raise MemoryStoreError("memory search query is invalid")
         if not isinstance(limit, int) or not 1 <= limit <= MEMORY_MAX_SEARCH_RESULTS:
             raise MemoryStoreError("memory search limit is out of bounds")
+        selected_statuses = (
+            statuses
+            if statuses is not None
+            else frozenset({MemoryStatus.CANDIDATE, MemoryStatus.CONFIRMED, MemoryStatus.STALE})
+        )
+        if (
+            not isinstance(selected_statuses, frozenset)
+            or not selected_statuses
+            or any(not isinstance(status, MemoryStatus) for status in selected_statuses)
+            or any(
+                status in {MemoryStatus.DELETED, MemoryStatus.EVICTED}
+                for status in selected_statuses
+            )
+        ):
+            raise MemoryStoreError("memory search statuses are invalid")
+        if type(touch) is not bool:
+            raise MemoryStoreError("memory search touch flag is invalid")
         records = self._read_records()
         matches = [
             record
             for record in records.values()
-            if record.status in {MemoryStatus.CANDIDATE, MemoryStatus.CONFIRMED, MemoryStatus.STALE}
+            if record.status in selected_statuses
             and (scope is None or record.scope is scope)
             and (scope_id is None or record.scope_id == scope_id)
             and query.casefold() in record.content.casefold()
         ]
         matches.sort(key=lambda item: (item.created_at, item.memory_id), reverse=True)
         matches = matches[:limit]
-        if matches:
-            with self._transaction():
-                records = self._read_records()
-                for record in matches:
-                    current = records.get(record.memory_id)
-                    if current is not None and current.status not in {
-                        MemoryStatus.DELETED,
-                        MemoryStatus.EVICTED,
-                    }:
-                        updated = current.recalled()
-                        self._append(updated, "recalled", records)
+        if matches and touch:
+            self.mark_recalled(tuple(record.memory_id for record in matches))
         return tuple(matches)
 
-    def _read_records(self) -> dict[str, MemoryRecord]:
+    def mark_recalled(self, memory_ids: tuple[str, ...]) -> tuple[MemoryRecord, ...]:
+        """Touch each named active record once after final recall selection."""
+        if (
+            not isinstance(memory_ids, tuple)
+            or len(set(memory_ids)) != len(memory_ids)
+            or any(not isinstance(memory_id, str) or not memory_id for memory_id in memory_ids)
+        ):
+            raise MemoryStoreError("memory recall IDs are invalid")
+        if not memory_ids:
+            return ()
+        with self._transaction():
+            records = self._read_records()
+            updated_records: list[MemoryRecord] = []
+            for memory_id in memory_ids:
+                current = self._require(records, memory_id)
+                if current.status in {MemoryStatus.DELETED, MemoryStatus.EVICTED}:
+                    raise MemoryStoreError("terminal memory cannot be recalled")
+                updated = current.recalled()
+                self._append(updated, "recalled", records)
+                updated_records.append(updated)
+        for record in updated_records:
+            self._observe("recall", "completed", record)
+        return tuple(updated_records)
+
+    def find_exact(
+        self,
+        content: str,
+        *,
+        scope: MemoryScope,
+        scope_id: str,
+        category: str | None = None,
+    ) -> tuple[MemoryRecord, ...]:
+        """Return active records with the same normalized content and scope."""
+        normalized = _normalize_memory_text(content)
+        records = self._read_records()
+        result = [
+            record
+            for record in records.values()
+            if record.status in {MemoryStatus.CANDIDATE, MemoryStatus.CONFIRMED, MemoryStatus.STALE}
+            and record.scope is scope
+            and record.scope_id == scope_id
+            and (category is None or record.category == category)
+            and _normalize_memory_text(record.content) == normalized
+        ]
+        result.sort(key=lambda item: (item.created_at, item.memory_id), reverse=True)
+        return tuple(result[:MEMORY_MAX_SEARCH_RESULTS])
+
+    def possible_conflicts(self, memory_id: str, *, limit: int = 20) -> tuple[MemoryRecord, ...]:
+        """Enumerate same-scope, same-category facts for explicit Host review."""
+        if not 1 <= limit <= MEMORY_MAX_SEARCH_RESULTS:
+            raise MemoryStoreError("memory conflict limit is out of bounds")
+        records = self._read_records()
+        current = self._require(records, memory_id)
+        result = [
+            record
+            for record in records.values()
+            if record.memory_id != current.memory_id
+            and record.status is MemoryStatus.CONFIRMED
+            and record.scope is current.scope
+            and record.scope_id == current.scope_id
+            and record.category == current.category
+            and _normalize_memory_text(record.content) != _normalize_memory_text(current.content)
+        ]
+        result.sort(key=lambda item: (item.updated_at, item.memory_id), reverse=True)
+        return tuple(result[:limit])
+
+    def consolidate(
+        self,
+        memory_id: str,
+        *,
+        content: str,
+        duplicate_ids: tuple[str, ...] = (),
+        reason: str = "host_consolidation",
+    ) -> MemoryRecord:
+        """Update one candidate and stale only explicitly named candidate duplicates."""
+        if not isinstance(duplicate_ids, tuple) or len(set(duplicate_ids)) != len(duplicate_ids):
+            raise MemoryStoreError("memory consolidation duplicate IDs are invalid")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
+            raise MemoryStoreError("memory consolidation reason is invalid")
+        with self._transaction():
+            records = self._read_records()
+            current = self._require(records, memory_id)
+            if current.status is not MemoryStatus.CANDIDATE:
+                raise MemoryStoreError("only a candidate can be consolidated")
+            try:
+                updated = current.update_fields(content=content)
+            except MemoryError as error:
+                raise MemoryStoreError(str(error)) from None
+            duplicates: list[MemoryRecord] = []
+            for duplicate_id in duplicate_ids:
+                duplicate = self._require(records, duplicate_id)
+                if duplicate.memory_id == current.memory_id:
+                    raise MemoryStoreError("memory consolidation cannot duplicate its target")
+                if duplicate.scope is not current.scope or duplicate.scope_id != current.scope_id:
+                    raise MemoryStoreError("memory consolidation scope mismatch")
+                if duplicate.status is not MemoryStatus.CANDIDATE:
+                    raise MemoryStoreError("only candidate duplicates can be consolidated")
+                duplicates.append(duplicate)
+            required_events = 1 + len(duplicates)
+            if records.event_count + required_events > MEMORY_MAX_EVENTS:
+                raise MemoryStoreError("memory consolidation would exceed the event limit")
+            appended = 0
+            attempted = 0
+            try:
+                attempted += 1
+                self._append(updated, "updated", records, reason=reason)
+                appended += 1
+                for duplicate in duplicates:
+                    stale = duplicate.transition(MemoryStatus.STALE)
+                    attempted += 1
+                    self._append(stale, "stale", records, reason=reason)
+                    appended += 1
+            except MemoryStoreError:
+                if attempted:
+                    self._observations.record(
+                        "consolidate",
+                        "partial",
+                        actor="host",
+                        scope_kinds=(current.scope.value,),
+                        record_count=appended,
+                        reason="append_outcome_unknown",
+                    )
+                    raise MemoryStoreError(
+                        "memory consolidation may be partially committed; inspect before retrying"
+                    ) from None
+                raise
+        self._observations.record(
+            "consolidate",
+            "completed",
+            actor="host",
+            scope_kinds=(current.scope.value,),
+            record_count=required_events,
+            reason=reason,
+        )
+        return updated
+
+    def reinforce(self, memory_id: str, *, confidence_delta: float = 0.05) -> MemoryRecord:
+        """Increase confidence within bounds and record a durable reinforcement event."""
+        if isinstance(confidence_delta, bool) or not isinstance(confidence_delta, (int, float)):
+            raise MemoryStoreError("memory reinforcement delta is invalid")
+        if not 0.0 < float(confidence_delta) <= 1.0:
+            raise MemoryStoreError("memory reinforcement delta is out of bounds")
+        with self._transaction():
+            records = self._read_records()
+            current = self._require(records, memory_id)
+            if current.status is not MemoryStatus.CONFIRMED:
+                raise MemoryStoreError("only confirmed memory can be reinforced")
+            updated = current.update_fields(
+                confidence=min(1.0, current.confidence + float(confidence_delta))
+            )
+            self._append(updated, "updated", records, reason="reinforced")
+        self._observe("reinforce", "completed", updated, reason="reinforced")
+        return updated
+
+    def review_stale(
+        self, before: str, *, limit: int = MEMORY_MAX_SEARCH_RESULTS
+    ) -> tuple[MemoryRecord, ...]:
+        """Mark old confirmed facts stale in deterministic update order."""
+        if not isinstance(before, str):
+            raise MemoryStoreError("memory stale review boundary is invalid")
+        try:
+            boundary = datetime.fromisoformat(before.replace("Z", "+00:00"))
+        except ValueError:
+            raise MemoryStoreError("memory stale review boundary is invalid") from None
+        if boundary.tzinfo is None or not 1 <= limit <= MEMORY_MAX_SEARCH_RESULTS:
+            raise MemoryStoreError("memory stale review arguments are invalid")
+        with self._transaction():
+            records = self._read_records()
+            candidates = sorted(
+                (
+                    record
+                    for record in records.values()
+                    if record.status is MemoryStatus.CONFIRMED
+                    and datetime.fromisoformat(record.updated_at.replace("Z", "+00:00")) < boundary
+                ),
+                key=lambda item: (item.updated_at, item.memory_id),
+            )[:limit]
+            updated: list[MemoryRecord] = []
+            for record in candidates:
+                stale = record.transition(MemoryStatus.STALE)
+                self._append(stale, "stale", records, reason="stale_review")
+                updated.append(stale)
+        for record in updated:
+            self._observe("stale_review", "completed", record, reason="stale_review")
+        return tuple(updated)
+
+    def evict_oldest(self, *, limit: int = 1) -> tuple[MemoryRecord, ...]:
+        """Evict the oldest active records without removing their event history."""
+        if not 1 <= limit <= MEMORY_MAX_SEARCH_RESULTS:
+            raise MemoryStoreError("memory eviction limit is out of bounds")
+        with self._transaction():
+            records = self._read_records()
+            candidates = sorted(
+                (
+                    record
+                    for record in records.values()
+                    if record.status
+                    in {MemoryStatus.CANDIDATE, MemoryStatus.CONFIRMED, MemoryStatus.STALE}
+                ),
+                key=lambda item: (item.updated_at, item.memory_id),
+            )[:limit]
+            updated: list[MemoryRecord] = []
+            for record in candidates:
+                evicted = record.transition(MemoryStatus.EVICTED)
+                self._append(evicted, "evicted", records, reason="capacity_eviction")
+                updated.append(evicted)
+        for record in updated:
+            self._observe("eviction", "completed", record, reason="capacity_eviction")
+        return tuple(updated)
+
+    def observations(self, limit: int = 256) -> tuple:
+        return self._observations.snapshot(limit)
+
+    def _observe(
+        self,
+        operation: str,
+        outcome: str,
+        record: MemoryRecord,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        self._observations.record(
+            operation,
+            outcome,
+            actor="host",
+            scope_kinds=(record.scope.value,),
+            record_count=1,
+            reason=reason,
+        )
+
+    def _read_records(self) -> _ReplayState:
         if not self.events_path.exists():
-            return {}
+            return _ReplayState()
         if self.events_path.is_symlink() or not self.events_path.is_file():
             raise MemoryStoreError("memory event log must be a regular file")
         try:
@@ -240,7 +507,7 @@ class MemoryStore:
             os.close(descriptor)
         if raw and not raw.endswith(b"\n"):
             raise MemoryStoreError("memory event log ends with an incomplete record")
-        records: dict[str, MemoryRecord] = {}
+        records = _ReplayState()
         lines = raw.splitlines()
         if len(lines) > MEMORY_MAX_EVENTS:
             raise MemoryStoreError("memory event log contains too many events")
@@ -251,8 +518,17 @@ class MemoryStore:
                 event = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 raise MemoryStoreError("memory event log contains invalid JSON") from None
-            if not isinstance(event, dict) or set(event) != {"event", "record", "version"}:
+            if not isinstance(event, dict) or set(event) not in (
+                {"event", "record", "version"},
+                {"event", "record", "version", "reason"},
+            ):
                 raise MemoryStoreError("memory event schema is invalid")
+            if "reason" in event and (
+                not isinstance(event["reason"], str)
+                or not event["reason"].strip()
+                or len(event["reason"]) > 256
+            ):
+                raise MemoryStoreError("memory event reason is invalid")
             if event.get("version") != 1 or not isinstance(event.get("event"), str):
                 raise MemoryStoreError("memory event version is invalid")
             record = MemoryRecord.from_mapping(event.get("record"))
@@ -265,19 +541,29 @@ class MemoryStore:
                 raise MemoryStoreError("memory record has duplicate created event")
             _validate_transition(previous, record, kind)
             records[record.memory_id] = record
+        records.event_count = len(lines)
         return records
 
     def _append(
         self,
         record: MemoryRecord,
         event: str,
-        records: dict[str, MemoryRecord],
+        records: _ReplayState,
+        *,
+        reason: str | None = None,
     ) -> None:
-        if len(records) >= MEMORY_MAX_EVENTS and record.memory_id not in records:
-            raise MemoryStoreError("memory record limit reached")
+        if records.event_count >= MEMORY_MAX_EVENTS:
+            raise MemoryStoreError("memory event limit reached")
+        event_mapping: dict[str, object] = {
+            "event": event,
+            "record": record.to_mapping(),
+            "version": 1,
+        }
+        if reason is not None:
+            event_mapping["reason"] = reason
         payload = (
             json.dumps(
-                {"event": event, "record": record.to_mapping(), "version": 1},
+                event_mapping,
                 ensure_ascii=False,
                 allow_nan=False,
                 sort_keys=True,
@@ -306,17 +592,37 @@ class MemoryStore:
             os.close(descriptor)
         _fsync_directory(self.root)
         records[record.memory_id] = record
+        records.event_count += 1
+
+    def _evict_for_capacity(self, records: _ReplayState) -> None:
+        active = [
+            record
+            for record in records.values()
+            if record.status in {MemoryStatus.CANDIDATE, MemoryStatus.CONFIRMED, MemoryStatus.STALE}
+        ]
+        if len(active) < MEMORY_MAX_ACTIVE_RECORDS:
+            return
+        oldest = min(active, key=lambda item: (item.updated_at, item.memory_id))
+        evicted = oldest.transition(MemoryStatus.EVICTED)
+        self._append(evicted, "evicted", records, reason="capacity_eviction")
+        self._observe("eviction", "completed", evicted, reason="capacity_eviction")
 
     def _ensure_root(self) -> None:
         parent = self.root.parent
-        if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
+        try:
+            parent.mkdir(mode=0o700, exist_ok=True)
+        except OSError:
+            raise MemoryStoreError(".coquo could not be created") from None
+        if parent.is_symlink() or not parent.is_dir():
             raise MemoryStoreError(".coquo must be a regular directory")
-        if not parent.exists():
-            parent.mkdir(mode=0o700)
         if self.root.exists() and (self.root.is_symlink() or not self.root.is_dir()):
             raise MemoryStoreError("memory directory must be a regular directory")
-        if not self.root.exists():
-            self.root.mkdir(mode=0o700)
+        try:
+            self.root.mkdir(mode=0o700, exist_ok=True)
+        except OSError:
+            raise MemoryStoreError("memory directory could not be created") from None
+        if self.root.is_symlink() or not self.root.is_dir():
+            raise MemoryStoreError("memory directory must be a regular directory")
         try:
             os.chmod(parent, stat.S_IRWXU)
             os.chmod(self.root, stat.S_IRWXU)
@@ -329,6 +635,13 @@ class MemoryStore:
             return records[memory_id]
         except KeyError:
             raise MemoryStoreError(f"memory record does not exist: {memory_id}") from None
+
+
+def _validate_reason(reason: str | None) -> None:
+    if reason is not None and (
+        not isinstance(reason, str) or not reason.strip() or len(reason) > 256
+    ):
+        raise MemoryStoreError("memory event reason is invalid")
 
 
 def _validate_transition(
@@ -354,6 +667,10 @@ def _validate_transition(
         raise MemoryStoreError("memory status event has the wrong status")
     if event not in {"confirmed", "updated", "recalled", "stale", "deleted", "evicted"}:
         raise MemoryStoreError("unknown memory event")
+
+
+def _normalize_memory_text(value: str) -> str:
+    return " ".join(value.casefold().split())
 
 
 def _open_lock(path: Path):

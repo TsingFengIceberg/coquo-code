@@ -20,6 +20,7 @@ from coquo.core.contracts import (
     ToolArguments,
     AssistantText,
     ConversationRequest,
+    MemoryEvidence,
     ToolResult,
     ToolUse,
     UserMessage,
@@ -1456,6 +1457,43 @@ def test_effective_summary_is_projected_before_retained_history() -> None:
     assert messages[0]["content"][0]["text"] == summary.user_text
     assert messages[1]["content"][0]["text"] == summary.assistant_acknowledgement
     assert messages[2]["content"][0]["text"] == "recent"
+
+
+def test_memory_evidence_projection_is_exact_ordered_and_identical_for_count_and_create() -> None:
+    summary = EffectiveContextSummary("old state")
+    evidence = (
+        MemoryEvidence("memory-1", "workspace", "first fact", "fact", 0.8),
+        MemoryEvidence("memory-2", "task", "second fact", "policy", 0.9),
+    )
+    snapshot = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("recent"),),
+        effective_summary=summary,
+        allow_tools=False,
+        memory_evidence=evidence,
+    )
+    client = RecordingMessagesClient(
+        [message(TextBlock(text="done", type="text"))],
+        counts=[SimpleNamespace(input_tokens=5)],
+    )
+    provider = AnthropicConversationProvider(config(), client)
+
+    provider.count_input_tokens(snapshot)
+    provider.respond(snapshot)
+
+    counted = client.count_requests[0]["messages"]
+    assert counted == client.requests[0]["messages"]
+    assert [item["role"] for item in counted] == [
+        "user",
+        "assistant",
+        "user",
+        "user",
+        "user",
+    ]
+    assert counted[0]["content"][0]["text"] == summary.user_text
+    assert counted[2]["content"][0]["text"] == evidence[0].rendered
+    assert counted[3]["content"][0]["text"] == evidence[1].rendered
+    assert counted[4]["content"][0]["text"] == "recent"
 
 
 def test_anthropic_models_discovery_is_exact_and_safe() -> None:

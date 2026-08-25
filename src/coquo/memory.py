@@ -24,6 +24,8 @@ MEMORY_MAX_EVENTS = 10_000
 MEMORY_MAX_EVENT_BYTES = 128 * 1024
 MEMORY_MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024
 MEMORY_MAX_SEARCH_RESULTS = 100
+MEMORY_MAX_ACTIVE_RECORDS = 1000
+MEMORY_MAX_ACCESS_SCOPES = 8
 
 _ASCII_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
 
@@ -59,12 +61,86 @@ class MemoryRecallMode(StrEnum):
     ON = "on"
 
 
+class MemoryRetrievalMode(StrEnum):
+    """Configured retrieval strategy; semantic currently degrades locally."""
+
+    TEXT = "text"
+    SEMANTIC = "semantic"
+
+
 class MemoryWriteMode(StrEnum):
     """Automatic extraction policy; explicit Host CRUD is separate."""
 
     OFF = "off"
     PROPOSE = "propose"
     AUTO = "auto"
+
+
+@dataclass(frozen=True)
+class MemoryAccessContext:
+    """Host-owned read/write capability for one runtime identity.
+
+    Scope membership is supplied by the Host runtime, never inferred from
+    model text, a file name, or a memory record.  An empty ``read_scopes``
+    tuple is the fail-closed default used by isolated Child runtimes.
+    """
+
+    actor: str
+    read_scopes: tuple[tuple[MemoryScope, str], ...]
+    write_scopes: tuple[tuple[MemoryScope, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.actor, str) or not self.actor or not self.actor.isascii():
+            raise MemoryError("memory access actor is invalid")
+        for name, scopes in (("read", self.read_scopes), ("write", self.write_scopes)):
+            if not isinstance(scopes, tuple) or len(scopes) > MEMORY_MAX_ACCESS_SCOPES:
+                raise MemoryError(f"memory {name} scope set is out of bounds")
+            if len(set(scopes)) != len(scopes):
+                raise MemoryError(f"memory {name} scope set contains duplicates")
+            for scope, scope_id in scopes:
+                if not isinstance(scope, MemoryScope):
+                    raise MemoryError(f"memory {name} scope is invalid")
+                _scope_id(scope_id)
+        if not set(self.write_scopes).issubset(set(self.read_scopes)):
+            raise MemoryError("memory write scope must be readable")
+
+    @classmethod
+    def host(
+        cls,
+        workspace_scope_id: str,
+        *,
+        task_id: str | None = None,
+        team_id: str | None = None,
+    ) -> "MemoryAccessContext":
+        """Build a Host context from already validated runtime identities."""
+
+        read: list[tuple[MemoryScope, str]] = [(MemoryScope.WORKSPACE, workspace_scope_id)]
+        if task_id is not None:
+            read.append((MemoryScope.TASK, task_id))
+        if team_id is not None:
+            read.append((MemoryScope.TEAM, team_id))
+        return cls("host", tuple(read), tuple(read))
+
+    @classmethod
+    def child(cls, child_id: str) -> "MemoryAccessContext":
+        """Return the default isolated Child capability (no memory access)."""
+
+        _scope_id(child_id)
+        return cls("child", ())
+
+    def permits(self, scope: MemoryScope, scope_id: str, *, write: bool = False) -> bool:
+        scopes = self.write_scopes if write else self.read_scopes
+        return (scope, scope_id) in scopes
+
+    @property
+    def write_target(self) -> tuple[MemoryScope, str] | None:
+        """Return the most specific Host write target, if any."""
+
+        for scope in (MemoryScope.TASK, MemoryScope.TEAM, MemoryScope.WORKSPACE):
+            for candidate in self.write_scopes:
+                if candidate[0] is scope:
+                    return candidate
+        return None
 
 
 def utc_now() -> str:

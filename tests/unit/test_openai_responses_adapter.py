@@ -7,11 +7,16 @@ from unittest.mock import ANY
 import openai
 import pytest
 
-from coquo.core.compaction import CompactSummaryRequest, build_compact_prompt
+from coquo.core.compaction import (
+    CompactSummaryRequest,
+    EffectiveContextSummary,
+    build_compact_prompt,
+)
 from coquo.core.contracts import (
     AssistantText,
     AssistantToolBatch,
     ConversationRequest,
+    MemoryEvidence,
     ProviderOwnedItem,
     ProviderResponseEnvelope,
     ToolResult,
@@ -184,6 +189,37 @@ def test_text_only_projection_omits_all_tools_including_native_search() -> None:
 
     assert "tools" not in projection
     assert "tool_choice" not in projection
+
+
+def test_memory_evidence_projection_is_exact_ordered_and_count_create_equivalent() -> None:
+    summary = EffectiveContextSummary("old state")
+    evidence = (
+        MemoryEvidence("memory-1", "workspace", "first fact", "fact", 0.8),
+        MemoryEvidence("memory-2", "task", "second fact", "policy", 0.9),
+    )
+    snapshot = ConversationRequest(
+        build_system_prompt(),
+        (UserMessage("recent"),),
+        effective_summary=summary,
+        allow_tools=False,
+        memory_evidence=evidence,
+    )
+
+    counted = build_input_projection(route(), snapshot)
+    created = build_request(route(), snapshot)
+
+    assert counted["input"] == created["input"]
+    assert [item["role"] for item in counted["input"]] == [
+        "user",
+        "assistant",
+        "user",
+        "user",
+        "user",
+    ]
+    assert counted["input"][0]["content"] == summary.user_text
+    assert counted["input"][2]["content"] == evidence[0].rendered
+    assert counted["input"][3]["content"] == evidence[1].rendered
+    assert counted["input"][4]["content"] == "recent"
 
 
 def test_native_search_projection_applies_required_domains_and_context() -> None:

@@ -100,6 +100,37 @@ def test_loop_commits_provider_owned_items_without_dispatching_them(tmp_path) ->
     assert committed[0].tool_ledger.entries == ()
 
 
+def test_prepared_turn_pins_untrusted_memory_evidence_without_persisting_it(tmp_path) -> None:
+    provider = ScriptedFakeProvider([AssistantText("done")])
+    committed: list[CommittedTurn] = []
+    from coquo.core.contracts import MemoryEvidence
+
+    evidence = MemoryEvidence(
+        "memory-1",
+        "workspace",
+        "The project uses deterministic tests.",
+        "fact",
+        0.9,
+        "session-1",
+        1,
+    )
+    loop = AgentLoop(
+        provider,
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+        commit_turn=committed.append,
+        memory_recall_factory=lambda _prompt: (evidence,),
+    )
+
+    assert loop.run("what are the tests?") == "done"
+    request = provider.received_requests[0]
+    assert request.memory_evidence == (evidence,)
+    assert "UNTRUSTED MEMORY EVIDENCE" in evidence.rendered
+    assert committed[0].items == (UserMessage("what are the tests?"), AssistantText("done"))
+
+
 def test_loop_commits_glob_grep_and_read_causality(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -1847,7 +1878,7 @@ def test_task_control_proposal_is_terminal_and_published_only_after_turn_commit(
 
     assert order == ["commit", "proposal"]
     assert len(proposals) == 1
-    assert proposals[0].context_id.startswith("ctx-v27-")
+    assert proposals[0].context_id.startswith("ctx-v29-")
     assert provider.received_requests[0].allow_tools is True
     assert provider.received_requests[1].allow_tools is False
     assert provider.received_requests[1].enabled_tool_names is None

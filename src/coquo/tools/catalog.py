@@ -14,6 +14,7 @@ from coquo.core.extensions import (
     ToolSetSnapshot,
 )
 from coquo.core.permissions import PermissionAction
+from coquo.memory_config import MemoryConfigStore
 from coquo.core.task_admission import TASK_PROPOSE_START_TOOL_NAME
 from coquo.core.skill_authoring import (
     SKILL_ACCEPT_CREATE_TOOL_NAME,
@@ -150,6 +151,14 @@ from coquo.tools.team_worktree_integrate import (
     parse_team_worktree_integrate,
     team_worktree_integrate_tool_snapshot,
 )
+from coquo.tools.memory import (
+    MEMORY_ADD_TOOL_NAME,
+    MEMORY_DELETE_TOOL_NAME,
+    MEMORY_SEARCH_TOOL_NAME,
+    MEMORY_TOOL_NAMES,
+    MEMORY_UPDATE_TOOL_NAME,
+    memory_tool_snapshots,
+)
 
 MAX_TOOL_CALLS_PER_RESPONSE = 8
 MAX_TOOL_REQUESTS_PER_TURN = 32
@@ -161,6 +170,7 @@ MAX_TOOL_INPUT_STRING_BYTES = 4096
 
 CHILD_CONTROL_TOOL_CATALOG = child_control_tool_snapshots()
 TEAM_CONTROL_TOOL_CATALOG = team_control_tool_snapshots()
+MEMORY_TOOL_CATALOG = memory_tool_snapshots()
 
 ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
@@ -287,6 +297,10 @@ _HOST_PERMISSION_ACTIONS: dict[str, tuple[PermissionAction, ...]] = {
     MOVE_DIRECTORY_TOOL_NAME: (PermissionAction.WORKSPACE_MOVE,),
     DOWNLOAD_FILE_TOOL_NAME: (PermissionAction.NETWORK_WRITE,),
     TEAM_WORKTREE_INTEGRATE_TOOL_NAME: (PermissionAction.DANGEROUS,),
+    MEMORY_SEARCH_TOOL_NAME: (PermissionAction.WORKSPACE_READ,),
+    MEMORY_ADD_TOOL_NAME: (PermissionAction.WORKSPACE_CREATE,),
+    MEMORY_UPDATE_TOOL_NAME: (PermissionAction.WORKSPACE_OVERWRITE,),
+    MEMORY_DELETE_TOOL_NAME: (PermissionAction.WORKSPACE_DELETE,),
 }
 _TASK_STAGE_CONTROL_NAMES = frozenset(
     {
@@ -332,6 +346,9 @@ def _builtin_contract(definition: CanonicalToolDefinition) -> ExtensionToolContr
     elif name == SKILL_ACCEPT_CREATE_TOOL_NAME:
         execution_kind = ToolExecutionKind.SKILL_LIFECYCLE
         permission_actions = ()
+    elif name in MEMORY_TOOL_NAMES:
+        execution_kind = ToolExecutionKind.HOST_ACTION
+        permission_actions = _HOST_PERMISSION_ACTIONS[name]
     elif name in {definition.name for definition in CHILD_CONTROL_TOOL_CATALOG}:
         execution_kind = ToolExecutionKind.CHILD_CONTROL
         permission_actions = ()
@@ -353,6 +370,19 @@ TOOL_REGISTRY_SNAPSHOT = ToolRegistrySnapshot(
     generation=TOOL_REGISTRY_GENERATION,
     contracts=tuple(_builtin_contract(definition) for definition in TOOL_CATALOG),
 )
+
+MEMORY_TOOL_CONTRACTS = tuple(_builtin_contract(definition) for definition in MEMORY_TOOL_CATALOG)
+
+
+def registry_snapshot_with_memory(workspace, base: ToolRegistrySnapshot) -> ToolRegistrySnapshot:
+    """Add memory contracts only when the Host memory-tools switch is effective."""
+    enabled = MemoryConfigStore(workspace).load().effective_tools
+    if not enabled or any(contract.name in MEMORY_TOOL_NAMES for contract in base.contracts):
+        return base
+    return ToolRegistrySnapshot(
+        generation=base.generation + 1,
+        contracts=(*base.contracts, *MEMORY_TOOL_CONTRACTS),
+    )
 
 
 def model_tool_definitions(
@@ -525,6 +555,14 @@ def _expected_keys(name: str) -> set[str]:
         return {"source", "destination"}
     if name == DOWNLOAD_FILE_TOOL_NAME:
         return {"url", "path"}
+    if name == MEMORY_SEARCH_TOOL_NAME:
+        return {"query", "max_results"}
+    if name == MEMORY_ADD_TOOL_NAME:
+        return {"content", "category", "confidence"}
+    if name == MEMORY_UPDATE_TOOL_NAME:
+        return {"memory_id", "content", "category", "confidence"}
+    if name == MEMORY_DELETE_TOOL_NAME:
+        return {"memory_id", "reason"}
     if name == TEAM_WORKTREE_INTEGRATE_TOOL_NAME:
         return {"team_id", "assignment_id", "expected_patch_sha256"}
     if name == TOOL_SEARCH_TOOL_NAME:
@@ -566,6 +604,11 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
         parse_team_worktree_integrate(
             ToolUse("validation", name, ToolArguments.from_mapping(tool_input))
         )
+        return
+    if name in MEMORY_TOOL_NAMES:
+        from coquo.tools.memory import _validate_values
+
+        _validate_values(name, tool_input)
         return
     if name == SKILL_PROPOSE_CREATE_TOOL_NAME:
         from coquo.core.skill_authoring import SkillCreationProposal

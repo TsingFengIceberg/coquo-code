@@ -30,7 +30,8 @@ from coquo.core.contracts import (
 from coquo.core.compaction import CompactionCandidateError
 from coquo.core.cancellation import TurnCancellation, TurnCancelled
 from coquo.core.extensions import ToolRegistrySnapshot
-from coquo.core.permissions import PermissionAction, PermissionMode
+from coquo.core.action_coordinator import ApprovalResolution
+from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
 from coquo.core.skill_authoring import (
     SKILL_ACCEPT_CREATE_TOOL_NAME,
     SKILL_PROPOSE_CREATE_TOOL_NAME,
@@ -66,8 +67,14 @@ from coquo.session_records import (
     SessionNameSource,
     SessionTitleFallbackReason,
     TurnCommitted,
+    workspace_fingerprint,
 )
 from coquo.session_store import SessionStore, SessionStoreError
+from coquo.cli.slash import dispatch_slash
+from coquo.memory import MemoryRecallMode, MemoryScope, MemoryStatus, MemoryWriteMode
+from coquo.memory_config import MemoryConfigStore
+from coquo.memory_store import MemoryStore
+from coquo.tools.memory import MEMORY_ADD_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME
 from coquo.skills import SkillInventoryLoader
 from coquo.skill_candidates import SkillCandidateStatus
 from coquo.system_prompt import build_system_prompt
@@ -149,6 +156,181 @@ def test_project_session_persists_and_resumes_history_with_current_runtime(tmp_p
     assert resumed_ledgers.turns[0].turn_number == 2
     assert second.transcript_path == transcript
     second.close()
+
+
+def test_memory_candidate_extraction_runs_only_after_durable_turn_commit(tmp_path: Path) -> None:
+    MemoryConfigStore(tmp_path).update(enabled=True, write=MemoryWriteMode.PROPOSE)
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        user_profile_path=tmp_path / "user.json",
+        project_profile_path=tmp_path / "project.json",
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    assert session.prompt("remember: Keep release checks deterministic") == (
+        "Fake response: remember: Keep release checks deterministic"
+    )
+    records = MemoryStore(tmp_path).list(status=MemoryStatus.CANDIDATE)
+    assert len(records) == 1
+    assert records[0].source_session_id == SESSION_ONE
+    assert records[0].source_turn == 1
+    assert session.history == (
+        UserMessage("remember: Keep release checks deterministic"),
+        AssistantText("Fake response: remember: Keep release checks deterministic"),
+    )
+    audit = session.action_audits()[-1]
+    assert audit.identity.tool_name == "memory_candidate_extract"
+    assert audit.status is ActionAuditStatus.SUCCEEDED
+    assert audit.result_code == "memory_candidate_created"
+    session.close()
+
+
+def test_memory_candidate_extraction_is_denied_and_audited_in_read_only_mode(
+    tmp_path: Path,
+) -> None:
+    MemoryConfigStore(tmp_path).update(enabled=True, write=MemoryWriteMode.AUTO)
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    session.prompt("remember: do not bypass read-only")
+
+    assert MemoryStore(tmp_path).count() == 0
+    audit = session.action_audits()[-1]
+    assert audit.identity.tool_name == "memory_candidate_extract"
+    assert audit.status is ActionAuditStatus.DENIED
+    session.close()
+
+
+def test_memory_candidate_extraction_honors_rejected_post_commit_approval(
+    tmp_path: Path,
+) -> None:
+    MemoryConfigStore(tmp_path).update(enabled=True, write=MemoryWriteMode.AUTO)
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.ASK,
+        approval_handler=lambda _request: ApprovalResolution.REJECT,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    session.prompt("remember: approval remains authoritative")
+
+    assert MemoryStore(tmp_path).count() == 0
+    audit = session.action_audits()[-1]
+    assert audit.identity.tool_name == "memory_candidate_extract"
+    assert audit.status is ActionAuditStatus.REJECTED
+    session.close()
+
+
+def test_model_visible_memory_tools_are_gated_and_audited(tmp_path: Path) -> None:
+    seeded = MemoryStore(tmp_path).create_candidate(
+        "The release gate is deterministic",
+        scope=MemoryScope.WORKSPACE,
+        scope_id=workspace_fingerprint(tmp_path),
+    )
+    MemoryStore(tmp_path).confirm(seeded.memory_id)
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "memory-search-1",
+                MEMORY_SEARCH_TOOL_NAME,
+                ToolArguments.from_mapping({"query": "release gate", "max_results": 4}),
+            ),
+            AssistantText("memory inspected"),
+        ]
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    MemoryConfigStore(tmp_path).update(
+        enabled=True,
+        recall=MemoryRecallMode.ON,
+        tools=True,
+    )
+    assert session.prompt("inspect memory") == "memory inspected"
+    assert {tool.name for tool in provider.received_requests[0].tool_definitions or ()} >= {
+        MEMORY_SEARCH_TOOL_NAME,
+        MEMORY_ADD_TOOL_NAME,
+    }
+    assert any(
+        audit.identity.tool_name == MEMORY_SEARCH_TOOL_NAME
+        and audit.status is ActionAuditStatus.SUCCEEDED
+        for audit in session.action_audits()
+    )
+    session.close()
+
+
+def test_team_memory_scope_requires_explicit_host_grant_and_supports_revoke(tmp_path: Path) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    team = session.create_team("Memory Team")
+    workspace_id = workspace_fingerprint(tmp_path)
+
+    before = session._memory_access_context()
+    assert before.permits(MemoryScope.WORKSPACE, workspace_id)
+    assert not before.permits(MemoryScope.TEAM, team.team_id)
+
+    granted = session.grant_team_memory_scope(team.team_id)
+    assert granted.permits(MemoryScope.TEAM, team.team_id)
+    assert session.action_audits()[-1].identity.tool_name == "memory_team_scope_grant"
+    assert session.action_audits()[-1].status is ActionAuditStatus.SUCCEEDED
+    session.close()
+
+    resumed = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        environment={},
+        session_store_factory=session_store_factory(),
+    )
+    assert resumed._memory_access_context().permits(MemoryScope.TEAM, team.team_id)
+    revoked = resumed.revoke_team_memory_scope(team.team_id)
+    assert not revoked.permits(MemoryScope.TEAM, team.team_id)
+    assert resumed.action_audits()[-1].identity.tool_name == "memory_team_scope_revoke"
+    resumed.close()
+
+    reopened = ProjectSession.open(
+        tmp_path,
+        resume=SESSION_ONE,
+        environment={},
+        session_store_factory=session_store_factory(),
+    )
+    assert not reopened._memory_access_context().permits(MemoryScope.TEAM, team.team_id)
+    reopened.close()
+
+
+def test_team_memory_scope_has_explicit_host_slash_routes(tmp_path: Path) -> None:
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+    team = session.create_team("Memory Team")
+
+    granted = dispatch_slash(f"/team memory grant {team.team_id}", session)
+    assert granted.kind == "success"
+    assert granted.message == f"Team memory scope granted: {team.team_id}"
+    assert session._memory_access_context().permits(MemoryScope.TEAM, team.team_id)
+
+    revoked = dispatch_slash(f"/team memory revoke {team.team_id}", session)
+    assert revoked.kind == "success"
+    assert revoked.message == f"Team memory scope revoked: {team.team_id}"
+    assert not session._memory_access_context().permits(MemoryScope.TEAM, team.team_id)
+    invalid = dispatch_slash("/team memory grant", session)
+    assert invalid.kind == "warning"
+    assert invalid.message == "Usage: /team memory grant|revoke <team-id>"
+    session.close()
 
 
 def test_project_session_projects_one_exact_private_tool_subset(tmp_path: Path) -> None:
@@ -970,6 +1152,7 @@ def test_project_session_records_title_fallback_reason(
 
 def test_project_session_closes_visible_title_round_when_turn_is_cancelled(tmp_path: Path) -> None:
     cancellation = TurnCancellation()
+    MemoryConfigStore(tmp_path).update(enabled=True, write=MemoryWriteMode.AUTO)
 
     class CancellingTitleProvider(RecordingProvider):
         def respond_outcome(self, request):
@@ -1011,6 +1194,8 @@ def test_project_session_closes_visible_title_round_when_turn_is_cancelled(tmp_p
     assert len(title_finishes) == 1
     assert title_finishes[0].outcome == ProviderInvocationOutcome.CANCELLED
     assert session.history == ()
+    assert MemoryStore(tmp_path).list(status=MemoryStatus.CANDIDATE) == ()
+    assert MemoryStore(tmp_path).list(status=MemoryStatus.CONFIRMED) == ()
     session.close()
 
 
@@ -1808,7 +1993,7 @@ def test_manual_compaction_preserves_full_history_and_resumes_effective_checkpoi
     assert durable_usage.unavailable_operations == 0
     assert session.effective_history == before_history[-4:]
     assert session.inspect_context().summary_present
-    assert session.inspect_context().context_id.startswith("ctx-v28-")
+    assert session.inspect_context().context_id.startswith("ctx-v30-")
     assert session.transcript_path.read_bytes().startswith(before_bytes)
     assert session._writer.state.records[-1].record_type == "context_compacted"
     history = session.compaction_history(5)

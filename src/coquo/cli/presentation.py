@@ -172,6 +172,7 @@ TEAM_HELP = (
     "  /team create <name>\n"
     "  /team list [1-100] [status=open|closed]\n"
     "  /team show <team-id> | /team close <team-id>\n"
+    "  /team memory grant|revoke <team-id>\n"
     "  /team member add|list|show|disable|enable|leave ...\n"
     "  /team worktree status|diff|recover|retire <worktree-id> ...\n"
     "  /team assignment create|list|show|prepare|run|start|wait|cancel|handoff|recover ...\n"
