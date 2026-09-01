@@ -62,6 +62,28 @@ def test_streaming_helper_preserves_exact_text_and_falls_back_explicitly() -> No
     assert provider.respond_calls == 1
 
 
+def test_streaming_helper_delivers_each_delta_before_provider_returns() -> None:
+    observations: list[tuple[str, bool]] = []
+    state = {"provider_returned": False}
+
+    class DelayedChunkProvider:
+        def respond_stream(self, _request, *, event_sink):
+            event_sink(ProviderTextDelta("first"))
+            event_sink(ProviderTextDelta("second"))
+            state["provider_returned"] = True
+            return AssistantText("firstsecond")
+
+    outcome = respond_with_streaming(
+        DelayedChunkProvider(),
+        request(),
+        event_sink=lambda event: observations.append((event.text, state["provider_returned"])),
+        prefer_stream=True,
+    )
+
+    assert outcome.response == AssistantText("firstsecond")
+    assert observations == [("first", False), ("second", False)]
+
+
 def test_streaming_helper_validates_completed_text_and_event_shape() -> None:
     mismatch = StreamingProvider(AssistantText("different"))
     with pytest.raises(ValueError, match="does not match"):

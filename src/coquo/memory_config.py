@@ -16,10 +16,17 @@ import stat
 from threading import RLock
 from typing import Any
 
-from coquo.memory import MemoryError, MemoryRecallMode, MemoryRetrievalMode, MemoryWriteMode
+from coquo.memory import (
+    MemoryCaptureMode,
+    MemoryError,
+    MemoryRecallMode,
+    MemoryRetrievalMode,
+    MemoryWriteMode,
+)
 
-MEMORY_CONFIG_SCHEMA_VERSION = 2
+MEMORY_CONFIG_SCHEMA_VERSION = 3
 MEMORY_CONFIG_LEGACY_SCHEMA_VERSION = 1
+MEMORY_CONFIG_TRANSITIONAL_SCHEMA_VERSION = 2
 MEMORY_CONFIG_MAX_BYTES = 32 * 1024
 
 
@@ -31,6 +38,7 @@ class MemoryConfig:
     recall: MemoryRecallMode = MemoryRecallMode.OFF
     write: MemoryWriteMode = MemoryWriteMode.OFF
     retrieval: MemoryRetrievalMode = MemoryRetrievalMode.TEXT
+    capture: MemoryCaptureMode = MemoryCaptureMode.EXPLICIT
     tools: bool = False
     provider: str = "local"
 
@@ -43,6 +51,8 @@ class MemoryConfig:
             raise MemoryError("memory write mode is invalid")
         if not isinstance(self.retrieval, MemoryRetrievalMode):
             raise MemoryError("memory retrieval mode is invalid")
+        if not isinstance(self.capture, MemoryCaptureMode):
+            raise MemoryError("memory capture mode is invalid")
         if self.provider != "local":
             raise MemoryError("only the local memory provider is available in this slice")
 
@@ -65,6 +75,7 @@ class MemoryConfig:
             "recall": self.recall.value,
             "write": self.write.value,
             "retrieval": self.retrieval.value,
+            "capture": self.capture.value,
             "tools": self.tools,
             "provider": self.provider,
         }
@@ -82,19 +93,35 @@ class MemoryConfig:
             "provider",
         }
         version = value.get("schema_version")
-        if version == MEMORY_CONFIG_LEGACY_SCHEMA_VERSION and set(value) in (
-            common,
-            common | {"retrieval"},
-        ):
+        fields = set(value)
+        if version == MEMORY_CONFIG_LEGACY_SCHEMA_VERSION and fields == common:
+            retrieval = MemoryRetrievalMode.TEXT
+            capture = MemoryCaptureMode.EXPLICIT
+        elif version == MEMORY_CONFIG_LEGACY_SCHEMA_VERSION and fields == common | {"retrieval"}:
             try:
                 retrieval = MemoryRetrievalMode(value.get("retrieval", "text"))
             except (ValueError, TypeError):
                 raise MemoryError("memory recall, write, or retrieval mode is invalid") from None
-        elif version == MEMORY_CONFIG_SCHEMA_VERSION and set(value) == common | {"retrieval"}:
+            capture = MemoryCaptureMode.EXPLICIT
+        elif version == MEMORY_CONFIG_TRANSITIONAL_SCHEMA_VERSION and fields == common | {
+            "retrieval"
+        }:
             try:
                 retrieval = MemoryRetrievalMode(value["retrieval"])
             except (ValueError, TypeError):
                 raise MemoryError("memory recall, write, or retrieval mode is invalid") from None
+            capture = MemoryCaptureMode.EXPLICIT
+        elif version == MEMORY_CONFIG_SCHEMA_VERSION and fields == common | {
+            "retrieval",
+            "capture",
+        }:
+            try:
+                retrieval = MemoryRetrievalMode(value["retrieval"])
+                capture = MemoryCaptureMode(value["capture"])
+            except (ValueError, TypeError):
+                raise MemoryError(
+                    "memory recall, write, retrieval, or capture mode is invalid"
+                ) from None
         else:
             raise MemoryError("memory configuration schema is invalid")
         try:
@@ -107,6 +134,7 @@ class MemoryConfig:
             recall=recall,
             write=write,
             retrieval=retrieval,
+            capture=capture,
             tools=value["tools"],
             provider=value["provider"],
         )
@@ -217,6 +245,7 @@ class MemoryConfigStore:
         recall: MemoryRecallMode | None = None,
         write: MemoryWriteMode | None = None,
         retrieval: MemoryRetrievalMode | None = None,
+        capture: MemoryCaptureMode | None = None,
         tools: bool | None = None,
     ) -> MemoryConfig:
         with self._transaction():
@@ -227,6 +256,7 @@ class MemoryConfigStore:
                 recall=current.recall if recall is None else recall,
                 write=current.write if write is None else write,
                 retrieval=current.retrieval if retrieval is None else retrieval,
+                capture=current.capture if capture is None else capture,
                 tools=current.tools if tools is None else tools,
             )
             raw = (

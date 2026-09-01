@@ -200,6 +200,12 @@ uv run coquo --profile vendor route
 uv run coquo --model openai/gpt-5 route
 ```
 
+需要机器可读的实时 Host 观测时，可将无正文 NDJSON 逐行 flush 到 stderr，最终回答仍在 stdout：
+
+```bash
+uv run coquo --events ndjson prompt "检查这个 workspace"
+```
+
 命名 profile 可为 exact endpoint/model 配置上下文窗口：
 
 ```bash
@@ -237,13 +243,13 @@ Session绑定workspace，并以append-only JSONL保存成功turn。新turn还保
 
 ```bash
 uv run coquo memory status
-uv run coquo memory configure --enable --recall on --write propose --retrieval text --no-tools
+uv run coquo memory configure --enable --recall on --write propose --retrieval semantic --capture explicit --no-tools
 uv run coquo memory add "发布前必须运行完整测试"
 uv run coquo memory confirm <memory-uuid>
 uv run coquo memory search "完整测试"
 ```
 
-长期记忆按workspace默认关闭，只有confirmed记录会被有界召回，并作为`[UNTRUSTED MEMORY EVIDENCE]`数据而非指令传给模型。显式`remember:`、`remember that`或`请记住`请求只在成功提交Turn后按`write`策略处理，并继续受PermissionGate、审批和Action Audit约束；模型CRUD工具还要求单独启用`--tools`。当前`semantic`检索在尚无本地embedding后端时会明确降级为文本匹配；完整作用域、生命周期、恢复和安全边界见[ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md)。
+长期记忆按workspace默认关闭，只有confirmed记录会被有界召回，并作为`[UNTRUSTED MEMORY EVIDENCE]`数据而非指令传给模型。显式`remember:`、`remember that`或`请记住`请求只在成功提交Turn后按`write`策略处理；可选的`capture=conservative`只从有限的偏好/项目规则句式生成candidate，隐式candidate即使`write=auto`也不会自动确认。所有写入继续受PermissionGate、审批和Action Audit约束；模型CRUD工具还要求单独启用`--tools`。`semantic`使用无网络的确定性`semantic-local-v1`本地检索，不是learned embedding后端；完整作用域、生命周期、恢复和安全边界见[ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md)。
 
 ### 管理 Task
 
@@ -501,9 +507,13 @@ uv run coquo eval task list
 tmp=$(mktemp -d)
 uv run coquo eval task prepare inventory-validation "$tmp/task"
 uv run coquo eval task score inventory-validation "$tmp/task"
+# 真实Provider验收（仅在单独确认网络、凭据和费用后运行）
+COQUO_REAL_PROVIDER_ACCEPT=1 uv run python scripts/real_provider_acceptance.py \
+  --profile <existing-profile> --allow-network --allow-credentials --allow-cost
 ```
 
 `pytest`验证函数、模块和协议边界；`eval run`用scripted fake provider把固定轨迹送入完整Host路径。`eval task prepare/score`则离线创建小型代码任务，并在候选目录外以可见测试和Host私有测试评分实际结果。只有显式写出`--real-provider`并选择profile/model的`eval task run`才会调用真实厂商；它固定在新建隔离任务目录内运行，工具事件写入stderr，稳定Host评分写入stdout。依赖变化后先执行 `uv lock`，再检查锁文件。Coquo 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。
+`scripts/real_provider_acceptance.py`不属于离线CI门禁；它默认创建临时workspace，且调用方workspace中已有同名fixture时会拒绝覆盖。CI只运行离线测试、恢复回归、fake CLI smoke和代码质量检查。
 
 ## 详细文档
 
@@ -608,4 +618,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo目前默认提供Registry generation 9中的62个规范工具，普通父Prompt曝光58个，覆盖workspace读写、命令验证、Git观察、网页搜索与抓取、结构化读取、受控下载、渐进式MCP发现、声明式Skill加载及有界Team协调；显式启用模型记忆工具时动态扩展为generation 10中的66个规范工具与62个普通父Prompt工具。命名Provider Profile、Session恢复、context与compaction、PermissionGate与Action Audit、前台多Stage Task、终端REPL、离线Eval及默认关闭的workspace长期记忆均已接入。
 
-项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Host侧的Task–Child–Team统一编排桥接现在会绑定精确identity、复用既有执行ledger并以handoff/evidence收敛Task Stage。默认Child execution envelope仍固定为单Turn、depth-one和受限能力；只有Host显式启用固定的只读explorer能力时，depth-one Child才可再创建一个depth-two Grandchild，Grandchild不能继续委派。默认后台提交由workspace-bound durable queue和可重启本地worker承载，显式注入的process-local Supervisor仅保留为兼容测试路径。写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。后台运行不自动重试RUNNING/CANCELLING孤儿，也不声称exactly-once；Team schedule不重试、不自动complete、不运行成永久daemon。任意递归多Agent、递归Team、可执行Skill、市场、分布式worker fleet及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。
+项目仍定位为本地单用户CLI原型；MCP目前支持受限stdio与Streamable HTTP及扩展capability，Skills目前支持有界本地包、渐进发现、上下文生命周期与ToolSet收窄。普通父Agent可以通过四个模型工具委派最多四个独立Child，也可以通过Team controls管理固定角色成员、work board、bounded schedule、reply review和显式worktree integration；Host侧的Task–Child–Team统一编排桥接现在会绑定精确identity、复用既有执行ledger并以handoff/evidence收敛Task Stage。Provider轮次会显示Host测得的流式chunk和首chunk/间隔诊断，便于区分上游等待与终端延迟。默认Child execution envelope仍固定为单Turn、depth-one和受限能力；只有Host显式启用固定的只读explorer能力时，depth-one Child才可再创建一个depth-two Grandchild，Grandchild不能继续委派。默认后台提交由workspace-bound durable queue和可重启本地worker承载，显式注入的process-local Supervisor仅保留为兼容测试路径。写入者仅能修改自己的隔离linked worktree，编码员的命令执行继续受现有网络禁用sandbox约束，所有handoff/reply/integration evidence都是非可信证据。后台运行不自动重试RUNNING/CANCELLING孤儿，也不声称exactly-once；Team schedule不重试、不自动complete、不运行成永久daemon。任意递归多Agent、递归Team、可执行Skill、市场、分布式worker fleet及浏览器自动化仍未实现。精确工具契约、版本、兼容性与安全边界统一记录在[已实现Foundation与设计演进](./docs/implemented-foundations.md)和[架构决策记录](./docs/decisions/)中。

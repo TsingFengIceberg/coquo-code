@@ -9,6 +9,7 @@ from coquo.core.orchestration import ProviderFailureKind
 from coquo.providers.errors import ProviderAdapterError
 from coquo.providers.manager import RuntimeProviderStateError
 from coquo.providers.profile import ProviderProfileError
+from coquo.providers.reliability import ProviderReliabilityBudgetError
 from coquo.providers.request_context import (
     ContextPreflightError,
     ContextPreflightErrorKind,
@@ -34,6 +35,11 @@ def render_turn_failure(error: BaseException, *, provider_prefix: str = "Provide
         message = render_provider_adapter_error(error, prefix=provider_prefix)
         note = "No turn was committed. Tool side effects completed earlier remain in Action Audit."
         return f"{message}\n{note}\n{_provider_next_step(error)}"
+    if isinstance(error, ProviderReliabilityBudgetError):
+        return (
+            f"Provider reliability budget error [{error.code}] after {error.attempts} attempt(s): {error}\n"
+            "No turn was committed. Next: inspect /usage and /status, then lower the local provider budget or retry manually."
+        )
     if isinstance(error, (ProviderProfileError, RuntimeProviderStateError)):
         return f"Runtime error: {error}\nNext: run /status and /provider list, then correct or select a valid profile."
     if isinstance(error, (ApprovalGrantError, ActionIdentityChangedError)):
@@ -56,6 +62,8 @@ def command_failure_guidance(error: Exception) -> str | None:
     """Return a short next step for known Host command failures."""
     if isinstance(error, ProviderAdapterError):
         return _provider_next_step(error)
+    if isinstance(error, ProviderReliabilityBudgetError):
+        return "Inspect /usage and /status; the local reliability budget stopped the operation before another attempt."
     if isinstance(error, (ProviderProfileError, RuntimeProviderStateError)):
         return "Next: run /status and /provider list before retrying."
     if isinstance(error, SessionStoreError):
@@ -77,6 +85,8 @@ def tool_result_guidance(tool_name: str, result_code: str | None) -> str | None:
         return None
     if result_code == "command_sandbox_unavailable":
         return "Next: run /sandbox check; the requested command was not started."
+    if result_code == "command_resource_limits_unavailable":
+        return "Next: run /sandbox check; fixed command resource limits could not be enforced and the command was not started."
     if result_code == "command_cwd_invalid":
         return "Next: verify the workspace-relative cwd before requesting a new command."
     if result_code == "command_exited_nonzero":

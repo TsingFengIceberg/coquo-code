@@ -244,6 +244,10 @@ from coquo.providers.manager import (
     RuntimeSwitchResult,
     TurnRuntimeSnapshot,
 )
+from coquo.providers.reliability import (
+    ProviderReliabilityBudgetError,
+    ProviderReliabilityPolicy,
+)
 from coquo.providers.definitions import ReasoningEffort
 from coquo.providers.native_search import (
     NativeSearchContextSize,
@@ -745,6 +749,11 @@ class TurnCommitStarted:
 
 
 @dataclass(frozen=True)
+class TurnCommitCompleted:
+    """Signal that the Session turn append has crossed its durable commit point."""
+
+
+@dataclass(frozen=True)
 class SessionTitleGenerationStarted:
     """Signal one content-free automatic Session-title attempt."""
 
@@ -817,6 +826,7 @@ PromptEvent = (
     | SessionTitlePrepared
     | SessionTitleFallbackApplied
     | TurnCommitStarted
+    | TurnCommitCompleted
     | TurnUsageCompleted
     | TaskRunStopped
     | AgentPromptEvent
@@ -1431,6 +1441,7 @@ class ProjectSession:
         custom_api_key_env: str | None = None,
         max_output_tokens: int | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        reliability_policy: ProviderReliabilityPolicy | None = None,
         environment: Mapping[str, str] | None = None,
         user_profile_path: Path | None = None,
         project_profile_path: Path | None = None,
@@ -1519,6 +1530,7 @@ class ProjectSession:
             "custom_api_key_env": custom_api_key_env,
             "max_output_tokens": max_output_tokens,
             "reasoning_effort": reasoning_effort,
+            "reliability_policy": reliability_policy,
         }
         if provider_factory is not None:
             manager_arguments["provider_factory"] = provider_factory
@@ -1968,6 +1980,26 @@ class ProjectSession:
                 name=name,
                 budget=budget,
             )
+
+    def drive_workflow(
+        self,
+        workflow_id: str,
+        *,
+        policy=None,
+        cancellation: TurnCancellation | None = None,
+    ):
+        """Drive one Host-owned Workflow with this live Session as executor."""
+        from coquo.workflow_orchestration import WorkflowOrchestrator
+
+        with self._lock:
+            self._ensure_open()
+            self._ensure_not_compacting()
+        return WorkflowOrchestrator(self.workspace).drive_until_review(
+            workflow_id,
+            self,
+            policy=policy,
+            cancellation=cancellation,
+        )
 
     def list_tasks(self) -> tuple[TaskInfo, ...]:
         """List workspace Tasks without changing Session or runtime state."""
@@ -5022,6 +5054,7 @@ class ProjectSession:
                 CompactionCandidateError,
                 ContextPreflightError,
                 ProviderAdapterError,
+                ProviderReliabilityBudgetError,
             ) as error:
                 self._record_compaction_failure(
                     prepared,
@@ -7527,7 +7560,9 @@ class ProjectSession:
         fallback_reason = SessionTitleFallbackReason.INVOCATION_BUDGET
         attempts = 0
         for attempt in range(1, SESSION_TITLE_MAX_ATTEMPTS + 1):
-            used = len(self._manager.usage_since(usage_cursor, kind=ProviderInvocationKind.TURN))
+            # Reliability retries are physical attempts inside one logical
+            # invocation and must not consume the AgentLoop invocation budget.
+            used = attempts
             if used >= MAX_PROVIDER_INVOCATIONS_PER_TURN:
                 break
             if self._active_cancellation is not None:
@@ -7536,7 +7571,10 @@ class ProjectSession:
                 self._active_event_sink,
                 SessionTitleGenerationStarted(attempt, SESSION_TITLE_MAX_ATTEMPTS),
             )
-            invocation_index = used + 1
+            # The hook runs after the first AgentLoop response has already
+            # consumed invocation 1; title attempts occupy the following
+            # logical invocation slots before the loop continues.
+            invocation_index = used + 2
             self._emit_prompt_event(
                 self._active_event_sink,
                 ProviderInvocationStarted(
@@ -7679,6 +7717,7 @@ class ProjectSession:
             session_name_source=session_name_source,
             session_title_fallback_reason=session_title_fallback_reason,
         )
+        self._emit_prompt_event(self._active_event_sink, TurnCommitCompleted())
         if self._memory_candidate_extractor is not None:
             self._run_memory_candidate_extraction(writer, turn)
         terminal = next(

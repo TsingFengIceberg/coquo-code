@@ -35,15 +35,16 @@ after terminal state, partial/oversized events, and path/symlink violations.
 
 Memory policy is Host configuration, separate from Provider profiles. The
 workspace-local `.coquo/memory/config.json` has a master `enabled` switch,
-`recall=off|on`, `write=off|propose|auto`, `retrieval=text|semantic`, `tools`, and the fixed `local`
+`recall=off|on`, `write=off|propose|auto`, `retrieval=text|semantic`,
+`capture=explicit|conservative`, `tools`, and the fixed `local`
 provider name. It defaults to disabled. Effective recall, write, and tool
 exposure are forced off while the master switch is disabled. This slice exposes
 Host-only `coquo memory status|configure|enable|disable` commands and explicit
 record administration (`add|list|show|search|confirm|update|stale|delete`).
-New configuration writes use schema v2. The reader continues to accept the
-original v1 shape and the transitional v1 shape that already carried
-`retrieval`, supplies `retrieval=text` when absent, and does not rewrite a
-legacy file until the user explicitly changes configuration.
+New configuration writes use schema v3. The reader continues to accept the
+original v1 shape and the transitional v2 shape that already carried
+`retrieval`, supplies `retrieval=text` and `capture=explicit` when absent, and
+does not rewrite a legacy file until the user explicitly changes configuration.
 Invalid or unreadable configuration fails prompt/tool projection before a
 Provider invocation; it is never silently treated as a disabled configuration.
 
@@ -53,15 +54,19 @@ confirmed records in Host-authorized scopes are selected when both `enabled`
 and `recall=on` are effective. Recall is frozen in the prepared turn, rendered
 as a separate `[UNTRUSTED MEMORY EVIDENCE]` user block, and never enters
 transcript history or permission state. The replaceable retrieval boundary
-supports deterministic text retrieval and a `semantic` mode that reports a
-bounded `text-fallback` until a local embedding backend is explicitly added.
+ supports deterministic text retrieval and a local `semantic-local-v1` feature-
+ hashed vector strategy. The latter is deliberately bounded and replaceable;
+ it is not a learned embedding backend and performs no network or model call.
 Candidate and stale records are queried without recall mutation, final evidence
 is deduplicated and bounded, and each selected confirmed record receives at
 most one durable `recalled` event per prepared turn.
 
 Explicit `remember:`/`remember that`/`请记住` requests are considered only
-after a successful `turn_committed`. `write=propose` creates a candidate and
-`write=auto` confirms it; unmarked model output is never extracted. Exact
+after a successful `turn_committed`. With `capture=conservative`, a small
+allow-list of preference and project-rule sentence forms may also create a
+candidate. `write=propose` creates a candidate and explicit `write=auto`
+confirms it; conservative implicit candidates never auto-confirm. Unmarked
+model output is never extracted. Exact
 deduplication, candidate consolidation, conflict enumeration, reinforcement,
 stale review, and capacity eviction preserve append-only event history and
 record a bounded reason. Confirmed conflicts are never silently overwritten.
@@ -106,8 +111,8 @@ observation.
 
 - Existing Session, Task, Child, Team, Provider, tool, and observation schemas do
   not change.
-- Memory config v1 remains readable without rewrite; schema v2 is used for new
-  writes and adds the explicit retrieval field.
+- Memory config v1 and transitional v2 remain readable without rewrite; schema
+  v3 is used for new writes and adds retrieval and capture fields.
 - Memory content is future untrusted evidence, never system authority, a
   permission grant, or execution proof.
 - Scope IDs are explicit; no scope is inferred from file names, model text, or

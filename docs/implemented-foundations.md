@@ -1586,6 +1586,12 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 134. [0154：Child/Team恢复边界与Provider档位矩阵](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 135. [0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)
 136. [0156：长期语义记忆契约与本地存储](./decisions/0156-long-term-memory-contract-and-local-store.md)
+137. [0157：真实Provider验收与流式诊断](./decisions/0157-real-provider-acceptance-and-stream-diagnostics.md)
+138. [0158：实时观测事件输出](./decisions/0158-live-observation-event-output.md)
+139. [0159：后台副作用置信度与终态幂等](./decisions/0159-background-effect-confidence.md)
+140. [0160：有界记忆召回索引缓存](./decisions/0160-bounded-memory-retrieval-index-cache.md)
+141. [0161：有界 Provider 可靠性与 Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
+142. [0162：固定命令资源限制](./decisions/0162-fixed-command-resource-limits.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1636,6 +1642,8 @@ Host-observed事件，只保留稳定ID、状态、时间及worker/lease引用�
 不保存prompt、模型/工具/handoff正文、headers、凭据或token，也不引入远程telemetry。
 详见[0152：可观察性事件流、诊断与留存](./decisions/0152-observation-stream-diagnosis-and-retention.md)。
 
+交互式TTY还使用独立的`immediate_streaming`呈现路径：每个收到的delta在终端转义后立即写入并flush，不等待完整Markdown段落或围栏代码块；中间片段不重新解释Markdown，完整响应仍由Agent loop校验。该路径只消除Host自己的Markdown缓冲，不能制造Provider、SDK或网络没有发送的chunk。
+
 ## Provider 推理强度模式
 
 Runtime现在提供Host-owned的进程内推理强度并集
@@ -1682,23 +1690,51 @@ Provider档位回归矩阵覆盖所有Host档位在OpenAI Chat/Responses及Anthr
 Provider round超过5秒仍未完成时，TTY还会每5秒追加一条低频Host-only的`still waiting`
 心跳，明确显示当前round和累计等待时间；心跳不包含Provider响应、请求正文或工具参数。
 生命周期事件保持FIFO且不可丢弃，队列保留独立文本delta以便逐块刷新。非TTY成功的prompt和
-eval保持原有stdout/stderr安静契约，公开NDJSON事件格式留待独立版本化设计。该切片
+eval保持原有stdout/stderr安静契约，公开NDJSON事件格式由独立的0158切片定义。该切片
 参考Claw-Code对run、assistant round与tool result的概念分层，但不复制其TUI、prompt、
 wire format或实现。详见
 [0155：实时Provider回合与工具时间线](./decisions/0155-live-provider-round-and-tool-timeline.md)。
 
 ## 长期语义记忆契约与本地存储
 
-当前长期语义记忆的配置新写schema v2，并继续原样读取旧v1（包括过渡期已带`retrieval`的v1）；旧配置缺少该字段时在内存中默认补为`retrieval=text`，只有用户显式更新时才写成v2。损坏或不可读配置会在Provider调用前明确失败，不会静默伪装为“memory disabled”。召回查询只选择confirmed记录，candidate/stale不会被顺带触碰；多查询命中的结果先去重和限界，最终进入Prepared Turn的每条记录至多追加一次`recalled`。事件数与记录数分别计数，追加前即拒绝越界，因此不会写出随后无法replay的第10001条事件。
+当前长期语义记忆的配置新写schema v3，并继续兼容原始v1和带`retrieval`的过渡v2；旧配置缺少字段时在内存中默认补为`retrieval=text`与`capture=explicit`，只有用户显式更新时才写成v3。损坏或不可读配置会在Provider调用前明确失败，不会静默伪装为“memory disabled”。召回查询只选择confirmed记录，candidate/stale不会被顺带触碰；多查询命中的结果先去重和限界，最终进入Prepared Turn的每条记录至多追加一次`recalled`。事件数与记录数分别计数，追加前即拒绝越界，因此不会写出随后无法replay的第10001条事件。
 
 显式`remember:`自动提取仍发生在`turn_committed`之后，但现在必须经过现有PermissionGate和持久化Action Audit：read-only必定拒绝，`approval=ask`的接受、拒绝或取消仍然有效，`write=auto`不构成审批旁路。Team memory grant/revoke也作为Host Action持久化，通过仅属于Host的`/team memory grant|revoke <team-id>`触发，并在resume时重新校验Team存在且当前Session仍为owner，任何不一致都fail-closed。模型`memory_add`保存可信Session/turn来源，update/delete的有界原因写入append-only事件。
 
 consolidation在第一次append前验证所有duplicate；若底层I/O在部分事件已持久化后失败，会如实返回并观察`partial`。自动容量淘汰也产生不含记忆正文的observation。Anthropic、OpenAI Chat Completions与OpenAI Responses的测试固定了count/create完全一致的投影顺序：compacted summary（如有）在前，多条`[UNTRUSTED MEMORY EVIDENCE]`随后，当前committed history最后。
 
-当前实现已扩展为以下边界：配置增加`retrieval=text|semantic`；semantic在没有本地后端时明确降级为有界`text-fallback`。只有成功`turn_committed`后的显式`remember:`、`remember that`或`请记住`请求才提取候选，`write=propose`保持candidate，`write=auto`在有界校验后确认，普通模型输出不会自动写入。去重、consolidation、冲突枚举、reinforcement、stale review和容量eviction均追加带bounded reason的事件，确认冲突不会静默覆盖旧事实。
+当前实现已扩展为以下边界：配置提供`retrieval=text|semantic`，其中semantic使用无网络、确定性的本地`semantic-local-v1`特征哈希检索；它是可替换的有界本地后端，并不冒充learned embedding模型。配置还提供`capture=explicit|conservative`：explicit只接受`remember:`等显式标记，conservative只接受有限的偏好和项目规则句式。两者都只在成功`turn_committed`后提取候选；显式`write=auto`可确认候选，但隐式conservative候选即使在auto下也必须保留为candidate等待人工确认。普通模型输出不会自动写入。去重、consolidation、冲突枚举、reinforcement、stale review和容量eviction均追加带bounded reason的事件，确认冲突不会静默覆盖旧事实。
 
 记忆访问由Host-owned `MemoryAccessContext`决定，而不是由模型内容决定。普通Host拥有当前workspace作用域，Task运行阶段可增加Host身份提供的Task作用域；Team作用域只有显式Host授权后才可用并可撤销。Child runtime默认没有任何读写作用域，也不会提取记忆；作用域解析失败时fail closed。记忆内容始终是untrusted evidence，不能授予工具、权限、批准或执行能力。model-visible memory工具已在双开关有效时接入现有PermissionGate、Action Audit和untrusted ToolResult；远程Provider仍是后续后端选项。
 
-第一阶段长期语义记忆与项目指令、Session历史、context compaction以及Task/Child/Team执行账本保持分层。`MemoryRecord`使用`user|workspace|task|team|child`显式作用域、候选/确认/过期/删除/淘汰生命周期、置信度、来源Session/turn与有界时间戳；确认需要显式确认时间，删除与淘汰是终态。DeerFlow提供事实治理参考，Hermes提供Provider生命周期参考；当前切片不接入远程后端，也不从普通模型输出自动抽取，只处理显式记忆标记。
+第一阶段长期语义记忆与项目指令、Session历史、context compaction以及Task/Child/Team执行账本保持分层。`MemoryRecord`使用`user|workspace|task|team|child`显式作用域、候选/确认/过期/删除/淘汰生命周期、置信度、来源Session/turn与有界时间戳；确认需要显式确认时间，删除与淘汰是终态。DeerFlow提供事实治理参考，Hermes提供Provider生命周期参考；当前切片不接入远程后端，也不从普通模型输出任意自动抽取，只接受显式标记或用户主动开启的保守句式，并且都在durable turn commit后处理。
 
-本地后端使用workspace内`.coquo/memory/events.jsonl`追加式事件日志和独占锁；每个事件保存完整当前记录，append+fsync后才更新replay内存，严格拒绝未知字段、坏schema、重复创建、终态后变更、超限事件和路径/symlink越界。Host配置独立于Provider profile，`.coquo/memory/config.json`默认`enabled=false`，提供`recall=off|on`、`write=off|propose|auto`、`retrieval=text|semantic`、`tools`与固定`local` provider；主开关关闭时有效召回、写入和工具暴露全部关闭。运行时已在turn准备时接入有界workspace recall：仅当`enabled=true`且`recall=on`时召回当前workspace的confirmed记录，固定到Prepared Turn，并以`[UNTRUSTED MEMORY EVIDENCE]`独立user数据块传给Provider，不写入Session transcript、不参与权限或Action Audit。Child runtime使用空recall provider。`coquo memory status|configure|enable|disable`以及显式`add|list|show|search|confirm|update|stale|delete`只管理本地账本，不调用Provider、不改变Session；候选提取仅在durable `turn_committed`后运行，model-visible memory tools受独立开关、PermissionGate和Action Audit控制，Child/Team共享由Host显式授权且fail-closed。远程Provider仍是后续backend选项。详见[0156：长期语义记忆契约与本地存储](./decisions/0156-long-term-memory-contract-and-local-store.md)。
+本地后端使用workspace内`.coquo/memory/events.jsonl`追加式事件日志和独占锁；每个事件保存完整当前记录，append+fsync后才更新replay内存，严格拒绝未知字段、坏schema、重复创建、终态后变更、超限事件和路径/symlink越界。Host配置独立于Provider profile，`.coquo/memory/config.json`默认`enabled=false`，提供`recall=off|on`、`write=off|propose|auto`、`retrieval=text|semantic`、`capture=explicit|conservative`、`tools`与固定`local` provider；主开关关闭时有效召回、写入和工具暴露全部关闭。运行时已在turn准备时接入有界workspace recall：仅当`enabled=true`且`recall=on`时召回当前workspace的confirmed记录，固定到Prepared Turn，并以`[UNTRUSTED MEMORY EVIDENCE]`独立user数据块传给Provider，不写入Session transcript、不参与权限或Action Audit。Child runtime使用空recall provider。`coquo memory status|configure|enable|disable`以及显式`add|list|show|search|confirm|update|stale|delete`只管理本地账本，不调用Provider、不改变Session；候选提取仅在durable `turn_committed`后运行，model-visible memory tools受独立开关、PermissionGate和Action Audit控制，Child/Team共享由Host显式授权且fail-closed。远程Provider仍是后续backend选项。详见[0156：长期语义记忆契约与本地存储](./docs/decisions/0156-long-term-memory-contract-and-local-store.md)。
+
+语义召回现在会复用有界的进程内特征索引。每条缓存绑定memory ID、内容、状态、更新时间和作用域版本；记录变化或消失时重算或移除。缓存不持久化、不与Child共享，也不是证据；召回结果只增加无正文的候选数和命中/未命中诊断，重放后的memory事件日志仍是唯一事实源。详见[0160：有界记忆召回索引缓存](./decisions/0160-bounded-memory-retrieval-index-cache.md)。
+
+## 有界 Provider 可靠性与 Workflow Driver
+
+Provider reliability把一次逻辑 invocation与物理attempt分开：默认只执行一次，显式策略最多三次，并且只有限流、超时、传输或Provider不可用且尚未收到文本delta时才允许重试。退避、`Retry-After`、总耗时、输入/输出Token预算、known-usage要求和取消均在下一attempt前检查；已经显示delta后绝不重放可见文本。每个物理attempt的usage或unknown事实都进入既有Host tracker，生命周期事件只保留有界attempt和流式诊断，不保存请求/响应正文、凭据或headers。
+
+Workflow Driver在Host侧串联现有Task、Child和Team账本，最多按记录推进Architect、Explorer与Executor阶段，并受四阶段和耗时上限约束。它返回明确的`review-ready`、`pending-stage`、`recovery-required`、`stage-failed`、`stage-limit`、`elapsed-limit`、`cancelled`或`blocked`停止原因；不会自动review、integrate、accept、retry、commit、push或创建隐藏的Provider/Tool工作。后台模式停在durable pending stage，失败和恢复状态必须由Host重新观察权威账本。详见[0161：有界 Provider 可靠性与 Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)。
+
+## 固定命令资源限制
+
+在Linux sandbox释放activation gate和用户argv之前，`run_command`通过`resource.prlimit`施加固定资源上限：CPU秒数等于请求timeout、地址空间2 GiB、单文件256 MiB、打开文件描述符1024。上限不由模型参数或approval模式提高，并与bubblewrap/seccomp、workspace、环境、输出、超时和进程组清理边界叠加。任一限制无法建立时以`command_resource_limits_unavailable`和`resource-limits-rejected` fail-closed，明确命令未启动，不降级到无沙箱执行。详见[0162：固定命令资源限制](./decisions/0162-fixed-command-resource-limits.md)。
+
+## 真实Provider验收与流式诊断
+
+`scripts/real_provider_acceptance.py`是仅供人工运行的验收脚本。默认使用临时workspace，覆盖最终回答、一次有界只读工具调用和长期记忆召回。调用方workspace必须不存在脚本的独占fixture；fixture使用原子独占创建并在结束后清理。脚本要求同时设置`COQUO_REAL_PROVIDER_ACCEPT=1`以及网络、凭据和成本三个独立确认；任一确认缺失都会在创建Provider前拒绝。子进程时间和输出有界，脚本不保存凭据或报告文件。
+
+`ProviderInvocationFinished`现在携带可选的Host测量流式事实：总耗时、文本delta数量、首个delta耗时和delta之间最大间隔。只有实际收到delta时TTY才显示这些事实；它们不包含回答正文或请求数据，也不改变重试、失败和提交语义。首个delta耗时大通常表示上游生成/传输延迟；delta间隔大通常表示Provider或传输缓冲；若delta间隔很小但终端仍晚显示，则问题在Host呈现链路。确定性测试覆盖指标计算和验收安全门禁，CI绝不调用真实endpoint。详见[0157：真实Provider验收与流式诊断](./decisions/0157-real-provider-acceptance-and-stream-diagnostics.md)。
+
+## 实时观测事件输出
+
+`ObservationStream`现在提供进程内订阅边界，按FIFO把每个Host观测事件推送给本地消费者；消费者异常会被隔离，不会改变Agent因果。`coquo --events ndjson prompt "检查这个 workspace"`把同一份有界、无正文的观测投影逐行flush到stderr，stdout仍只保留最终回答。流式delta只报告字符数和UTF-8字节数，不保存回答、prompt、工具参数、headers、凭据、推理或token；默认`--events none`保持原有输出。该接口是本地诊断流，不代表Provider或终端已实现exactly-once刷新。详见[0158：实时观测事件输出](./decisions/0158-live-observation-event-output.md)。
+
+交互式TTY还使用独立的`immediate_streaming`呈现路径：每个收到的delta在终端转义后立即写入并flush，不等待完整Markdown段落或围栏代码块；中间片段不重新解释Markdown，完整响应仍由Agent loop校验。该路径只消除Host自己的Markdown缓冲，不能制造Provider、SDK或网络没有发送的chunk。
+
+## 后台副作用置信度与终态幂等
+
+后台队列记录现在携带`not-started`、`in-flight`、`confirmed`或`unknown`副作用状态。新队列记录使用schema v2，旧v1记录按事件类型推导状态继续回放。正常观察到Child终态后才标记`confirmed`；孤立的RUNNING/CANCELLING执行恢复为`interrupted`并标记`unknown`，要求人工检查可能的外部副作用。终态写入在状态与置信度完全一致时幂等，冲突观察fail-closed，不覆盖既有证据。队列仍不是Child执行事实源，也不自动重试或声称exactly-once。详见[0159：后台副作用置信度与终态幂等](./decisions/0159-background-effect-confidence.md)。

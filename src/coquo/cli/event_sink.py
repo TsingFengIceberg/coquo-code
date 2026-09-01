@@ -29,6 +29,21 @@ from coquo.cli.presentation import (
     render_prompt_event,
     render_turn_trace,
 )
+from coquo.observability import ObservationEvent, observation_event_json
+
+
+class ObservationJsonSink:
+    """Flush one safe Host observation event per JSON line."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+
+    def __call__(self, event: ObservationEvent) -> None:
+        if not isinstance(event, ObservationEvent):
+            raise TypeError("observation JSON sink received an invalid event")
+        self._stream.write(observation_event_json(event))
+        self._stream.write("\n")
+        self._stream.flush()
 
 
 class TerminalEventSink:
@@ -44,6 +59,7 @@ class TerminalEventSink:
         show_role_markers: bool = False,
         show_waiting: bool = False,
         show_provider_rounds: bool = True,
+        immediate_streaming: bool = False,
         tool_detail_mode: ToolDetailMode = ToolDetailMode.COMPACT,
         markdown_width: int | None = None,
     ) -> None:
@@ -68,6 +84,7 @@ class TerminalEventSink:
                 first_prefix=self._assistant_prefix,
                 continuation_prefix=self._continuation_prefix,
                 prefix_width=self._prefix_width,
+                immediate_streaming=immediate_streaming,
             )
             if render_markdown
             else None

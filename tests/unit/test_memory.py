@@ -9,6 +9,7 @@ import coquo.memory_store as memory_store_module
 
 from coquo.memory import (
     MemoryAccessContext,
+    MemoryCaptureMode,
     MemoryError,
     MemoryRecord,
     MemoryRecallMode,
@@ -84,12 +85,28 @@ def test_memory_config_reads_legacy_v1_without_rewriting_and_next_write_uses_v2(
     updated = store.update(tools=True)
     assert updated.tools is True
     assert json.loads(store.path.read_text()) == updated.to_mapping()
-    assert updated.to_mapping()["schema_version"] == 2
+    assert updated.to_mapping()["schema_version"] == 3
 
     transitional = dict(legacy, retrieval="semantic")
     store.path.write_text(json.dumps(transitional) + "\n", encoding="utf-8")
     assert store.load().retrieval is MemoryRetrievalMode.SEMANTIC
     assert json.loads(store.path.read_text()) == transitional
+
+
+def test_memory_config_reads_v3_capture_and_rejects_unknown_capture(tmp_path: Path) -> None:
+    store = MemoryConfigStore(tmp_path)
+    saved = store.update(
+        enabled=True,
+        capture=MemoryCaptureMode.CONSERVATIVE,
+    )
+    assert saved.capture is MemoryCaptureMode.CONSERVATIVE
+    assert json.loads(store.path.read_text()) == saved.to_mapping()
+
+    payload = saved.to_mapping()
+    payload["capture"] = "aggressive"
+    store.path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(MemoryError, match="capture"):
+        store.load()
 
 
 def test_memory_config_concurrent_field_updates_are_serialized(tmp_path: Path) -> None:
@@ -373,6 +390,60 @@ def test_post_commit_extraction_ignores_unmarked_model_conversation(tmp_path: Pa
     assert MemoryStore(tmp_path).count() == 0
 
 
+def test_conservative_capture_proposes_only_allowlisted_ordinary_user_facts(tmp_path: Path) -> None:
+    MemoryConfigStore(tmp_path).update(
+        enabled=True,
+        write=MemoryWriteMode.PROPOSE,
+        capture=MemoryCaptureMode.CONSERVATIVE,
+    )
+    extractor = MemoryCandidateExtractor(tmp_path)
+    preferred = CommittedTurn(
+        (UserMessage("I prefer concise release reports."), AssistantText("noted")),
+        UserMessage("I prefer concise release reports."),
+        AssistantText("noted"),
+    )
+    proposed = extractor.after_commit(
+        preferred, session_id="session-1", source_turn=1, authorized=True
+    )
+    assert proposed.memory_id is not None
+    assert proposed.confirmed is False
+    assert proposed.reason == "conservative_candidate_requires_confirmation"
+    record = MemoryStore(tmp_path).get(proposed.memory_id)
+    assert record.status is MemoryStatus.CANDIDATE
+    assert record.category == "conservative_candidate"
+
+    ordinary = CommittedTurn(
+        (UserMessage("Please inspect the project."), AssistantText("done")),
+        UserMessage("Please inspect the project."),
+        AssistantText("done"),
+    )
+    ignored = extractor.after_commit(
+        ordinary, session_id="session-1", source_turn=2, authorized=True
+    )
+    assert ignored.memory_id is None
+    assert ignored.reason == "no_accepted_memory_pattern"
+
+
+def test_conservative_capture_never_auto_confirms_implicit_candidate(tmp_path: Path) -> None:
+    MemoryConfigStore(tmp_path).update(
+        enabled=True,
+        write=MemoryWriteMode.AUTO,
+        capture=MemoryCaptureMode.CONSERVATIVE,
+    )
+    turn = CommittedTurn(
+        (UserMessage("项目要求发布前运行完整测试。"), AssistantText("好的")),
+        UserMessage("项目要求发布前运行完整测试。"),
+        AssistantText("好的"),
+    )
+    result = MemoryCandidateExtractor(tmp_path).after_commit(
+        turn, session_id="session-1", source_turn=1, authorized=True
+    )
+    assert result.memory_id is not None
+    assert result.confirmed is False
+    assert result.reason == "conservative_candidate_requires_confirmation"
+    assert MemoryStore(tmp_path).get(result.memory_id).status is MemoryStatus.CANDIDATE
+
+
 def test_candidate_governance_deduplicates_lists_conflicts_and_consolidates(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path)
     first = store.create_candidate(
@@ -480,31 +551,129 @@ def test_memory_consolidation_reports_durable_partial_append(monkeypatch, tmp_pa
     assert store.observations()[-1].outcome == "partial"
 
 
-def test_semantic_retrieval_degrades_to_bounded_text_without_backend(tmp_path: Path) -> None:
+def test_semantic_retrieval_uses_bounded_local_vectors_and_paraphrase_aliases(
+    tmp_path: Path,
+) -> None:
     store = MemoryStore(tmp_path)
     record = store.create_candidate(
-        "Deterministic release checks",
+        "发布窗口为周五 16:20，区域为 ca-central-1。",
         scope=MemoryScope.WORKSPACE,
         scope_id="workspace-one",
     )
     store.confirm(record.memory_id)
     result = SemanticMemoryRetriever().retrieve(
         store,
-        "release checks",
+        "什么时候部署以及在哪个 region？",
         scope=MemoryScope.WORKSPACE,
         scope_id="workspace-one",
         limit=1,
+        statuses=frozenset({MemoryStatus.CONFIRMED}),
+        touch=False,
     )
-    assert result.strategy == "text-fallback"
-    assert result.degraded is True
+    assert result.strategy == "semantic-local-v1"
+    assert result.degraded is False
     assert [item.memory_id for item in result.records] == [record.memory_id]
     assert result.records[0].status is MemoryStatus.CONFIRMED
+    assert store.get(record.memory_id).last_recalled_at is None
     config = MemoryConfigStore(tmp_path).update(
         enabled=True,
         recall=MemoryRecallMode.ON,
         retrieval=MemoryRetrievalMode.SEMANTIC,
     )
     assert config.retrieval is MemoryRetrievalMode.SEMANTIC
+
+
+def test_semantic_retrieval_filters_scope_status_and_ranks_relevant_records(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    relevant = store.create_candidate(
+        "Incident response requires rollback after repeated failure.",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+    )
+    stale = store.create_candidate(
+        "Incident response requires rollback after repeated failure.",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+    )
+    other_scope = store.create_candidate(
+        "Incident response requires rollback after repeated failure.",
+        scope=MemoryScope.TASK,
+        scope_id="task-one",
+    )
+    unrelated = store.create_candidate(
+        "The team lunch order is vegetarian.",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+    )
+    for item in (relevant, stale, other_scope, unrelated):
+        store.confirm(item.memory_id)
+    store.transition(stale.memory_id, MemoryStatus.STALE)
+
+    result = SemanticMemoryRetriever().retrieve(
+        store,
+        "回滚异常处理",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+        limit=8,
+        statuses=frozenset({MemoryStatus.CONFIRMED}),
+        touch=True,
+    )
+
+    assert [item.memory_id for item in result.records] == [relevant.memory_id]
+    assert store.get(relevant.memory_id).last_recalled_at is not None
+    assert store.get(stale.memory_id).last_recalled_at is None
+    assert store.get(other_scope.memory_id).last_recalled_at is None
+    assert store.get(unrelated.memory_id).last_recalled_at is None
+
+
+def test_semantic_retrieval_reuses_feature_index_and_invalidates_changed_records(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path)
+    record = store.create_candidate(
+        "部署必须保留可回滚方案。",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+    )
+    store.confirm(record.memory_id)
+    retriever = SemanticMemoryRetriever()
+
+    first = retriever.retrieve(
+        store,
+        "发布回滚",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+        limit=1,
+        statuses=frozenset({MemoryStatus.CONFIRMED}),
+        touch=False,
+    )
+    second = retriever.retrieve(
+        store,
+        "发布回滚",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+        limit=1,
+        statuses=frozenset({MemoryStatus.CONFIRMED}),
+        touch=False,
+    )
+
+    assert first.cache_misses == 1
+    assert first.cache_hits == 0
+    assert second.cache_hits == 1
+    assert second.cache_misses == 0
+
+    store.update(record.memory_id, content="部署改为必须先验证健康检查。")
+    third = retriever.retrieve(
+        store,
+        "部署健康检查",
+        scope=MemoryScope.WORKSPACE,
+        scope_id="workspace-one",
+        limit=1,
+        statuses=frozenset({MemoryStatus.CONFIRMED}),
+        touch=False,
+    )
+    assert third.cache_misses == 1
+    assert third.cache_hits == 0
 
 
 def test_memory_lifecycle_reinforcement_stale_review_and_eviction_are_durable(

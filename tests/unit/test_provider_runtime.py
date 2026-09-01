@@ -19,7 +19,8 @@ from coquo.core.contracts import (
 )
 from coquo.core.session_title import build_session_title_request
 from coquo.providers.definitions import ReasoningEffort, ReasoningProfile, WireProtocol
-from coquo.providers.errors import ProviderAdapterError, output_limit_error
+from coquo.providers.errors import ProviderAdapterError, adapter_error, output_limit_error
+from coquo.core.orchestration import ProviderFailureKind
 from coquo.providers.manager import (
     RuntimeProviderManager,
     RuntimeProviderStateError,
@@ -41,6 +42,7 @@ from coquo.providers.request_context import (
 )
 from coquo.providers.streaming import ProviderResponseOutcome, ProviderTextDelta
 from coquo.providers.usage import ProviderInvocationKind, ProviderTokenUsage
+from coquo.providers.reliability import ProviderReliabilityPolicy
 from coquo.session import ProjectSession
 from coquo.system_prompt import build_system_prompt
 from coquo.tools.glob import GlobTool
@@ -298,6 +300,100 @@ def test_turn_runtime_preflights_and_accounts_session_title_as_turn_usage(tmp_pa
     assert len(usage.latest_turn) == 1
     assert usage.latest_turn[0].kind == ProviderInvocationKind.TURN
     assert usage.latest_turn[0].usage == ProviderTokenUsage(12, 4)
+
+
+def test_non_turn_provider_operations_share_bounded_reliability_policy(tmp_path) -> None:
+    class ReliableOperationsProvider(RecordingProvider):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.title_calls = 0
+            self.review_calls = 0
+            self.compact_calls = 0
+
+        def count_session_title_input_tokens(self, request):
+            return RequestTokenCount(12, RequestTokenCountMethod.ESTIMATED)
+
+        def count_input_tokens(self, request):
+            return RequestTokenCount(12, RequestTokenCountMethod.ESTIMATED)
+
+        def count_compact_summary_input_tokens(self, request):
+            return RequestTokenCount(12, RequestTokenCountMethod.ESTIMATED)
+
+        def generate_session_title_outcome(self, request):
+            self.title_calls += 1
+            if self.title_calls == 1:
+                raise adapter_error(
+                    provider_id="custom",
+                    model_id=self.label,
+                    kind=ProviderFailureKind.TRANSPORT,
+                    code="temporary_transport",
+                    message="temporary title transport failure",
+                    retryable=True,
+                )
+            return ProviderResponseOutcome(
+                AssistantText("Recovered title"),
+                False,
+                ProviderTokenUsage(12, 2),
+            )
+
+        def respond(self, request):
+            self.review_calls += 1
+            if self.review_calls == 1:
+                raise adapter_error(
+                    provider_id="custom",
+                    model_id=self.label,
+                    kind=ProviderFailureKind.TIMEOUT,
+                    code="temporary_timeout",
+                    message="temporary review timeout",
+                    retryable=True,
+                )
+            return AssistantText("review")
+
+        def summarize_compact(self, request):
+            self.compact_calls += 1
+            if self.compact_calls == 1:
+                raise adapter_error(
+                    provider_id="custom",
+                    model_id=self.label,
+                    kind=ProviderFailureKind.PROVIDER_UNAVAILABLE,
+                    code="temporary_unavailable",
+                    message="temporary compact outage",
+                    retryable=True,
+                )
+            return AssistantText("summary")
+
+    provider = ReliableOperationsProvider("one")
+    manager = RuntimeProviderManager(
+        configured_store(tmp_path),
+        environment={},
+        profile="one",
+        provider_factory=lambda route, *, environment: provider,
+        reliability_policy=ProviderReliabilityPolicy(
+            max_attempts=2,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+        ),
+    )
+    with manager.provider_for_turn() as runtime:
+        assert runtime.generate_session_title(
+            build_session_title_request("retry title")
+        ) == AssistantText("Recovered title")
+        review_request = ConversationRequest(
+            build_system_prompt(), (UserMessage("review"),), allow_tools=False
+        )
+        assert runtime.review(review_request) == AssistantText("review")
+        summary = CompactSummaryRequest(build_compact_prompt(), "source", 20)
+        assert runtime.summarize(summary) == AssistantText("summary")
+
+    assert provider.title_calls == 2
+    assert provider.review_calls == 2
+    assert provider.compact_calls == 2
+    usage = manager.usage_snapshot()
+    assert usage.latest_compaction is not None
+    assert usage.profile_compaction_totals.unknown_invocations == 2
+    assert usage.profile_review_totals.unknown_invocations == 2
+    assert usage.profile_turn_totals.known_invocations == 1
+    assert usage.profile_turn_totals.unknown_invocations == 1
 
 
 def test_runtime_usage_retains_known_usage_from_output_limit_failure(tmp_path) -> None:

@@ -14,6 +14,8 @@ import hashlib
 import json
 from collections import deque
 from datetime import datetime, timezone
+from threading import RLock
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 
@@ -45,6 +47,9 @@ class ObservationEvidence(StrEnum):
 
 class ObservationError(ValueError):
     """Raised for an invalid Host observation query."""
+
+
+OBSERVATION_EVENT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,7 @@ class ObservationEvent:
 
     def to_mapping(self) -> dict[str, object]:
         return {
+            "schema_version": OBSERVATION_EVENT_SCHEMA_VERSION,
             "event_id": self.event_id,
             "trace_id": self.trace_id,
             "source": self.source.value,
@@ -183,6 +189,9 @@ class ObservationStream:
         self.retention = retention
         self._events: deque[ObservationEvent] = deque(maxlen=retention.max_events)
         self._sequence = 0
+        self._lock = RLock()
+        self._subscribers: dict[int, Callable[[ObservationEvent], None]] = {}
+        self._next_subscriber_id = 1
 
     def publish_prompt(self, event: object) -> ObservationEvent:
         """Publish a content-free projection of an existing live Host event."""
@@ -191,7 +200,7 @@ class ObservationStream:
         return self.publish(
             record_type=record_type,
             status=status,
-            summary=record_type,
+            summary=_live_summary(event, record_type),
             related_ids=_related_ids(event),
         )
 
@@ -199,13 +208,39 @@ class ObservationStream:
         """Attach the current volatile turn context to subsequent events."""
         if not isinstance(context, ObservationContext):
             raise TypeError("observation stream context is invalid")
-        if context.session_id is not None and context.session_id != self.source_id:
-            # A ProjectSession can switch its durable Session in place. Do not
-            # let live events from the previous Session bleed into the new one.
-            self.source_id = context.session_id
-            self._events.clear()
-            self._sequence = 0
-        self.context = context
+        with self._lock:
+            if context.session_id is not None and context.session_id != self.source_id:
+                # A ProjectSession can switch its durable Session in place. Do not
+                # let live events from the previous Session bleed into the new one.
+                self.source_id = context.session_id
+                self._events.clear()
+                self._sequence = 0
+            self.context = context
+
+    def subscribe(self, callback: Callable[[ObservationEvent], None]) -> Callable[[], None]:
+        """Subscribe to live events and return an idempotent unsubscribe callback.
+
+        Subscribers are process-local presentation hooks. Callback failures are
+        isolated from the Agent loop, and callbacks never run while the stream
+        lock is held.
+        """
+        if not callable(callback):
+            raise TypeError("observation subscriber must be callable")
+        with self._lock:
+            subscriber_id = self._next_subscriber_id
+            self._next_subscriber_id += 1
+            self._subscribers[subscriber_id] = callback
+        removed = False
+
+        def unsubscribe() -> None:
+            nonlocal removed
+            if removed:
+                return
+            removed = True
+            with self._lock:
+                self._subscribers.pop(subscriber_id, None)
+
+        return unsubscribe
 
     def publish(
         self,
@@ -219,37 +254,47 @@ class ObservationStream:
         _text(record_type, "live observation record type", 96)
         _text(status, "live observation status", 64)
         _text(summary, "live observation summary", 512)
-        event = ObservationEvent(
-            event_id="obs-v1-"
-            + hashlib.sha256(
-                f"{self.context.trace_id}\0live\0{self.source_id}\0{self._sequence}\0{record_type}".encode()
-            ).hexdigest(),
-            trace_id=self.context.trace_id,
-            source=ObservationSource.SESSION,
-            source_id=self.source_id,
-            sequence=self._sequence,
-            occurred_at=occurred_at or _now(),
-            record_type=record_type,
-            phase=ObservationPhase.OBSERVED,
-            status=status,
-            evidence=ObservationEvidence.HOST_OBSERVED,
-            summary=summary,
-            parent_event_id=self._events[-1].event_id
-            if self._events
-            else self.context.parent_event_id,
-            related_ids=related_ids,
-        )
-        self._events.append(event)
-        self._sequence += 1
-        self._expire()
+        with self._lock:
+            event = ObservationEvent(
+                event_id="obs-v1-"
+                + hashlib.sha256(
+                    f"{self.context.trace_id}\0live\0{self.source_id}\0{self._sequence}\0{record_type}".encode()
+                ).hexdigest(),
+                trace_id=self.context.trace_id,
+                source=ObservationSource.SESSION,
+                source_id=self.source_id,
+                sequence=self._sequence,
+                occurred_at=occurred_at or _now(),
+                record_type=record_type,
+                phase=ObservationPhase.OBSERVED,
+                status=status,
+                evidence=ObservationEvidence.HOST_OBSERVED,
+                summary=summary,
+                parent_event_id=self._events[-1].event_id
+                if self._events
+                else self.context.parent_event_id,
+                related_ids=related_ids,
+            )
+            self._events.append(event)
+            self._sequence += 1
+            self._expire()
+            subscribers = tuple(self._subscribers.values())
+        for callback in subscribers:
+            try:
+                callback(event)
+            except Exception:
+                # A diagnostics consumer must never change Agent causality.
+                continue
         return event
 
     def snapshot(self) -> tuple[ObservationEvent, ...]:
-        self._expire()
-        return tuple(self._events)
+        with self._lock:
+            self._expire()
+            return tuple(self._events)
 
     def clear(self) -> None:
-        self._events.clear()
+        with self._lock:
+            self._events.clear()
 
     def _expire(self) -> None:
         if self.retention.max_age_seconds is None or not self._events:
@@ -447,7 +492,10 @@ def project_background_items(
                 phase=phase,
                 status=str(status),
                 evidence=ObservationEvidence.HOST_OBSERVED,
-                summary=f"background submission {state}",
+                summary=(
+                    f"background submission {state} "
+                    f"effect={getattr(item, 'effect_state', 'confirmed')}"
+                ),
                 related_ids=tuple(sorted(related.items())),
             )
         )
@@ -841,6 +889,27 @@ def _live_status(event: object) -> str:
     if "committed" in name or "prepared" in name or "completed" in name:
         return "completed"
     return "observed"
+
+
+def _live_summary(event: object, record_type: str) -> str:
+    """Describe stream delivery without retaining response content."""
+    text = getattr(event, "text", None)
+    if record_type == "live_assistant_response_text_delta_received" and isinstance(text, str):
+        return f"{record_type} chars={len(text)} bytes={len(text.encode('utf-8'))}"
+    if record_type == "live_provider_invocation_finished":
+        elapsed = getattr(event, "elapsed_milliseconds", None)
+        delta_count = getattr(event, "delta_count", 0)
+        first_delta = getattr(event, "first_delta_milliseconds", None)
+        max_gap = getattr(event, "max_delta_gap_milliseconds", None)
+        retry_count = getattr(event, "retry_count", 0)
+        return (
+            f"{record_type} elapsed_ms={elapsed if elapsed is not None else 'none'} "
+            f"delta_count={delta_count} "
+            f"first_delta_ms={first_delta if first_delta is not None else 'none'} "
+            f"max_delta_gap_ms={max_gap if max_gap is not None else 'none'} "
+            f"retry_count={retry_count}"
+        )
+    return record_type
 
 
 def _camel_parts(value: str) -> tuple[str, ...]:

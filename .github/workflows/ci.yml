@@ -1,0 +1,68 @@
+name: offline release gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      UV_CACHE_DIR: /tmp/coquo-uv-cache
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install locked environment
+        run: uv sync --frozen
+      - name: Run unit and integration tests
+        run: uv run pytest
+      - name: Run offline evals
+        run: uv run coquo eval run all --format json
+      - name: Exercise public fake CLI and Session resume
+        shell: bash
+        run: |
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/workspace" "$tmp/config"
+          XDG_CONFIG_HOME="$tmp/config" uv run coquo -C "$tmp/workspace" prompt "Hello"
+          XDG_CONFIG_HOME="$tmp/config" uv run coquo -C "$tmp/workspace" session show latest
+          XDG_CONFIG_HOME="$tmp/config" uv run coquo -C "$tmp/workspace" --resume latest prompt "Second"
+      - name: Exercise offline release compatibility smoke
+        run: uv run python scripts/offline_release_smoke.py
+      - name: Recheck durable recovery boundaries
+        run: >-
+          uv run pytest
+          tests/unit/test_session_store.py
+          tests/unit/test_child_run_recovery.py
+          tests/unit/test_child_supervisor.py
+          tests/unit/test_task_runtime.py
+          tests/unit/test_memory.py
+          tests/unit/test_real_provider_acceptance.py
+      - name: Verify real acceptance is opt-in only
+        run: uv run python scripts/real_provider_acceptance.py --help
+      - name: Check lint, formatting, lock, and whitespace
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv lock --check
+          git diff --check

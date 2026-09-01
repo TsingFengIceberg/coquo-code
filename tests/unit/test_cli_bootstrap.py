@@ -76,6 +76,31 @@ def test_prompt_command_runs_the_deterministic_foundation_loop(capsys, tmp_path)
     assert captured.err == ""
 
 
+def test_prompt_command_can_emit_live_content_free_observations_as_ndjson(tmp_path) -> None:
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["--events", "ndjson", "prompt", "Hello"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={},
+            user_profile_path=tmp_path / "user.json",
+            project_profile_path=tmp_path / "project.json",
+        )
+        == 0
+    )
+
+    records = [json.loads(line) for line in errors.getvalue().splitlines()]
+    assert records
+    assert records[0]["record_type"] == "live_provider_invocation_started"
+    assert records[-1]["record_type"] == "live_turn_commit_completed"
+    assert all("response" not in record for record in records)
+    assert all("Hello" not in line for line in errors.getvalue().splitlines())
+
+
 def test_prompt_command_explains_output_limit_without_committing_turn(
     monkeypatch, tmp_path
 ) -> None:
@@ -196,6 +221,40 @@ def test_prompt_command_buffers_streamed_final_but_flushes_companion_text_to_std
     assert errors.getvalue() == (
         "I will inspect.\n[tool 1/6] read_file path='README.md'\n[tool 1/6] succeeded\n"
     )
+
+
+def test_tty_prompt_command_flushes_streamed_assistant_deltas_to_terminal(
+    monkeypatch, tmp_path
+) -> None:
+    class StreamingSession:
+        startup_resume_result = None
+
+        def prompt(self, _text, *, event_sink=None):
+            event_sink(AssistantResponseTextDeltaReceived("first "))
+            event_sink(AssistantResponseTextDeltaReceived("chunk"))
+            event_sink(AssistantFinalTextStreamCommitted("first chunk"))
+            return "first chunk"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ProjectSession, "open", lambda *_args, **_kwargs: StreamingSession())
+    output = InteractiveStream()
+    errors = InteractiveStream()
+
+    assert (
+        main(
+            ["prompt", "stream"],
+            stdout=output,
+            stderr=errors,
+            cwd=tmp_path,
+            environment={"NO_COLOR": "1"},
+        )
+        == 0
+    )
+
+    assert output.getvalue() == "first chunk\n"
+    assert errors.getvalue() == ""
 
 
 def test_prompt_command_handles_stream_interrupt_without_leaking_partial_stdout(

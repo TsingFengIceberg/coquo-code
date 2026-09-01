@@ -319,6 +319,45 @@ def test_tty_feedback_marks_streamed_markdown_without_rendering_marker_as_a_list
     assert "**" not in rendered
 
 
+def test_terminal_event_sink_immediate_streaming_flushes_before_final_event() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        render_markdown=True,
+        immediate_streaming=True,
+    )
+
+    sink(AssistantResponseTextDeltaReceived("still waiting"))
+
+    assert stream.getvalue() == "still waiting"
+    assert stream.flush_count == 1
+
+    sink(AssistantFinalTextStreamCommitted("still waiting"))
+    assert stream.getvalue() == "still waiting\n"
+
+
+def test_terminal_event_sink_immediate_streaming_flushes_each_delta_independently() -> None:
+    stream = FlushingStream()
+    sink = TerminalEventSink(
+        stream,
+        color=False,
+        render_markdown=True,
+        immediate_streaming=True,
+    )
+
+    sink(AssistantResponseTextDeltaReceived("first"))
+    assert stream.getvalue() == "first"
+    assert stream.flush_count == 1
+
+    sink(AssistantResponseTextDeltaReceived(" second"))
+    assert stream.getvalue() == "first second"
+    assert stream.flush_count == 2
+
+    sink(AssistantFinalTextStreamCommitted("first second"))
+    assert stream.getvalue() == "first second\n"
+
+
 def test_tty_feedback_keeps_nonstream_markdown_final_on_the_role_marker_line() -> None:
     stream = FlushingStream()
     sink = TerminalEventSink(

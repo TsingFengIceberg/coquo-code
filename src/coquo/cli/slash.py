@@ -30,6 +30,7 @@ from coquo.cli.presentation import (
     TASK_HELP,
     CHILD_HELP,
     TEAM_HELP,
+    WORKFLOW_HELP,
     MessageKind,
     ToolDetailMode,
     render_compact_result,
@@ -108,6 +109,7 @@ from coquo.cli.presentation import (
     render_team_schedule,
     render_task_timeline,
     render_task_verification_result,
+    render_workflow_drive,
     render_switch_rejection,
     render_tool_ledgers,
     render_tool_catalog,
@@ -144,6 +146,7 @@ from coquo.tools.git_repository import GitObservationError
 from coquo.tools.git_log import DEFAULT_GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT
 from coquo.tools.catalog import TOOL_CATALOG
 from coquo.tools.web_search import WebSearchPreparationError
+from coquo.workflow_orchestration import WorkflowDrivePolicy, WorkflowError
 
 TOP_LEVEL_COMMANDS = (
     "/help",
@@ -176,6 +179,7 @@ TOP_LEVEL_COMMANDS = (
     "/task",
     "/child",
     "/team",
+    "/workflow",
     "/resume",
     "/clear",
 )
@@ -252,6 +256,8 @@ SLASH_COMPLETIONS = (
     SlashCompletionSpec("/task", "Task commands", True),
     SlashCompletionSpec("/child", "Durable Child Run control", True),
     SlashCompletionSpec("/team", "Durable Team and member identity", True),
+    SlashCompletionSpec("/workflow", "Bounded Task-Child-Team workflow driver", True),
+    SlashCompletionSpec("/workflow drive", "Drive one workflow until Reviewer boundary"),
     SlashCompletionSpec("/resume", "Resume a Session", True),
     SlashCompletionSpec("/clear", "Clear terminal output", True),
     SlashCompletionSpec("/exit", "Exit the REPL", True),
@@ -439,6 +445,7 @@ SLASH_COMPLETIONS = (
 
 class ReplSession(Protocol):
     turns: tuple
+    workspace: object
 
     def action_audits(self): ...
 
@@ -523,6 +530,8 @@ class ReplSession(Protocol):
     def list_sessions(self): ...
 
     def create_task(self, objective: str, acceptance_criteria: tuple[str, ...] = ()): ...
+
+    def drive_workflow(self, workflow_id: str, *, policy=None, cancellation=None): ...
 
     def list_tasks(self): ...
 
@@ -1070,6 +1079,10 @@ def dispatch_slash(
         return SlashResult(handled=True, message=CHILD_HELP, kind="info")
     if command == "/team":
         return SlashResult(handled=True, message=TEAM_HELP, kind="info")
+    if command == "/workflow":
+        return SlashResult(handled=True, message=WORKFLOW_HELP, kind="info")
+    if command == "/workflow drive" or command.startswith("/workflow drive "):
+        return _workflow_drive(command, session)
     if command == "/child create" or command.startswith("/child create "):
         return _child_create(command, session)
     if command == "/child prepare" or command.startswith("/child prepare "):
@@ -3216,6 +3229,43 @@ def _task_proposal_drive(command: str, session: ReplSession) -> SlashResult:
     )
 
 
+def _workflow_drive(command: str, session: ReplSession) -> SlashResult:
+    """Run the bounded Host workflow driver from the live REPL Session."""
+    parts = command.split()
+    usage = "Usage: /workflow drive <workflow-id> [1-4] [foreground|background]"
+    if len(parts) not in {3, 4, 5} or parts[:2] != ["/workflow", "drive"]:
+        return _usage(usage)
+    workflow_id = parts[2]
+    max_stages = 2
+    background = False
+    limit_seen = False
+    mode_seen = False
+    for value in parts[3:]:
+        if value.isascii() and value.isdigit() and not limit_seen:
+            max_stages = int(value)
+            limit_seen = True
+        elif value in {"foreground", "background"} and not mode_seen:
+            background = value == "background"
+            mode_seen = True
+        else:
+            return _usage(usage)
+    if not 1 <= max_stages <= 4:
+        return _usage(usage)
+    return _call(
+        lambda: render_workflow_drive(
+            session.drive_workflow(
+                workflow_id,
+                policy=WorkflowDrivePolicy(
+                    max_stages=max_stages,
+                    background=background,
+                ),
+            )
+        ),
+        kind="info",
+        failure_prefix="Workflow drive failed",
+    )
+
+
 def _task_admission_id_from_command(command: str, operation: str) -> str | None:
     parts = command.split()
     if len(parts) != 4 or parts[:3] != ["/task", "proposal", operation]:
@@ -3901,6 +3951,7 @@ def _command_error(error: Exception, *, failure_prefix: str) -> SlashResult:
             RuntimeProviderStateError,
             RuntimeRouteError,
             SessionStoreError,
+            WorkflowError,
         ),
     ):
         message = f"{failure_prefix}: {error}"

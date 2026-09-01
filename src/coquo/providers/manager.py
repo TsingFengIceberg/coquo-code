@@ -51,6 +51,11 @@ from coquo.providers.request_context import (
     raise_for_context_fit,
     rejects_context_transition,
 )
+from coquo.providers.reliability import (
+    ProviderReliabilityBudgetError,
+    ProviderReliabilityPolicy,
+    invoke_with_reliability,
+)
 from coquo.providers.resolver import resolve_profile_route, resolve_runtime_route
 from coquo.providers.streaming import (
     ProviderResponseOutcome,
@@ -161,6 +166,43 @@ class RuntimeStatus:
         return self.profile
 
 
+def _invoke_reliable_operation(
+    operation: Callable[[object], object],
+    request: object,
+    *,
+    report: ContextFitReport,
+    policy: ProviderReliabilityPolicy,
+    usage_tracker: RuntimeUsageTracker,
+    usage_kind: ProviderInvocationKind,
+) -> ProviderResponseOutcome:
+    """Apply the common retry and usage contract to a non-turn operation."""
+
+    def invoke(_event_sink: Callable[[object], None]) -> tuple[ProviderResponseOutcome, bool]:
+        result = operation(request)
+        if isinstance(result, ProviderResponseOutcome):
+            return result, result.text_was_streamed
+        return ProviderResponseOutcome(result, False), False
+
+    try:
+        reliable = invoke_with_reliability(
+            invoke,
+            report=report,
+            policy=policy,
+            cancellation=None,
+            event_sink=lambda _event: None,
+            usage_sink=lambda usage: usage_tracker.record(usage_kind, usage),
+        )
+    except ProviderAdapterError:
+        # Each adapter failure's usage was recorded by the reliability helper.
+        raise
+    except ProviderReliabilityBudgetError:
+        raise
+    except BaseException:
+        usage_tracker.record(usage_kind, None)
+        raise
+    return reliable.outcome
+
+
 @dataclass(frozen=True)
 class CurrentTargetContextAssessment:
     """One read-only fit assessment for the coherent current runtime target."""
@@ -179,6 +221,7 @@ class CompactionRuntimeSnapshot:
     capability: ModelContextCapability
     status: RuntimeStatus
     usage_tracker: RuntimeUsageTracker = field(default_factory=RuntimeUsageTracker)
+    reliability_policy: ProviderReliabilityPolicy = field(default_factory=ProviderReliabilityPolicy)
 
     def assess_summary_request(self, request: CompactSummaryRequest) -> ContextFitReport:
         return _assess_summary_request(
@@ -194,30 +237,23 @@ class CompactionRuntimeSnapshot:
             request=request,
         )
         raise_for_context_fit(report)
-        try:
-            operation = getattr(self.provider, "summarize_compact_outcome", None)
-            if callable(operation):
-                outcome = operation(request)
-                if not isinstance(outcome, ProviderResponseOutcome):
-                    raise ValueError("provider returned an invalid compact response outcome")
-                response = outcome.response
-                usage = outcome.usage
-            else:
-                operation = getattr(self.provider, "summarize_compact", None)
-                if not callable(operation):
-                    raise CompactionUnavailableError(
-                        "current provider does not support controlled compaction"
-                    )
-                response = operation(request)
-                usage = None
-        except ProviderAdapterError as error:
-            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, error.usage)
-            raise
-        except BaseException:
+        operation = getattr(self.provider, "summarize_compact_outcome", None)
+        if not callable(operation):
+            operation = getattr(self.provider, "summarize_compact", None)
+        if not callable(operation):
             self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
-            raise
-        self.usage_tracker.record(ProviderInvocationKind.COMPACTION, usage)
-        return response
+            raise CompactionUnavailableError(
+                "current provider does not support controlled compaction"
+            )
+        outcome = _invoke_reliable_operation(
+            operation,
+            request,
+            report=report,
+            policy=self.reliability_policy,
+            usage_tracker=self.usage_tracker,
+            usage_kind=ProviderInvocationKind.COMPACTION,
+        )
+        return outcome.response
 
     def assess_context(self, request: ConversationRequest) -> ContextFitReport:
         return assess_context_fit(
@@ -264,6 +300,7 @@ class TurnRuntimeSnapshot:
     capability: ModelContextCapability
     status: RuntimeStatus
     usage_tracker: RuntimeUsageTracker = field(default_factory=RuntimeUsageTracker)
+    reliability_policy: ProviderReliabilityPolicy = field(default_factory=ProviderReliabilityPolicy)
 
     @property
     def streaming_supported(self) -> bool:
@@ -314,30 +351,23 @@ class TurnRuntimeSnapshot:
             request=request,
         )
         raise_for_context_fit(report)
-        try:
-            operation = getattr(self.provider, "summarize_compact_outcome", None)
-            if callable(operation):
-                outcome = operation(request)
-                if not isinstance(outcome, ProviderResponseOutcome):
-                    raise ValueError("provider returned an invalid compact response outcome")
-                response = outcome.response
-                usage = outcome.usage
-            else:
-                operation = getattr(self.provider, "summarize_compact", None)
-                if not callable(operation):
-                    raise CompactionUnavailableError(
-                        "current provider does not support controlled compaction"
-                    )
-                response = operation(request)
-                usage = None
-        except ProviderAdapterError as error:
-            self.usage_tracker.record(ProviderInvocationKind.COMPACTION, error.usage)
-            raise
-        except BaseException:
+        operation = getattr(self.provider, "summarize_compact_outcome", None)
+        if not callable(operation):
+            operation = getattr(self.provider, "summarize_compact", None)
+        if not callable(operation):
             self.usage_tracker.record(ProviderInvocationKind.COMPACTION, None)
-            raise
-        self.usage_tracker.record(ProviderInvocationKind.COMPACTION, usage)
-        return response
+            raise CompactionUnavailableError(
+                "current provider does not support controlled compaction"
+            )
+        outcome = _invoke_reliable_operation(
+            operation,
+            request,
+            report=report,
+            policy=self.reliability_policy,
+            usage_tracker=self.usage_tracker,
+            usage_kind=ProviderInvocationKind.COMPACTION,
+        )
+        return outcome.response
 
     def generate_session_title(self, request: SessionTitleRequest) -> ProviderResponse:
         """Generate one bounded no-tools title through an optional adapter operation."""
@@ -346,27 +376,25 @@ class TurnRuntimeSnapshot:
             raise SessionTitleUnavailableError(
                 "current provider does not support Session title generation"
             )
-        if self.route is not None:
-            report = _assess_session_title_request(
-                provider=self.provider,
-                capability=self.capability,
-                request=request,
-            )
-            raise_for_context_fit(report)
-        try:
-            outcome = operation(request)
-            if not isinstance(outcome, ProviderResponseOutcome):
+        if self.route is None:
+            result = operation(request)
+            if not isinstance(result, ProviderResponseOutcome):
                 raise ValueError("provider returned an invalid Session-title outcome")
-        except ProviderAdapterError as error:
-            if self.route is not None:
-                self.usage_tracker.record(ProviderInvocationKind.TURN, error.usage)
-            raise
-        except BaseException:
-            if self.route is not None:
-                self.usage_tracker.record(ProviderInvocationKind.TURN, None)
-            raise
-        if self.route is not None:
-            self.usage_tracker.record(ProviderInvocationKind.TURN, outcome.usage)
+            return result.response
+        report = _assess_session_title_request(
+            provider=self.provider,
+            capability=self.capability,
+            request=request,
+        )
+        raise_for_context_fit(report)
+        outcome = _invoke_reliable_operation(
+            operation,
+            request,
+            report=report,
+            policy=self.reliability_policy,
+            usage_tracker=self.usage_tracker,
+            usage_kind=ProviderInvocationKind.TURN,
+        )
         return outcome.response
 
     def respond(self, request: ConversationRequest) -> ProviderResponse:
@@ -396,20 +424,19 @@ class TurnRuntimeSnapshot:
         )
         raise_for_context_fit(report)
         self.usage_tracker.record_context(report)
-        try:
-            outcome = respond_with_streaming(
+        outcome = _invoke_reliable_operation(
+            lambda item: respond_with_streaming(
                 self.provider,
-                request,
+                item,
                 event_sink=lambda _delta: None,
                 prefer_stream=False,
-            )
-        except ProviderAdapterError as error:
-            self.usage_tracker.record(ProviderInvocationKind.REVIEW, error.usage)
-            raise
-        except BaseException:
-            self.usage_tracker.record(ProviderInvocationKind.REVIEW, None)
-            raise
-        self.usage_tracker.record(ProviderInvocationKind.REVIEW, outcome.usage)
+            ),
+            request,
+            report=report,
+            policy=self.reliability_policy,
+            usage_tracker=self.usage_tracker,
+            usage_kind=ProviderInvocationKind.REVIEW,
+        )
         return outcome.response
 
     def respond_stream(
@@ -433,6 +460,7 @@ class TurnRuntimeSnapshot:
         event_sink: ProviderTextDeltaSink,
         prefer_stream: bool,
         preflight_sink: Callable[[ContextFitReport], None] | None,
+        cancellation=None,
     ) -> ProviderResponseOutcome:
         """Publish one preflight, invoke once, and account for actual or unknown usage."""
         if self.route is None:
@@ -452,26 +480,57 @@ class TurnRuntimeSnapshot:
         self.usage_tracker.record_context(report)
         if preflight_sink is not None:
             preflight_sink(report)
-        try:
-            outcome = respond_with_streaming(
-                self.provider,
-                request,
-                event_sink=event_sink,
-                prefer_stream=prefer_stream,
+
+        def invoke(attempt_sink: Callable[[object], None]) -> tuple[ProviderResponseOutcome, bool]:
+            saw_delta = False
+
+            def receive(event: object) -> None:
+                nonlocal saw_delta
+                if hasattr(event, "text"):
+                    saw_delta = True
+                attempt_sink(event)
+
+            return (
+                respond_with_streaming(
+                    self.provider,
+                    request,
+                    event_sink=receive,
+                    prefer_stream=prefer_stream,
+                    cancellation=cancellation,
+                ),
+                saw_delta,
             )
-        except ProviderAdapterError as error:
-            self.usage_tracker.record(ProviderInvocationKind.TURN, error.usage)
+
+        try:
+            reliable = invoke_with_reliability(
+                invoke,
+                report=report,
+                policy=self.reliability_policy,
+                cancellation=cancellation,
+                event_sink=event_sink,
+                usage_sink=lambda usage: self.usage_tracker.record(
+                    ProviderInvocationKind.TURN, usage
+                ),
+            )
+            outcome = reliable.outcome
+        except ProviderReliabilityBudgetError:
+            # A local budget rejection before network I/O has no Provider
+            # invocation to account for; successful attempts were already
+            # recorded by ``invoke_with_reliability`` before the rejection.
+            raise
+        except ProviderAdapterError:
             raise
         except BaseException:
             self.usage_tracker.record(ProviderInvocationKind.TURN, None)
             raise
-        self.usage_tracker.record(ProviderInvocationKind.TURN, outcome.usage)
         return ProviderResponseOutcome(
             outcome.response,
             outcome.text_was_streamed,
             outcome.usage,
             report,
             outcome.search_observation,
+            attempts=reliable.attempts,
+            retry_delays_seconds=reliable.retry_delays_seconds,
         )
 
 
@@ -619,6 +678,7 @@ class RuntimeProviderManager:
         fake_factory: Callable[[], ConversationProvider] = ScriptedFakeProvider,
         context_resolver: ModelContextCapabilityResolver | None = None,
         context_cache_path: Path | None = None,
+        reliability_policy: ProviderReliabilityPolicy | None = None,
     ) -> None:
         self._store = store
         self._environment = environment
@@ -646,6 +706,9 @@ class RuntimeProviderManager:
         self._route: RuntimeProviderRoute | None = None
         self._capability = ModelContextCapability.unknown(None)
         self._usage_tracker = RuntimeUsageTracker(self._generation)
+        self._reliability_policy = reliability_policy or ProviderReliabilityPolicy()
+        if not isinstance(self._reliability_policy, ProviderReliabilityPolicy):
+            raise RuntimeProviderStateError("provider reliability policy is invalid")
         _validate_output_budget(max_output_tokens)
         _validate_reasoning_effort(reasoning_effort)
 
@@ -912,6 +975,7 @@ class RuntimeProviderManager:
                 capability,
                 status,
                 self._usage_tracker,
+                self._reliability_policy,
             )
         try:
             yield snapshot
@@ -951,6 +1015,7 @@ class RuntimeProviderManager:
                 capability,
                 status,
                 self._usage_tracker,
+                self._reliability_policy,
             )
         try:
             yield snapshot

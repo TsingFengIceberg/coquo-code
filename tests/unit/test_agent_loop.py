@@ -1501,6 +1501,35 @@ def test_provider_invocation_finish_records_bounded_elapsed_time(
     assert finished.elapsed_milliseconds == 32_500
 
 
+def test_provider_invocation_finish_records_stream_arrival_metrics(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StreamingProvider:
+        def respond_stream(self, _request, *, event_sink):
+            event_sink(ProviderTextDelta("hel"))
+            event_sink(ProviderTextDelta("lo"))
+            return AssistantText("hello")
+
+    loop = AgentLoop(
+        StreamingProvider(),
+        ReadFileTool(tmp_path),
+        GlobTool(tmp_path),
+        GrepTool(tmp_path),
+        ListDirectoryTool(tmp_path),
+    )
+    clock = iter((1_000_000_000, 2_000_000_000, 5_000_000_000, 8_000_000_000))
+    monkeypatch.setattr("coquo.agent.loop.time.monotonic_ns", lambda: next(clock))
+    events = []
+
+    assert loop.run("stream", event_sink=events.append) == "hello"
+
+    finished = next(event for event in events if isinstance(event, ProviderInvocationFinished))
+    assert finished.elapsed_milliseconds == 7_000
+    assert finished.delta_count == 2
+    assert finished.first_delta_milliseconds == 1_000
+    assert finished.max_delta_gap_milliseconds == 3_000
+
+
 @pytest.mark.parametrize(
     ("error", "expected_outcome"),
     (

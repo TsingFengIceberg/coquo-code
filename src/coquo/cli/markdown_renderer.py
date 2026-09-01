@@ -32,6 +32,7 @@ class TerminalMarkdownRenderer:
         first_prefix: str = "",
         continuation_prefix: str = "",
         prefix_width: int = 0,
+        immediate_streaming: bool = False,
     ) -> None:
         self._stream = stream
         self._color = color
@@ -46,9 +47,13 @@ class TerminalMarkdownRenderer:
         )
         self._pending = ""
         self._started = False
+        self._immediate_streaming = immediate_streaming
+        self._immediate_line_start = True
 
     def push(self, delta: str) -> bool:
         """Buffer one exact delta and render its largest stream-safe prefix."""
+        if self._immediate_streaming:
+            return self._render_immediate(delta)
         self._pending += delta
         boundary = _stream_safe_boundary(self._pending)
         if boundary is None:
@@ -59,6 +64,13 @@ class TerminalMarkdownRenderer:
 
     def flush(self) -> bool:
         """Render the remaining suffix after its response is known to be complete."""
+        if self._immediate_streaming:
+            if not self._started or self._immediate_line_start:
+                return False
+            self._stream.write("\n")
+            self._stream.flush()
+            self._immediate_line_start = True
+            return True
         if not self._pending:
             return False
         pending = self._pending
@@ -86,11 +98,37 @@ class TerminalMarkdownRenderer:
         """Discard an incomplete suffix without presenting it as completed Markdown."""
         self._pending = ""
         self._started = False
+        self._immediate_line_start = True
 
     def reset(self) -> None:
         """Start a new assistant document after one stream completes."""
         self._pending = ""
         self._started = False
+        self._immediate_line_start = True
+
+    def _render_immediate(self, text: str) -> bool:
+        """Flush safe escaped text as soon as it arrives.
+
+        Immediate mode intentionally does not reinterpret Markdown fragments:
+        doing so would require buffering an unclosed construct and recreate the
+        bursty behavior this mode is meant to diagnose.  The completed response
+        is still validated against the streamed text by the Agent loop.
+        """
+        if not text:
+            return False
+        safe_text = escape_terminal_controls(text)
+        rendered: list[str] = []
+        for character in safe_text:
+            if self._immediate_line_start:
+                rendered.append(self._continuation_prefix if self._started else self._first_prefix)
+                self._immediate_line_start = False
+            rendered.append(character)
+            if character == "\n":
+                self._immediate_line_start = True
+        self._stream.write("".join(rendered))
+        self._stream.flush()
+        self._started = True
+        return True
 
     def _render(self, markdown: str) -> bool:
         if not markdown:

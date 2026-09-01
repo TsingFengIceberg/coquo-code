@@ -1770,6 +1770,12 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 134. [0154: Child/Team Recovery Boundaries and Provider Effort Matrix](./decisions/0154-child-team-recovery-and-effort-matrix.md)
 135. [0155: Live Provider Round and Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md)
 136. [0156: Long-Term Memory Contract and Local Store](./decisions/0156-long-term-memory-contract-and-local-store.md)
+137. [0157: Real Provider Acceptance and Stream Diagnostics](./decisions/0157-real-provider-acceptance-and-stream-diagnostics.md)
+138. [0158: Live Observation Event Output](./decisions/0158-live-observation-event-output.md)
+139. [0159: Background Effect Confidence and Terminal Idempotency](./decisions/0159-background-effect-confidence.md)
+140. [0160: Bounded Memory Retrieval Index Cache](./decisions/0160-bounded-memory-retrieval-index-cache.md)
+141. [0161: Bounded Provider Reliability and Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
+142. [0162: Fixed Command Resource Limits](./decisions/0162-fixed-command-resource-limits.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -1901,19 +1907,20 @@ showing the current round and accumulated wait without exposing a Provider
 response, request body, or tool arguments.
 Lifecycle events remain FIFO and non-droppable, while assistant text deltas
 are preserved as separate events for independent flushing. Successful non-TTY prompt and eval output keeps its
-quiet stdout/stderr compatibility contract; a public NDJSON event format is
-left to a separate versioned design. This slice borrows Claw-Code's conceptual
+quiet stdout/stderr compatibility contract; the public NDJSON event format is
+defined by the separate versioned 0158 design. This slice borrows Claw-Code's conceptual
 separation of runs, assistant rounds, and tool results without copying its TUI,
 prompts, wire format, or implementation. See [0155: Live Provider Round and
 Tool Timeline](./decisions/0155-live-provider-round-and-tool-timeline.md).
 
 ## Long-Term Memory Contract and Local Store
 
-New long-term-memory configuration writes use schema v2 while the reader keeps
-the original and transitional v1 shapes compatible without rewriting them.
-Legacy v1 resolves to `retrieval=text` when that field is absent and advances
-only after an explicit update. Corrupt or unreadable configuration fails before
-Provider invocation instead of silently masquerading as disabled memory. Recall
+New long-term-memory configuration writes use schema v3 while the reader keeps
+the original v1 shape and transitional v2 shape compatible without rewriting
+them. Legacy configurations resolve to `retrieval=text` and
+`capture=explicit` when those fields are absent and advance only after an
+explicit update. Corrupt or unreadable configuration fails before Provider
+invocation instead of silently masquerading as disabled memory. Recall
 queries only confirmed records, never touch candidate/stale matches, deduplicate
 all derived-query results, and append at most one `recalled` event for each item
 that actually enters a Prepared Turn. Event count is independent from record
@@ -1938,14 +1945,19 @@ count/create ordering: an optional compacted summary first, multiple
 `[UNTRUSTED MEMORY EVIDENCE]` user-data items next, and current committed
 history last.
 
-The implementation now also exposes `retrieval=text|semantic`; without a
-local backend, semantic mode explicitly degrades to bounded `text-fallback`.
-Only an explicit user `remember:`, `remember that`, or `请记住` request after a
-successful `turn_committed` creates a candidate. `write=propose` leaves it
-pending and `write=auto` confirms it after bounded validation; arbitrary model
-output is never extracted. Deduplication, consolidation, conflict enumeration,
-reinforcement, stale review, and capacity eviction append events with bounded
-reasons, and confirmed conflicts are never silently overwritten.
+The implementation exposes `retrieval=text|semantic`; `semantic` uses the
+deterministic, local, feature-hashed `semantic-local-v1` strategy and does not
+contact a model or network service. It is a bounded replaceable retrieval
+backend, not a learned embedding model. Configuration also exposes
+`capture=explicit|conservative`. Explicit capture accepts only `remember:`
+markers, while conservative capture accepts a small allow-list of preference
+and project-rule sentence forms. Both operate only after a successful
+`turn_committed`; explicit `write=auto` may confirm its candidate, but an
+implicit conservative candidate always remains `candidate` until a later human
+confirmation. Arbitrary model output is never extracted. Deduplication,
+consolidation, conflict enumeration, reinforcement, stale review, and capacity
+eviction append events with bounded reasons, and confirmed conflicts are never
+silently overwritten.
 
 Access is controlled by a Host-owned `MemoryAccessContext`, not by model text.
 The ordinary Host receives the current workspace scope; an active Host Task may
@@ -1964,8 +1976,9 @@ candidate/confirmed/stale/deleted/evicted lifecycle, confidence, source
 Session/turn provenance, and bounded timestamps. Confirmation requires an
 explicit confirmation time; deletion and eviction are terminal. DeerFlow is the
 fact-governance reference and Hermes is the provider-lifecycle reference; this
-slice adds no remote backend and never extracts arbitrary model output, only
-explicit memory markers after a durable turn commit.
+slice adds no remote backend and never extracts arbitrary model output. It
+accepts only explicit markers or the opt-in conservative sentence allow-list,
+always after a durable turn commit.
 
 The local backend is an append-only `.coquo/memory/events.jsonl` event log with
 an exclusive lock. Each event stores the complete current record; append and
@@ -1989,3 +2002,100 @@ model-visible tools. Candidate extraction runs only after durable
 `turn_committed`; Child/Team sharing is Host-authorized and fail-closed. Remote
 Providers remain a later backend option. See [0156: Long-Term Memory Contract
 and Local Store](./decisions/0156-long-term-memory-contract-and-local-store.md).
+
+Semantic recall now reuses a bounded process-local feature index. Each cached
+entry is bound to the memory ID, content, status, update timestamp, and scope
+version; a changed or disappeared record is recomputed or removed. Cache state
+is never durable, shared with Children, or treated as evidence, and retrieval
+results expose content-free candidate and hit/miss diagnostics. The replayed
+memory event log remains the only source of truth. See [0160: Bounded Memory
+Retrieval Index Cache](./decisions/0160-bounded-memory-retrieval-index-cache.md).
+
+## Bounded Provider Reliability and Workflow Driver
+
+Provider reliability distinguishes one logical invocation from its physical
+attempts: the default is one attempt, an explicit policy allows at most three,
+and retry is permitted only for rate-limit, timeout, transport, or provider-
+unavailable failures observed before any text delta. Backoff, `Retry-After`,
+elapsed time, input/output token budgets, known-usage requirements, and
+cancellation are checked before another attempt; visible text is never replayed.
+Every physical attempt contributes usage or an explicit unknown fact to the
+existing Host tracker. Lifecycle events retain only bounded attempt and stream
+diagnostics and never request/response bodies, credentials, or headers.
+
+The Workflow Driver composes the existing Task, Child, and Team ledgers on the
+Host side. It may advance recorded Architect, Explorer, and Executor stages in
+order, bounded by four stages and an elapsed-time limit, and returns an explicit
+`review-ready`, `pending-stage`, `recovery-required`, `stage-failed`,
+`stage-limit`, `elapsed-limit`, `cancelled`, or `blocked` stop reason. It never
+automatically reviews, integrates, accepts, retries, commits, pushes, or creates
+hidden Provider/tool work. Background mode stops at a durable pending stage;
+failure and recovery states require a fresh observation of the authoritative
+ledger. See [0161: Bounded Provider Reliability and Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md).
+
+## Fixed Command Resource Limits
+
+Before releasing the Linux sandbox activation gate and user argv,
+`run_command` applies fixed `resource.prlimit` ceilings: CPU seconds equal the
+requested timeout, address space is 2 GiB, individual file size is 256 MiB, and
+open file descriptors are limited to 1024. These Host limits cannot be raised
+by model arguments or approval mode and layer with bubblewrap/seccomp, workspace,
+environment, output, timeout, and process-group cleanup boundaries. If any limit
+cannot be installed, execution fails closed with
+`command_resource_limits_unavailable` and `resource-limits-rejected`, explicitly
+stating that the command was not started; there is no unsandboxed fallback. See
+[0162: Fixed Command Resource Limits](./decisions/0162-fixed-command-resource-limits.md).
+
+## Real Provider Acceptance and Stream Diagnostics
+
+`scripts/real_provider_acceptance.py` is a manual-only acceptance harness. It
+uses a temporary workspace by default and exercises a final response, a
+bounded read-only tool call, and long-term-memory recall. A caller-provided
+workspace must not already contain the exclusive fixture; the fixture is
+created atomically and cleaned up afterward. The harness requires
+`COQUO_REAL_PROVIDER_ACCEPT=1` plus independent network, credential, and cost
+acknowledgements, refuses to start a Provider when any gate is missing, bounds
+subprocess time and output, and never stores credential values or a report file.
+
+`ProviderInvocationFinished` now carries optional Host-measured stream facts:
+elapsed duration, text-delta count, time to first delta, and maximum inter-delta
+gap. The TTY renders these facts only when deltas were observed. They contain
+no response text or request data and do not affect retry, failure, or commit
+semantics. A large first-delta time points to upstream latency; a large
+inter-delta gap points to provider/transport buffering; a low-gap stream with
+late terminal output points to the Host presentation path. Deterministic tests
+cover the metrics and all acceptance safety gates; CI never invokes a real
+endpoint. See [0157](./decisions/0157-real-provider-acceptance-and-stream-diagnostics.md).
+
+## Live Observation Event Output
+
+`ObservationStream` now exposes a process-local subscription boundary that
+delivers each Host observation event in FIFO order. Subscriber failures are
+isolated and cannot change Agent causality. `coquo --events ndjson prompt
+"Inspect this workspace"` flushes the same bounded, content-free projection as
+one JSON object per line to stderr, while stdout retains the final response.
+Stream deltas expose only character and UTF-8 byte counts, never response text,
+prompts, tool arguments, headers, credentials, reasoning, or tokens; the
+default `--events none` keeps the existing output contract. This is a local
+diagnostic stream, not a claim of provider-side or terminal exactly-once
+rendering. See [0158](./decisions/0158-live-observation-event-output.md).
+
+Interactive TTYs additionally use an `immediate_streaming` presentation path:
+each received delta is terminal-escaped, written, and flushed without waiting
+for a complete Markdown paragraph or fenced code block. Incomplete Markdown is
+not reinterpreted in this path; the Agent loop still validates the complete
+response against the received deltas. This removes Host-side Markdown buffering
+from latency diagnosis, but cannot create chunks that the Provider, SDK, or
+network has not delivered.
+
+## Background Effect Confidence and Terminal Idempotency
+
+Background queue items now carry `not-started`, `in-flight`, `confirmed`, or
+`unknown` side-effect confidence. New records use queue schema v2; legacy v1
+records remain replayable with an event-derived state. A normally observed Child
+terminal record is `confirmed`; an orphaned RUNNING/CANCELLING execution is
+recovered as `interrupted` with `unknown`, requiring human inspection of
+possible external effects. Terminal writes are idempotent only when status and
+confidence match; conflicting observations fail closed instead of overwriting
+evidence. The queue remains an observation ledger, does not automatically retry,
+and makes no exactly-once claim. See [0159](./decisions/0159-background-effect-confidence.md).

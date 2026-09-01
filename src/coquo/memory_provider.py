@@ -29,6 +29,15 @@ class MemoryProvider(Protocol):
         touch: bool = True,
     ) -> tuple[MemoryRecord, ...]: ...
 
+    def list(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        scope_id: str | None = None,
+        status: MemoryStatus | None = None,
+        limit: int = 100,
+    ) -> tuple[MemoryRecord, ...]: ...
+
     def mark_recalled(self, memory_ids: tuple[str, ...]) -> tuple[MemoryRecord, ...]: ...
 
     def find_exact(
@@ -66,6 +75,9 @@ class LocalMemoryProvider:
 
     def search(self, query: str, **kwargs):
         return self.store.search(query, **kwargs)
+
+    def list(self, **kwargs):
+        return self.store.list(**kwargs)
 
     def find_exact(self, content: str, **kwargs):
         return self.store.find_exact(content, **kwargs)

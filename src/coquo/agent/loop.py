@@ -1006,8 +1006,28 @@ class AgentLoop:
                 ),
             )
 
+        started = time.monotonic_ns()
+        delta_count = 0
+        first_delta_milliseconds: int | None = None
+        max_delta_gap_milliseconds: int | None = None
+        previous_delta_at: int | None = None
+
         def receive_provider_event(event: ProviderTextDelta | ProviderSearchActivity) -> None:
+            nonlocal delta_count, first_delta_milliseconds, max_delta_gap_milliseconds
+            nonlocal previous_delta_at
             if isinstance(event, ProviderTextDelta):
+                now = time.monotonic_ns()
+                delta_count += 1
+                elapsed = _provider_elapsed_milliseconds(started, now)
+                if first_delta_milliseconds is None:
+                    first_delta_milliseconds = elapsed
+                elif previous_delta_at is not None:
+                    gap = _provider_elapsed_milliseconds(previous_delta_at, now)
+                    max_delta_gap_milliseconds = max(
+                        gap,
+                        max_delta_gap_milliseconds or 0,
+                    )
+                previous_delta_at = now
                 self._emit_prompt_event(
                     event_sink,
                     AssistantResponseTextDeltaReceived(event.text),
@@ -1025,7 +1045,6 @@ class AgentLoop:
                 MAX_PROVIDER_INVOCATIONS_PER_TURN,
             ),
         )
-        started = time.monotonic_ns()
         try:
             outcome = respond_with_streaming(
                 provider,
@@ -1059,6 +1078,9 @@ class AgentLoop:
                     MAX_PROVIDER_INVOCATIONS_PER_TURN,
                     ProviderInvocationOutcome.CANCELLED,
                     elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                    delta_count=delta_count,
+                    first_delta_milliseconds=first_delta_milliseconds,
+                    max_delta_gap_milliseconds=max_delta_gap_milliseconds,
                 ),
             )
             raise
@@ -1070,6 +1092,9 @@ class AgentLoop:
                     MAX_PROVIDER_INVOCATIONS_PER_TURN,
                     ProviderInvocationOutcome.FAILED,
                     elapsed_milliseconds=_provider_elapsed_milliseconds(started),
+                    delta_count=delta_count,
+                    first_delta_milliseconds=first_delta_milliseconds,
+                    max_delta_gap_milliseconds=max_delta_gap_milliseconds,
                 ),
             )
             raise
@@ -1081,6 +1106,10 @@ class AgentLoop:
                 invocation_outcome,
                 tool_count,
                 _provider_elapsed_milliseconds(started),
+                delta_count,
+                first_delta_milliseconds,
+                max_delta_gap_milliseconds,
+                max(0, outcome.attempts - 1),
             ),
         )
         return outcome
@@ -1726,8 +1755,8 @@ class AgentLoop:
             pass
 
 
-def _provider_elapsed_milliseconds(started: int) -> int:
-    elapsed = max(0, (time.monotonic_ns() - started) // 1_000_000)
+def _provider_elapsed_milliseconds(started: int, ended: int | None = None) -> int:
+    elapsed = max(0, ((time.monotonic_ns() if ended is None else ended) - started) // 1_000_000)
     return min(elapsed, 86_400_000)
 
 

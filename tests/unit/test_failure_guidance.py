@@ -111,3 +111,11 @@ def test_mcp_tool_result_guidance_ignores_unknown_codes_and_non_mcp_tools() -> N
     assert tool_result_guidance("mcp_fixture_read_1234567890", "unknown") is None
     assert tool_result_guidance("read_file", "mcp_timeout") is None
     assert tool_result_guidance("mcp_fixture_read_1234567890", None) is None
+
+
+def test_command_resource_limit_failure_guidance_is_fail_closed() -> None:
+    guidance = tool_result_guidance("run_command", "command_resource_limits_unavailable")
+
+    assert guidance is not None
+    assert "fixed command resource limits could not be enforced" in guidance
+    assert "command was not started" in guidance

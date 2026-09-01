@@ -71,7 +71,13 @@ from coquo.session_records import (
 )
 from coquo.session_store import SessionStore, SessionStoreError
 from coquo.cli.slash import dispatch_slash
-from coquo.memory import MemoryRecallMode, MemoryScope, MemoryStatus, MemoryWriteMode
+from coquo.memory import (
+    MemoryCaptureMode,
+    MemoryRecallMode,
+    MemoryScope,
+    MemoryStatus,
+    MemoryWriteMode,
+)
 from coquo.memory_config import MemoryConfigStore
 from coquo.memory_store import MemoryStore
 from coquo.tools.memory import MEMORY_ADD_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME
@@ -180,6 +186,38 @@ def test_memory_candidate_extraction_runs_only_after_durable_turn_commit(tmp_pat
         UserMessage("remember: Keep release checks deterministic"),
         AssistantText("Fake response: remember: Keep release checks deterministic"),
     )
+    audit = session.action_audits()[-1]
+    assert audit.identity.tool_name == "memory_candidate_extract"
+    assert audit.status is ActionAuditStatus.SUCCEEDED
+    assert audit.result_code == "memory_candidate_created"
+    session.close()
+
+
+def test_conservative_memory_capture_runs_from_ordinary_user_turn_as_candidate(
+    tmp_path: Path,
+) -> None:
+    MemoryConfigStore(tmp_path).update(
+        enabled=True,
+        write=MemoryWriteMode.AUTO,
+        capture=MemoryCaptureMode.CONSERVATIVE,
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        approval_mode=ApprovalMode.AUTO,
+        session_store_factory=session_store_factory(SESSION_ONE),
+    )
+
+    assert session.prompt("I prefer concise release reports.") == (
+        "Fake response: I prefer concise release reports."
+    )
+
+    records = MemoryStore(tmp_path).list(status=MemoryStatus.CANDIDATE)
+    assert len(records) == 1
+    assert records[0].category == "conservative_candidate"
+    assert records[0].source_session_id == SESSION_ONE
+    assert records[0].source_turn == 1
     audit = session.action_audits()[-1]
     assert audit.identity.tool_name == "memory_candidate_extract"
     assert audit.status is ActionAuditStatus.SUCCEEDED

@@ -85,6 +85,42 @@ def test_streaming_waits_for_blank_line_or_closed_fence() -> None:
     assert "print('ok')" in stream.getvalue()
 
 
+def test_immediate_streaming_flushes_each_fragment_without_waiting_for_markdown() -> None:
+    stream = FlushingStream()
+    renderer = TerminalMarkdownRenderer(
+        stream,
+        color=False,
+        width=60,
+        immediate_streaming=True,
+    )
+
+    assert renderer.push("The provider has") is True
+    assert stream.getvalue() == "The provider has"
+    assert renderer.push(" not finished.") is True
+    assert stream.getvalue() == "The provider has not finished."
+    assert stream.flush_count == 2
+    assert renderer.flush() is True
+    assert renderer.flush() is False
+
+
+def test_immediate_streaming_preserves_role_prefix_only_at_line_starts() -> None:
+    stream = FlushingStream()
+    renderer = TerminalMarkdownRenderer(
+        stream,
+        color=False,
+        width=60,
+        first_prefix="• ",
+        continuation_prefix="  ",
+        prefix_width=2,
+        immediate_streaming=True,
+    )
+
+    renderer.push("first ")
+    renderer.push("line\nsecond")
+
+    assert stream.getvalue() == "• first line\n  second"
+
+
 def test_abort_discards_incomplete_markdown_suffix() -> None:
     stream = FlushingStream()
     renderer = TerminalMarkdownRenderer(stream, color=False, width=60)

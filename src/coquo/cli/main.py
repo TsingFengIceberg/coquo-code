@@ -24,7 +24,7 @@ from coquo.cli.approval import (
 from coquo.cli.frontend import ApprovalPending, FrontendEventQueue
 from coquo.cli.terminal_app import supports_terminal_application
 from coquo.cli.brand import color_enabled
-from coquo.cli.event_sink import TerminalEventSink
+from coquo.cli.event_sink import ObservationJsonSink, TerminalEventSink
 from coquo.cli.failure_guidance import render_turn_failure
 from coquo.cli.markdown_renderer import write_markdown_document
 from coquo.cli.presentation import (
@@ -142,6 +142,10 @@ from coquo.core.orchestration import (
 )
 from coquo.providers.definitions import BUILTIN_PROVIDERS, WireProtocol
 from coquo.providers.errors import ProviderAdapterError
+from coquo.providers.reliability import (
+    ProviderReliabilityBudgetError,
+    ProviderReliabilityPolicy,
+)
 from coquo.providers.factory import create_provider
 from coquo.providers.fake import ScriptedFakeProvider
 from coquo.providers.manager import RuntimeProviderManager, RuntimeProviderStateError
@@ -185,6 +189,7 @@ from coquo.session_store import (
     SessionStoreError,
 )
 from coquo.memory import (
+    MemoryCaptureMode,
     MemoryError as SemanticMemoryError,
     MemoryRecallMode,
     MemoryRetrievalMode,
@@ -279,6 +284,29 @@ def output_token_budget(value: str) -> int:
             f"max output tokens must be between 1 and {MAX_MODEL_OUTPUT_TOKENS}"
         )
     return tokens
+
+
+def provider_attempt_budget(value: str) -> int:
+    """Accept one bounded Provider attempt count for opt-in retries."""
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("provider max attempts must be an integer")
+    attempts = int(value)
+    if not 1 <= attempts <= 3:
+        raise argparse.ArgumentTypeError("provider max attempts must be between 1 and 3")
+    return attempts
+
+
+def provider_elapsed_budget(value: str) -> float:
+    """Accept one bounded positive Provider elapsed-time budget."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("provider elapsed budget must be a number") from None
+    if not 0 < seconds <= 300:
+        raise argparse.ArgumentTypeError(
+            "provider elapsed budget must be between 0 and 300 seconds"
+        )
+    return seconds
 
 
 def reasoning_effort(value: str) -> ReasoningEffort:
@@ -443,6 +471,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="process-local output budget override for prompt or interactive mode",
     )
     parser.add_argument(
+        "--provider-max-attempts",
+        type=provider_attempt_budget,
+        default=1,
+        help="bounded Provider attempts per logical request (1 disables retry)",
+    )
+    parser.add_argument(
+        "--provider-max-input-tokens",
+        type=output_token_budget,
+        help="fail closed when cumulative known input tokens exceed this limit",
+    )
+    parser.add_argument(
+        "--provider-max-output-tokens",
+        type=output_token_budget,
+        help="fail closed when cumulative known output tokens exceed this limit",
+    )
+    parser.add_argument(
+        "--provider-max-elapsed-seconds",
+        type=provider_elapsed_budget,
+        help="bounded elapsed-time budget for Provider retries",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         dest="invocation_reasoning_effort",
         type=reasoning_effort,
@@ -461,6 +510,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key-env",
         dest="invocation_api_key_env",
         help="environment variable holding a custom API key",
+    )
+    parser.add_argument(
+        "--events",
+        choices=["none", "ndjson"],
+        default="none",
+        help="emit content-free live Host events as NDJSON to stderr",
     )
     subcommands = parser.add_subparsers(dest="command")
     prompt_parser = subcommands.add_parser("prompt", help="run one prompt turn")
@@ -969,6 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_configure.add_argument(
         "--retrieval", choices=[mode.value for mode in MemoryRetrievalMode]
     )
+    memory_configure.add_argument("--capture", choices=[mode.value for mode in MemoryCaptureMode])
     memory_tools = memory_configure.add_mutually_exclusive_group()
     memory_tools.add_argument("--tools", dest="memory_tools", action="store_true")
     memory_tools.add_argument("--no-tools", dest="memory_tools", action="store_false")
@@ -2457,6 +2513,7 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
         stdout.write(f"configured write: {config.write.value}\n")
         stdout.write(f"effective write: {config.effective_write.value}\n")
         stdout.write(f"configured retrieval: {config.retrieval.value}\n")
+        stdout.write(f"configured capture: {config.capture.value}\n")
         stdout.write(f"configured tools: {'yes' if config.tools else 'no'}\n")
         stdout.write(f"effective tools: {'yes' if config.effective_tools else 'no'}\n")
         stdout.write(f"provider: {config.provider}\n")
@@ -2485,12 +2542,14 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
             retrieval=(
                 None if arguments.retrieval is None else MemoryRetrievalMode(arguments.retrieval)
             ),
+            capture=(None if arguments.capture is None else MemoryCaptureMode(arguments.capture)),
             tools=arguments.memory_tools,
         )
         stdout.write(
             f"Memory configuration saved: enabled={'yes' if config.enabled else 'no'}, "
             f"recall={config.recall.value}, write={config.write.value}, "
             f"retrieval={config.retrieval.value}, "
+            f"capture={config.capture.value}, "
             f"tools={'yes' if config.tools else 'no'}.\n"
         )
         return 0
@@ -4398,6 +4457,12 @@ def main(
             custom_api_key_env=arguments.invocation_api_key_env,
             max_output_tokens=arguments.invocation_max_output_tokens,
             reasoning_effort=arguments.invocation_reasoning_effort,
+            reliability_policy=ProviderReliabilityPolicy(
+                max_attempts=arguments.provider_max_attempts,
+                max_input_tokens=arguments.provider_max_input_tokens,
+                max_output_tokens=arguments.provider_max_output_tokens,
+                max_elapsed_seconds=arguments.provider_max_elapsed_seconds,
+            ),
             environment=env,
             user_profile_path=user_profile_path,
             project_profile_path=project_profile_path,
@@ -4430,32 +4495,43 @@ def main(
             if resume_result is not None:
                 message, _ = render_session_resume(resume_result)
                 print(message, file=errors)
+            observation_unsubscribe = None
+            if arguments.events == "ndjson":
+                observation_unsubscribe = session.observation_stream.subscribe(
+                    ObservationJsonSink(errors)
+                )
             if arguments.command == "prompt":
+                stream_to_terminal = output.isatty() and errors.isatty()
                 event_sink = TerminalEventSink(
-                    errors,
-                    color=color_enabled(errors, env),
-                    stream_deltas=False,
-                    render_markdown=errors.isatty(),
-                    show_provider_rounds=errors.isatty(),
+                    output if stream_to_terminal else errors,
+                    color=color_enabled(output if stream_to_terminal else errors, env),
+                    stream_deltas=stream_to_terminal,
+                    render_markdown=stream_to_terminal,
+                    immediate_streaming=stream_to_terminal,
+                    show_provider_rounds=stream_to_terminal or errors.isatty(),
                 )
                 try:
-                    response = session.prompt(arguments.prompt, event_sink=event_sink)
-                except KeyboardInterrupt:
-                    event_sink.abort_stream()
-                    print("generation cancelled; no turn was committed", file=errors)
-                    return 130
-                except BaseException:
-                    event_sink.abort_stream()
-                    raise
-                if output.isatty():
-                    write_markdown_document(
-                        output,
-                        response,
-                        color=color_enabled(output, env),
-                    )
-                else:
-                    print(response, file=output)
-                return 0
+                    try:
+                        response = session.prompt(arguments.prompt, event_sink=event_sink)
+                    except KeyboardInterrupt:
+                        event_sink.abort_stream()
+                        print("generation cancelled; no turn was committed", file=errors)
+                        return 130
+                    except BaseException:
+                        event_sink.abort_stream()
+                        raise
+                    if output.isatty() and not event_sink.final_text_was_streamed:
+                        write_markdown_document(
+                            output,
+                            response,
+                            color=color_enabled(output, env),
+                        )
+                    elif not output.isatty():
+                        print(response, file=output)
+                    return 0
+                finally:
+                    if observation_unsubscribe is not None:
+                        observation_unsubscribe()
             return run_repl(
                 session,
                 stdin=input_stream,
@@ -4464,8 +4540,10 @@ def main(
                 cwd=workspace,
                 color=color_enabled(output, env),
                 render_markdown=output.isatty(),
+                immediate_streaming=output.isatty(),
                 frontend_queue=frontend_queue,
                 approval_broker=approval_broker,
+                observation_output=errors if arguments.events == "ndjson" else None,
             )
         finally:
             session.close()
@@ -4477,6 +4555,12 @@ def main(
         return 2
     except ContextPreflightError as error:
         print(f"context preflight error: {error}", file=errors)
+        return 2
+    except ProviderReliabilityBudgetError as error:
+        print(
+            f"provider reliability budget error [{error.code}] after {error.attempts} attempt(s): {error}",
+            file=errors,
+        )
         return 2
     except ProviderAdapterError as error:
         return render_provider_failure(error, errors)

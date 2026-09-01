@@ -1,4 +1,4 @@
-"""Conservative post-commit extraction of explicitly requested memory facts."""
+"""Safe post-commit extraction of explicit or conservatively stated memory facts."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from coquo.core.contracts import CommittedTurn
-from coquo.memory import MemoryAccessContext
+from coquo.memory import MemoryAccessContext, MemoryCaptureMode
 from coquo.memory import MemoryError as SemanticMemoryError
 from coquo.memory import MemoryStatus, MemoryWriteMode
 from coquo.memory_config import MemoryConfigStore
@@ -18,6 +18,12 @@ from coquo.memory_observability import MemoryObservationLedger
 from coquo.session_records import workspace_fingerprint
 
 _MARKER = re.compile(r"(?:^|\s)(?:remember\s+that|remember:|请记住)\s+(.+?)\s*$", re.IGNORECASE)
+_CONSERVATIVE_MARKERS = (
+    re.compile(
+        r"^\s*(?:I prefer|I always use|I usually use|our project uses|the project requires)\b", re.I
+    ),
+    re.compile(r"^\s*(?:我偏好|我通常使用|我们使用|项目要求|项目采用).+"),
+)
 MAX_EXTRACTED_CANDIDATE_BYTES = 2048
 
 
@@ -34,15 +40,22 @@ class MemoryExtractionResult:
 
 @dataclass(frozen=True)
 class PreparedMemoryExtraction:
-    """Read-only preparation result for one explicit post-commit write."""
+    """Read-only preparation result for one post-commit write."""
 
     mode: MemoryWriteMode
     content: str
     access: MemoryAccessContext
+    capture: MemoryCaptureMode
+    explicit: bool
 
 
 class MemoryCandidateExtractor:
-    """Extract only explicit user-directed memory requests after durable commit."""
+    """Extract bounded user memory facts after durable commit.
+
+    Conservative capture is opt-in and only creates candidates from a small
+    allow-list of preference and project-rule sentence forms.  It never
+    auto-confirms an implicit candidate, even when ``write=auto`` is selected.
+    """
 
     def __init__(
         self,
@@ -76,10 +89,13 @@ class MemoryCandidateExtractor:
         if mode is MemoryWriteMode.OFF:
             self._observations.record("candidate_extraction", "disabled", actor="host")
             return None
-        content = _explicit_memory_content(turn.user.text)
-        if content is None:
+        captured = _capture_memory_content(turn.user.text, config.capture)
+        if captured is None:
             self._observations.record(
-                "candidate_extraction", "empty", actor="host", reason="no_explicit_marker"
+                "candidate_extraction",
+                "empty",
+                actor="host",
+                reason="no_accepted_memory_pattern",
             )
             return None
         access = self._access_factory()
@@ -93,7 +109,8 @@ class MemoryCandidateExtractor:
                 "candidate_extraction", "denied", actor=access.actor, reason="scope_denied"
             )
             return None
-        return PreparedMemoryExtraction(mode, content, access)
+        content, explicit = captured
+        return PreparedMemoryExtraction(mode, content, access, config.capture, explicit)
 
     def after_commit(
         self,
@@ -109,25 +126,23 @@ class MemoryCandidateExtractor:
                 "candidate_extraction", "denied", actor="host", reason="permission_required"
             )
             return MemoryExtractionResult(MemoryWriteMode.OFF, reason="permission_required")
-        if _explicit_memory_content(turn.user.text) is None:
-            self._observations.record(
-                "candidate_extraction", "empty", actor="host", reason="no_explicit_marker"
-            )
-            return MemoryExtractionResult(
-                self._config.load().effective_write,
-                reason="no_explicit_marker",
-            )
         prepared = prepared or self.prepare(turn)
         if prepared is None:
             try:
-                mode = self._config.load().effective_write
+                config = self._config.load()
             except SemanticMemoryError as error:
                 return MemoryExtractionResult(MemoryWriteMode.OFF, reason=f"config_error:{error}")
-            return MemoryExtractionResult(mode, reason="not_prepared")
+            reason = (
+                "no_explicit_marker"
+                if config.capture is MemoryCaptureMode.EXPLICIT
+                else "no_accepted_memory_pattern"
+            )
+            return MemoryExtractionResult(config.effective_write, reason=reason)
         mode = prepared.mode
         access = prepared.access
         content = prepared.content
-        if _explicit_memory_content(turn.user.text) != content:
+        captured = _capture_memory_content(turn.user.text, prepared.capture)
+        if captured is None or captured[0] != content or captured[1] != prepared.explicit:
             self._observations.record(
                 "candidate_extraction", "failed", actor=access.actor, reason="stale_preparation"
             )
@@ -145,10 +160,14 @@ class MemoryCandidateExtractor:
                 content,
                 scope=scope,
                 scope_id=scope_id,
-                category="explicit_user_fact",
+                category=("explicit_user_fact" if prepared.explicit else "conservative_candidate"),
             )
             if existing:
-                if mode is MemoryWriteMode.AUTO and existing[0].status is MemoryStatus.CANDIDATE:
+                if (
+                    mode is MemoryWriteMode.AUTO
+                    and prepared.explicit
+                    and existing[0].status is MemoryStatus.CANDIDATE
+                ):
                     self._provider.confirm(existing[0].memory_id)
                     self._observations.record(
                         "candidate_extraction",
@@ -178,18 +197,21 @@ class MemoryCandidateExtractor:
                 content,
                 scope=scope,
                 scope_id=scope_id,
-                category="explicit_user_fact",
+                category=("explicit_user_fact" if prepared.explicit else "conservative_candidate"),
                 confidence=1.0,
                 source_session_id=session_id,
                 source_turn=source_turn,
             )
             mutation_started = True
-            if mode is MemoryWriteMode.AUTO:
+            if mode is MemoryWriteMode.AUTO and prepared.explicit:
                 self._provider.confirm(candidate.memory_id)
             result = MemoryExtractionResult(
                 mode,
                 memory_id=candidate.memory_id,
-                confirmed=mode is MemoryWriteMode.AUTO,
+                confirmed=mode is MemoryWriteMode.AUTO and prepared.explicit,
+                reason=(
+                    None if prepared.explicit else "conservative_candidate_requires_confirmation"
+                ),
             )
             self._observations.record(
                 "candidate_extraction",
@@ -226,3 +248,19 @@ def _explicit_memory_content(text: str) -> str | None:
     if "\x00" in content:
         return None
     return content
+
+
+def _capture_memory_content(text: str, capture: MemoryCaptureMode) -> tuple[str, bool] | None:
+    explicit = _explicit_memory_content(text)
+    if explicit is not None:
+        return explicit, True
+    if capture is not MemoryCaptureMode.CONSERVATIVE:
+        return None
+    if not isinstance(text, str) or "\x00" in text:
+        return None
+    content = text.strip()
+    if not content or len(content.encode("utf-8")) > MAX_EXTRACTED_CANDIDATE_BYTES:
+        return None
+    if any(pattern.match(content) for pattern in _CONSERVATIVE_MARKERS):
+        return content, False
+    return None

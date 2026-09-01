@@ -41,6 +41,14 @@ class MemoryRecallService:
         )
         self._scope_id = workspace_fingerprint(self.workspace)
         self._access_factory = access_factory or (lambda: MemoryAccessContext.host(self._scope_id))
+        self._retrievers: dict[str, object] = {}
+
+    def _retriever(self, mode: str):
+        retriever = self._retrievers.get(mode)
+        if retriever is None:
+            retriever = retriever_for(mode)
+            self._retrievers[mode] = retriever
+        return retriever
 
     def recall(self, prompt: str) -> tuple[MemoryEvidence, ...]:
         config = self._config.load()
@@ -57,9 +65,12 @@ class MemoryRecallService:
         queries = _queries(prompt)
         found: dict[str, object] = {}
         degraded = False
+        candidate_count = 0
+        cache_hits = 0
+        cache_misses = 0
         for query in queries:
             for scope, scope_id in access.read_scopes:
-                result = retriever_for(config.retrieval.value).retrieve(
+                result = self._retriever(config.retrieval.value).retrieve(
                     self._provider,
                     query,
                     scope=scope,
@@ -69,6 +80,9 @@ class MemoryRecallService:
                     touch=False,
                 )
                 degraded = degraded or result.degraded
+                candidate_count += result.candidate_count
+                cache_hits += result.cache_hits
+                cache_misses += result.cache_misses
                 for record in result.records:
                     if record.status is MemoryStatus.CONFIRMED and access.permits(
                         record.scope, record.scope_id
@@ -105,6 +119,10 @@ class MemoryRecallService:
             scope_kinds=tuple(scope.value for scope, _ in access.read_scopes),
             record_count=len(evidence),
             degraded=degraded,
+            reason=(
+                f"strategy={config.retrieval.value};queries={len(queries)};records={len(found)};"
+                f"candidates={candidate_count};cache_hits={cache_hits};cache_misses={cache_misses}"
+            ),
         )
         return tuple(evidence)
 

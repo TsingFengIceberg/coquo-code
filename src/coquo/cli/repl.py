@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TextIO
 
 from coquo.cli.brand import render_banner
-from coquo.cli.event_sink import TerminalEventSink
+from coquo.cli.event_sink import ObservationJsonSink, TerminalEventSink
 from coquo.cli.markdown_renderer import terminal_stream_content_width
 from coquo.cli.prompt_editor import (
     MAX_PROMPT_BYTES,
@@ -62,12 +62,21 @@ def run_repl(
     cwd: Path,
     color: bool,
     render_markdown: bool = False,
+    immediate_streaming: bool = False,
     prompt_editor: PromptEditor | None = None,
     frontend_queue: FrontendEventQueue | None = None,
     approval_broker: TerminalApprovalBroker | None = None,
+    observation_output: TextIO | None = None,
 ) -> int:
     """Read input, dispatch local commands, and route ordinary text to the model."""
     editor = prompt_editor or create_prompt_editor(stdin, stdout)
+    if observation_output is not None:
+        observation_sink = ObservationJsonSink(observation_output)
+        subscribe = getattr(session, "observation_stream", None)
+        subscribe = getattr(subscribe, "subscribe", None)
+        if not callable(subscribe):
+            raise ValueError("session does not expose a live observation stream")
+        subscribe(observation_sink)
     terminal_ui = isinstance(editor, TerminalPromptEditor)
     persistent_ui = (
         prompt_editor is None
@@ -108,6 +117,7 @@ def run_repl(
             cwd=cwd,
             color=color,
             render_markdown=render_markdown,
+            immediate_streaming=immediate_streaming,
             queue=frontend_queue,
             approval_broker=approval_broker,
         ).run()
@@ -174,6 +184,7 @@ def run_repl(
                     render_markdown=render_markdown,
                     show_role_markers=terminal_ui,
                     show_waiting=terminal_ui,
+                    immediate_streaming=immediate_streaming,
                     tool_detail_mode=tool_details.mode,
                 )
                 event_sink.start_waiting()
@@ -213,6 +224,7 @@ def run_repl(
                 render_markdown=render_markdown,
                 show_role_markers=terminal_ui,
                 show_waiting=terminal_ui,
+                immediate_streaming=immediate_streaming,
                 tool_detail_mode=tool_details.mode,
             )
             active_event_sink = event_sink
@@ -253,6 +265,7 @@ def run_repl(
                     render_markdown=render_markdown,
                     show_role_markers=terminal_ui,
                     show_waiting=terminal_ui,
+                    immediate_streaming=immediate_streaming,
                     tool_detail_mode=tool_details.mode,
                 )
                 active_event_sink = task_sink

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 from pathlib import Path
 from threading import Barrier, Lock, Thread
 
@@ -52,10 +53,56 @@ def test_background_queue_is_durable_and_deduplicated(tmp_path: Path) -> None:
     claimed = queue.claim("92345678-1234-4234-9234-123456789abc")
     assert claimed is not None
     assert claimed.state == "claimed"
+    assert claimed.effect_state == "in-flight"
     assert queue.inspect(item.submission_id).lease_id == claimed.lease_id
     queue.requeue(claimed, reason="worker exited before start")
     assert queue.inspect(item.submission_id).state == "queued"
+    assert queue.inspect(item.submission_id).effect_state == "not-started"
     assert child_store.inspect(child_id).status is ChildRunStatus.READY
+
+
+def test_background_terminal_observation_is_idempotent_but_conflicts_fail_closed(
+    tmp_path: Path,
+) -> None:
+    _child_store, child_id = prepared_child(tmp_path)
+    queue = BackgroundQueueStore(tmp_path)
+    queued = queue.enqueue(child_id)
+    claimed = queue.claim("92345678-1234-4234-9234-123456789abc")
+    assert claimed is not None
+
+    terminal = queue.terminal(
+        claimed,
+        child_status="interrupted",
+        message="provider side effect may be unknown",
+        effect_state="unknown",
+    )
+    assert terminal.outcome_unknown is True
+    assert (
+        queue.terminal(
+            claimed,
+            child_status="interrupted",
+            message="duplicate observation",
+            effect_state="unknown",
+        )
+        == terminal
+    )
+    with pytest.raises(BackgroundRuntimeError, match="conflicts"):
+        queue.terminal(claimed, child_status="failed", effect_state="confirmed")
+    assert queue.inspect(queued.submission_id).effect_state == "unknown"
+
+
+def test_legacy_v1_queue_records_replay_with_derived_effect_state(tmp_path: Path) -> None:
+    _child_store, child_id = prepared_child(tmp_path)
+    queue = BackgroundQueueStore(tmp_path)
+    queue.enqueue(child_id)
+    records = json.loads(queue.queue_path.read_text(encoding="utf-8").splitlines()[0])
+    records["schema_version"] = 1
+    records.pop("effect_state", None)
+    queue.queue_path.write_text(json.dumps(records) + "\n", encoding="utf-8")
+
+    item = queue.snapshot()[0]
+    assert item.state == "queued"
+    assert item.effect_state == "not-started"
 
 
 def test_background_worker_completes_child_and_records_terminal_queue_event(tmp_path: Path) -> None:

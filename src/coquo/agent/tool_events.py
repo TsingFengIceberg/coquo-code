@@ -181,6 +181,10 @@ class ProviderInvocationFinished:
     outcome: ProviderInvocationOutcome
     tool_count: int = 0
     elapsed_milliseconds: int | None = field(default=None, compare=False)
+    delta_count: int = field(default=0, compare=False)
+    first_delta_milliseconds: int | None = field(default=None, compare=False)
+    max_delta_gap_milliseconds: int | None = field(default=None, compare=False)
+    retry_count: int = field(default=0, compare=False)
     purpose: ProviderInvocationPurpose = ProviderInvocationPurpose.TURN
 
     def __post_init__(self) -> None:
@@ -192,6 +196,23 @@ class ProviderInvocationFinished:
             or not 0 <= self.elapsed_milliseconds <= 86_400_000
         ):
             raise ValueError("provider invocation elapsed duration is invalid")
+        for value, label in (
+            (self.delta_count, "delta count"),
+            (self.first_delta_milliseconds, "first delta duration"),
+            (self.max_delta_gap_milliseconds, "maximum delta gap"),
+        ):
+            if value is not None and (type(value) is not int or not 0 <= value <= 86_400_000):
+                raise ValueError(f"provider invocation {label} is invalid")
+        if type(self.delta_count) is not int or not 0 <= self.delta_count <= 100_000:
+            raise ValueError("provider invocation delta count is invalid")
+        if self.delta_count == 0 and (
+            self.first_delta_milliseconds is not None or self.max_delta_gap_milliseconds is not None
+        ):
+            raise ValueError("provider invocation stream metrics require deltas")
+        if self.delta_count == 1 and self.max_delta_gap_milliseconds is not None:
+            raise ValueError("one-delta invocation cannot have a delta gap")
+        if type(self.retry_count) is not int or not 0 <= self.retry_count <= 2:
+            raise ValueError("provider invocation retry count is invalid")
         if type(self.purpose) is not ProviderInvocationPurpose:
             raise ValueError("provider invocation purpose is invalid")
         if type(self.tool_count) is not int or not 0 <= self.tool_count <= 32:

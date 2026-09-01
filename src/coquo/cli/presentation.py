@@ -65,7 +65,11 @@ from coquo.session import (
     TurnUsageCompleted,
 )
 from coquo.task_runtime import TaskNextAction, TaskRunStopped
-from coquo.workflow_orchestration import WorkflowPhase, WorkflowState
+from coquo.workflow_orchestration import (
+    WorkflowDriveResult,
+    WorkflowPhase,
+    WorkflowState,
+)
 from coquo.session_records import ActionAuditState, SessionTitleFallbackReason
 from coquo.session_store import MAX_SESSION_PREVIEW_TURNS, MAX_TOOL_LEDGER_QUERY_TURNS
 from coquo.providers.usage import RuntimeUsageSnapshot, ProviderUsageTotals
@@ -298,6 +302,12 @@ SKILLS_HELP = (
     "  /skills doctor\n"
     "These commands are Host-only and read-only. They do not call the provider, mutate the "
     "Session, or write Action Audit records."
+)
+WORKFLOW_HELP = (
+    "Workflow commands:\n"
+    "  /workflow drive <workflow-id> [1-4] [foreground|background]\n"
+    "The bounded driver advances Architecture, Explorer, and Executor through the existing "
+    "Task/Child/Team bridge, then stops before Reviewer, integration, acceptance, retry, or Git."
 )
 HOOKS_HELP = (
     "Hook inspection commands:\n"
@@ -1675,6 +1685,19 @@ def render_workflow_state(state: WorkflowState) -> str:
     return "\n".join(lines)
 
 
+def render_workflow_drive(result: WorkflowDriveResult) -> str:
+    """Render one bounded Workflow driver stop and its durable state."""
+    lines = [
+        render_workflow_state(result.state),
+        f"Drive stop: {result.stop_reason.value}",
+        f"Stages started: {', '.join(role.value for role in result.stages_started) or 'none'}",
+        f"Elapsed: {result.elapsed_seconds:.3f}s",
+    ]
+    if result.diagnostic:
+        lines.append(f"Drive diagnostic: {_safe_inline(result.diagnostic)}")
+    return "\n".join(lines)
+
+
 def render_child_start_observation(observation: ChildStartObservation) -> str:
     """Render Child metadata plus the Host-observed background submission."""
     lines = [render_child_run_info(observation.child), f"Background backend: {observation.backend}"]
@@ -1723,6 +1746,7 @@ def render_background_runtime_status(status) -> str:
     for item in status.queue:
         lines.append(
             f"- {item.submission_id}: {item.state} child={item.child_run_id}"
+            f" effect={getattr(item, 'effect_state', 'confirmed')}"
             + (
                 f" terminal={item.terminal_child_status}"
                 if item.terminal_child_status is not None
@@ -2908,6 +2932,15 @@ def render_prompt_event(
             )
         if event.elapsed_milliseconds is not None:
             detail += f" ({_format_elapsed_milliseconds(event.elapsed_milliseconds)})"
+        if event.retry_count:
+            detail += f" [retried {event.retry_count}x]"
+        if event.delta_count:
+            stream_details = f"stream {event.delta_count} chunks"
+            if event.first_delta_milliseconds is not None:
+                stream_details += f", first {event.first_delta_milliseconds}ms"
+            if event.max_delta_gap_milliseconds is not None:
+                stream_details += f", max gap {event.max_delta_gap_milliseconds}ms"
+            detail += f" [{stream_details}]"
         return (
             f"Model round [{event.invocation_index}/{event.invocation_limit}]: {detail}",
             kind,

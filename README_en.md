@@ -200,6 +200,13 @@ uv run coquo --profile vendor route
 uv run coquo --model openai/gpt-5 route
 ```
 
+For machine-readable live Host observations, opt into flushed content-free
+NDJSON on stderr while the final response remains on stdout:
+
+```bash
+uv run coquo --events ndjson prompt "Inspect this workspace"
+```
+
 A named profile can configure the context window for its exact endpoint/model:
 
 ```bash
@@ -237,13 +244,13 @@ A Session is workspace-bound and stores successful turns in append-only JSONL. N
 
 ```bash
 uv run coquo memory status
-uv run coquo memory configure --enable --recall on --write propose --retrieval text --no-tools
+uv run coquo memory configure --enable --recall on --write propose --retrieval semantic --capture explicit --no-tools
 uv run coquo memory add "Run the complete test suite before release"
 uv run coquo memory confirm <memory-uuid>
 uv run coquo memory search "complete test suite"
 ```
 
-Long-term memory is workspace-scoped and disabled by default. Only confirmed records are recalled within fixed bounds, and the model receives them as `[UNTRUSTED MEMORY EVIDENCE]` data rather than instructions. Explicit `remember:`, `remember that`, or `请记住` requests are processed after a successful Turn commit according to the `write` policy and remain subject to PermissionGate, approval, and Action Audit; model CRUD tools additionally require `--tools`. Until a local embedding backend exists, `semantic` retrieval explicitly degrades to text matching; see [ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md) for complete scope, lifecycle, recovery, and security boundaries.
+Long-term memory is workspace-scoped and disabled by default. Only confirmed records are recalled within fixed bounds, and the model receives them as `[UNTRUSTED MEMORY EVIDENCE]` data rather than instructions. Explicit `remember:`, `remember that`, or `请记住` requests are processed after a successful Turn commit according to the `write` policy. Optional `capture=conservative` accepts only a small allow-list of preference and project-rule forms; implicit candidates never auto-confirm, even with `write=auto`. All writes remain subject to PermissionGate, approval, and Action Audit; model CRUD tools additionally require `--tools`. `semantic` uses the deterministic, offline `semantic-local-v1` retriever rather than a learned embedding service. See [ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md) for complete scope, lifecycle, recovery, and security boundaries.
 
 ### Manage Tasks
 
@@ -501,9 +508,13 @@ uv run coquo eval task list
 tmp=$(mktemp -d)
 uv run coquo eval task prepare inventory-validation "$tmp/task"
 uv run coquo eval task score inventory-validation "$tmp/task"
+# Real Provider acceptance (run only after separately approving network, credentials, and cost)
+COQUO_REAL_PROVIDER_ACCEPT=1 uv run python scripts/real_provider_acceptance.py \
+  --profile <existing-profile> --allow-network --allow-credentials --allow-cost
 ```
 
 `pytest` verifies functions, modules, and protocol boundaries, while `eval run` sends fixed scripted-fake trajectories through the complete Host path. `eval task prepare/score` instead creates a small code task offline and scores actual outcomes outside the candidate directory with visible and Host-private tests. Only `eval task run` with both `--real-provider` and an explicit profile/model may invoke a real vendor; it runs in a newly created isolated task directory, writes tool events to stderr, and reserves stdout for the stable Host score. After changing dependencies, run `uv lock` before checking the lockfile. Coquo does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.
+`scripts/real_provider_acceptance.py` is outside the offline CI gate. It defaults to a temporary workspace and refuses to overwrite an existing fixture in a caller-provided workspace. CI runs only offline tests, recovery regressions, fake-CLI smoke, and code-quality checks.
 
 ## Detailed documentation
 
@@ -608,4 +619,4 @@ uv run coquo eval task score inventory-validation "$tmp/task"
 
 Coquo currently defaults to Registry generation 9 with 62 canonical tools and 58 tools exposed to ordinary parent Prompts, covering workspace reads and writes, command verification, Git observation, web search and fetch, structured reads, controlled downloads, progressive MCP discovery, declarative Skill loading, and bounded Team coordination; explicitly enabling model memory tools dynamically expands this to generation 10 with 66 canonical tools and 62 ordinary-parent tools. Named Provider Profiles, Session resume, context and compaction, PermissionGate and Action Audit, foreground multi-Stage Tasks, the terminal REPL, offline Evals, and disabled-by-default workspace long-term memory are integrated.
 
-The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can use four model tools to delegate to at most four independent Children and Team controls to manage fixed-role members, a dependency board, bounded schedule waves, reply review, and explicit worktree integration. The Host-side Task–Child–Team orchestration bridge now binds exact identities, reuses the existing execution ledgers, and converges Task Stages from handoff/evidence. The default Child execution envelope remains one-Turn, depth-one, and capability-restricted; only when the Host explicitly enables the fixed read-only explorer capability may a depth-one Child create one depth-two Grandchild, and that Grandchild cannot delegate further. Default background submission uses a workspace-bound durable queue and restartable local worker, while an explicitly injected process-local Supervisor remains only as a compatibility/testing path. Writers may modify only their isolated linked worktree, coders remain subject to the existing network-disabled command sandbox, and all handoffs/replies/integration evidence are untrusted. Background recovery never automatically retries claimed `running`/`cancelling` work and does not claim exactly-once execution; Team schedules do not retry, auto-complete, or run as a permanent daemon. Arbitrary recursive multi-agent execution, recursive Teams, executable Skills, a marketplace, a distributed worker fleet, and browser automation remain deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).
+The project remains a local single-user CLI prototype. MCP supports confined stdio, Streamable HTTP, and extended capabilities; Skills currently provide bounded local packages, progressive discovery, context lifetime, and ToolSet restriction. An ordinary parent Agent can use four model tools to delegate to at most four independent Children and Team controls to manage fixed-role members, a dependency board, bounded schedule waves, reply review, and explicit worktree integration. The Host-side Task–Child–Team orchestration bridge now binds exact identities, reuses the existing execution ledgers, and converges Task Stages from handoff/evidence. Provider rounds expose Host-measured stream chunk, first-chunk, and inter-chunk diagnostics so upstream waiting can be distinguished from terminal delivery delay. The default Child execution envelope remains one-Turn, depth-one, and capability-restricted; only when the Host explicitly enables the fixed read-only explorer capability may a depth-one Child create one depth-two Grandchild, and that Grandchild cannot delegate further. Default background submission uses a workspace-bound durable queue and restartable local worker, while an explicitly injected process-local Supervisor remains only as a compatibility/testing path. Writers may modify only their isolated linked worktree, coders remain subject to the existing network-disabled command sandbox, and all handoffs/replies/integration evidence are untrusted. Background recovery never automatically retries claimed `running`/`cancelling` work and does not claim exactly-once execution; Team schedules do not retry, auto-complete, or run as a permanent daemon. Arbitrary recursive multi-agent execution, recursive Teams, executable Skills, a marketplace, a distributed worker fleet, and browser automation remain deferred. Exact tool contracts, versions, compatibility rules, and security boundaries live in [Implemented Foundations and Design Evolution](./docs/implemented-foundations_en.md) and the [architecture decision records](./docs/decisions/).

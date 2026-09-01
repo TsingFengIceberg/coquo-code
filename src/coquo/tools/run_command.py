@@ -9,6 +9,11 @@ from enum import StrEnum
 import json
 import os
 from pathlib import Path, PureWindowsPath
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - resource is POSIX-only
+    resource = None  # type: ignore[assignment]
 import signal
 import stat
 import subprocess
@@ -41,6 +46,9 @@ MIN_COMMAND_TIMEOUT_SECONDS = 1
 MAX_COMMAND_TIMEOUT_SECONDS = 300
 MAX_COMMAND_STDOUT_BYTES = 32 * 1024
 MAX_COMMAND_STDERR_BYTES = 32 * 1024
+MAX_COMMAND_ADDRESS_SPACE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_COMMAND_FILE_BYTES = 256 * 1024 * 1024
+MAX_COMMAND_OPEN_FILES = 1024
 COMMAND_TERMINATE_GRACE_SECONDS = 1.0
 COMMAND_KILL_GRACE_SECONDS = 1.0
 COMMAND_PIPE_DRAIN_GRACE_SECONDS = 1.0
@@ -91,6 +99,7 @@ class RunCommandExecutionStatus(StrEnum):
     SPAWN_REJECTED = "spawn-rejected"
     SANDBOX_REJECTED = "sandbox-rejected"
     SPAWN_FAILED = "spawn-failed"
+    RESOURCE_LIMITS_REJECTED = "resource-limits-rejected"
     EXITED = "exited"
     SIGNALED = "signaled"
     TIMED_OUT = "timed-out"
@@ -177,6 +186,33 @@ class CommandSandboxInspection:
 
 class RunCommandPreparationError(ValueError):
     """Reject malformed or unsafe-to-prepare command requests before permission policy."""
+
+
+class CommandResourceLimitsUnavailable(RuntimeError):
+    """The Host could not apply the fixed process resource limits."""
+
+
+def _apply_command_resource_limits(pid: int, timeout_seconds: int) -> None:
+    """Apply fixed inherited limits while the sandbox is still behind its gate."""
+    if resource is None or not hasattr(resource, "prlimit"):
+        raise CommandResourceLimitsUnavailable("process resource limits require POSIX prlimit")
+    if type(pid) is not int or pid <= 0:
+        raise CommandResourceLimitsUnavailable("sandbox process ID is invalid")
+    if type(timeout_seconds) is not int or timeout_seconds < MIN_COMMAND_TIMEOUT_SECONDS:
+        raise CommandResourceLimitsUnavailable("command timeout is invalid")
+    limits = (
+        (resource.RLIMIT_CPU, (timeout_seconds, timeout_seconds)),
+        (resource.RLIMIT_AS, (MAX_COMMAND_ADDRESS_SPACE_BYTES, MAX_COMMAND_ADDRESS_SPACE_BYTES)),
+        (resource.RLIMIT_FSIZE, (MAX_COMMAND_FILE_BYTES, MAX_COMMAND_FILE_BYTES)),
+        (resource.RLIMIT_NOFILE, (MAX_COMMAND_OPEN_FILES, MAX_COMMAND_OPEN_FILES)),
+    )
+    try:
+        for kind, value in limits:
+            resource.prlimit(pid, kind, value)
+    except (OSError, ValueError, AttributeError) as error:
+        raise CommandResourceLimitsUnavailable(
+            "process resource limits could not be applied"
+        ) from error
 
 
 @dataclass
@@ -462,6 +498,30 @@ class RunCommandTool:
                 duration_ms=_elapsed_milliseconds(started),
             )
 
+        # Bubblewrap holds the requested argv behind --block-fd, so limits can
+        # be applied before any user command is released into the sandbox.
+        if process.poll() is None:
+            try:
+                _apply_command_resource_limits(process.pid, prepared.timeout_seconds)
+            except CommandResourceLimitsUnavailable:
+                cleanup_complete = self._terminate_process_group(process)
+                for pipe in (process.stdout, process.stderr, activation_pipe):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except OSError:
+                            pass
+                readers_complete = _join_readers(readers, COMMAND_PIPE_DRAIN_GRACE_SECONDS)
+                if cleanup_complete and readers_complete:
+                    return self._resource_limits_rejected(
+                        prepared,
+                        duration_ms=_elapsed_milliseconds(started),
+                    )
+                return self._sandbox_cleanup_incomplete(
+                    prepared,
+                    duration_ms=_elapsed_milliseconds(started),
+                )
+
         if launch.activation_read_fd is not None:
             assert activation_pipe is not None
             activation_reader = readers[-1]
@@ -617,6 +677,7 @@ class RunCommandTool:
             "command_cancel_cleanup_incomplete": "run_command was cancelled and cleanup is incomplete",
             "command_cleanup_incomplete": "run_command process cleanup is incomplete",
             "command_sandbox_unavailable": "run_command sandbox was unavailable",
+            "command_resource_limits_unavailable": "run_command resource limits could not be enforced",
         }[result_code]
         return RunCommandExecutionResult(
             ToolResult(
@@ -697,6 +758,39 @@ class RunCommandTool:
             RunCommandOutcome.FAILED,
             "command_sandbox_unavailable",
             "run_command sandbox is unavailable; the requested command was not started",
+            observation,
+        )
+
+    def _resource_limits_rejected(
+        self,
+        prepared: PreparedRunCommand,
+        *,
+        duration_ms: int | None = None,
+    ) -> RunCommandExecutionResult:
+        stdout = _BoundedCapture(MAX_COMMAND_STDOUT_BYTES, bytearray())
+        stderr = _BoundedCapture(MAX_COMMAND_STDERR_BYTES, bytearray())
+        observation = _execution_observation(
+            status=RunCommandExecutionStatus.RESOURCE_LIMITS_REJECTED,
+            returncode=None,
+            duration_ms=duration_ms,
+            stdout=stdout,
+            stderr=stderr,
+            cleanup_complete=True,
+        )
+        return RunCommandExecutionResult(
+            ToolResult(
+                prepared.request.tool_use_id,
+                self._payload(
+                    prepared,
+                    observation=observation,
+                    stdout=stdout,
+                    stderr=stderr,
+                ),
+                is_error=True,
+            ),
+            RunCommandOutcome.FAILED,
+            "command_resource_limits_unavailable",
+            "run_command resource limits could not be enforced; the requested command was not started",
             observation,
         )
 

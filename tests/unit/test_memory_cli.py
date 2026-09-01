@@ -27,12 +27,28 @@ def test_memory_cli_switch_and_explicit_candidate_management(tmp_path: Path) -> 
     assert status == 0 and errors == ""
     assert "enabled: no" in output
     assert "effective recall: off" in output
+    assert "configured capture: explicit" in output
 
-    status, _, errors = invoke(
+    status, output, errors = invoke(
         tmp_path,
-        ["memory", "configure", "--enable", "--recall", "on", "--write", "propose", "--tools"],
+        [
+            "memory",
+            "configure",
+            "--enable",
+            "--recall",
+            "on",
+            "--write",
+            "propose",
+            "--capture",
+            "conservative",
+            "--tools",
+        ],
     )
     assert status == 0 and errors == ""
+    assert "capture=conservative" in output
+    status, output, errors = invoke(tmp_path, ["memory", "status"])
+    assert status == 0 and errors == ""
+    assert "configured capture: conservative" in output
     status, candidate_json, errors = invoke(
         tmp_path,
         ["memory", "add", "Prefer deterministic tests", "--category", "preference"],

@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from coquo.agent.tool_events import (
+    AssistantResponseTextDeltaReceived,
     ProviderInvocationFinished,
     ProviderInvocationOutcome,
     ProviderInvocationStarted,
@@ -207,6 +208,11 @@ def test_live_stream_projects_provider_round_boundaries_without_response_content
             24,
             ProviderInvocationOutcome.TOOL_REQUEST,
             2,
+            elapsed_milliseconds=1250,
+            delta_count=2,
+            first_delta_milliseconds=100,
+            max_delta_gap_milliseconds=850,
+            retry_count=1,
         )
     )
 
@@ -216,7 +222,64 @@ def test_live_stream_projects_provider_round_boundaries_without_response_content
         "live_provider_invocation_finished",
     ]
     assert [event.status for event in events] == ["started", "tool-request"]
+    assert "elapsed_ms=1250" in events[1].summary
+    assert "delta_count=2" in events[1].summary
+    assert "first_delta_ms=100" in events[1].summary
+    assert "max_delta_gap_ms=850" in events[1].summary
+    assert "retry_count=1" in events[1].summary
     assert all("response" not in observation_event_json(event) for event in events)
+    assert all(event.to_mapping()["schema_version"] == 1 for event in events)
+
+
+def test_live_stream_reports_delta_size_without_delta_content() -> None:
+    session_id = _id()
+    stream = ObservationStream(
+        source_id=session_id,
+        context=ObservationContext.new(session_id=session_id),
+    )
+
+    stream.publish_prompt(AssistantResponseTextDeltaReceived("Hello"))
+
+    event = stream.snapshot()[0]
+    assert event.summary.endswith("chars=5 bytes=5")
+    assert "Hello" not in observation_event_json(event)
+
+
+def test_live_stream_subscribers_receive_fifo_events_and_can_unsubscribe() -> None:
+    session_id = _id()
+    stream = ObservationStream(
+        source_id=session_id,
+        context=ObservationContext.new(session_id=session_id),
+    )
+    received = []
+    unsubscribe = stream.subscribe(received.append)
+
+    first = stream.publish(record_type="provider_started", status="started", summary="safe")
+    second = stream.publish(record_type="provider_finished", status="completed", summary="safe")
+    unsubscribe()
+    stream.publish(record_type="turn_committed", status="completed", summary="safe")
+
+    assert received == [first, second]
+    assert [event.sequence for event in received] == [0, 1]
+
+
+def test_live_stream_subscriber_failure_does_not_change_agent_observation() -> None:
+    session_id = _id()
+    stream = ObservationStream(
+        source_id=session_id,
+        context=ObservationContext.new(session_id=session_id),
+    )
+    received = []
+
+    def broken(_event) -> None:
+        raise RuntimeError("presentation failed")
+
+    stream.subscribe(broken)
+    stream.subscribe(received.append)
+    event = stream.publish(record_type="provider_started", status="started", summary="safe")
+
+    assert received == [event]
+    assert stream.snapshot() == (event,)
 
 
 def test_background_projection_filters_and_diagnosis_are_read_only() -> None:

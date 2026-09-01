@@ -16,12 +16,15 @@ from coquo.worktree_integration import (
 from coquo.worktree_records import WorktreeState
 from coquo.workflow_orchestration import (
     WorkflowError,
+    WorkflowDrivePolicy,
+    WorkflowDriveStopReason,
     WorkflowOrchestrator,
     WorkflowPhase,
     WorkflowRole,
     WorkflowVerdict,
     WorkflowStage,
 )
+from coquo.core.cancellation import TurnCancellation
 from coquo.task_records import StageExecutionTarget
 
 
@@ -286,6 +289,84 @@ def test_workflow_bridge_runs_real_explorer_and_executor_with_durable_identities
         reloaded = WorkflowOrchestrator(tmp_path).inspect(state.workflow_id)
         assert reloaded.revision == after_execution.revision
         assert reloaded.stages == after_execution.stages
+    finally:
+        session.close()
+
+
+def test_bounded_workflow_driver_runs_explore_and_execute_then_stops_at_review(tmp_path) -> None:
+    session = ProjectSession.open(tmp_path, environment={}, approval_mode=ApprovalMode.AUTO)
+    try:
+        orchestrator = WorkflowOrchestrator(tmp_path)
+        state = orchestrator.start(
+            "drive a bounded workflow",
+            owner_session=session.session_id,
+            acceptance_criteria=("review is still explicit",),
+        )
+        driven = orchestrator.drive_until_review(
+            state.workflow_id,
+            session,
+            policy=WorkflowDrivePolicy(background=False),
+        )
+        assert driven.stop_reason is WorkflowDriveStopReason.REVIEW_READY
+        assert driven.stages_started == (WorkflowRole.EXPLORER, WorkflowRole.EXECUTOR)
+        assert driven.state.phase is WorkflowPhase.REVIEW
+        assert driven.state.integration is None
+    finally:
+        session.close()
+
+
+def test_bounded_workflow_driver_stops_for_pending_background_stage(tmp_path) -> None:
+    session = ProjectSession.open(tmp_path, environment={}, approval_mode=ApprovalMode.AUTO)
+    try:
+        orchestrator = WorkflowOrchestrator(tmp_path)
+        state = orchestrator.start(
+            "observe a bounded background workflow",
+            owner_session=session.session_id,
+            acceptance_criteria=("pending remains visible",),
+        )
+        driven = orchestrator.drive_until_review(
+            state.workflow_id,
+            session,
+            policy=WorkflowDrivePolicy(background=True),
+        )
+        assert driven.stop_reason is WorkflowDriveStopReason.PENDING_STAGE
+        assert driven.stages_started == (WorkflowRole.EXPLORER,)
+        assert driven.state.phase is WorkflowPhase.EXPLORATION
+    finally:
+        session.close()
+
+
+def test_bounded_workflow_driver_enforces_stage_limit_and_cancellation(tmp_path) -> None:
+    session = ProjectSession.open(tmp_path, environment={}, approval_mode=ApprovalMode.AUTO)
+    try:
+        orchestrator = WorkflowOrchestrator(tmp_path)
+        state = orchestrator.start(
+            "stop before executor",
+            owner_session=session.session_id,
+            acceptance_criteria=("stage limit is honored",),
+        )
+        limited = orchestrator.drive_until_review(
+            state.workflow_id,
+            session,
+            policy=WorkflowDrivePolicy(max_stages=1, background=False),
+        )
+        assert limited.stop_reason is WorkflowDriveStopReason.STAGE_LIMIT
+        assert limited.state.phase is WorkflowPhase.EXECUTION
+
+        cancelled_state = orchestrator.start(
+            "cancel before driving",
+            owner_session=session.session_id,
+            acceptance_criteria=("cancel is visible",),
+        )
+        cancellation = TurnCancellation()
+        cancellation.request()
+        cancelled = orchestrator.drive_until_review(
+            cancelled_state.workflow_id,
+            session,
+            cancellation=cancellation,
+        )
+        assert cancelled.stop_reason is WorkflowDriveStopReason.CANCELLED
+        assert cancelled.state.phase is WorkflowPhase.ARCHITECTURE
     finally:
         session.close()
 

@@ -97,12 +97,14 @@ class _QueuedPromptRenderer:
         *,
         color: bool,
         render_markdown: bool,
+        immediate_streaming: bool = False,
         width: int = DEFAULT_TERMINAL_WIDTH,
     ) -> None:
         self._stream = io.StringIO()
         self._cursor = 0
         self._color = color
         self._render_markdown = render_markdown
+        self._immediate_streaming = immediate_streaming
         self._width = width
         self._sink = self._new_sink()
 
@@ -170,6 +172,7 @@ class _QueuedPromptRenderer:
             color=self._color,
             render_markdown=self._render_markdown,
             show_role_markers=True,
+            immediate_streaming=self._immediate_streaming,
             tool_detail_mode=getattr(self, "_tool_detail_mode", ToolDetailMode.COMPACT),
             markdown_width=self._width,
         )
@@ -192,6 +195,7 @@ class TerminalApplication:
         cwd: Path,
         color: bool,
         render_markdown: bool,
+        immediate_streaming: bool = False,
         queue: FrontendEventQueue,
         approval_broker: TerminalApprovalBroker,
         input: Input | None = None,
@@ -208,7 +212,11 @@ class TerminalApplication:
         self._state = TerminalViewState()
         self._tool_details = ToolDetailSettings()
         self._session_switch = SessionSwitchCatalog()
-        self._renderer = _QueuedPromptRenderer(color=color, render_markdown=render_markdown)
+        self._renderer = _QueuedPromptRenderer(
+            color=color,
+            render_markdown=render_markdown,
+            immediate_streaming=immediate_streaming,
+        )
         self._status = _snapshot(session, "status")
         self._session_info = _snapshot(session, "session_info")
         self._session_info_before_prepared_title: object | None = None

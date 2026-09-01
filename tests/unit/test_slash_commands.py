@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from uuid import uuid4
 
 from coquo.agent.loop import AgentLoop
 from coquo.cli.presentation import ToolDetailMode
@@ -84,6 +85,13 @@ from coquo.task_records import (
     TaskTerminalOutcome,
 )
 from coquo.task_runtime import TaskDriverStopReason, TaskNextAction
+from coquo.workflow_orchestration import (
+    WorkflowDriveStopReason,
+    WorkflowPacket,
+    WorkflowPhase,
+    WorkflowRole,
+    WorkflowState,
+)
 
 
 @dataclass
@@ -211,6 +219,32 @@ class Session:
             ),
             True,
             "command_succeeded",
+        )
+
+    def drive_workflow(self, workflow_id, *, policy=None, cancellation=None):
+        del cancellation
+        self.workflow_drive = (workflow_id, policy)
+        state = WorkflowState(
+            str(uuid4()),
+            str(uuid4()),
+            WorkflowPhase.EXECUTION,
+            WorkflowPacket(
+                "Inspect the fixture",
+                ("workspace",),
+                (),
+                ("fixture is understood",),
+                "read-only",
+                "manual",
+                (),
+                {"provider": "fake"},
+            ),
+        )
+        return SimpleNamespace(
+            state=state,
+            stop_reason=WorkflowDriveStopReason.REVIEW_READY,
+            stages_started=(WorkflowRole.EXPLORER,),
+            elapsed_seconds=0.25,
+            diagnostic=None,
         )
 
     def inspect_context(self):
@@ -1860,6 +1894,22 @@ def test_effort_command_accepts_all_host_levels_and_reports_complete_union(tmp_p
     assert session.updates[-1] is None
     invalid = dispatch_slash("/effort ultra", session)
     assert invalid.message == "Usage: /effort [none|minimal|low|medium|high|xhigh|max|reset]"
+
+
+def test_workflow_drive_parses_bounded_stage_limit_and_background_mode(tmp_path) -> None:
+    session = Session(tmp_path)
+    workflow_id = str(uuid4())
+
+    result = dispatch_slash(f"/workflow drive {workflow_id} 3 background", session)
+
+    assert result.handled is True
+    assert result.kind == "info"
+    assert "Drive stop: review-ready" in result.message
+    assert "Stages started: explorer" in result.message
+    driven_id, policy = session.workflow_drive
+    assert driven_id == workflow_id
+    assert policy.max_stages == 3
+    assert policy.background is True
 
 
 def test_non_slash_text_is_not_handled(tmp_path) -> None:

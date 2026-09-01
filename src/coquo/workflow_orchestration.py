@@ -15,9 +15,11 @@ from enum import StrEnum
 import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Mapping
+import time
+from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
 
+from coquo.core.cancellation import TurnCancellation, TurnCancelled
 from coquo.core.permissions import (
     ApprovalMode,
     PermissionAction,
@@ -66,6 +68,89 @@ class WorkflowVerdict(StrEnum):
     PASSED = "passed"
     REJECTED = "rejected"
     UNKNOWN = "unknown"
+
+
+class WorkflowDriveStopReason(StrEnum):
+    """Why the bounded driver returned control to its Host."""
+
+    REVIEW_READY = "review-ready"
+    PENDING_STAGE = "pending-stage"
+    RECOVERY_REQUIRED = "recovery-required"
+    STAGE_FAILED = "stage-failed"
+    STAGE_LIMIT = "stage-limit"
+    ELAPSED_LIMIT = "elapsed-limit"
+    CANCELLED = "cancelled"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class WorkflowDrivePolicy:
+    """Conservative limits for one automatic explore/execute progression."""
+
+    max_stages: int = 2
+    max_elapsed_seconds: float = 300.0
+    background: bool = False
+    execution_target: StageExecutionTarget = StageExecutionTarget.CHILD
+    team_id: str | None = None
+    member_id: str | None = None
+    work_item_id: str | None = None
+    max_assignments: int = 32
+    max_parallel: int = 4
+
+    def __post_init__(self) -> None:
+        if type(self.max_stages) is not int or not 1 <= self.max_stages <= 4:
+            raise ValueError("workflow drive stage limit must be between 1 and 4")
+        if (
+            isinstance(self.max_elapsed_seconds, bool)
+            or not isinstance(self.max_elapsed_seconds, (int, float))
+            or self.max_elapsed_seconds <= 0
+            or self.max_elapsed_seconds > 3600
+        ):
+            raise ValueError("workflow drive elapsed limit must be between 0 and 3600 seconds")
+        if type(self.background) is not bool:
+            raise ValueError("workflow drive background flag is invalid")
+        if type(self.execution_target) is not StageExecutionTarget:
+            raise ValueError("workflow drive execution target is invalid")
+        if self.execution_target is StageExecutionTarget.TEAM_ASSIGNMENT:
+            if not self.team_id or not self.member_id:
+                raise ValueError("Team assignment workflow drive requires team and member IDs")
+        elif self.execution_target is StageExecutionTarget.TEAM_SCHEDULE and not self.team_id:
+            raise ValueError("Team schedule workflow drive requires a Team ID")
+        elif (
+            self.team_id is not None or self.member_id is not None or self.work_item_id is not None
+        ):
+            raise ValueError("Team execution IDs are invalid for a Child workflow drive")
+        if type(self.max_assignments) is not int or not 1 <= self.max_assignments <= 32:
+            raise ValueError("workflow drive assignment limit is invalid")
+        if type(self.max_parallel) is not int or not 1 <= self.max_parallel <= 4:
+            raise ValueError("workflow drive parallel limit is invalid")
+
+
+@dataclass(frozen=True)
+class WorkflowDriveResult:
+    """Structured Host result; no driver outcome implies acceptance."""
+
+    state: "WorkflowState"
+    stop_reason: WorkflowDriveStopReason
+    stages_started: tuple[WorkflowRole, ...]
+    elapsed_seconds: float
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not WorkflowState:
+            raise WorkflowError("workflow drive state is invalid")
+        if type(self.stop_reason) is not WorkflowDriveStopReason:
+            raise WorkflowError("workflow drive stop reason is invalid")
+        if not isinstance(self.stages_started, tuple) or any(
+            type(role) is not WorkflowRole for role in self.stages_started
+        ):
+            raise WorkflowError("workflow drive stage list is invalid")
+        if (
+            isinstance(self.elapsed_seconds, bool)
+            or not isinstance(self.elapsed_seconds, (int, float))
+            or self.elapsed_seconds < 0
+        ):
+            raise WorkflowError("workflow drive elapsed time is invalid")
 
 
 _TERMINAL_PHASES = {
@@ -410,6 +495,130 @@ class WorkflowOrchestrator:
         except KeyError:
             raise WorkflowError(f"workflow phase {state.phase.value} cannot advance") from None
         return self._replace(state, phase=next_phase)
+
+    def drive_until_review(
+        self,
+        workflow_id: str,
+        session: Any,
+        *,
+        policy: WorkflowDrivePolicy | None = None,
+        cancellation: TurnCancellation | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> WorkflowDriveResult:
+        """Boundedly run architecture, exploration, and execution stages.
+
+        The driver only invokes the existing Task/Child/Team bridge.  It stops
+        before Reviewer, integration, acceptance, retry, or Git operations so
+        the Host retains every consequential decision.
+        """
+        if session is None:
+            raise WorkflowError("workflow drive requires a live Host Session")
+        selected = policy or WorkflowDrivePolicy()
+        if not isinstance(selected, WorkflowDrivePolicy):
+            raise WorkflowError("workflow drive policy is invalid")
+        started = monotonic()
+        stages_started: list[WorkflowRole] = []
+
+        def result(
+            state: WorkflowState,
+            reason: WorkflowDriveStopReason,
+            diagnostic: str | None = None,
+        ) -> WorkflowDriveResult:
+            return WorkflowDriveResult(
+                state,
+                reason,
+                tuple(stages_started),
+                max(0.0, monotonic() - started),
+                diagnostic,
+            )
+
+        while True:
+            state = self.inspect(workflow_id)
+            try:
+                if cancellation is not None:
+                    cancellation.check()
+            except TurnCancelled:
+                return result(
+                    state, WorkflowDriveStopReason.CANCELLED, "Host cancellation requested"
+                )
+            if monotonic() - started >= selected.max_elapsed_seconds:
+                return result(state, WorkflowDriveStopReason.ELAPSED_LIMIT)
+            if state.phase is WorkflowPhase.ARCHITECTURE:
+                self.advance(workflow_id, expected_phase=WorkflowPhase.ARCHITECTURE)
+                continue
+            if state.phase is WorkflowPhase.REVIEW:
+                return result(state, WorkflowDriveStopReason.REVIEW_READY)
+            if state.phase in _TERMINAL_PHASES:
+                reason = (
+                    WorkflowDriveStopReason.RECOVERY_REQUIRED
+                    if state.phase is WorkflowPhase.RECOVERY_REQUIRED
+                    else WorkflowDriveStopReason.BLOCKED
+                )
+                return result(state, reason, f"workflow is already {state.phase.value}")
+            if state.phase is WorkflowPhase.NEEDS_REWORK:
+                return result(
+                    state, WorkflowDriveStopReason.BLOCKED, "workflow requires explicit Host rework"
+                )
+            if state.phase not in {WorkflowPhase.EXPLORATION, WorkflowPhase.EXECUTION}:
+                return result(
+                    state, WorkflowDriveStopReason.BLOCKED, "workflow phase is not driveable"
+                )
+
+            role = (
+                WorkflowRole.EXPLORER
+                if state.phase is WorkflowPhase.EXPLORATION
+                else WorkflowRole.EXECUTOR
+            )
+            existing = self._latest_stage(state, role)
+            if existing is None and len(stages_started) >= selected.max_stages:
+                return result(state, WorkflowDriveStopReason.STAGE_LIMIT)
+            try:
+                if role is WorkflowRole.EXPLORER:
+                    self.start_exploration_stage(workflow_id)
+                    if existing is None:
+                        stages_started.append(role)
+                    bridge_result = self.run_exploration_stage(
+                        workflow_id, session, background=selected.background
+                    )
+                else:
+                    self.start_execution_stage(
+                        workflow_id,
+                        target=selected.execution_target,
+                        team_id=selected.team_id,
+                        member_id=selected.member_id,
+                        work_item_id=selected.work_item_id,
+                        max_assignments=selected.max_assignments,
+                        max_parallel=selected.max_parallel,
+                    )
+                    if existing is None:
+                        stages_started.append(role)
+                    bridge_result = self.run_execution_stage(
+                        workflow_id, session, background=selected.background
+                    )
+            except WorkflowError as error:
+                return result(
+                    self.inspect(workflow_id),
+                    WorkflowDriveStopReason.BLOCKED,
+                    str(error),
+                )
+            if bridge_result.outcome == "pending":
+                return result(
+                    self.inspect(workflow_id),
+                    WorkflowDriveStopReason.PENDING_STAGE,
+                    bridge_result.diagnostic,
+                )
+            if bridge_result.outcome == "recovery-required":
+                return result(
+                    self.inspect(workflow_id),
+                    WorkflowDriveStopReason.RECOVERY_REQUIRED,
+                    bridge_result.diagnostic,
+                )
+            if bridge_result.outcome == "failed":
+                return result(
+                    self.inspect(workflow_id),
+                    WorkflowDriveStopReason.STAGE_FAILED,
+                    bridge_result.diagnostic,
+                )
 
     def record_exploration(
         self, workflow_id: str, *, source_id: str, status: str, summary: str
@@ -1333,6 +1542,9 @@ __all__ = [
     "WorkflowRole",
     "WorkflowPhase",
     "WorkflowVerdict",
+    "WorkflowDriveStopReason",
+    "WorkflowDrivePolicy",
+    "WorkflowDriveResult",
     "WorkflowPacket",
     "WorkflowEvidence",
     "WorkflowStage",

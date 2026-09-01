@@ -45,6 +45,40 @@ def payload(result) -> dict[str, object]:
     return json.loads(result.tool_result.content)
 
 
+def test_fixed_resource_limits_are_applied_as_non_raiseable_process_bounds(monkeypatch) -> None:
+    calls = []
+
+    def record(pid, kind, limits):
+        calls.append((pid, kind, limits))
+
+    monkeypatch.setattr(run_command_module.resource, "prlimit", record)
+
+    run_command_module._apply_command_resource_limits(42, 7)
+
+    assert [pid for pid, _, _ in calls] == [42] * 4
+    assert all(soft == hard for _, _, (soft, hard) in calls)
+    assert calls[0][2] == (7, 7)
+    assert calls[1][2] == (
+        run_command_module.MAX_COMMAND_ADDRESS_SPACE_BYTES,
+        run_command_module.MAX_COMMAND_ADDRESS_SPACE_BYTES,
+    )
+    assert calls[2][2] == (
+        run_command_module.MAX_COMMAND_FILE_BYTES,
+        run_command_module.MAX_COMMAND_FILE_BYTES,
+    )
+    assert calls[3][2] == (
+        run_command_module.MAX_COMMAND_OPEN_FILES,
+        run_command_module.MAX_COMMAND_OPEN_FILES,
+    )
+
+
+def test_resource_limit_setup_fails_closed_when_prlimit_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(run_command_module, "resource", None)
+
+    with pytest.raises(run_command_module.CommandResourceLimitsUnavailable):
+        run_command_module._apply_command_resource_limits(42, 7)
+
+
 def test_direct_execution_captures_stdout_stderr_and_literal_metacharacters(
     tmp_path: Path,
 ) -> None:

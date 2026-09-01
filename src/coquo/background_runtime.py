@@ -41,7 +41,8 @@ from coquo.child_run_store import (
 )
 from coquo.session_records import workspace_fingerprint
 
-BACKGROUND_QUEUE_SCHEMA_VERSION = 1
+BACKGROUND_QUEUE_SCHEMA_VERSION = 2
+BACKGROUND_QUEUE_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 BACKGROUND_WORKER_STATE_SCHEMA_VERSION = 1
 MAX_BACKGROUND_QUEUE_RECORDS = 20_000
 MAX_BACKGROUND_QUEUE_BYTES = 8 * 1024 * 1024
@@ -52,6 +53,7 @@ BACKGROUND_IDLE_SECONDS = 2.0
 BACKGROUND_RECORD_TYPES = {"background_queue_event_v1"}
 BACKGROUND_EVENTS = {"queued", "claimed", "heartbeat", "requeued", "terminal"}
 BACKGROUND_TERMINAL_STATUSES = frozenset(item.value for item in ChildRunStatus)
+BACKGROUND_EFFECT_STATES = frozenset({"not-started", "in-flight", "confirmed", "unknown"})
 
 
 class BackgroundRuntimeError(RuntimeError):
@@ -74,10 +76,16 @@ class BackgroundQueueItem:
     heartbeat_at: str | None = None
     terminal_child_status: str | None = None
     message: str | None = None
+    effect_state: str = "confirmed"
 
     @property
     def pending(self) -> bool:
         return self.state in {"queued", "claimed"}
+
+    @property
+    def outcome_unknown(self) -> bool:
+        """Whether a terminal item may have crossed an external side-effect boundary."""
+        return self.state == "terminal" and self.effect_state == "unknown"
 
 
 @dataclass(frozen=True)
@@ -149,6 +157,13 @@ def _safe_text(value: object, label: str, limit: int = 1024) -> str:
     if not text or len(text) > limit:
         raise BackgroundRuntimeError(f"{label} is invalid")
     return text
+
+
+def _safe_effect_state(value: object) -> str:
+    state = _safe_text(value, "background effect state", 32)
+    if state not in BACKGROUND_EFFECT_STATES:
+        raise BackgroundRuntimeError("background effect state is invalid")
+    return state
 
 
 def _safe_error(error: BaseException) -> str:
@@ -233,6 +248,7 @@ class BackgroundQueueStore:
                 child_run_id=child_id,
                 state="queued",
                 queued_at=self._clock(),
+                effect_state="not-started",
             )
             self._append_locked(self._record("queued", item))
             return item
@@ -253,6 +269,7 @@ class BackgroundQueueStore:
                 lease_id=str(uuid4()),
                 claimed_at=self._clock(),
                 heartbeat_at=self._clock(),
+                effect_state="in-flight",
             )
             self._append_locked(self._record("claimed", claimed))
             return claimed
@@ -273,6 +290,7 @@ class BackgroundQueueStore:
             claimed_at=current.claimed_at,
             heartbeat_at=self._clock(),
             message=message or current.message,
+            effect_state=current.effect_state,
         )
         with self._queue_lock():
             current = self._find_locked(item.submission_id)
@@ -293,6 +311,7 @@ class BackgroundQueueStore:
                 state="queued",
                 queued_at=current.queued_at,
                 message=reason_text,
+                effect_state="not-started",
             )
             self._append_locked(self._record("requeued", updated, message=reason_text))
             return updated
@@ -303,13 +322,19 @@ class BackgroundQueueStore:
         *,
         child_status: str,
         message: str | None = None,
+        effect_state: str = "confirmed",
     ) -> BackgroundQueueItem:
         status = _safe_text(child_status, "Child terminal status", 32)
         if status not in BACKGROUND_TERMINAL_STATUSES:
             raise BackgroundRuntimeError("Child terminal status is invalid")
+        effect = _safe_effect_state(effect_state)
         with self._queue_lock():
             current = self._find_locked(item.submission_id)
             if current.state == "terminal":
+                if current.terminal_child_status != status or current.effect_state != effect:
+                    raise BackgroundRuntimeError(
+                        "background terminal observation conflicts with the durable result"
+                    )
                 return current
             if current.state != "claimed" or current.lease_id != item.lease_id:
                 raise BackgroundRuntimeError("background queue lease does not match")
@@ -324,6 +349,7 @@ class BackgroundQueueStore:
                 heartbeat_at=current.heartbeat_at,
                 terminal_child_status=status,
                 message=None if message is None else _safe_text(message, "terminal message"),
+                effect_state=effect,
             )
             self._append_locked(self._record("terminal", terminal))
             return terminal
@@ -469,6 +495,7 @@ class BackgroundQueueStore:
             "claimed_at": item.claimed_at,
             "heartbeat_at": item.heartbeat_at,
             "terminal_child_status": item.terminal_child_status,
+            "effect_state": item.effect_state,
             "message": message if message is not None else item.message,
             "recorded_at": self._clock(),
         }
@@ -520,6 +547,15 @@ class BackgroundQueueStore:
             event = record["event"]
             submission_id = record["submission_id"]
             current = items.get(submission_id)
+            event_effect = record.get("effect_state")
+            if event_effect is None:
+                event_effect = (
+                    "not-started"
+                    if event in {"queued", "requeued"}
+                    else "in-flight"
+                    if event in {"claimed", "heartbeat"}
+                    else "confirmed"
+                )
             candidate = BackgroundQueueItem(
                 submission_id=submission_id,
                 child_run_id=record["child_run_id"],
@@ -537,6 +573,7 @@ class BackgroundQueueStore:
                 terminal_child_status=record.get("terminal_child_status")
                 or (current.terminal_child_status if current else None),
                 message=record.get("message") or (current.message if current else None),
+                effect_state=_safe_effect_state(event_effect),
             )
             items[submission_id] = candidate
         return tuple(sorted(items.values(), key=lambda item: (item.queued_at, item.submission_id)))
@@ -545,7 +582,7 @@ class BackgroundQueueStore:
     def _validate_record(record: object, expected_sequence: int) -> None:
         if not isinstance(record, dict) or record.get("record_type") not in BACKGROUND_RECORD_TYPES:
             raise BackgroundRuntimeError("background queue record type is invalid")
-        if record.get("schema_version") != BACKGROUND_QUEUE_SCHEMA_VERSION:
+        if record.get("schema_version") not in BACKGROUND_QUEUE_SUPPORTED_SCHEMA_VERSIONS:
             raise BackgroundRuntimeError("background queue schema is unsupported")
         if record.get("sequence") != expected_sequence:
             raise BackgroundRuntimeError("background queue sequence is not contiguous")
@@ -566,6 +603,8 @@ class BackgroundQueueStore:
             raise BackgroundRuntimeError("background terminal status is invalid")
         if record.get("message") is not None:
             _safe_text(record["message"], "background message")
+        if record.get("effect_state") is not None:
+            _safe_effect_state(record["effect_state"])
 
     def _ensure_root(self) -> None:
         for path in (
@@ -714,7 +753,7 @@ class PersistentChildWorker:
         processed: list[str] = []
         diagnostics: list[str] = []
         recovered: list[str] = []
-        active: dict[Future[tuple[str, str, str | None]], BackgroundQueueItem] = {}
+        active: dict[Future[tuple[str, str, str | None, str]], BackgroundQueueItem] = {}
         last_activity = time.monotonic()
         processed_count = 0
         with lease:
@@ -730,7 +769,7 @@ class PersistentChildWorker:
                         for future, item in tuple(active.items()):
                             if future.done():
                                 del active[future]
-                                child_id, status, error = future.result()
+                                child_id, status, error, effect_state = future.result()
                                 processed.append(child_id)
                                 processed_count += 1
                                 last_activity = now
@@ -739,7 +778,10 @@ class PersistentChildWorker:
                                 if status in BACKGROUND_TERMINAL_STATUSES:
                                     try:
                                         self.store.terminal(
-                                            item, child_status=status, message=error
+                                            item,
+                                            child_status=status,
+                                            message=error,
+                                            effect_state=effect_state,
                                         )
                                     except BaseException as terminal_error:
                                         diagnostics.append(
@@ -860,7 +902,7 @@ class PersistentChildWorker:
                 )
         return recovered, diagnostics
 
-    def _execute(self, item: BackgroundQueueItem) -> tuple[str, str, str | None]:
+    def _execute(self, item: BackgroundQueueItem) -> tuple[str, str, str | None, str]:
         error_text: str | None = None
         try:
             executor = (
@@ -882,12 +924,13 @@ class PersistentChildWorker:
                         result_code="background_execution_failed",
                         message=error_text,
                     )
-                return item.child_run_id, current.status.value, error_text
+                return item.child_run_id, current.status.value, error_text, "not-started"
             except BaseException as terminal_error:
                 return (
                     item.child_run_id,
                     "failed",
                     f"{error_text}; terminalization failed: {_safe_error(terminal_error)}",
+                    "unknown",
                 )
         try:
             current = ChildRunStore(self.workspace).inspect(item.child_run_id)
@@ -904,9 +947,14 @@ class PersistentChildWorker:
                     result_code="worker_missing_terminal_state",
                     message="background executor returned without a durable terminal Child state",
                 )
-            return item.child_run_id, current.status.value, None
+            return item.child_run_id, current.status.value, None, "confirmed"
         except BaseException as error:
-            return item.child_run_id, "failed", f"terminal inspection failed: {_safe_error(error)}"
+            return (
+                item.child_run_id,
+                "failed",
+                f"terminal inspection failed: {_safe_error(error)}",
+                "unknown",
+            )
 
     def _default_executor(self, child_run_id: str):
         del child_run_id
@@ -918,7 +966,7 @@ class PersistentChildWorker:
         self,
         worker_id: str,
         state: str,
-        active: Mapping[Future[tuple[str, str, str | None]], BackgroundQueueItem],
+        active: Mapping[Future[tuple[str, str, str | None, str]], BackgroundQueueItem],
         *,
         last_error: str | None = None,
     ) -> None:
@@ -941,7 +989,7 @@ class PersistentChildWorker:
     def _heartbeat(
         self,
         worker_id: str,
-        active: Mapping[Future[tuple[str, str, str | None]], BackgroundQueueItem],
+        active: Mapping[Future[tuple[str, str, str | None, str]], BackgroundQueueItem],
     ) -> None:
         for item in active.values():
             try:

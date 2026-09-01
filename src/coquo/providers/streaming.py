@@ -126,6 +126,19 @@ class ProviderResponseOutcome:
     usage: ProviderTokenUsage | None = None
     context_report: ContextFitReport | None = None
     search_observation: ProviderSearchObservation | None = None
+    attempts: int = 1
+    retry_delays_seconds: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.attempts) is not int or self.attempts < 1 or self.attempts > 3:
+            raise ValueError("provider response attempt count is invalid")
+        if not isinstance(self.retry_delays_seconds, tuple):
+            raise ValueError("provider response retry delays are invalid")
+        if len(self.retry_delays_seconds) != self.attempts - 1:
+            raise ValueError("provider response retry delays do not match attempts")
+        for delay in self.retry_delays_seconds:
+            if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay < 0:
+                raise ValueError("provider response retry delay is invalid")
 
 
 def respond_with_streaming(
@@ -148,12 +161,25 @@ def respond_with_streaming(
 
     observed_method = getattr(provider, "respond_with_observation", None)
     if callable(observed_method):
-        outcome = observed_method(
-            request,
-            event_sink=checked_sink,
-            prefer_stream=prefer_stream,
-            preflight_sink=preflight_sink,
-        )
+        try:
+            outcome = observed_method(
+                request,
+                event_sink=checked_sink,
+                prefer_stream=prefer_stream,
+                preflight_sink=preflight_sink,
+                cancellation=cancellation,
+            )
+        except TypeError as error:
+            # Preserve compatibility with third-party observed providers that
+            # implement the pre-cancellation callback shape.
+            if "cancellation" not in str(error):
+                raise
+            outcome = observed_method(
+                request,
+                event_sink=checked_sink,
+                prefer_stream=prefer_stream,
+                preflight_sink=preflight_sink,
+            )
         if cancellation is not None:
             cancellation.check()
         return outcome

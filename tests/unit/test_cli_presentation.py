@@ -439,6 +439,21 @@ def test_provider_invocation_events_render_round_boundaries_without_content() ->
             purpose=ProviderInvocationPurpose.SESSION_TITLE,
         )
     ) == ("Model round [2/24]: session title received (425ms)", "success")
+    assert render_prompt_event(
+        ProviderInvocationFinished(
+            3,
+            24,
+            ProviderInvocationOutcome.FINAL_TEXT,
+            elapsed_milliseconds=2500,
+            delta_count=3,
+            first_delta_milliseconds=1200,
+            max_delta_gap_milliseconds=900,
+        )
+    ) == (
+        "Model round [3/24]: final response received (2.5s) "
+        "[stream 3 chunks, first 1200ms, max gap 900ms]",
+        "success",
+    )
 
 
 def test_durable_usage_presentation_distinguishes_unknown_and_legacy() -> None:

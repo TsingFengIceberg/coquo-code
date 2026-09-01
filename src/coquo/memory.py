@@ -1,7 +1,8 @@
 """Provider-neutral contracts for bounded long-term semantic memory.
 
-This slice defines storage data, scope, and lifecycle vocabulary only.  Memory
-is not model authority, and no automatic recall or extraction is performed here.
+Memory remains Host-owned, bounded, and untrusted evidence.  Recall and
+post-commit candidate capture are implemented by separate services; these
+contracts deliberately do not grant model authority or execution capability.
 """
 
 from __future__ import annotations
@@ -62,10 +63,17 @@ class MemoryRecallMode(StrEnum):
 
 
 class MemoryRetrievalMode(StrEnum):
-    """Configured retrieval strategy; semantic currently degrades locally."""
+    """Configured local retrieval strategy."""
 
     TEXT = "text"
     SEMANTIC = "semantic"
+
+
+class MemoryCaptureMode(StrEnum):
+    """How ordinary user text may become a memory candidate."""
+
+    EXPLICIT = "explicit"
+    CONSERVATIVE = "conservative"
 
 
 class MemoryWriteMode(StrEnum):
