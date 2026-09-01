@@ -28,6 +28,7 @@ The name comes from Latin *coquō*, “I cook”: requirements, context, tools, 
   - [Inspect routes and context windows](#inspect-routes-and-context-windows)
   - [Manage Sessions](#manage-sessions)
   - [Manage long-term memory](#manage-long-term-memory)
+  - [Manage controlled self-evolution](#manage-controlled-self-evolution)
 - [Manage Tasks](#manage-tasks)
 - [Manage Teams](#manage-teams)
 - [Manage Child Runs](#manage-child-runs)
@@ -251,6 +252,17 @@ uv run coquo memory search "complete test suite"
 ```
 
 Long-term memory is workspace-scoped and disabled by default. Only confirmed records are recalled within fixed bounds, and the model receives them as `[UNTRUSTED MEMORY EVIDENCE]` data rather than instructions. Explicit `remember:`, `remember that`, or `请记住` requests are processed after a successful Turn commit according to the `write` policy. Optional `capture=conservative` accepts only a small allow-list of preference and project-rule forms; implicit candidates never auto-confirm, even with `write=auto`. All writes remain subject to PermissionGate, approval, and Action Audit; model CRUD tools additionally require `--tools`. `semantic` uses the deterministic, offline `semantic-local-v1` retriever rather than a learned embedding service. See [ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md) for complete scope, lifecycle, recovery, and security boundaries.
+
+### Manage controlled self-evolution
+
+```bash
+uv run coquo evolution status
+uv run coquo evolution configure propose
+uv run coquo evolution trace skill success "verified reusable workflow" --metrics '{"success_rate":0.8}'
+uv run coquo evolution patterns
+```
+
+`EvolutionController` connects bounded traces, graders, repeated patterns, and four candidate targets (memory, skill, prompt, and workflow) through one controlled lifecycle. Candidates require Trace provenance, safety checks, independent validation/test metric comparison, and explicit `approve` before `activate`; `observe`, `rollback`, `deprecate`, and `archive` provide post-release governance. The default `off` mode records traces only, while `propose` and `supervised` still never publish automatically. These commands touch only the local `.coquo/evolution/events.jsonl` ledger: they do not invoke a Provider, execute tools, or change permissions, sandboxing, ToolSet, or AgentLoop policy. See [ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md) for the full boundary.
 
 ### Manage Tasks
 

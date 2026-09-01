@@ -1592,6 +1592,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 140. [0160：有界记忆召回索引缓存](./decisions/0160-bounded-memory-retrieval-index-cache.md)
 141. [0161：有界 Provider 可靠性与 Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
 142. [0162：固定命令资源限制](./decisions/0162-fixed-command-resource-limits.md)
+143. [0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1734,6 +1735,10 @@ Workflow Driver在Host侧串联现有Task、Child和Team账本，最多按记录
 `ObservationStream`现在提供进程内订阅边界，按FIFO把每个Host观测事件推送给本地消费者；消费者异常会被隔离，不会改变Agent因果。`coquo --events ndjson prompt "检查这个 workspace"`把同一份有界、无正文的观测投影逐行flush到stderr，stdout仍只保留最终回答。流式delta只报告字符数和UTF-8字节数，不保存回答、prompt、工具参数、headers、凭据、推理或token；默认`--events none`保持原有输出。该接口是本地诊断流，不代表Provider或终端已实现exactly-once刷新。详见[0158：实时观测事件输出](./decisions/0158-live-observation-event-output.md)。
 
 交互式TTY还使用独立的`immediate_streaming`呈现路径：每个收到的delta在终端转义后立即写入并flush，不等待完整Markdown段落或围栏代码块；中间片段不重新解释Markdown，完整响应仍由Agent loop校验。该路径只消除Host自己的Markdown缓冲，不能制造Provider、SDK或网络没有发送的chunk。
+
+## 有界自进化控制器
+
+自进化控制面现在由Host-owned `EvolutionController`提供，默认`off`，支持`propose`与`supervised`两个候选生成模式。它把有界Trace、grader结果、重复模式、Memory/Skill/Prompt/Workflow候选、安全检查、独立validation/test指标比较、人工批准、版本化激活、线上观察、回滚及归档写入独立的`.coquo/evolution/events.jsonl`；候选始终带来源并标记为不可信数据。`coquo evolution`只执行本地审计和状态转移，不调用Provider、不执行工具，也不能修改PermissionGate、sandbox、ToolSet、Child/Team或AgentLoop。只有通过Eval、人工批准且安全检查通过的候选才可激活，回滚会恢复最近的既有稳定候选（若存在）。详见[0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)。
 
 ## 后台副作用置信度与终态幂等
 

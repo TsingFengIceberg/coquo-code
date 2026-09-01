@@ -28,6 +28,7 @@ Coquo 是一个面向本地单用户使用、以学习为先的 Coding Agent CLI
   - [检查 Route 与 Context Window](#检查-route-与-context-window)
   - [管理 Session](#管理-session)
   - [管理长期记忆](#管理长期记忆)
+  - [管理受控自进化](#管理受控自进化)
 - [管理 Task](#管理-task)
 - [管理 Team](#管理-team)
 - [管理 Child Run](#管理-child-run)
@@ -250,6 +251,17 @@ uv run coquo memory search "完整测试"
 ```
 
 长期记忆按workspace默认关闭，只有confirmed记录会被有界召回，并作为`[UNTRUSTED MEMORY EVIDENCE]`数据而非指令传给模型。显式`remember:`、`remember that`或`请记住`请求只在成功提交Turn后按`write`策略处理；可选的`capture=conservative`只从有限的偏好/项目规则句式生成candidate，隐式candidate即使`write=auto`也不会自动确认。所有写入继续受PermissionGate、审批和Action Audit约束；模型CRUD工具还要求单独启用`--tools`。`semantic`使用无网络的确定性`semantic-local-v1`本地检索，不是learned embedding后端；完整作用域、生命周期、恢复和安全边界见[ADR 0156](./docs/decisions/0156-long-term-memory-contract-and-local-store.md)。
+
+### 管理受控自进化
+
+```bash
+uv run coquo evolution status
+uv run coquo evolution configure propose
+uv run coquo evolution trace skill success "verified reusable workflow" --metrics '{"success_rate":0.8}'
+uv run coquo evolution patterns
+```
+
+`EvolutionController`把有界Trace、grader、重复模式和四类候选（memory、skill、prompt、workflow）接入同一条受控生命周期。候选必须有Trace来源，通过安全检查和独立validation/test指标比较，并经人工`approve`后才能`activate`；`observe`、`rollback`、`deprecate`和`archive`用于线上治理。默认`off`只记录Trace，`propose`和`supervised`也不会自动发布。该命令只操作`.coquo/evolution/events.jsonl`本地账本，不调用Provider、不执行工具、不改变权限、sandbox、ToolSet或AgentLoop。完整边界见[ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md)。
 
 ### 管理 Task
 

@@ -1776,6 +1776,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 140. [0160: Bounded Memory Retrieval Index Cache](./decisions/0160-bounded-memory-retrieval-index-cache.md)
 141. [0161: Bounded Provider Reliability and Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
 142. [0162: Fixed Command Resource Limits](./decisions/0162-fixed-command-resource-limits.md)
+143. [0163: Bounded Self-Evolution Controller](./decisions/0163-bounded-self-evolution-controller.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -2087,6 +2088,10 @@ not reinterpreted in this path; the Agent loop still validates the complete
 response against the received deltas. This removes Host-side Markdown buffering
 from latency diagnosis, but cannot create chunks that the Provider, SDK, or
 network has not delivered.
+
+## Bounded Self-Evolution Controller
+
+The Host-owned `EvolutionController` now provides a bounded self-evolution control plane, defaulting to `off` with `propose` and `supervised` candidate-generation modes. It writes bounded traces, grader facts, repeated patterns, Memory/Skill/Prompt/Workflow candidates, safety checks, independent validation/test metric comparisons, human approval, versioned activation, live observations, rollback, and archival to the separate `.coquo/evolution/events.jsonl` log; every candidate retains provenance and remains untrusted task data. `coquo evolution` performs only local audit and state transitions: it does not invoke a Provider, execute tools, or modify PermissionGate, sandbox, ToolSet, Child/Team, or AgentLoop policy. Only a safety-passed candidate that passes Eval and receives explicit approval can activate, and rollback restores the newest prior stable candidate when one exists. See [0163: Bounded Self-Evolution Controller](./decisions/0163-bounded-self-evolution-controller.md).
 
 ## Background Effect Confidence and Terminal Idempotency
 

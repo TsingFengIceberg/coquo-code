@@ -199,6 +199,13 @@ from coquo.memory import (
 )
 from coquo.memory_config import MemoryConfigStore
 from coquo.memory_store import MemoryStore, MemoryStoreError
+from coquo.evolution import (
+    EvolutionController,
+    EvolutionError,
+    EvolutionMode,
+    EvolutionOutcome,
+    EvolutionTarget,
+)
 from coquo.session_records import workspace_fingerprint
 from coquo.skills import (
     SkillCatalogError,
@@ -1089,6 +1096,71 @@ def build_parser() -> argparse.ArgumentParser:
     for action, status in (("stale", MemoryStatus.STALE), ("delete", MemoryStatus.DELETED)):
         command = memory_commands.add_parser(action, help=f"mark one memory as {status.value}")
         command.add_argument("memory_id")
+    evolution_parser = subcommands.add_parser(
+        "evolution", help="inspect and manage the bounded self-evolution lifecycle"
+    )
+    evolution_commands = evolution_parser.add_subparsers(dest="evolution_command", required=True)
+    evolution_commands.add_parser("status", help="show the evolution mode and candidate counts")
+    evolution_configure = evolution_commands.add_parser("configure", help="set the evolution mode")
+    evolution_configure.add_argument("mode", choices=[mode.value for mode in EvolutionMode])
+    evolution_trace = evolution_commands.add_parser(
+        "trace", help="record one content-free evolution trace"
+    )
+    evolution_trace.add_argument("target", choices=[target.value for target in EvolutionTarget])
+    evolution_trace.add_argument("outcome", choices=[outcome.value for outcome in EvolutionOutcome])
+    evolution_trace.add_argument("summary", type=nonblank_prompt)
+    evolution_trace.add_argument("--session")
+    evolution_trace.add_argument("--turn", type=positive_turn_number)
+    evolution_trace.add_argument("--metrics", default="{}")
+    evolution_assess = evolution_commands.add_parser("assess", help="grade one recorded trace")
+    evolution_assess.add_argument("trace_id")
+    evolution_assess.add_argument("--label")
+    evolution_assess.add_argument("--grader", default="deterministic")
+    evolution_patterns = evolution_commands.add_parser(
+        "patterns", help="show repeated trace patterns"
+    )
+    evolution_patterns.add_argument(
+        "--target", choices=[target.value for target in EvolutionTarget]
+    )
+    evolution_propose = evolution_commands.add_parser(
+        "propose", help="create one quarantined candidate"
+    )
+    evolution_propose.add_argument("target", choices=[target.value for target in EvolutionTarget])
+    evolution_propose.add_argument("summary", type=nonblank_prompt)
+    evolution_propose.add_argument("content", type=nonblank_prompt)
+    evolution_propose.add_argument("--trace-id", action="append", required=True)
+    evolution_propose.add_argument("--expected-metrics", default="{}")
+    evolution_candidates = evolution_commands.add_parser(
+        "candidates", help="list evolution candidates"
+    )
+    evolution_candidates.add_argument(
+        "--target", choices=[target.value for target in EvolutionTarget]
+    )
+    evolution_show = evolution_commands.add_parser("show", help="show one evolution candidate")
+    evolution_show.add_argument("candidate_id")
+    evolution_safety = evolution_commands.add_parser("safety-check", help="check candidate safety")
+    evolution_safety.add_argument("candidate_id")
+    evolution_evaluate = evolution_commands.add_parser(
+        "evaluate", help="compare baseline and candidate metrics"
+    )
+    evolution_evaluate.add_argument("candidate_id")
+    evolution_evaluate.add_argument("--baseline-metrics", required=True)
+    evolution_evaluate.add_argument("--candidate-metrics", required=True)
+    evolution_evaluate.add_argument("--validation-set", required=True)
+    evolution_evaluate.add_argument("--test-set", required=True)
+    for action in ("approve", "activate", "rollback", "deprecate"):
+        command = evolution_commands.add_parser(action, help=f"{action} one evolution candidate")
+        command.add_argument("candidate_id")
+    evolution_observe = evolution_commands.add_parser(
+        "observe", help="record active candidate metrics"
+    )
+    evolution_observe.add_argument("candidate_id")
+    evolution_observe.add_argument("--metrics", required=True)
+    evolution_observe.add_argument("--not-used", action="store_true")
+    evolution_archive = evolution_commands.add_parser(
+        "archive", help="archive inactive candidates before a timestamp"
+    )
+    evolution_archive.add_argument("before", type=nonblank_prompt)
     task_parser = subcommands.add_parser("task", help="create and inspect durable workspace Tasks")
     task_commands = task_parser.add_subparsers(dest="task_command", required=True)
     task_create = task_commands.add_parser("create", help="create one ready Task")
@@ -2650,6 +2722,133 @@ def handle_memory_command(arguments: argparse.Namespace, workspace: Path, stdout
         stdout.write(_render_memory_record(memory.transition(arguments.memory_id, status)) + "\n")
         return 0
     raise MemoryStoreError("unknown memory command")
+
+
+def _evolution_json_object(raw: str, field: str) -> dict[str, object]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise EvolutionError(f"{field} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise EvolutionError(f"{field} must be a JSON object")
+    return value
+
+
+def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Expose the bounded evolution controller as an auditable Host command."""
+    controller = EvolutionController(workspace)
+    command = arguments.evolution_command
+    if command == "status":
+        candidates = controller.candidates()
+        active = sum(item.status.value == "active" for item in candidates)
+        stdout.write(
+            json.dumps(
+                {
+                    "mode": controller.mode().value,
+                    "traces": len(controller.traces()),
+                    "candidates": len(candidates),
+                    "active": active,
+                    "storage": str(controller.store.events_path),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if command == "configure":
+        stdout.write(
+            json.dumps({"mode": controller.configure(EvolutionMode(arguments.mode)).value}) + "\n"
+        )
+        return 0
+    if command == "trace":
+        trace = controller.record_trace(
+            EvolutionTarget(arguments.target),
+            EvolutionOutcome(arguments.outcome),
+            arguments.summary,
+            source_session_id=arguments.session,
+            source_turn=arguments.turn,
+            metrics=_evolution_json_object(arguments.metrics, "metrics"),
+        )
+        stdout.write(json.dumps(trace.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "assess":
+        assessment = controller.assess(
+            arguments.trace_id, label=arguments.label, grader=arguments.grader
+        )
+        stdout.write(json.dumps(assessment.__dict__, ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "patterns":
+        target = None if arguments.target is None else EvolutionTarget(arguments.target)
+        for pattern in controller.patterns(target):
+            stdout.write(json.dumps(pattern, ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "propose":
+        candidate = controller.propose(
+            EvolutionTarget(arguments.target),
+            arguments.summary,
+            arguments.content,
+            tuple(arguments.trace_id),
+            expected_metrics=_evolution_json_object(arguments.expected_metrics, "expected-metrics"),
+        )
+        stdout.write(json.dumps(candidate.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command in {"candidates", "show"}:
+        if command == "show":
+            items = [
+                item
+                for item in controller.candidates()
+                if item.candidate_id == arguments.candidate_id
+            ]
+        else:
+            target = None if arguments.target is None else EvolutionTarget(arguments.target)
+            items = controller.candidates(target)
+        for item in items:
+            stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        if command == "show" and not items:
+            raise EvolutionError("candidate does not exist")
+        return 0
+    if command == "safety-check":
+        passed, reasons = controller.safety_check(arguments.candidate_id)
+        stdout.write(
+            json.dumps(
+                {
+                    "candidate_id": arguments.candidate_id,
+                    "passed": passed,
+                    "reasons": list(reasons),
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0 if passed else 1
+    if command == "evaluate":
+        result = controller.evaluate(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.baseline_metrics, "baseline-metrics"),
+            _evolution_json_object(arguments.candidate_metrics, "candidate-metrics"),
+            validation_set=arguments.validation_set,
+            test_set=arguments.test_set,
+        )
+        stdout.write(json.dumps(result.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if result.passed else 1
+    if command in {"approve", "activate", "rollback", "deprecate"}:
+        item = getattr(controller, command)(arguments.candidate_id)
+        stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "observe":
+        item = controller.observe(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.metrics, "metrics"),
+            used=not arguments.not_used,
+        )
+        stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "archive":
+        for item in controller.archive(before=arguments.before):
+            stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    raise EvolutionError("unknown evolution command")
 
 
 def handle_session_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
@@ -4302,6 +4501,16 @@ def main(
                     "provider selection options cannot be combined with memory management"
                 )
             return handle_memory_command(arguments, workspace, output)
+        if arguments.command == "evolution":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with evolution management"
+                )
+            return handle_evolution_command(arguments, workspace, output)
         if arguments.command == "task":
             if (
                 arguments.profile is not None

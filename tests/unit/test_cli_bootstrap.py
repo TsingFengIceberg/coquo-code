@@ -355,8 +355,13 @@ def test_tty_markdown_rendering_does_not_change_durable_assistant_text(tmp_path)
     assert "Heading" in rendered
     assert "This is bold." in rendered
     assert "# Heading" not in rendered
-    transcript = next((tmp_path / ".coquo").rglob("*.jsonl"))
-    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    transcript_records = []
+    for path in (tmp_path / ".coquo").rglob("*.jsonl"):
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        if any(record.get("record_type") == "turn_committed" for record in records):
+            transcript_records = records
+            break
+    records = transcript_records
     turn = next(record for record in records if record["record_type"] == "turn_committed")
     assert turn["items"][-1] == {
         "item_type": "assistant_text",

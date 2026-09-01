@@ -33,6 +33,7 @@ from coquo.memory_store import MemoryStoreError
 from coquo.memory_observability import MemoryObservationLedger
 from coquo.memory_recall import MemoryRecallService, empty_memory_recall
 from coquo.memory_extraction import MemoryCandidateExtractor
+from coquo.evolution import EvolutionController, EvolutionError, EvolutionOutcome, EvolutionTarget
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
@@ -1047,6 +1048,7 @@ class ProjectSession:
         self._manager = manager
         self._session_store = session_store
         self._task_store = TaskStore(self.workspace)
+        self._evolution = EvolutionController(self.workspace)
         self._child_run_store = ChildRunStore(self.workspace)
         self._team_store = TeamStore(self.workspace)
         self._team_service = TeamAssignmentService(self.workspace)
@@ -1417,6 +1419,21 @@ class ProjectSession:
             error,
             provider_usage=provider_usage,
         )
+        try:
+            self._evolution.record_trace(
+                EvolutionTarget.WORKFLOW,
+                EvolutionOutcome.EXTERNAL_ERROR
+                if isinstance(error, ProviderAdapterError)
+                else EvolutionOutcome.FAILED,
+                f"uncommitted turn failed with {type(error).__name__}",
+                source_session_id=self._writer.session_id,
+                source_turn=len(self._writer.state.turns) + 1,
+                metrics={"success_rate": 0.0},
+            )
+        except (EvolutionError, OSError):
+            # Evolution is diagnostic state; a telemetry failure must not alter
+            # the durable failure semantics of the Session.
+            return
 
     def _prepare_runtime_first_response_hook(self, runtime, usage_cursor, title_source_text):
         if self._writer.state.turns or self._writer.state.latest_name is not None:
@@ -7720,6 +7737,7 @@ class ProjectSession:
         self._emit_prompt_event(self._active_event_sink, TurnCommitCompleted())
         if self._memory_candidate_extractor is not None:
             self._run_memory_candidate_extraction(writer, turn)
+        self._record_evolution_trace(writer, turn)
         terminal = next(
             (
                 entry
@@ -7750,6 +7768,7 @@ class ProjectSession:
                 "candidate_extraction", "failed", actor="host", reason="missing_turn_identity"
             )
             return
+
         source_turn = len(writer.state.turns)
         identity = ActionIdentity(
             request_id=_uuid4_text(self._action_uuid_factory(), "action request ID"),
@@ -7817,6 +7836,44 @@ class ProjectSession:
                     else "approval_not_granted"
                 ),
             )
+
+    def _record_evolution_trace(self, writer: SessionWriter, turn: CommittedTurn) -> None:
+        """Record content-free committed-turn facts without affecting commit truth."""
+        unsuccessful = {
+            "error",
+            "denied",
+            "rejected",
+            "cancelled",
+            "failed",
+            "partial",
+            "outcome-unknown",
+            "skipped-after-failure",
+            "rejected-over-budget",
+        }
+        failures = sum(entry.outcome.value in unsuccessful for entry in turn.tool_ledger.entries)
+        if not turn.tool_ledger.entries or failures == 0:
+            outcome = EvolutionOutcome.SUCCESS
+        elif failures == len(turn.tool_ledger.entries):
+            outcome = EvolutionOutcome.FAILED
+        else:
+            outcome = EvolutionOutcome.PARTIAL
+        try:
+            self._evolution.record_trace(
+                EvolutionTarget.WORKFLOW,
+                outcome,
+                f"committed turn with {turn.tool_ledger.requested} tool requests and {failures} unsuccessful outcomes",
+                source_session_id=writer.session_id,
+                source_turn=len(writer.state.turns),
+                metrics={
+                    "success_rate": 0.0 if failures else 1.0,
+                    "tool_requests": turn.tool_ledger.requested,
+                    "tool_failures": failures,
+                },
+            )
+        except EvolutionError:
+            # Evolution is diagnostic state; a telemetry failure must not turn a
+            # durable Session commit into an ambiguous outcome.
+            return
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
         self._web_search.disable_sources()
