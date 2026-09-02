@@ -17,6 +17,13 @@ import re
 import shutil
 from typing import Callable
 
+from coquo.core.action_coordinator import ActionExecutionResult
+from coquo.core.contracts import ToolResult
+from coquo.core.extension_actions import (
+    CoordinatedExtensionActionInvoker,
+)
+from coquo.core.permissions import PermissionAction
+from coquo.session_records import ActionExecutionOutcome
 
 PLUGIN_MANIFEST_VERSION = 1
 MAX_PLUGIN_MANIFEST_BYTES = 32 * 1024
@@ -214,11 +221,19 @@ class PluginRunner:
         *,
         executor: Callable[[tuple[str, ...], float], object],
         approve: Callable[[PluginManifest], bool] | None = None,
+        action_invoker: CoordinatedExtensionActionInvoker | None = None,
     ) -> None:
         if not callable(executor):
             raise ValueError("plugin executor callback is required")
+        if action_invoker is not None and not isinstance(
+            action_invoker, CoordinatedExtensionActionInvoker
+        ):
+            raise ValueError("plugin action invoker is invalid")
+        if action_invoker is not None and approve is not None:
+            raise ValueError("plugin action invoker owns approval; approve is not allowed")
         self.executor = executor
         self.approve = approve
+        self.action_invoker = action_invoker
 
     def invoke(
         self, plugin: PluginManifest, *, timeout_seconds: float = 30.0
@@ -232,6 +247,66 @@ class PluginRunner:
         ):
             raise PluginRegistryError("plugin timeout must be between 0 and 300 seconds")
         dangerous = bool(plugin.capabilities & _DANGEROUS_CAPABILITIES)
+        if self.action_invoker is not None:
+            action = _plugin_permission_action(plugin)
+
+            def execute(identity):
+                try:
+                    raw = self.executor(plugin.entrypoint, float(timeout_seconds))
+                except Exception as error:
+                    return ActionExecutionResult(
+                        ToolResult(
+                            identity.tool_use_id,
+                            type(error).__name__,
+                            is_error=True,
+                        ),
+                        ActionExecutionOutcome.FAILED,
+                        "plugin_executor_error",
+                        "plugin executor failed",
+                    )
+                if isinstance(raw, PluginExecutionResult):
+                    value = raw
+                else:
+                    output = getattr(raw, "output", raw if isinstance(raw, str) else "")
+                    value = PluginExecutionResult(plugin.name, "completed", output=str(output))
+                is_error = value.outcome != "completed"
+                return ActionExecutionResult(
+                    ToolResult(
+                        identity.tool_use_id,
+                        value.output or value.error or value.outcome,
+                        is_error=is_error,
+                    ),
+                    ActionExecutionOutcome.FAILED if is_error else ActionExecutionOutcome.SUCCEEDED,
+                    f"plugin_{value.outcome}",
+                    "plugin execution failed" if is_error else "plugin execution completed",
+                )
+
+            coordinated = self.action_invoker.invoke(
+                tool_name=f"plugin_{plugin.name.replace('-', '_')}",
+                arguments={
+                    "plugin": plugin.name,
+                    "version": plugin.version,
+                    "digest": plugin.digest,
+                    "capabilities": sorted(plugin.capabilities),
+                },
+                action=action,
+                approval_required=False,
+                execute=execute,
+            )
+            if not coordinated.executed:
+                return PluginExecutionResult(
+                    plugin.name,
+                    "denied",
+                    error=coordinated.result_code,
+                )
+            return PluginExecutionResult(
+                plugin.name,
+                "completed" if not coordinated.tool_result.is_error else "failed",
+                output=coordinated.tool_result.content
+                if not coordinated.tool_result.is_error
+                else "",
+                error=None if not coordinated.tool_result.is_error else coordinated.result_code,
+            )
         if dangerous and (self.approve is None or not self.approve(plugin)):
             return PluginExecutionResult(plugin.name, "denied", error="host approval required")
         try:
@@ -240,6 +315,17 @@ class PluginRunner:
             return PluginExecutionResult(plugin.name, "failed", error=type(error).__name__)
         output = getattr(result, "output", result if isinstance(result, str) else "")
         return PluginExecutionResult(plugin.name, "completed", output=str(output))
+
+
+def _plugin_permission_action(plugin: PluginManifest) -> PermissionAction:
+    capabilities = plugin.capabilities
+    if "network-write" in capabilities:
+        return PermissionAction.NETWORK_WRITE
+    if "network-read" in capabilities:
+        return PermissionAction.NETWORK_READ
+    if "workspace-write" in capabilities or "command" in capabilities:
+        return PermissionAction.DANGEROUS
+    return PermissionAction.WORKSPACE_READ
 
 
 __all__ = [

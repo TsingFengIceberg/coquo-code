@@ -4,11 +4,17 @@ import json
 
 import pytest
 
+from coquo.core.action_coordinator import ActionCoordinator, ApprovalResolution
+from coquo.core.actions import ActionLease
+from coquo.core.extension_actions import CoordinatedExtensionActionInvoker
+from coquo.core.permissions import ApprovalMode, PermissionMode
 from coquo.plugin_registry import (
     PluginRegistry,
     PluginRegistryError,
+    PluginManifest,
     PluginRunner,
 )
+from coquo.session_records import BindingSnapshot
 
 
 def write_plugin(path, *, capabilities=("workspace-read",)):
@@ -80,3 +86,61 @@ def test_plugin_runner_requires_approval_for_dangerous_capabilities() -> None:
     ).invoke(manifest)
     assert allowed.outcome == "completed"
     assert calls == [("writer-plugin",)]
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.records: list[str] = []
+
+    def action_requested(self, **_values):
+        self.records.append("requested")
+
+    def permission_decided(self, **_values):
+        self.records.append("permission")
+
+    def approval_resolved(self, **_values):
+        self.records.append("approval")
+
+    def action_execution_started(self, **_values):
+        self.records.append("started")
+
+    def action_execution_finished(self, **_values):
+        self.records.append("finished")
+
+
+def test_plugin_runner_routes_capability_through_coordinator() -> None:
+    manifest = PluginManifest.from_mapping(
+        {
+            "manifest_version": 1,
+            "name": "read-plugin",
+            "version": "1.0",
+            "description": "read",
+            "entrypoint": ["read-plugin"],
+            "capabilities": ["workspace-read"],
+        },
+        digest="b" * 64,
+    )
+    writer = _RecordingWriter()
+    invoker = CoordinatedExtensionActionInvoker(
+        coordinator=ActionCoordinator(
+            writer=writer,  # type: ignore[arg-type]
+            approval_handler=lambda _request: ApprovalResolution.ACCEPT,
+        ),
+        binding=BindingSnapshot.fake(),
+        permission_mode=PermissionMode.READ_ONLY,
+        approval_mode=ApprovalMode.ASK,
+        workspace_fingerprint="v1-" + "3" * 64,
+        lease=ActionLease(
+            "12345678-1234-4234-9234-123456789abc",
+            "22345678-1234-4234-9234-123456789abc",
+            0,
+            "ctx-v1-" + "4" * 64,
+        ),
+    )
+    result = PluginRunner(
+        executor=lambda argv, _timeout: "safe-output",
+        action_invoker=invoker,
+    ).invoke(manifest)
+    assert result.outcome == "completed"
+    assert result.output == "safe-output"
+    assert writer.records == ["requested", "permission", "started", "finished"]

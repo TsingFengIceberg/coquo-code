@@ -1596,6 +1596,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 144. [0164：自动 Workflow 到 Skill 自进化闭环](./decisions/0164-automatic-skill-evolution-pipeline.md)
 145. [0165：Memory、策略、Eval 与 Provider 稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)
 146. [0166：Host-gated Browser Action 与 AgentLoop 接入](./decisions/0166-browser-action-agentloop-integration.md)
+147. [0167：扩展协调与 Session 观察桥接收口](./decisions/0167-extension-coordination-and-session-observation-bridge.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1782,3 +1783,15 @@ credential-free URL、origin allowlist、selector、step 和后端约束；页�
 本切片使用显式 Host/API 注入，不增加 CLI 开关，也不隐式依赖 Playwright；关闭
 Session 时会回收注入的 runtime。详见[0166：Host-gated Browser Action 与
 AgentLoop 接入](./decisions/0166-browser-action-agentloop-integration.md)。
+
+## Skill/Plugin、Session 接口与观察流收口
+
+声明式 Skill 和本地 Plugin 的副作用现在通过
+`CoordinatedExtensionActionInvoker` 适配到既有
+`ActionCoordinator → PermissionGate → Approval → Action Audit` 路径；扩展
+自身不能授予权限、改变 ToolSet/system prompt/sandbox，也不能委派
+Child/Team。`ProjectSessionManager` 对 Session 创建注册失败、后台 worker
+启动失败和 close 失败进行有界回滚，Web `/v1/events` 与 IDE 事件查询返回
+相同的 cursor/gap/epoch/dropped-count 批次。ObservationStream 切换 Session
+context 时会递增 epoch 并清空保留事件和订阅队列，防止旧 Session 事件泄露给
+新消费者。详见[0167：扩展协调与 Session 观察桥接收口](./decisions/0167-extension-coordination-and-session-observation-bridge.md)。

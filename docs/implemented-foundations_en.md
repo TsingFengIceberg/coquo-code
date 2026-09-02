@@ -1780,6 +1780,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 144. [0164: Automatic Workflow-to-Skill Evolution Pipeline](./decisions/0164-automatic-skill-evolution-pipeline.md)
 145. [0165: Memory, Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md)
 146. [0166: Host-gated Browser Actions in the AgentLoop](./decisions/0166-browser-action-agentloop-integration.md)
+147. [0167: Host-Coordinated Extensions and Isolated Session Observation](./decisions/0167-extension-coordination-and-session-observation-bridge.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -2190,3 +2191,17 @@ This slice uses explicit Host/API injection, adds no CLI switch, and has no
 implicit Playwright dependency. Session shutdown closes the injected runtime.
 See [0166: Host-gated Browser Actions in the
 AgentLoop](./decisions/0166-browser-action-agentloop-integration.md).
+
+## Skill/Plugin, Session Interface, and Observation Hardening
+
+Declarative Skills and local Plugins now adapt side effects through
+`CoordinatedExtensionActionInvoker` into the existing
+`ActionCoordinator -> PermissionGate -> Approval -> Action Audit` path. An
+extension cannot grant permission, change the ToolSet/system prompt/sandbox,
+or delegate Child/Team work. `ProjectSessionManager` rolls back bounded
+failures during Session registration, background-worker startup, and close;
+Web `/v1/events` and IDE event queries return the same cursor/gap/epoch/
+dropped-count batch. Switching the ObservationStream Session context increments
+its epoch and clears retained and queued events so a prior Session cannot leak to
+a new consumer. See [0167: Host-Coordinated Extensions and Isolated Session
+Observation](./decisions/0167-extension-coordination-and-session-observation-bridge.md).

@@ -14,7 +14,8 @@ import hashlib
 import json
 from collections import deque
 from datetime import datetime, timezone
-from threading import RLock
+from threading import Condition, RLock
+import time
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -50,6 +51,9 @@ class ObservationError(ValueError):
 
 
 OBSERVATION_EVENT_SCHEMA_VERSION = 1
+MAX_OBSERVATION_SUBSCRIBER_PENDING = 1024
+MAX_OBSERVATION_READ_LIMIT = 256
+MAX_OBSERVATION_WAIT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -173,6 +177,153 @@ class ObservationEvent:
         }
 
 
+@dataclass(frozen=True)
+class ObservationBatch:
+    """A cursor-aware bounded read from one live observation stream.
+
+    ``gap`` is true when the requested cursor predates retained events or a
+    subscriber had to drop events because its bounded queue was full.  A gap
+    never implies that authoritative Session/Task/Child/Team records were
+    deleted; consumers must re-query the durable source when they need a full
+    history.
+    """
+
+    events: tuple[ObservationEvent, ...]
+    next_sequence: int
+    oldest_sequence: int | None
+    latest_sequence: int | None
+    stream_epoch: int
+    gap: bool = False
+    dropped_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.events, tuple) or len(self.events) > MAX_OBSERVATION_READ_LIMIT:
+            raise ValueError("observation batch events are invalid")
+        if type(self.next_sequence) is not int or self.next_sequence < 0:
+            raise ValueError("observation batch next sequence is invalid")
+        for value, label in (
+            (self.oldest_sequence, "oldest sequence"),
+            (self.latest_sequence, "latest sequence"),
+        ):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"observation batch {label} is invalid")
+        if self.latest_sequence is not None and self.oldest_sequence is None:
+            raise ValueError("observation batch latest sequence requires oldest sequence")
+        if type(self.stream_epoch) is not int or self.stream_epoch < 0:
+            raise ValueError("observation batch stream epoch is invalid")
+        if type(self.gap) is not bool:
+            raise ValueError("observation batch gap flag is invalid")
+        if type(self.dropped_count) is not int or self.dropped_count < 0:
+            raise ValueError("observation batch dropped count is invalid")
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "events": [event.to_mapping() for event in self.events],
+            "next_sequence": self.next_sequence,
+            "oldest_sequence": self.oldest_sequence,
+            "latest_sequence": self.latest_sequence,
+            "stream_epoch": self.stream_epoch,
+            "gap": self.gap,
+            "dropped_count": self.dropped_count,
+        }
+
+
+class ObservationSubscription:
+    """Bounded, non-blocking publisher subscription for local consumers."""
+
+    def __init__(
+        self, stream: "ObservationStream", subscriber_id: int, max_pending: int, stream_epoch: int
+    ) -> None:
+        self._stream = stream
+        self._subscriber_id = subscriber_id
+        self._max_pending = max_pending
+        self._pending: deque[ObservationEvent] = deque()
+        self._condition = Condition(RLock())
+        self._closed = False
+        self._gap = False
+        self._dropped_count = 0
+        self._stream_epoch = stream_epoch
+
+    def _offer(self, event: ObservationEvent, stream_epoch: int) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            if stream_epoch != self._stream_epoch:
+                self._pending.clear()
+                self._gap = False
+                self._dropped_count = 0
+                self._stream_epoch = stream_epoch
+            if len(self._pending) >= self._max_pending:
+                self._pending.popleft()
+                self._gap = True
+                self._dropped_count += 1
+            self._pending.append(event)
+            self._condition.notify_all()
+
+    def _reset_epoch(self, stream_epoch: int) -> None:
+        """Discard queued events when the stream switches Session context."""
+        with self._condition:
+            if self._closed:
+                return
+            self._pending.clear()
+            self._gap = False
+            self._dropped_count = 0
+            self._stream_epoch = stream_epoch
+            self._condition.notify_all()
+
+    def read(
+        self, *, after: int = -1, limit: int = MAX_OBSERVATION_READ_LIMIT, timeout: float = 0.0
+    ) -> ObservationBatch:
+        """Read queued events, optionally waiting for the next event."""
+        _validate_observation_cursor(after, limit, timeout)
+        deadline = time.monotonic() + float(timeout)
+        with self._condition:
+            while not self._closed and not any(event.sequence > after for event in self._pending):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
+            selected = tuple(event for event in self._pending if event.sequence > after)[:limit]
+            if selected:
+                next_sequence = selected[-1].sequence + 1
+                oldest = self._pending[0].sequence if self._pending else None
+                latest = self._pending[-1].sequence if self._pending else None
+            else:
+                oldest = self._pending[0].sequence if self._pending else None
+                latest = self._pending[-1].sequence if self._pending else None
+                next_sequence = after + 1
+            batch = ObservationBatch(
+                selected,
+                next_sequence,
+                oldest,
+                latest,
+                self._stream_epoch,
+                self._gap or (oldest is not None and after + 1 < oldest),
+                self._dropped_count,
+            )
+            if selected:
+                consumed_until = selected[-1].sequence
+                self._pending = deque(
+                    event for event in self._pending if event.sequence > consumed_until
+                )
+                self._gap = False
+                self._dropped_count = 0
+            return batch
+
+    def close(self) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._condition.notify_all()
+        self._stream._remove_queue_subscriber(self._subscriber_id, self)
+
+    @property
+    def closed(self) -> bool:
+        with self._condition:
+            return self._closed
+
+
 class ObservationStream:
     """Bounded in-memory live event stream for one Host runtime."""
 
@@ -189,9 +340,16 @@ class ObservationStream:
         self.retention = retention
         self._events: deque[ObservationEvent] = deque(maxlen=retention.max_events)
         self._sequence = 0
+        self._stream_epoch = 0
         self._lock = RLock()
         self._subscribers: dict[int, Callable[[ObservationEvent], None]] = {}
+        self._queue_subscribers: dict[int, ObservationSubscription] = {}
         self._next_subscriber_id = 1
+
+    @property
+    def stream_epoch(self) -> int:
+        with self._lock:
+            return self._stream_epoch
 
     def publish_prompt(self, event: object) -> ObservationEvent:
         """Publish a content-free projection of an existing live Host event."""
@@ -209,13 +367,20 @@ class ObservationStream:
         if not isinstance(context, ObservationContext):
             raise TypeError("observation stream context is invalid")
         with self._lock:
+            subscriptions: tuple[ObservationSubscription, ...] = ()
+            stream_epoch = self._stream_epoch
             if context.session_id is not None and context.session_id != self.source_id:
                 # A ProjectSession can switch its durable Session in place. Do not
                 # let live events from the previous Session bleed into the new one.
                 self.source_id = context.session_id
                 self._events.clear()
                 self._sequence = 0
+                self._stream_epoch += 1
+                subscriptions = tuple(self._queue_subscribers.values())
+                stream_epoch = self._stream_epoch
             self.context = context
+        for subscription in subscriptions:
+            subscription._reset_epoch(stream_epoch)
 
     def subscribe(self, callback: Callable[[ObservationEvent], None]) -> Callable[[], None]:
         """Subscribe to live events and return an idempotent unsubscribe callback.
@@ -241,6 +406,31 @@ class ObservationStream:
                 self._subscribers.pop(subscriber_id, None)
 
         return unsubscribe
+
+    def subscribe_queue(
+        self, *, max_pending: int = MAX_OBSERVATION_SUBSCRIBER_PENDING
+    ) -> ObservationSubscription:
+        """Subscribe through a bounded queue without blocking ``publish``."""
+        if (
+            type(max_pending) is not int
+            or not 1 <= max_pending <= MAX_OBSERVATION_SUBSCRIBER_PENDING
+        ):
+            raise ValueError("observation subscriber queue limit is invalid")
+        with self._lock:
+            subscriber_id = self._next_subscriber_id
+            self._next_subscriber_id += 1
+            subscription = ObservationSubscription(
+                self, subscriber_id, max_pending, self._stream_epoch
+            )
+            self._queue_subscribers[subscriber_id] = subscription
+        return subscription
+
+    def _remove_queue_subscriber(
+        self, subscriber_id: int, subscription: ObservationSubscription
+    ) -> None:
+        with self._lock:
+            if self._queue_subscribers.get(subscriber_id) is subscription:
+                self._queue_subscribers.pop(subscriber_id, None)
 
     def publish(
         self,
@@ -279,6 +469,10 @@ class ObservationStream:
             self._sequence += 1
             self._expire()
             subscribers = tuple(self._subscribers.values())
+            queue_subscribers = tuple(self._queue_subscribers.values())
+            stream_epoch = self._stream_epoch
+        for subscription in queue_subscribers:
+            subscription._offer(event, stream_epoch)
         for callback in subscribers:
             try:
                 callback(event)
@@ -292,9 +486,35 @@ class ObservationStream:
             self._expire()
             return tuple(self._events)
 
+    def read(
+        self,
+        *,
+        after: int = -1,
+        limit: int = MAX_OBSERVATION_READ_LIMIT,
+    ) -> ObservationBatch:
+        """Read retained events with explicit stale-cursor/gap semantics."""
+        _validate_observation_cursor(after, limit, 0.0)
+        with self._lock:
+            self._expire()
+            values = tuple(self._events)
+            selected = tuple(event for event in values if event.sequence > after)[:limit]
+            oldest = values[0].sequence if values else None
+            latest = values[-1].sequence if values else None
+            next_sequence = selected[-1].sequence + 1 if selected else after + 1
+            gap = oldest is not None and after + 1 < oldest
+            return ObservationBatch(
+                selected,
+                next_sequence,
+                oldest,
+                latest,
+                self._stream_epoch,
+                gap,
+            )
+
     def clear(self) -> None:
         with self._lock:
             self._events.clear()
+            self._stream_epoch += 1
 
     def _expire(self) -> None:
         if self.retention.max_age_seconds is None or not self._events:
@@ -302,6 +522,19 @@ class ObservationStream:
         cutoff = datetime.now(timezone.utc).timestamp() - self.retention.max_age_seconds
         while self._events and _timestamp_epoch(self._events[0].occurred_at) < cutoff:
             self._events.popleft()
+
+
+def _validate_observation_cursor(after: int, limit: int, timeout: float) -> None:
+    if type(after) is not int or after < -1:
+        raise ObservationError("observation cursor is invalid")
+    if type(limit) is not int or not 1 <= limit <= MAX_OBSERVATION_READ_LIMIT:
+        raise ObservationError("observation read limit is invalid")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 <= timeout <= MAX_OBSERVATION_WAIT_SECONDS
+    ):
+        raise ObservationError("observation wait timeout is invalid")
 
 
 def retain_observation_events(

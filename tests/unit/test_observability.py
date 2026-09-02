@@ -263,6 +263,28 @@ def test_live_stream_subscribers_receive_fifo_events_and_can_unsubscribe() -> No
     assert [event.sequence for event in received] == [0, 1]
 
 
+def test_queue_subscription_is_reset_when_stream_context_switches() -> None:
+    first_session = _id()
+    second_session = _id()
+    stream = ObservationStream(
+        source_id=first_session,
+        context=ObservationContext.new(session_id=first_session),
+    )
+    subscription = stream.subscribe_queue(max_pending=4)
+    stream.publish(record_type="old_event", status="completed", summary="old")
+    old_epoch = stream.stream_epoch
+
+    stream.set_context(ObservationContext.new(session_id=second_session))
+    assert stream.stream_epoch == old_epoch + 1
+    assert subscription.read(after=-1).events == ()
+
+    event = stream.publish(record_type="new_event", status="started", summary="new")
+    batch = subscription.read(after=-1)
+    assert batch.stream_epoch == stream.stream_epoch
+    assert batch.events == (event,)
+    assert all(item.source_id == second_session for item in batch.events)
+
+
 def test_live_stream_subscriber_failure_does_not_change_agent_observation() -> None:
     session_id = _id()
     stream = ObservationStream(

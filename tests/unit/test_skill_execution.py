@@ -4,6 +4,12 @@ import json
 
 import pytest
 
+from coquo.core.action_coordinator import ActionCoordinator, ApprovalResolution
+from coquo.core.actions import ActionLease
+from coquo.core.contracts import ToolResult
+from coquo.core.extension_actions import CoordinatedExtensionActionInvoker
+from coquo.core.permissions import ApprovalMode, PermissionMode
+from coquo.session_records import BindingSnapshot
 from coquo.skills.catalog import SkillCandidate, SkillManifest, SkillSourceKind
 from coquo.skills.execution import (
     ExecutableSkillRunner,
@@ -103,3 +109,87 @@ def test_skill_execution_plan_sidecar_is_bounded_and_json_only(tmp_path) -> None
     )
     plan = load_skill_execution_plan(tmp_path, candidate())
     assert plan.steps[0].tool_name == "stat_path"
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.records: list[str] = []
+
+    def action_requested(self, **_values):
+        self.records.append("requested")
+
+    def permission_decided(self, **_values):
+        self.records.append("permission")
+
+    def approval_resolved(self, **_values):
+        self.records.append("approval")
+
+    def action_execution_started(self, **_values):
+        self.records.append("started")
+
+    def action_execution_finished(self, **_values):
+        self.records.append("finished")
+
+
+def _extension_invoker(
+    writer: _RecordingWriter, *, mode: PermissionMode, approval: ApprovalResolution
+):
+    return CoordinatedExtensionActionInvoker(
+        coordinator=ActionCoordinator(
+            writer=writer,  # type: ignore[arg-type]
+            approval_handler=lambda _request: approval,
+        ),
+        binding=BindingSnapshot.fake(),
+        permission_mode=mode,
+        approval_mode=ApprovalMode.ASK,
+        workspace_fingerprint="v1-" + "1" * 64,
+        lease=ActionLease(
+            "12345678-1234-4234-9234-123456789abc",
+            "22345678-1234-4234-9234-123456789abc",
+            0,
+            "ctx-v1-" + "2" * 64,
+        ),
+    )
+
+
+def test_skill_runner_routes_steps_through_coordinator_when_invoker_is_supplied() -> None:
+    writer = _RecordingWriter()
+    calls: list[str] = []
+    runner = ExecutableSkillRunner(
+        dispatch=lambda name, _arguments: calls.append(name) or ToolResult("ignored", "ok"),
+        action_invoker=_extension_invoker(
+            writer,
+            mode=PermissionMode.READ_ONLY,
+            approval=ApprovalResolution.ACCEPT,
+        ),
+    )
+    plan = SkillExecutionPlan.from_mapping(
+        {"schema_version": 1, "steps": [{"tool": "read_file", "arguments": {}}]}
+    )
+    result = runner.execute(candidate(allowed_tools=("read_file",)), plan)
+    assert result.result_codes == ("ok",)
+    assert calls == ["read_file"]
+    assert writer.records == ["requested", "permission", "started", "finished"]
+
+
+def test_skill_dangerous_step_uses_coordinator_approval_instead_of_legacy_callback() -> None:
+    writer = _RecordingWriter()
+    runner = ExecutableSkillRunner(
+        dispatch=lambda name, arguments: ToolResult("ignored", "executed"),
+        action_invoker=_extension_invoker(
+            writer,
+            mode=PermissionMode.DANGER_FULL_ACCESS,
+            approval=ApprovalResolution.ACCEPT,
+        ),
+    )
+    plan = SkillExecutionPlan.from_mapping(
+        {
+            "schema_version": 1,
+            "allow_dangerous": True,
+            "steps": [{"tool": "write_file", "arguments": {"path": "x", "content": "y"}}],
+        }
+    )
+    result = runner.execute(candidate(allowed_tools=("write_file",)), plan)
+    assert result.denied is False
+    assert result.executed_steps == 1
+    assert writer.records == ["requested", "permission", "approval", "started", "finished"]

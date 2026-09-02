@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from coquo.core.cancellation import TurnCancellation, TurnCancelled
+from coquo.observability import ObservationBatch
 
 
 INTERFACE_PROTOCOL_VERSION = 1
@@ -28,6 +29,7 @@ MAX_INTERFACE_PROMPT_CHARACTERS = 32_768
 MAX_INTERFACE_EVENTS = 256
 MAX_INTERFACE_SESSIONS = 16
 MAX_INTERFACE_WAIT_SECONDS = 30
+MAX_INTERFACE_COMPLETED_TURNS = 128
 
 
 class InterfaceError(RuntimeError):
@@ -60,6 +62,11 @@ class InterfaceResponse:
     turn_id: str | None = None
     next_sequence: int | None = None
     events_truncated: bool = False
+    events_gap: bool = False
+    events_oldest_sequence: int | None = None
+    events_latest_sequence: int | None = None
+    events_dropped_count: int = 0
+    stream_epoch: int | None = None
 
     def as_mapping(self) -> dict[str, object]:
         return {
@@ -73,6 +80,11 @@ class InterfaceResponse:
             "turn_id": self.turn_id,
             "next_sequence": self.next_sequence,
             "events_truncated": self.events_truncated,
+            "events_gap": self.events_gap,
+            "events_oldest_sequence": self.events_oldest_sequence,
+            "events_latest_sequence": self.events_latest_sequence,
+            "events_dropped_count": self.events_dropped_count,
+            "stream_epoch": self.stream_epoch,
         }
 
 
@@ -323,10 +335,44 @@ class ProjectSessionManager:
             raise InterfaceError("event cursor is invalid")
         if type(limit) is not int or not 1 <= limit <= MAX_INTERFACE_EVENTS:
             raise InterfaceError("event limit is invalid")
-        selected, session = self.get(session_id)
+        return self.event_batch(session_id=session_id, after=after, limit=limit).events
+
+    def event_batch(
+        self,
+        *,
+        session_id: str | None = None,
+        after: int = -1,
+        limit: int = MAX_INTERFACE_EVENTS,
+    ) -> ObservationBatch:
+        if type(after) is not int or after < -1:
+            raise InterfaceError("event cursor is invalid")
+        if type(limit) is not int or not 1 <= limit <= MAX_INTERFACE_EVENTS:
+            raise InterfaceError("event limit is invalid")
+        _, session = self.get(session_id)
         stream = session.observation_stream
-        values = tuple(stream.snapshot())
-        return tuple(_interface_event(event) for event in values if event.sequence > after)[-limit:]
+        read = getattr(stream, "read", None)
+        if callable(read):
+            batch = read(after=after, limit=limit)
+        else:
+            values = tuple(stream.snapshot())
+            selected = tuple(event for event in values if event.sequence > after)[:limit]
+            batch = ObservationBatch(
+                selected,
+                selected[-1].sequence + 1 if selected else after + 1,
+                values[0].sequence if values else None,
+                values[-1].sequence if values else None,
+                int(getattr(stream, "stream_epoch", 0)),
+                bool(values and after + 1 < values[0].sequence),
+            )
+        return ObservationBatch(
+            tuple(_interface_event(event) for event in batch.events),
+            batch.next_sequence,
+            batch.oldest_sequence,
+            batch.latest_sequence,
+            batch.stream_epoch,
+            batch.gap,
+            batch.dropped_count,
+        )
 
 
 def _interface_event(event: object) -> InterfaceEvent:
@@ -412,27 +458,20 @@ class IDEJsonRpcBridge:
                     session_id = params.get("session_id")
                     after = params.get("after", -1)
                     limit = params.get("limit", MAX_INTERFACE_EVENTS)
+                    batch = self.session_manager.event_batch(
+                        session_id=session_id, after=after, limit=limit
+                    )
                     response = InterfaceResponse(
                         request_id,
                         "completed",
-                        events=self.session_manager.events(
-                            session_id=session_id,
-                            after=after,
-                            limit=limit,
-                        ),
+                        events=batch.events,
                         session_id=session_id or self.session_manager.current_id(),
-                        next_sequence=(
-                            max(
-                                (
-                                    event.sequence
-                                    for event in self.session_manager.events(
-                                        session_id=session_id, after=after, limit=limit
-                                    )
-                                ),
-                                default=after,
-                            )
-                            + 1
-                        ),
+                        next_sequence=batch.next_sequence,
+                        events_gap=batch.gap,
+                        events_oldest_sequence=batch.oldest_sequence,
+                        events_latest_sequence=batch.latest_sequence,
+                        events_dropped_count=batch.dropped_count,
+                        stream_epoch=batch.stream_epoch,
                     )
                 elif params not in ({}, None):
                     raise InterfaceError("events params are invalid")
@@ -654,7 +693,7 @@ class _WebHandler(BaseHTTPRequestHandler):
             try:
                 after = int(query.get("after", ["-1"])[0])
                 limit = int(query.get("limit", [str(MAX_INTERFACE_EVENTS)])[0])
-                events = bridge.session_manager.events(
+                batch = bridge.session_manager.event_batch(
                     session_id=session_id,
                     after=after,
                     limit=limit,
@@ -662,9 +701,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                 self._send(
                     HTTPStatus.OK,
                     {
-                        "events": [event.as_mapping() for event in events],
-                        "next_sequence": max((event.sequence for event in events), default=after)
-                        + 1,
+                        "events": [event.as_mapping() for event in batch.events],
+                        "next_sequence": batch.next_sequence,
+                        "events_gap": batch.gap,
+                        "events_oldest_sequence": batch.oldest_sequence,
+                        "events_latest_sequence": batch.latest_sequence,
+                        "events_dropped_count": batch.dropped_count,
+                        "stream_epoch": batch.stream_epoch,
                     },
                 )
             except (ValueError, InterfaceError) as error:
@@ -679,11 +722,24 @@ class _WebHandler(BaseHTTPRequestHandler):
         if bridge.session_manager is not None:
             query = parse_qs(parsed.query, keep_blank_values=True)
             try:
-                events = bridge.session_manager.events(
+                batch = bridge.session_manager.event_batch(
                     session_id=query.get("session_id", [None])[0],
                     after=int(query.get("after", ["-1"])[0]),
                     limit=int(query.get("limit", [str(MAX_INTERFACE_EVENTS)])[0]),
                 )
+                self._send(
+                    HTTPStatus.OK,
+                    {
+                        "events": [event.as_mapping() for event in batch.events],
+                        "next_sequence": batch.next_sequence,
+                        "events_gap": batch.gap,
+                        "events_oldest_sequence": batch.oldest_sequence,
+                        "events_latest_sequence": batch.latest_sequence,
+                        "events_dropped_count": batch.dropped_count,
+                        "stream_epoch": batch.stream_epoch,
+                    },
+                )
+                return
             except (ValueError, InterfaceError) as error:
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(error)[:512]})
                 return

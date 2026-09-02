@@ -15,6 +15,11 @@ import re
 from typing import Any, Callable, Mapping
 
 from coquo.core.contracts import ToolArguments
+from coquo.core.extension_actions import (
+    CoordinatedExtensionActionInvoker,
+    tool_result_execution,
+)
+from coquo.core.permissions import PermissionAction
 from coquo.skills.catalog import SkillCandidate
 from coquo.tools.catalog import ORDINARY_TOOL_NAMES
 
@@ -182,18 +187,26 @@ class ExecutableSkillRunner:
     def __init__(
         self,
         *,
-        dispatch: Callable[[str, ToolArguments], object],
+        dispatch: Callable[[str, ToolArguments], object] | None = None,
         approve: Callable[[str, Mapping[str, Any]], bool] | None = None,
+        action_invoker: CoordinatedExtensionActionInvoker | None = None,
         max_steps: int = MAX_EXECUTION_STEPS,
     ) -> None:
-        if not callable(dispatch):
+        if dispatch is None or not callable(dispatch):
             raise ValueError("Skill dispatch callback is required")
         if approve is not None and not callable(approve):
             raise ValueError("Skill approval callback is invalid")
+        if action_invoker is not None and not isinstance(
+            action_invoker, CoordinatedExtensionActionInvoker
+        ):
+            raise ValueError("Skill action invoker is invalid")
+        if action_invoker is not None and approve is not None:
+            raise ValueError("Skill action invoker owns approval; approve is not allowed")
         if type(max_steps) is not int or not 1 <= max_steps <= MAX_EXECUTION_STEPS:
             raise ValueError("Skill execution step limit is invalid")
         self.dispatch = dispatch
         self.approve = approve
+        self.action_invoker = action_invoker
         self.max_steps = max_steps
 
     def execute(
@@ -226,26 +239,59 @@ class ExecutableSkillRunner:
                     f"Skill step requires explicit dangerous execution: {step.tool_name}"
                 )
             arguments = _resolve_inputs(step.arguments, variables)
-            if step.approval_required or step.tool_name in _FORBIDDEN_DEFAULT_TOOLS:
+            if self.action_invoker is None and (
+                step.approval_required or step.tool_name in _FORBIDDEN_DEFAULT_TOOLS
+            ):
                 if self.approve is None or not self.approve(step.tool_name, arguments):
                     return SkillExecutionResult(
                         candidate.manifest.name, index, index, tuple(results), True
                     )
             try:
-                result = self.dispatch(step.tool_name, ToolArguments.from_mapping(arguments))
+                coordinated_code: str | None = None
+                if self.action_invoker is not None:
+                    coordinated = self.action_invoker.invoke(
+                        tool_name=f"skill_{candidate.manifest.name.replace('-', '_')}",
+                        arguments={
+                            "skill": candidate.manifest.name,
+                            "step": index,
+                            "tool": step.tool_name,
+                            "arguments": arguments,
+                        },
+                        action=_permission_action(step.tool_name),
+                        approval_required=(
+                            step.approval_required or step.tool_name in _FORBIDDEN_DEFAULT_TOOLS
+                        ),
+                        execute=lambda identity: tool_result_execution(
+                            identity,
+                            self.dispatch(step.tool_name, ToolArguments.from_mapping(arguments)),
+                        ),
+                    )
+                    result = coordinated.tool_result
+                    coordinated_code = coordinated.result_code
+                else:
+                    result = self.dispatch(step.tool_name, ToolArguments.from_mapping(arguments))
             except Exception as error:
                 code = f"dispatch_error:{type(error).__name__}"
                 results.append(code)
                 return SkillExecutionResult(
                     candidate.manifest.name, index + 1, index, tuple(results)
                 )
-            code = getattr(result, "code", None)
+            code = coordinated_code or getattr(result, "code", None)
             results.append(str(code) if code else "ok")
             if getattr(result, "is_error", False):
                 return SkillExecutionResult(
                     candidate.manifest.name, index + 1, index, tuple(results)
                 )
         return SkillExecutionResult(candidate.manifest.name, len(plan.steps), None, tuple(results))
+
+
+def _permission_action(tool_name: str) -> PermissionAction:
+    """Classify a Skill step conservatively before it enters Host policy."""
+    return (
+        PermissionAction.WORKSPACE_READ
+        if tool_name not in _FORBIDDEN_DEFAULT_TOOLS
+        else PermissionAction.DANGEROUS
+    )
 
 
 def load_skill_execution_plan(package_root: Path, candidate: SkillCandidate) -> SkillExecutionPlan:
