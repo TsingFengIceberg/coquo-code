@@ -1779,6 +1779,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 143. [0163: Bounded Self-Evolution Controller](./decisions/0163-bounded-self-evolution-controller.md)
 144. [0164: Automatic Workflow-to-Skill Evolution Pipeline](./decisions/0164-automatic-skill-evolution-pipeline.md)
 145. [0165: Memory, Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md)
+146. [0166: Host-gated Browser Actions in the AgentLoop](./decisions/0166-browser-action-agentloop-integration.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -2164,3 +2165,28 @@ backpressure is observed. This distinguishes missing upstream chunks, Provider
 buffering, and Host queue delay. Existing cancellation, retry, no-replay-after-
 delta, and atomic Turn commit boundaries remain unchanged. See [0165: Memory,
 Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md).
+
+## Host-gated Browser Actions in the AgentLoop
+
+Browser automation now enters the normal Host-owned
+`ProjectSession → AgentLoop → ActionCoordinator → Action Audit` path through an
+explicitly injected `BrowserAutomation` runtime. Only a Session with that
+runtime receives the closed `browser_action` contract; ordinary Sessions and
+all Child Sessions keep it out of their ToolSet. Each request performs one
+bounded action—`navigate`, `click`, `fill`, `extract_text`, or `screenshot`—and
+uses action-specific catalog validation.
+
+Browser actions are `network-read` Host Actions and continue through the
+PermissionGate, approval, Hook, lease, cancellation, timeout, output-limit, and
+audit boundaries. The Browser runtime enforces credential-free URLs, the origin
+allowlist, selectors, step limits, and backend constraints. Page text,
+screenshots, URLs, and backend claims return only as bounded ToolResult data
+marked `evidence: "untrusted"`; they cannot grant permission, run commands,
+access MCP or Skills, delegate work, or modify the workspace. A missing or
+closed runtime and backend failures fail closed or are reported truthfully; no
+automatic retry is performed.
+
+This slice uses explicit Host/API injection, adds no CLI switch, and has no
+implicit Playwright dependency. Session shutdown closes the injected runtime.
+See [0166: Host-gated Browser Actions in the
+AgentLoop](./decisions/0166-browser-action-agentloop-integration.md).

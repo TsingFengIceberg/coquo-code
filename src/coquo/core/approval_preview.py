@@ -33,6 +33,7 @@ class ApprovalPreviewKind(StrEnum):
     MCP_TOOL = "mcp-tool"
     HOOK_HANDLER = "hook-handler"
     TEAM_WORKTREE_INTEGRATION = "team-worktree-integration"
+    BROWSER_ACTION = "browser-action"
 
 
 @dataclass(frozen=True)

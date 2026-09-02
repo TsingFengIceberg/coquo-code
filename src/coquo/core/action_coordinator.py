@@ -256,6 +256,7 @@ _TOOL_PREVIEW_KINDS = {
     "download_file": ApprovalPreviewKind.FILE_DOWNLOAD,
     "hook_handler": ApprovalPreviewKind.HOOK_HANDLER,
     "team_worktree_integrate": ApprovalPreviewKind.TEAM_WORKTREE_INTEGRATION,
+    "browser_action": ApprovalPreviewKind.BROWSER_ACTION,
 }
 
 

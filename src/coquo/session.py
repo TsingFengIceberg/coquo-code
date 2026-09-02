@@ -414,8 +414,17 @@ from coquo.tools.compare_files import COMPARE_FILES_TOOL_NAME, CompareFilesTool
 from coquo.tools.catalog import (
     ORDINARY_PROMPT_TOOL_NAMES,
     ORDINARY_TOOL_NAMES,
+    BROWSER_ACTION_TOOL_NAME,
+    registry_snapshot_with_browser,
     registry_snapshot_with_memory,
 )
+from coquo.browser import (
+    BrowserAction,
+    BrowserAutomation,
+    BrowserAutomationError,
+    BrowserObservation,
+)
+from coquo.tools.browser import parse_browser_action
 from coquo.tools.task_coordination import (
     TASK_ACCEPT_ADMISSION_TOOL_NAME,
     TASK_ACCEPT_PLAN_TOOL_NAME,
@@ -997,6 +1006,7 @@ class ProjectSession:
         archive_list: ArchiveListTool | None = None,
         move_directory: MoveDirectoryTool | None = None,
         download_file: DownloadFileTool | None = None,
+        browser: BrowserAutomation | None = None,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
         approval_handler: ApprovalHandler | None = None,
@@ -1117,6 +1127,11 @@ class ProjectSession:
         self._archive_list = archive_list or ArchiveListTool(self.execution_workspace)
         self._move_directory = move_directory or MoveDirectoryTool(self.execution_workspace)
         self._download_file = download_file or DownloadFileTool(self.execution_workspace)
+        if browser is not None and not isinstance(browser, BrowserAutomation):
+            raise ValueError("browser runtime is invalid")
+        if browser is not None and child_mode:
+            raise ValueError("Child sessions cannot own a browser runtime")
+        self._browser = browser
         self._mcp_store = mcp_store or McpServerStore.for_workspace(self.workspace)
         self._mcp_client = mcp_client or McpClient(self.workspace)
         self._mcp_policy_store = mcp_policy_store or McpToolPolicyStore.for_workspace(
@@ -1284,8 +1299,12 @@ class ProjectSession:
             self._project_instructions_loader.load,
             (lambda: TOOL_REGISTRY_SNAPSHOT)
             if self._child_mode
-            else lambda: registry_snapshot_with_memory(
-                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            else lambda: registry_snapshot_with_browser(
+                self.workspace,
+                registry_snapshot_with_memory(
+                    self.workspace, self._mcp_catalog_service.registry_snapshot()
+                ),
+                enabled=self._browser is not None,
             ),
             skill_inventory_factory,
             hook_set_factory,
@@ -1550,6 +1569,7 @@ class ProjectSession:
         archive_list_factory: Callable[[Path], ArchiveListTool] = ArchiveListTool,
         move_directory_factory: Callable[[Path], MoveDirectoryTool] = MoveDirectoryTool,
         download_file_factory: Callable[[Path], DownloadFileTool] = DownloadFileTool,
+        browser: BrowserAutomation | None = None,
         mcp_client_factory: Callable[..., object] = McpClient,
         permission_mode: PermissionMode = PermissionMode.READ_ONLY,
         approval_mode: ApprovalMode = ApprovalMode.ASK,
@@ -1703,6 +1723,7 @@ class ProjectSession:
                     archive_list=archive_list,
                     move_directory=move_directory,
                     download_file=download_file,
+                    browser=browser,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -1759,8 +1780,12 @@ class ProjectSession:
                     tool_registry_factory=(
                         (lambda: TOOL_REGISTRY_SNAPSHOT)
                         if child_mode
-                        else lambda: registry_snapshot_with_memory(
-                            resolved_workspace, resume_mcp_catalog.registry_snapshot()
+                        else lambda: registry_snapshot_with_browser(
+                            resolved_workspace,
+                            registry_snapshot_with_memory(
+                                resolved_workspace, resume_mcp_catalog.registry_snapshot()
+                            ),
+                            enabled=browser is not None,
                         )
                     ),
                     skill_inventory_factory=(
@@ -1830,6 +1855,7 @@ class ProjectSession:
                     archive_list=archive_list,
                     move_directory=move_directory,
                     download_file=download_file,
+                    browser=browser,
                     permission_mode=permission_mode,
                     approval_mode=approval_mode,
                     approval_handler=approval_handler,
@@ -4467,8 +4493,12 @@ class ProjectSession:
                     self._archive_list,
                     commit_turn=lambda turn: self._commit_turn(writer_holder["writer"], turn),
                     project_instructions_factory=self._project_instructions_loader.load,
-                    tool_registry_factory=lambda: registry_snapshot_with_memory(
-                        self.workspace, self._mcp_catalog_service.registry_snapshot()
+                    tool_registry_factory=lambda: registry_snapshot_with_browser(
+                        self.workspace,
+                        registry_snapshot_with_memory(
+                            self.workspace, self._mcp_catalog_service.registry_snapshot()
+                        ),
+                        enabled=self._browser is not None,
                     ),
                     skill_inventory_factory=self._skill_inventory_loader.load,
                     hook_set_factory=self._hook_store.snapshot,
@@ -4555,6 +4585,8 @@ class ProjectSession:
             )
             if _enabled_tool_names is None and self._memory_tools_enabled():
                 enabled_tool_names = (*enabled_tool_names, *MEMORY_TOOL_NAMES)
+            if _enabled_tool_names is None and self._browser is not None:
+                enabled_tool_names = (*enabled_tool_names, BROWSER_ACTION_TOOL_NAME)
             if not any(source in {"brave", "tavily"} for source in self._search_source_order):
                 enabled_tool_names = tuple(
                     name for name in enabled_tool_names if name != WEB_SEARCH_TOOL_NAME
@@ -5646,12 +5678,20 @@ class ProjectSession:
             if supervisor is not None:
                 supervisor.close(join_timeout=1.0)
             mcp_cleanup_complete = self._mcp_process_manager.close()
+            browser_cleanup_complete = True
+            if self._browser is not None:
+                try:
+                    self._browser.close()
+                except Exception:
+                    browser_cleanup_complete = False
             try:
                 self._writer.close()
             finally:
                 self._manager.close()
             if not mcp_cleanup_complete:
                 raise RuntimeError("MCP process cleanup is incomplete")
+            if not browser_cleanup_complete:
+                raise RuntimeError("browser process cleanup is incomplete")
 
     def _retire_team_schedule_supervisor_for_identity_change(self) -> None:
         supervisor = self._team_schedule_supervisor
@@ -5769,8 +5809,12 @@ class ProjectSession:
             self._archive_list,
             commit_turn=lambda turn: self._commit_turn(writer, turn),
             project_instructions_factory=self._project_instructions_loader.load,
-            tool_registry_factory=lambda: registry_snapshot_with_memory(
-                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            tool_registry_factory=lambda: registry_snapshot_with_browser(
+                self.workspace,
+                registry_snapshot_with_memory(
+                    self.workspace, self._mcp_catalog_service.registry_snapshot()
+                ),
+                enabled=self._browser is not None,
             ),
             skill_inventory_factory=self._skill_inventory_loader.load,
             hook_set_factory=self._hook_store.snapshot,
@@ -5808,8 +5852,12 @@ class ProjectSession:
             for contract in prepared.registry_snapshot.contracts
         )
         if has_mcp:
-            current = registry_snapshot_with_memory(
-                self.workspace, self._mcp_catalog_service.registry_snapshot()
+            current = registry_snapshot_with_browser(
+                self.workspace,
+                registry_snapshot_with_memory(
+                    self.workspace, self._mcp_catalog_service.registry_snapshot()
+                ),
+                enabled=self._browser is not None,
             )
             if (
                 current.snapshot_id != prepared.registry_snapshot.snapshot_id
@@ -6853,6 +6901,7 @@ class ProjectSession:
         prepared_web_fetch: PreparedWebFetch | None = None
         prepared_move_directory: PreparedMoveDirectory | None = None
         prepared_download: PreparedDownloadFile | None = None
+        prepared_browser = None
         prepared_memory: PreparedMemoryAction | None = None
         prepared_mcp: PreparedMcpCall | None = None
         prepared_integration = None
@@ -7007,6 +7056,17 @@ class ProjectSession:
                 return _invalid_tool_request(request, error)
             action = prepared_download.action
             precondition = prepared_download.precondition
+        elif request.name == BROWSER_ACTION_TOOL_NAME:
+            if self._browser is None:
+                return _invalid_tool_request(
+                    request, BrowserAutomationError("browser runtime is unavailable")
+                )
+            try:
+                prepared_browser = parse_browser_action(request)
+            except (ValueError, BrowserAutomationError) as error:
+                return _invalid_tool_request(request, error)
+            action = PermissionAction.NETWORK_READ
+            precondition = ActionPrecondition.none()
         elif request.name in MEMORY_TOOL_NAMES:
             try:
                 prepared_memory = self._memory_tool.prepare(
@@ -7208,6 +7268,11 @@ class ProjectSession:
                 action_digest=identity.digest,
                 kind=ApprovalPreviewKind.FILE_DOWNLOAD,
             )
+        elif prepared_browser is not None:
+            approval_preview = build_metadata_preview(
+                action_digest=identity.digest,
+                kind=ApprovalPreviewKind.BROWSER_ACTION,
+            )
         elif prepared_mcp is not None:
             mcp_entry = self._mcp_store.get_server(
                 prepared_mcp.candidate.configured_name,
@@ -7275,6 +7340,8 @@ class ProjectSession:
             if prepared_download is not None:
                 refreshed = self._download_file.refresh_precondition(prepared_download)
                 return replace(current, precondition=refreshed)
+            if prepared_browser is not None:
+                return current
             if prepared_mcp is not None:
                 catalog = self._mcp_catalog_service.snapshot()
                 candidate = next(
@@ -7630,6 +7697,50 @@ class ProjectSession:
                     result_code=download_result.result_code,
                     audit_message=download_result.audit_message,
                 )
+            elif request.name == BROWSER_ACTION_TOOL_NAME and prepared_browser is not None:
+                if self._browser is None:
+                    return ActionExecutionResult(
+                        tool_result=ToolResult(
+                            request.tool_use_id,
+                            "browser runtime is unavailable",
+                            is_error=True,
+                        ),
+                        outcome=ActionExecutionOutcome.FAILED,
+                        result_code="browser_unavailable",
+                        audit_message=(
+                            "browser action failed because no Host browser runtime is configured"
+                        ),
+                    )
+                try:
+                    browser_result = self._execute_browser_action(prepared_browser)
+                except BrowserAutomationError as error:
+                    return ActionExecutionResult(
+                        tool_result=ToolResult(
+                            request.tool_use_id,
+                            str(error)[:4096],
+                            is_error=True,
+                        ),
+                        outcome=ActionExecutionOutcome.FAILED,
+                        result_code="browser_policy_error",
+                        audit_message="browser action was rejected by the Host browser policy",
+                    )
+                succeeded = browser_result.outcome == "completed"
+                return ActionExecutionResult(
+                    tool_result=ToolResult(
+                        request.tool_use_id,
+                        _browser_observation_payload(browser_result),
+                        is_error=not succeeded,
+                    ),
+                    outcome=(
+                        ActionExecutionOutcome.SUCCEEDED
+                        if succeeded
+                        else ActionExecutionOutcome.FAILED
+                    ),
+                    result_code="browser_ok" if succeeded else "browser_failed",
+                    audit_message=(
+                        "browser action completed" if succeeded else "browser backend action failed"
+                    ),
+                )
             else:
                 result = ToolResult(
                     request.tool_use_id, f"unknown tool: {request.name}", is_error=True
@@ -7740,6 +7851,26 @@ class ProjectSession:
         )
         self._active_hook_audit_entries.extend(dispatch.hook_audit.entries)
         return dispatch
+
+    def _execute_browser_action(self, request):
+        """Execute one parsed Browser action through the injected Host runtime."""
+        browser = self._browser
+        if browser is None:
+            raise BrowserAutomationError("browser runtime is unavailable")
+        if request.action is BrowserAction.NAVIGATE:
+            assert request.url is not None
+            return browser.navigate(request.url)
+        if request.action is BrowserAction.CLICK:
+            assert request.selector is not None
+            return browser.click(request.selector)
+        if request.action is BrowserAction.FILL:
+            assert request.selector is not None and request.value is not None
+            return browser.fill(request.selector, request.value)
+        if request.action is BrowserAction.EXTRACT_TEXT:
+            return browser.extract_text(request.selector)
+        if request.action is BrowserAction.SCREENSHOT:
+            return browser.screenshot()
+        raise BrowserAutomationError("browser action is unsupported")
 
     def _assert_action_lease(self, lease: ActionLease) -> None:
         active = self._active_action_lease
@@ -8894,6 +9025,18 @@ def _invalid_tool_request(request: ToolUse, error: Exception) -> ToolDispatchRes
         ToolEventStatus.ERROR,
         "invalid_request",
     )
+
+
+def _browser_observation_payload(observation: BrowserObservation) -> str:
+    """Serialize bounded browser output as explicitly untrusted evidence."""
+    payload = {
+        "action": observation.action.value,
+        "evidence": "untrusted",
+        "outcome": observation.outcome,
+        "step": observation.step,
+        "value": observation.value,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _provider_elapsed_milliseconds(started: int) -> int:

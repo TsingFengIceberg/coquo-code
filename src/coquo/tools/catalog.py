@@ -22,6 +22,11 @@ from coquo.core.skill_authoring import (
     SKILL_PROPOSE_CREATE_TOOL_NAME,
 )
 from coquo.tools.archive_list import ARCHIVE_LIST_TOOL_NAME, archive_list_tool_snapshot
+from coquo.tools.browser import (
+    BROWSER_ACTION_TOOL_NAME,
+    browser_action_tool_snapshot,
+    parse_browser_action,
+)
 from coquo.tools.checksum_file import CHECKSUM_FILE_TOOL_NAME, checksum_file_tool_snapshot
 from coquo.tools.compare_files import COMPARE_FILES_TOOL_NAME, compare_files_tool_snapshot
 from coquo.tools.copy_file import COPY_FILE_TOOL_NAME, copy_file_tool_snapshot
@@ -171,6 +176,7 @@ MAX_TOOL_INPUT_STRING_BYTES = 4096
 CHILD_CONTROL_TOOL_CATALOG = child_control_tool_snapshots()
 TEAM_CONTROL_TOOL_CATALOG = team_control_tool_snapshots()
 MEMORY_TOOL_CATALOG = memory_tool_snapshots()
+BROWSER_ACTION_TOOL_CATALOG = (browser_action_tool_snapshot(),)
 
 ORDINARY_TOOL_CATALOG: tuple[CanonicalToolDefinition, ...] = (
     read_file_tool_snapshot(),
@@ -296,6 +302,7 @@ _HOST_PERMISSION_ACTIONS: dict[str, tuple[PermissionAction, ...]] = {
     WEB_FETCH_TOOL_NAME: (PermissionAction.NETWORK_READ,),
     MOVE_DIRECTORY_TOOL_NAME: (PermissionAction.WORKSPACE_MOVE,),
     DOWNLOAD_FILE_TOOL_NAME: (PermissionAction.NETWORK_WRITE,),
+    BROWSER_ACTION_TOOL_NAME: (PermissionAction.NETWORK_READ,),
     TEAM_WORKTREE_INTEGRATE_TOOL_NAME: (PermissionAction.DANGEROUS,),
     MEMORY_SEARCH_TOOL_NAME: (PermissionAction.WORKSPACE_READ,),
     MEMORY_ADD_TOOL_NAME: (PermissionAction.WORKSPACE_CREATE,),
@@ -385,6 +392,29 @@ def registry_snapshot_with_memory(workspace, base: ToolRegistrySnapshot) -> Tool
     )
 
 
+def registry_snapshot_with_browser(
+    workspace,
+    base: ToolRegistrySnapshot,
+    *,
+    enabled: bool = False,
+) -> ToolRegistrySnapshot:
+    """Add the Browser action only when a Host browser runtime is configured.
+
+    Browser is intentionally absent from the default registry so an ordinary
+    Session cannot accidentally advertise a capability it cannot execute.
+    The returned snapshot preserves the memory extension first, then appends
+    one immutable built-in Browser contract for the exact prepared turn.
+    """
+    snapshot = registry_snapshot_with_memory(workspace, base)
+    if not enabled or BROWSER_ACTION_TOOL_NAME in snapshot.names:
+        return snapshot
+    browser_contract = _builtin_contract(BROWSER_ACTION_TOOL_CATALOG[0])
+    return ToolRegistrySnapshot(
+        generation=snapshot.generation + 1,
+        contracts=(*snapshot.contracts, browser_contract),
+    )
+
+
 def model_tool_definitions(
     enabled_tool_names: tuple[str, ...] | None = None,
     *,
@@ -436,6 +466,19 @@ def tool_use_from_input(
             arguments=ToolArguments.from_mapping(tool_input),
             assistant_text=assistant_text,
         )
+    if name == BROWSER_ACTION_TOOL_NAME:
+        if not isinstance(tool_input, dict):
+            raise ValueError(f"{name} input is malformed")
+        allowed = {"action", "url", "selector", "value"}
+        if set(tool_input) - allowed or "action" not in tool_input:
+            raise ValueError(f"{name} input is malformed")
+        _validate_known_input(name, tool_input, allowed)
+        return ToolUse(
+            tool_use_id=tool_use_id,
+            name=name,
+            arguments=ToolArguments.from_mapping(tool_input),
+            assistant_text=assistant_text,
+        )
     expected = _expected_keys(name)
     if not isinstance(tool_input, dict) or set(tool_input) != expected:
         raise ValueError(f"{name} input is malformed")
@@ -454,7 +497,7 @@ def tool_use_from_provider_input(
     tool_input: dict[str, object],
 ) -> ToolUse:
     """Freeze provider input while deferring ordinary-tool validation to the Host."""
-    if name not in ORDINARY_TOOL_NAMES:
+    if name not in ORDINARY_TOOL_NAMES and name != BROWSER_ACTION_TOOL_NAME:
         return tool_use_from_input(tool_use_id, name, tool_input)
     return ToolUse(
         tool_use_id=tool_use_id,
@@ -470,6 +513,9 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
     tool_input = request.arguments.as_mapping()
     if request.name.startswith("mcp_"):
         return tool_input
+    if request.name == BROWSER_ACTION_TOOL_NAME:
+        _validate_known_input(request.name, tool_input, {"action", "url", "selector", "value"})
+        return tool_input
     expected = _expected_keys(request.name)
     if set(tool_input) != expected:
         raise ValueError(f"{request.name} input is malformed")
@@ -479,7 +525,7 @@ def tool_input_from_use(request: ToolUse) -> dict[str, object]:
 
 def tool_input_for_provider_history(request: ToolUse) -> dict[str, object]:
     """Replay frozen ordinary-tool input exactly after Host-side validation."""
-    if request.name in ORDINARY_TOOL_NAMES:
+    if request.name in ORDINARY_TOOL_NAMES or request.name == BROWSER_ACTION_TOOL_NAME:
         if not isinstance(request.arguments, ToolArguments):
             raise ValueError("tool arguments are invalid")
         return request.arguments.as_mapping()
@@ -555,6 +601,8 @@ def _expected_keys(name: str) -> set[str]:
         return {"source", "destination"}
     if name == DOWNLOAD_FILE_TOOL_NAME:
         return {"url", "path"}
+    if name == BROWSER_ACTION_TOOL_NAME:
+        return {"action", "url", "selector", "value"}
     if name == MEMORY_SEARCH_TOOL_NAME:
         return {"query", "max_results"}
     if name == MEMORY_ADD_TOOL_NAME:
@@ -604,6 +652,9 @@ def _validate_known_input(name: str, tool_input: dict[str, object], expected: se
         parse_team_worktree_integrate(
             ToolUse("validation", name, ToolArguments.from_mapping(tool_input))
         )
+        return
+    if name == BROWSER_ACTION_TOOL_NAME:
+        parse_browser_action(ToolUse("validation", name, ToolArguments.from_mapping(tool_input)))
         return
     if name in MEMORY_TOOL_NAMES:
         from coquo.tools.memory import _validate_values

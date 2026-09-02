@@ -1595,6 +1595,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 143. [0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)
 144. [0164：自动 Workflow 到 Skill 自进化闭环](./decisions/0164-automatic-skill-evolution-pipeline.md)
 145. [0165：Memory、策略、Eval 与 Provider 稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)
+146. [0166：Host-gated Browser Action 与 AgentLoop 接入](./decisions/0166-browser-action-agentloop-integration.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1761,3 +1762,23 @@ Workflow Driver在Host侧串联现有Task、Child和Team账本，最多按记录
 `EvalPlatform`在已有离线Host Eval之上提供有界版本化dataset、互斥validation/test切分、封闭`EvalGrade`、持久化运行记录和baseline/candidate比较。运行记录只保存检查名、分数、状态和时间等受限事实，写入`.coquo/evals/runs.jsonl`，不保存prompt、回答、路径或凭据；任何缺失case、单case退化、pass-rate或平均分下降都会使regression gate fail-closed。可用`coquo eval platform datasets|run|compare`检查。
 
 Provider长稳验收新增最多8次的显式soak重复。`StreamSample`将观测分类为未流式、首delta等待、delta间隔过大或健康，只描述Host测量事实，不猜测供应商原因。TTY前台事件队列现在暴露enqueue、drain、高水位和阻塞put计数，发现背压时追加一次警告；这能区分上游没有chunk、Provider缓冲与Host呈现排队。原有取消、重试、首delta后不重放和Turn原子提交边界保持不变。详见[0165：Memory、策略、Eval与Provider稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)。
+
+## Host-gated Browser Action 与 AgentLoop 接入
+
+Browser 自动化现在通过显式注入的 Host-owned `BrowserAutomation` runtime
+接入正常 `ProjectSession → AgentLoop → ActionCoordinator → Action Audit`
+路径。只有配置了 Browser runtime 的 Session 才动态曝光闭合的
+`browser_action` 工具；普通 Session 和所有 Child Session 都不会看到它。
+每次请求只能执行一个有界动作：`navigate`、`click`、`fill`、`extract_text`
+或 `screenshot`，并在 catalog 边界执行 action-specific 参数校验。
+
+Browser action 被视为 `network-read` Host Action，继续经过 PermissionGate、
+approval、Hook、lease、取消、超时、输出限制和审计边界。Browser 自身仍负责
+credential-free URL、origin allowlist、selector、step 和后端约束；页面文本、
+截图、URL 和后端声明只会以 `evidence: "untrusted"` 的有界 ToolResult 返回，
+不能授予权限、执行命令、访问 MCP/Skill、委派工作或修改 workspace。缺少或
+关闭 runtime、后端失败和不确定副作用都会 fail-closed 或如实报告，不自动重试。
+
+本切片使用显式 Host/API 注入，不增加 CLI 开关，也不隐式依赖 Playwright；关闭
+Session 时会回收注入的 runtime。详见[0166：Host-gated Browser Action 与
+AgentLoop 接入](./decisions/0166-browser-action-agentloop-integration.md)。

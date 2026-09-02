@@ -8,7 +8,18 @@ from coquo.browser import (
     BrowserAutomationError,
     BrowserPolicy,
 )
-from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.core.contracts import AssistantText, ToolArguments, ToolUse
+from coquo.core.permissions import ApprovalMode, PermissionAction, PermissionMode
+from coquo.providers.fake import ScriptedFakeProvider
+from coquo.session import ProjectSession
+from coquo.session_records import ActionAuditStatus
+from coquo.tools.catalog import (
+    BROWSER_ACTION_TOOL_NAME,
+    TOOL_REGISTRY_SNAPSHOT,
+    registry_snapshot_with_browser,
+    tool_input_from_use,
+    tool_use_from_input,
+)
 from coquo.tools.browser import browser_action_tool_snapshot, parse_browser_action
 
 
@@ -96,6 +107,13 @@ def test_browser_action_contract_is_closed_and_action_specific() -> None:
     assert parsed.action is BrowserAction.NAVIGATE
     assert parsed.url == "https://example.com"
 
+    direct = tool_use_from_input(
+        "browser-1b",
+        BROWSER_ACTION_TOOL_NAME,
+        {"action": "extract_text"},
+    )
+    assert tool_input_from_use(direct) == {"action": "extract_text"}
+
     with pytest.raises(ValueError, match="irrelevant fields"):
         parse_browser_action(
             ToolUse(
@@ -106,3 +124,62 @@ def test_browser_action_contract_is_closed_and_action_specific() -> None:
                 ),
             )
         )
+
+
+def test_browser_action_is_advertised_and_dispatched_through_session_action_audit(
+    tmp_path,
+) -> None:
+    backend = FakeBrowser()
+    browser = BrowserAutomation(
+        backend,
+        BrowserPolicy(("https://example.com",)),
+        # ActionCoordinator owns the durable permission/approval decision;
+        # this callback is the backend's final Host gate.
+        approve=lambda *_: True,
+    )
+    provider = ScriptedFakeProvider(
+        [
+            ToolUse(
+                "browser-1",
+                BROWSER_ACTION_TOOL_NAME,
+                ToolArguments.from_mapping({"action": "extract_text"}),
+            ),
+            # The browser observation is intentionally untrusted tool data.
+            AssistantText("observed"),
+        ]
+    )
+    session = ProjectSession.open(
+        tmp_path,
+        environment={},
+        fake_provider_factory=lambda: provider,
+        browser=browser,
+        permission_mode=PermissionMode.DANGER_FULL_ACCESS,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    try:
+        assert session.prompt("Inspect the page") == "observed"
+        assert backend.calls == [("extract", None)]
+        request = provider.received_requests[1]
+        result = next(item for item in reversed(request.history) if item.tool_use_id == "browser-1")
+        assert '"evidence":"untrusted"' in result.content
+        audits = [
+            audit
+            for audit in session._writer.state.action_audits
+            if audit.identity.tool_name == BROWSER_ACTION_TOOL_NAME
+        ]
+        assert audits and audits[-1].status is ActionAuditStatus.SUCCEEDED
+    finally:
+        session.close()
+
+
+def test_browser_action_remains_hidden_without_a_runtime(tmp_path) -> None:
+    snapshot = registry_snapshot_with_browser(tmp_path, TOOL_REGISTRY_SNAPSHOT, enabled=False)
+    assert BROWSER_ACTION_TOOL_NAME not in snapshot.names
+
+
+def test_browser_action_registry_is_added_only_for_configured_runtime(tmp_path) -> None:
+    snapshot = registry_snapshot_with_browser(tmp_path, TOOL_REGISTRY_SNAPSHOT, enabled=True)
+    assert snapshot.names[-1] == BROWSER_ACTION_TOOL_NAME
+    assert snapshot.contract(BROWSER_ACTION_TOOL_NAME).permission_actions == (
+        PermissionAction.NETWORK_READ,
+    )
