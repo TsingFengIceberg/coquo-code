@@ -10,11 +10,14 @@ readme = "README_en.md"
 requires-python = ">=3.12,<3.14"
 authors = [{ name = "Coquo contributors" }]
 dependencies = [
-  "anthropic>=0.116.0",
-  "openai>=2.15.0",
-  "prompt-toolkit>=3.0.52",
-  "pyyaml>=6.0.2",
-  "rich>=13.9.4",
+	"a2a-sdk[http-server]==1.1.2",
+	"anthropic>=0.116.0",
+	"fastapi>=0.115.0",
+	"openai>=2.15.0",
+	"prompt-toolkit>=3.0.52",
+	"pyyaml>=6.0.2",
+	"rich>=13.9.4",
+	"uvicorn[standard]>=0.34.0",
 ]
 keywords = ["agent", "cli", "coding-agent", "harness", "llm"]
 classifiers = [
@@ -29,6 +32,7 @@ classifiers = [
 
 [project.scripts]
 coquo = "coquo.cli.main:main"
+coquo-a2a = "coquo.a2a_server:main"
 
 [dependency-groups]
 dev = [
