@@ -4,6 +4,7 @@ from io import StringIO
 import json
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import pytest
 
@@ -12,7 +13,9 @@ from coquo.interfaces import (
     InterfaceEvent,
     InterfaceResponse,
     LocalWebBridge,
+    ProjectSessionManager,
 )
+from coquo.observability import ObservationContext, ObservationStream
 
 
 def response(request_id: str, prompt: str) -> InterfaceResponse:
@@ -62,3 +65,71 @@ def test_ide_bridge_serves_line_protocol_with_flush() -> None:
     output_stream = StringIO()
     bridge.serve(input_stream, output_stream)
     assert json.loads(output_stream.getvalue())["outcome"] == "completed"
+
+
+class _ManagedFakeSession:
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
+        self.session_id = str(uuid4())
+        self.observation_stream = ObservationStream(
+            source_id=self.session_id,
+            context=ObservationContext.new(session_id=self.session_id),
+        )
+        self.closed = False
+
+    def prompt(self, prompt, *, cancellation):
+        cancellation.check()
+        self.observation_stream.publish(
+            record_type="turn_started",
+            status="started",
+            summary="turn started",
+        )
+        cancellation.check()
+        self.observation_stream.publish(
+            record_type="turn_finished",
+            status="completed",
+            summary="turn finished",
+        )
+        return f"handled:{prompt}"
+
+    def close(self):
+        self.closed = True
+
+
+def test_project_session_manager_runs_real_session_and_exposes_live_cursor(tmp_path) -> None:
+    created: list[_ManagedFakeSession] = []
+
+    def factory(workspace):
+        session = _ManagedFakeSession(workspace)
+        created.append(session)
+        return session
+
+    manager = ProjectSessionManager(tmp_path, session_factory=factory)
+    created_response = manager.create()
+    assert created_response.session_id == created[0].session_id
+    started = manager.start_prompt("r1", "hello", session_id=created[0].session_id)
+    assert started.outcome == "started"
+    assert started.turn_id is not None
+    finished = manager.wait("r2", started.turn_id, timeout=2)
+    assert finished.outcome == "completed"
+    assert finished.text == "handled:hello"
+    events = manager.events(session_id=created[0].session_id, after=-1)
+    assert [event.sequence for event in events] == [0, 1]
+    assert all("prompt" not in event.payload for event in events)
+    bridge = IDEJsonRpcBridge(session_manager=manager)
+    listed = json.loads(bridge.handle_line('{"id":"r3","method":"session_list"}'))
+    assert created[0].session_id in json.loads(listed["text"])["sessions"]
+    polled = json.loads(
+        bridge.handle_line(
+            json.dumps(
+                {
+                    "id": "r4",
+                    "method": "events",
+                    "params": {"session_id": created[0].session_id, "after": 0},
+                }
+            )
+        )
+    )
+    assert [event["sequence"] for event in polled["events"]] == [1]
+    manager.close(created[0].session_id)
+    assert created[0].closed is True
