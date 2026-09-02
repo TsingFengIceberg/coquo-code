@@ -1593,6 +1593,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 141. [0161：有界 Provider 可靠性与 Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
 142. [0162：固定命令资源限制](./decisions/0162-fixed-command-resource-limits.md)
 143. [0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)
+144. [0164：自动 Workflow 到 Skill 自进化闭环](./decisions/0164-automatic-skill-evolution-pipeline.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1739,6 +1740,12 @@ Workflow Driver在Host侧串联现有Task、Child和Team账本，最多按记录
 ## 有界自进化控制器
 
 自进化控制面现在由Host-owned `EvolutionController`提供，默认`off`，支持`propose`与`supervised`两个候选生成模式。它把有界Trace、grader结果、重复模式、Memory/Skill/Prompt/Workflow候选、安全检查、独立validation/test指标比较、人工批准、版本化激活、线上观察、回滚及归档写入独立的`.coquo/evolution/events.jsonl`；候选始终带来源并标记为不可信数据。`coquo evolution`只执行本地审计和状态转移，不调用Provider、不执行工具，也不能修改PermissionGate、sandbox、ToolSet、Child/Team或AgentLoop。只有通过Eval、人工批准且安全检查通过的候选才可激活，回滚会恢复最近的既有稳定候选（若存在）。详见[0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)。
+
+## Workflow 到 Skill 的自动自进化闭环
+
+在上述控制面之上，`SkillEvolutionService`完成了受控的九步 Skill 闭环：成功提交的 Host workflow Trace → 至少三次重复成功模式 → 有界 Evolution candidate → 声明式 `SKILL.md` 包 → `.coquo/skill-candidates/v1/` quarantine → 安全检查与独立 validation/test 指标 Eval → 人工批准 → Host 安装后由下一回合的 Skill inventory 发现 → 使用观察、精确回滚与归档。候选不会在当前冻结 Turn 热加载，通用 `skills install` 也不能绕过 Evolution 的批准门禁。
+
+生成 Skill 只提供不可信的声明式流程指导；`allowed-tools`只能与当前 ToolSet 求交，不能授予写入、命令、网络、MCP、Child、Team 或任何 PermissionGate/sandbox/AgentLoop 权限。该闭环不等于 Memory、System Prompt 或高权限策略的自动演化；那些目标仍需独立设计和人工发布。完整边界与 CLI 验收见[0164：自动 Workflow 到 Skill 自进化闭环](./decisions/0164-automatic-skill-evolution-pipeline.md)。
 
 ## 后台副作用置信度与终态幂等
 

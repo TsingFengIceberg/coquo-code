@@ -2093,6 +2093,25 @@ network has not delivered.
 
 The Host-owned `EvolutionController` now provides a bounded self-evolution control plane, defaulting to `off` with `propose` and `supervised` candidate-generation modes. It writes bounded traces, grader facts, repeated patterns, Memory/Skill/Prompt/Workflow candidates, safety checks, independent validation/test metric comparisons, human approval, versioned activation, live observations, rollback, and archival to the separate `.coquo/evolution/events.jsonl` log; every candidate retains provenance and remains untrusted task data. `coquo evolution` performs only local audit and state transitions: it does not invoke a Provider, execute tools, or modify PermissionGate, sandbox, ToolSet, Child/Team, or AgentLoop policy. Only a safety-passed candidate that passes Eval and receives explicit approval can activate, and rollback restores the newest prior stable candidate when one exists. See [0163: Bounded Self-Evolution Controller](./decisions/0163-bounded-self-evolution-controller.md).
 
+## Automatic Workflow-to-Skill Evolution Loop
+
+On top of that control plane, `SkillEvolutionService` implements the bounded
+nine-step Skill loop: successful committed Host workflow Trace, at least three
+repeated successes, a bounded Evolution candidate, a declarative `SKILL.md`
+package, quarantine under `.coquo/skill-candidates/v1/`, safety checks and
+independent validation/test metric Eval, explicit human approval, discovery by
+the next Turn's Skill inventory after Host installation, and bounded usage
+observation, exact rollback, and archival. Candidates are never hot-loaded into
+the frozen current Turn, and generic `skills install` cannot bypass the
+Evolution approval gate.
+
+The generated Skill is untrusted declarative guidance. Its `allowed-tools`
+metadata only intersects the current ToolSet; it cannot grant writes, commands,
+network, MCP, Child, Team, PermissionGate, sandbox, or AgentLoop authority.
+This loop is not automatic evolution of Memory, the system prompt, or
+high-privilege policy. Those targets require separate design and human release.
+See [0164: Automatic Workflow-to-Skill Evolution Pipeline](./decisions/0164-automatic-skill-evolution-pipeline.md).
+
 ## Background Effect Confidence and Terminal Idempotency
 
 Background queue items now carry `not-started`, `in-flight`, `confirmed`, or
