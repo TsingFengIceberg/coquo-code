@@ -8,6 +8,8 @@ from coquo.browser import (
     BrowserAutomationError,
     BrowserPolicy,
 )
+from coquo.core.contracts import ToolArguments, ToolUse
+from coquo.tools.browser import browser_action_tool_snapshot, parse_browser_action
 
 
 class FakeBrowser:
@@ -78,3 +80,29 @@ def test_browser_disallows_credentials_and_non_web_schemes() -> None:
         browser.navigate("https://user:pass@example.com")
     with pytest.raises(BrowserAutomationError, match=r"HTTP\(S\)"):
         browser.navigate("javascript:alert(1)")
+
+
+def test_browser_action_contract_is_closed_and_action_specific() -> None:
+    snapshot = browser_action_tool_snapshot()
+    assert snapshot.name == "browser_action"
+    assert snapshot.as_mapping()["input_schema"]["additionalProperties"] is False
+
+    request = ToolUse(
+        "browser-1",
+        "browser_action",
+        ToolArguments.from_mapping({"action": "navigate", "url": "https://example.com"}),
+    )
+    parsed = parse_browser_action(request)
+    assert parsed.action is BrowserAction.NAVIGATE
+    assert parsed.url == "https://example.com"
+
+    with pytest.raises(ValueError, match="irrelevant fields"):
+        parse_browser_action(
+            ToolUse(
+                "browser-2",
+                "browser_action",
+                ToolArguments.from_mapping(
+                    {"action": "click", "selector": "#go", "url": "https://example.com"}
+                ),
+            )
+        )
