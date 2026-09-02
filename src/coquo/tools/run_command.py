@@ -251,6 +251,11 @@ class RunCommandTool:
         else:
             self._command_sandbox = LinuxBubblewrapCommandSandbox()
 
+    @property
+    def workspace(self) -> Path:
+        """Return the resolved Host workspace used by this command boundary."""
+        return self._workspace
+
     def inspect_sandbox(self, *, verify_activation: bool = False) -> CommandSandboxInspection:
         """Inspect dependencies and optionally run one fixed activation probe."""
         if type(verify_activation) is not bool:
