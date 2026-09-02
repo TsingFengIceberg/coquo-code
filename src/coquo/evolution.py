@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,8 @@ MAX_CANDIDATE_COUNT = 2_000
 MAX_TEXT_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 2 * 1024
 MAX_METRICS = 32
+MAX_WORKFLOW_STEPS = 64
+MAX_WORKFLOW_STEP_BYTES = 192
 _ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _SECRET_RE = re.compile(r"(?i)(api[_-]?key|authorization\s*:\s*bearer|secret|password|token\s*=)")
 
@@ -111,6 +114,12 @@ def _mapping_metrics(value: tuple[tuple[str, float], ...]) -> dict[str, float]:
     return {key: number for key, number in value}
 
 
+def _workflow_fingerprint(workflow: tuple[str, ...]) -> str:
+    """Return a stable, content-free identity for one observed tool sequence."""
+    raw = json.dumps(list(workflow), ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    return "workflow-v1-" + hashlib.sha256(b"coquo-workflow-v1\0" + raw).hexdigest()
+
+
 @dataclass(frozen=True)
 class EvolutionTrace:
     trace_id: str
@@ -121,6 +130,7 @@ class EvolutionTrace:
     source_turn: int | None
     metrics: tuple[tuple[str, float], ...]
     occurred_at: str
+    workflow: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _id(self.trace_id, "trace_id")
@@ -136,6 +146,17 @@ class EvolutionTrace:
         ):
             raise EvolutionError("evolution source_turn is invalid")
         _text(self.occurred_at, "occurred_at", 64)
+        if not isinstance(self.workflow, tuple) or len(self.workflow) > MAX_WORKFLOW_STEPS:
+            raise EvolutionError("evolution workflow is invalid")
+        for step in self.workflow:
+            if (
+                not isinstance(step, str)
+                or not step
+                or not step.isascii()
+                or "\x00" in step
+                or len(step.encode("ascii")) > MAX_WORKFLOW_STEP_BYTES
+            ):
+                raise EvolutionError("evolution workflow step is invalid")
 
     def as_mapping(self) -> dict[str, object]:
         return {
@@ -147,6 +168,7 @@ class EvolutionTrace:
             "source_turn": self.source_turn,
             "metrics": _mapping_metrics(self.metrics),
             "occurred_at": self.occurred_at,
+            "workflow": list(self.workflow),
         }
 
 
@@ -344,6 +366,7 @@ class EvolutionController:
         source_session_id: str | None = None,
         source_turn: int | None = None,
         metrics: Mapping[str, Any] | None = None,
+        workflow: tuple[str, ...] = (),
     ) -> EvolutionTrace:
         trace = EvolutionTrace(
             str(uuid4()),
@@ -354,6 +377,7 @@ class EvolutionController:
             source_turn,
             _metrics(metrics),
             _now(),
+            workflow,
         )
         self.store._append("trace", trace.as_mapping())
         return trace
@@ -373,6 +397,7 @@ class EvolutionController:
                     event.get("source_turn"),
                     _metrics(event.get("metrics")),
                     event["occurred_at"],
+                    tuple(event.get("workflow", ())),
                 )
             )
         return tuple(item for item in result if target is None or item.target is target)
@@ -402,9 +427,14 @@ class EvolutionController:
         return assessment
 
     def patterns(self, target: EvolutionTarget | None = None) -> tuple[dict[str, object], ...]:
-        groups: dict[tuple[str, str, str], list[EvolutionTrace]] = {}
+        groups: dict[tuple[str, str, str, tuple[str, ...]], list[EvolutionTrace]] = {}
         for trace in self.traces(target):
-            key = (trace.target.value, trace.outcome.value, trace.summary.casefold())
+            key = (
+                trace.target.value,
+                trace.outcome.value,
+                trace.summary.casefold(),
+                trace.workflow,
+            )
             groups.setdefault(key, []).append(trace)
         return tuple(
             {
@@ -413,6 +443,8 @@ class EvolutionController:
                 "summary": key[2],
                 "count": len(items),
                 "trace_ids": [item.trace_id for item in items],
+                "workflow": list(key[3]),
+                "workflow_fingerprint": _workflow_fingerprint(key[3]),
             }
             for key, items in sorted(groups.items())
         )

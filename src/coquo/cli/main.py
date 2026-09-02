@@ -206,6 +206,7 @@ from coquo.evolution import (
     EvolutionOutcome,
     EvolutionTarget,
 )
+from coquo.skill_evolution import SkillEvolutionService
 from coquo.session_records import workspace_fingerprint
 from coquo.skills import (
     SkillCatalogError,
@@ -1112,6 +1113,12 @@ def build_parser() -> argparse.ArgumentParser:
     evolution_trace.add_argument("--session")
     evolution_trace.add_argument("--turn", type=positive_turn_number)
     evolution_trace.add_argument("--metrics", default="{}")
+    evolution_trace.add_argument(
+        "--workflow",
+        action="append",
+        default=[],
+        help="bounded tool:outcome fact; repeat in observed order",
+    )
     evolution_assess = evolution_commands.add_parser("assess", help="grade one recorded trace")
     evolution_assess.add_argument("trace_id")
     evolution_assess.add_argument("--label")
@@ -1161,6 +1168,45 @@ def build_parser() -> argparse.ArgumentParser:
         "archive", help="archive inactive candidates before a timestamp"
     )
     evolution_archive.add_argument("before", type=nonblank_prompt)
+    evolution_skill_patterns = evolution_commands.add_parser(
+        "skill-patterns",
+        help="show repeated successful workflow patterns eligible for Skill evolution",
+    )
+    evolution_skill_patterns.add_argument("--min-successes", type=positive_turn_number, default=3)
+    evolution_skill_propose = evolution_commands.add_parser(
+        "skill-propose", help="quarantine a declarative Skill from one repeated workflow pattern"
+    )
+    evolution_skill_propose.add_argument("pattern_fingerprint")
+    evolution_skill_propose.add_argument(
+        "--scope", choices=["workspace", "project"], default="project"
+    )
+    evolution_skill_safety = evolution_commands.add_parser(
+        "skill-safety-check", help="run static safety checks for one evolved Skill"
+    )
+    evolution_skill_safety.add_argument("skill_candidate_id")
+    evolution_skill_evaluate = evolution_commands.add_parser(
+        "skill-evaluate", help="evaluate one evolved Skill against independent metrics"
+    )
+    evolution_skill_evaluate.add_argument("skill_candidate_id")
+    evolution_skill_evaluate.add_argument("--baseline-metrics", required=True)
+    evolution_skill_evaluate.add_argument("--candidate-metrics", required=True)
+    evolution_skill_evaluate.add_argument("--validation-set", default="skill-validation-v1")
+    evolution_skill_evaluate.add_argument("--test-set", default="skill-test-v1")
+    for action in ("skill-approve", "skill-install", "skill-rollback", "skill-deprecate"):
+        command = evolution_commands.add_parser(
+            action, help=f"{action.replace('-', ' ')} one evolved Skill"
+        )
+        command.add_argument("skill_candidate_id")
+    evolution_skill_observe = evolution_commands.add_parser(
+        "skill-observe", help="record one evolved Skill usage observation"
+    )
+    evolution_skill_observe.add_argument("skill_candidate_id")
+    evolution_skill_observe.add_argument("--metrics", required=True)
+    evolution_skill_observe.add_argument("--not-used", action="store_true")
+    evolution_skill_archive = evolution_commands.add_parser(
+        "skill-archive", help="archive inactive evolved Skills before a timestamp"
+    )
+    evolution_skill_archive.add_argument("before", type=nonblank_prompt)
     task_parser = subcommands.add_parser("task", help="create and inspect durable workspace Tasks")
     task_commands = task_parser.add_subparsers(dest="task_command", required=True)
     task_create = task_commands.add_parser("create", help="create one ready Task")
@@ -2741,6 +2787,8 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
     if command == "status":
         candidates = controller.candidates()
         active = sum(item.status.value == "active" for item in candidates)
+        skill_service = SkillEvolutionService(workspace, evolution=controller)
+        skill_candidates = skill_service.candidates.list()
         stdout.write(
             json.dumps(
                 {
@@ -2748,6 +2796,11 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
                     "traces": len(controller.traces()),
                     "candidates": len(candidates),
                     "active": active,
+                    "skill_patterns": len(skill_service.patterns()),
+                    "skill_candidates": len(skill_candidates),
+                    "skill_installed": sum(
+                        item.status.value == "installed" for item in skill_candidates
+                    ),
                     "storage": str(controller.store.events_path),
                 },
                 ensure_ascii=False,
@@ -2769,6 +2822,7 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
             source_session_id=arguments.session,
             source_turn=arguments.turn,
             metrics=_evolution_json_object(arguments.metrics, "metrics"),
+            workflow=tuple(arguments.workflow),
         )
         stdout.write(json.dumps(trace.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
         return 0
@@ -2847,6 +2901,67 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
     if command == "archive":
         for item in controller.archive(before=arguments.before):
             stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "skill-patterns":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        for pattern in service.patterns(min_successes=arguments.min_successes):
+            stdout.write(
+                json.dumps(pattern.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+        return 0
+    if command == "skill-propose":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        proposal = service.propose(
+            service.pattern(arguments.pattern_fingerprint), scope=arguments.scope
+        )
+        stdout.write(
+            json.dumps(
+                {
+                    "pattern": proposal.pattern.as_mapping(),
+                    "safety": proposal.safety.as_mapping(),
+                    "state": proposal.state.as_mapping(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    if command == "skill-safety-check":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        report = service.safety_check(arguments.skill_candidate_id)
+        stdout.write(json.dumps(report.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if report.passed else 1
+    if command == "skill-evaluate":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        result = service.evaluate(
+            arguments.skill_candidate_id,
+            _evolution_json_object(arguments.baseline_metrics, "baseline-metrics"),
+            _evolution_json_object(arguments.candidate_metrics, "candidate-metrics"),
+            validation_set=arguments.validation_set,
+            test_set=arguments.test_set,
+        )
+        stdout.write(json.dumps(result.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if result.passed else 1
+    if command in {"skill-approve", "skill-install", "skill-rollback", "skill-deprecate"}:
+        service = SkillEvolutionService(workspace, evolution=controller)
+        method = command.replace("skill-", "")
+        state = getattr(service, method)(arguments.skill_candidate_id)
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "skill-observe":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        state = service.observe(
+            arguments.skill_candidate_id,
+            _evolution_json_object(arguments.metrics, "metrics"),
+            used=not arguments.not_used,
+        )
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "skill-archive":
+        service = SkillEvolutionService(workspace, evolution=controller)
+        for state in service.archive(before=arguments.before):
+            stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
         return 0
     raise EvolutionError("unknown evolution command")
 
@@ -3251,6 +3366,7 @@ def _skill_candidate_value(
         "fingerprint": candidate.manifest.fingerprint,
         "installed_lock_digest": candidate.installed_lock_digest,
         "installed_scope": candidate.installed_scope,
+        "evolution_candidate_id": candidate.evolution_candidate_id,
         "name": candidate.manifest.name,
         "owner_session_id": candidate.owner_session_id,
         "proposal_turn_sequence": candidate.proposal_turn_sequence,
@@ -3267,6 +3383,8 @@ def _skill_candidate_value(
         "source": candidate.source.value,
         "source_sha256": candidate.source_sha256,
         "source_url": candidate.source_url,
+        "source_trace_ids": list(candidate.source_trace_ids),
+        "pattern_fingerprint": candidate.pattern_fingerprint,
         "status": candidate.status.value,
     }
     if include_instructions:

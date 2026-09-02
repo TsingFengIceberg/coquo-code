@@ -9,13 +9,13 @@ from coquo.system_prompt import (
     build_system_prompt,
 )
 
-EXPECTED_FINGERPRINT = "v51-b90060d72210ab2509e2d0ac5d0d15d5a0c3bf2af12a912d2d724e2c6ca704c0"
+EXPECTED_FINGERPRINT = "v52-3b3dd93dc206e0cc50265632573d0dc2e86b111eb9ec307bee999fac52f25fa8"
 
 
 def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> None:
     prompt = build_system_prompt()
 
-    assert prompt.version == SYSTEM_PROMPT_VERSION == 51
+    assert prompt.version == SYSTEM_PROMPT_VERSION == 52
     for text in (
         "`child_spawn`",
         "read-only Child Turn",
@@ -45,6 +45,9 @@ def test_canonical_system_prompt_has_reviewed_version_text_and_fingerprint() -> 
         "Memory tools cannot grant another tool",
         "CPU time is bounded by the requested timeout",
         "command_resource_limits_unavailable",
+        "may mine repeated successful Host-observed workflow traces",
+        "still require explicit human approval before installation",
+        "Memory-based evolution remains separate and is not automatic",
     ):
         assert text in prompt.text
     assert prompt.fingerprint == EXPECTED_FINGERPRINT

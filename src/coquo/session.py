@@ -34,6 +34,7 @@ from coquo.memory_observability import MemoryObservationLedger
 from coquo.memory_recall import MemoryRecallService, empty_memory_recall
 from coquo.memory_extraction import MemoryCandidateExtractor
 from coquo.evolution import EvolutionController, EvolutionError, EvolutionOutcome, EvolutionTarget
+from coquo.skill_evolution import SkillEvolutionService
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
@@ -1129,6 +1130,15 @@ class ProjectSession:
         )
         self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(
             self.execution_workspace
+        )
+        self._skill_evolution = (
+            None
+            if self._child_mode
+            else SkillEvolutionService(
+                self.execution_workspace,
+                evolution=self._evolution,
+                candidates=self._skill_candidate_store,
+            )
         )
         self._hook_store = hook_store or HookStore.for_workspace(self.workspace)
         self._memory_scope_id = workspace_fingerprint(self.workspace)
@@ -7858,7 +7868,7 @@ class ProjectSession:
         else:
             outcome = EvolutionOutcome.PARTIAL
         try:
-            self._evolution.record_trace(
+            trace = self._evolution.record_trace(
                 EvolutionTarget.WORKFLOW,
                 outcome,
                 f"committed turn with {turn.tool_ledger.requested} tool requests and {failures} unsuccessful outcomes",
@@ -7869,8 +7879,14 @@ class ProjectSession:
                     "tool_requests": turn.tool_ledger.requested,
                     "tool_failures": failures,
                 },
+                workflow=tuple(
+                    f"{entry.tool_name}:{entry.outcome.value}" for entry in turn.tool_ledger.entries
+                ),
             )
-        except EvolutionError:
+            if self._skill_evolution is not None:
+                self._skill_evolution.ingest_trace(trace)
+                self._skill_evolution.observe_turn(turn)
+        except Exception:
             # Evolution is diagnostic state; a telemetry failure must not turn a
             # durable Session commit into an ambiguous outcome.
             return

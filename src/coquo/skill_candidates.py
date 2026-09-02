@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -51,10 +52,13 @@ SKILL_CANDIDATE_VERSION = 1
 MAX_SKILL_CANDIDATES = 128
 MAX_SKILL_ARCHIVE_RATIO = 100
 _EVENT_FILE_LIMIT = 128 * 1024
+_UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+_WORKFLOW_FINGERPRINT = re.compile(r"^workflow-v1-[0-9a-f]{64}$")
 
 
 class SkillCandidateSource(StrEnum):
     GENERATED = "generated"
+    EVOLUTION = "evolution"
     REMOTE_RAW = "remote-raw"
     REMOTE_ZIP = "remote-zip"
 
@@ -62,7 +66,9 @@ class SkillCandidateSource(StrEnum):
 class SkillCandidateStatus(StrEnum):
     PENDING = "pending"
     INSTALLED = "installed"
+    REVOKED = "revoked"
     REJECTED = "rejected"
+    ARCHIVED = "archived"
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,9 @@ class SkillCandidateInfo:
     source_url: str | None
     installed_scope: str | None = None
     installed_lock_digest: str | None = None
+    evolution_candidate_id: str | None = None
+    source_trace_ids: tuple[str, ...] = ()
+    pattern_fingerprint: str | None = None
 
 
 class SkillCandidateStore:
@@ -121,6 +130,73 @@ class SkillCandidateStore:
             source_url=None,
             proposal_context_id=proposal.context_id,
             proposal_tool_use_id=proposal.tool_use_id,
+        )
+
+    def create_evolution(
+        self,
+        *,
+        evolution_candidate_id: str,
+        name: str,
+        description: str,
+        instructions: str,
+        allowed_tools: tuple[str, ...] | None,
+        source_trace_ids: tuple[str, ...],
+        pattern_fingerprint: str,
+        scope: str = "project",
+    ) -> SkillCandidateInfo:
+        """Quarantine one Host-generated declarative Skill from an Evolution candidate."""
+        if (
+            not isinstance(evolution_candidate_id, str)
+            or not evolution_candidate_id
+            or len(evolution_candidate_id) > 64
+            or not isinstance(name, str)
+            or not isinstance(description, str)
+            or not isinstance(instructions, str)
+            or not isinstance(pattern_fingerprint, str)
+            or not source_trace_ids
+            or scope not in {"workspace", "project"}
+            or not _UUID4.fullmatch(evolution_candidate_id)
+            or not _WORKFLOW_FINGERPRINT.fullmatch(pattern_fingerprint)
+        ):
+            raise SkillCatalogError("evolution-invalid", "Evolution Skill provenance is invalid")
+        canonical_skill_name(name)
+        if any(
+            not isinstance(item, str) or _UUID4.fullmatch(item) is None for item in source_trace_ids
+        ):
+            raise SkillCatalogError(
+                "evolution-invalid", "Evolution Skill trace provenance is invalid"
+            )
+        body = instructions if instructions.endswith("\n") else instructions + "\n"
+        allowed = ""
+        if allowed_tools is not None:
+            allowed = "allowed-tools:\n" + "".join(f"  - {tool}\n" for tool in allowed_tools)
+        skill_file = (
+            "---\n"
+            "manifest-version: 1\n"
+            f"name: {name}\n"
+            f"description: {json.dumps(description, ensure_ascii=False)}\n"
+            f"{allowed}"
+            "---\n"
+            f"{body}"
+        ).encode("utf-8")
+        candidate_id = _evolution_candidate_id(evolution_candidate_id, name, skill_file)
+        return self._create(
+            candidate_id=candidate_id,
+            source=SkillCandidateSource.EVOLUTION,
+            files={"SKILL.md": skill_file},
+            requested_scope=scope,
+            owner_session_id=None,
+            proposal_turn_sequence=None,
+            source_sha256=hashlib.sha256(skill_file).hexdigest(),
+            source_url=None,
+            proposal_context_id=None,
+            proposal_tool_use_id=None,
+            evolution_provenance={
+                "version": 1,
+                "evolution_candidate_id": evolution_candidate_id,
+                "source_trace_ids": list(source_trace_ids),
+                "pattern_fingerprint": pattern_fingerprint,
+            },
         )
 
     def fetch(self, url: str) -> SkillCandidateInfo:
@@ -251,6 +327,9 @@ class SkillCandidateStore:
         if manifest.fingerprint != metadata["manifest-fingerprint"]:
             raise SkillCatalogError("candidate-drift", "Skill candidate package changed")
         package_skill_file = _read_regular(package / "SKILL.md", MAX_SKILL_FILE_BYTES)
+        evolution_candidate_id = None
+        source_trace_ids: tuple[str, ...] = ()
+        pattern_fingerprint = None
         if source is SkillCandidateSource.GENERATED:
             try:
                 reconstructed = SkillCreationProposal(
@@ -273,6 +352,39 @@ class SkillCandidateStore:
                 raise SkillCatalogError(
                     "candidate-drift", "Generated Skill candidate provenance changed"
                 )
+        elif source is SkillCandidateSource.EVOLUTION:
+            provenance = _read_json_file(directory / "evolution-provenance.json", 16 * 1024)
+            if (
+                not isinstance(provenance, dict)
+                or set(provenance)
+                != {"version", "evolution_candidate_id", "source_trace_ids", "pattern_fingerprint"}
+                or provenance.get("version") != 1
+                or not isinstance(provenance.get("evolution_candidate_id"), str)
+                or _UUID4.fullmatch(provenance.get("evolution_candidate_id", "")) is None
+                or not isinstance(provenance.get("source_trace_ids"), list)
+                or not provenance["source_trace_ids"]
+                or not all(
+                    isinstance(item, str) and _UUID4.fullmatch(item) is not None
+                    for item in provenance["source_trace_ids"]
+                )
+                or not isinstance(provenance.get("pattern_fingerprint"), str)
+                or _WORKFLOW_FINGERPRINT.fullmatch(provenance["pattern_fingerprint"]) is None
+            ):
+                raise SkillCatalogError(
+                    "candidate-invalid", "Evolution Skill provenance is invalid"
+                )
+            evolution_candidate_id = provenance["evolution_candidate_id"]
+            source_trace_ids = tuple(provenance["source_trace_ids"])
+            pattern_fingerprint = provenance["pattern_fingerprint"]
+            if (
+                metadata["requested-scope"] not in {"workspace", "project"}
+                or metadata["owner-session-id"] is not None
+                or metadata["proposal-turn-sequence"] is not None
+                or metadata["proposal-context-id"] is not None
+                or metadata["proposal-tool-use-id"] is not None
+                or not isinstance(metadata["source-url"], type(None))
+            ):
+                raise SkillCatalogError("candidate-invalid", "Evolution Skill metadata is invalid")
         elif (
             metadata["requested-scope"] is not None
             or metadata["owner-session-id"] is not None
@@ -303,6 +415,10 @@ class SkillCandidateStore:
                 installed_lock_digest = event["lock-digest"]
             elif kind == "rejected":
                 status = SkillCandidateStatus.REJECTED
+            elif kind == "revoked":
+                status = SkillCandidateStatus.REVOKED
+            elif kind == "archived":
+                status = SkillCandidateStatus.ARCHIVED
         return SkillCandidateInfo(
             candidate_id=candidate_id,
             source=source,
@@ -317,6 +433,9 @@ class SkillCandidateStore:
             source_url=metadata["source-url"],
             installed_scope=installed_scope,
             installed_lock_digest=installed_lock_digest,
+            evolution_candidate_id=evolution_candidate_id,
+            source_trace_ids=source_trace_ids,
+            pattern_fingerprint=pattern_fingerprint,
         )
 
     def install(
@@ -325,10 +444,16 @@ class SkillCandidateStore:
         *,
         scope: str | None = None,
         expected_owner_session_id: str | None = None,
+        evolution_approved: bool = False,
     ) -> SkillImportResult:
         candidate = self.inspect(candidate_id)
         if candidate.status is not SkillCandidateStatus.PENDING:
             raise SkillCatalogError("candidate-not-pending", "Skill candidate is not pending")
+        if candidate.source is SkillCandidateSource.EVOLUTION and not evolution_approved:
+            raise SkillCatalogError(
+                "evolution-approval-required",
+                "Evolution Skill candidates require Evolution evaluation and approval",
+            )
         if expected_owner_session_id is not None and (
             candidate.source is not SkillCandidateSource.GENERATED
             or candidate.owner_session_id != expected_owner_session_id
@@ -381,6 +506,55 @@ class SkillCandidateStore:
         )
         return self.inspect(candidate_id)
 
+    def revoke(self, candidate_id: str) -> SkillCandidateInfo:
+        """Remove one exact installed package from the active inventory for rollback."""
+        candidate = self.inspect(candidate_id)
+        if candidate.status is not SkillCandidateStatus.INSTALLED:
+            raise SkillCatalogError("candidate-not-installed", "Skill candidate is not installed")
+        from coquo.skills.authoring import skill_lock_root, skill_root
+
+        _, root = skill_root(
+            self.workspace, candidate.installed_scope or "project", self.environment
+        )
+        package = root / candidate.manifest.name
+        lock = (
+            skill_lock_root(
+                self.workspace, candidate.installed_scope or "project", self.environment
+            )
+            / f"{candidate.manifest.name}.json"
+        )
+        current, resources = load_skill_package(package)
+        if (
+            current.fingerprint != candidate.manifest.fingerprint
+            or resources != candidate.resources
+        ):
+            raise SkillCatalogError("candidate-drift", "Installed Skill changed before rollback")
+        _remove_installed_package(package, lock)
+        _append_event(
+            self.root / candidate_id / "events.jsonl",
+            {
+                "candidate-id": candidate_id,
+                "event": "revoked",
+                "lock-digest": candidate.installed_lock_digest,
+                "scope": candidate.installed_scope,
+                "version": 1,
+            },
+        )
+        return self.inspect(candidate_id)
+
+    def archive(self, candidate_id: str) -> SkillCandidateInfo:
+        """Archive a non-active quarantine record without deleting its audit evidence."""
+        candidate = self.inspect(candidate_id)
+        if candidate.status in {SkillCandidateStatus.INSTALLED, SkillCandidateStatus.ARCHIVED}:
+            raise SkillCatalogError(
+                "candidate-not-archivable", "Skill candidate cannot be archived"
+            )
+        _append_event(
+            self.root / candidate_id / "events.jsonl",
+            {"candidate-id": candidate_id, "event": "archived", "version": 1},
+        )
+        return self.inspect(candidate_id)
+
     def _create(
         self,
         *,
@@ -394,6 +568,7 @@ class SkillCandidateStore:
         source_url: str | None,
         proposal_context_id: str | None,
         proposal_tool_use_id: str | None,
+        evolution_provenance: Mapping[str, object] | None = None,
     ) -> SkillCandidateInfo:
         canonical_skill_candidate_id(candidate_id)
         if "SKILL.md" not in files:
@@ -437,6 +612,9 @@ class SkillCandidateStore:
                 "source-url": source_url,
             }
             _write_exclusive_json(directory / "candidate.json", metadata)
+            if evolution_provenance is not None:
+                _write_exclusive_json(directory / "evolution-provenance.json", evolution_provenance)
+                created.append(directory / "evolution-provenance.json")
             _write_exclusive(
                 directory / "events.jsonl",
                 _json_line(
@@ -463,6 +641,19 @@ def _remote_candidate_id(
         sort_keys=True,
     ).encode("utf-8")
     return "skc-v1-" + hashlib.sha256(b"coquo-remote-skill-v1\0" + payload).hexdigest()
+
+
+def _evolution_candidate_id(evolution_candidate_id: str, name: str, skill_file: bytes) -> str:
+    payload = json.dumps(
+        {
+            "evolution_candidate_id": evolution_candidate_id,
+            "name": name,
+            "sha256": hashlib.sha256(skill_file).hexdigest(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "skc-v1-" + hashlib.sha256(b"coquo-evolution-skill-v1\0" + payload).hexdigest()
 
 
 def _validate_candidate_directory(root: Path, directory: Path) -> None:
@@ -704,7 +895,15 @@ def _read_events(path: Path, candidate_id: str) -> tuple[dict[str, object], ...]
         expected_fields = {
             "created": {"candidate-id", "event", "version"},
             "rejected": {"candidate-id", "event", "version"},
+            "archived": {"candidate-id", "event", "version"},
             "installed": {
+                "candidate-id",
+                "event",
+                "lock-digest",
+                "scope",
+                "version",
+            },
+            "revoked": {
                 "candidate-id",
                 "event",
                 "lock-digest",
@@ -722,13 +921,13 @@ def _read_events(path: Path, candidate_id: str) -> tuple[dict[str, object], ...]
             raise SkillCatalogError("candidate-invalid", "Skill install event is invalid")
         if not events and kind != "created":
             raise SkillCatalogError("candidate-invalid", "Skill candidate has no creation event")
-        if events and kind not in {"installed", "rejected"}:
+        if events and kind not in {"installed", "revoked", "rejected", "archived"}:
             raise SkillCatalogError("candidate-invalid", "Skill candidate event kind is invalid")
         if terminal:
             raise SkillCatalogError(
                 "candidate-invalid", "Skill candidate has events after terminal state"
             )
-        terminal = kind in {"installed", "rejected"}
+        terminal = kind in {"rejected", "archived"}
         events.append(event)
     if not events:
         raise SkillCatalogError("candidate-invalid", "Skill candidate event log is empty")
@@ -777,6 +976,36 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _remove_installed_package(package: Path, lock: Path) -> None:
+    """Remove only a package whose exact identity was checked by the caller."""
+    if package.is_symlink() or not package.is_dir() or lock.is_symlink():
+        raise SkillCatalogError("rollback-target-invalid", "Installed Skill target is invalid")
+    if lock.exists() and not lock.is_file():
+        raise SkillCatalogError("rollback-target-invalid", "Skill import lock is invalid")
+    for root, directories, files in os.walk(package, topdown=False, followlinks=False):
+        current = Path(root)
+        for name in files:
+            path = current / name
+            if path.is_symlink() or not path.is_file():
+                raise SkillCatalogError(
+                    "rollback-target-invalid", "Skill package contains an invalid file"
+                )
+            path.unlink()
+        for name in directories:
+            path = current / name
+            if path.is_symlink() or not path.is_dir():
+                raise SkillCatalogError(
+                    "rollback-target-invalid", "Skill package contains an invalid directory"
+                )
+            path.rmdir()
+    package.rmdir()
+    if lock.exists():
+        lock.unlink()
+    _fsync_directory(package.parent)
+    if lock.parent.exists():
+        _fsync_directory(lock.parent)
 
 
 def _remove_created_candidate(directory: Path) -> None:
