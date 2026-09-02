@@ -767,6 +767,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills_install.add_argument("candidate_id")
     skills_install.add_argument("--scope", choices=["workspace", "project", "user"], default=None)
+
+    plugin_parser = subcommands.add_parser(
+        "plugin", help="inspect or install manifest-only external plugins"
+    )
+    plugin_commands = plugin_parser.add_subparsers(dest="plugin_command", required=True)
+    plugin_commands.add_parser("list", help="list discovered local plugins")
+    plugin_install = plugin_commands.add_parser(
+        "install", help="copy one explicit local plugin package into quarantine"
+    )
+    plugin_install.add_argument("source", type=Path)
     skills_lock = skills_commands.add_parser("lock", help="inspect or verify an import lock")
     skills_lock_commands = skills_lock.add_subparsers(dest="skills_lock_command", required=True)
     for command_name in ("show", "verify"):
@@ -1387,6 +1397,10 @@ def build_parser() -> argparse.ArgumentParser:
         "worker", help="run or recover the workspace-bound durable Child worker"
     )
     child_worker.add_argument("--worker-count", type=int, choices=range(1, 5), default=4)
+    child_worker.add_argument("--fleet-size", type=int, choices=range(1, 9), default=1)
+    child_worker.add_argument(
+        "--daemon", action="store_true", help="keep supervising until interrupted"
+    )
 
     observe_parser = subcommands.add_parser(
         "observe", help="inspect one unified read-only observation timeline"
@@ -3575,6 +3589,47 @@ def handle_skills_command(
     raise ValueError(f"unsupported skills command: {arguments.skills_command}")
 
 
+def handle_plugin_command(arguments: argparse.Namespace, workspace: Path, stdout: TextIO) -> int:
+    """Manage manifest-only plugins without importing or executing plugin code."""
+    from coquo.plugin_registry import PluginRegistry
+
+    registry = PluginRegistry(workspace)
+    if arguments.plugin_command == "list":
+        for info in registry.list():
+            stdout.write(
+                json.dumps(
+                    {
+                        "name": info.manifest.name,
+                        "version": info.manifest.version,
+                        "capabilities": sorted(info.manifest.capabilities),
+                        "digest": info.manifest.digest,
+                        "status": info.status.value,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        return 0
+    if arguments.plugin_command == "install":
+        info = registry.install(arguments.source)
+        stdout.write(
+            json.dumps(
+                {
+                    "name": info.manifest.name,
+                    "version": info.manifest.version,
+                    "digest": info.manifest.digest,
+                    "status": info.status.value,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return 0
+    raise ValueError(f"unsupported plugin command: {arguments.plugin_command}")
+
+
 def _skill_candidate_value(
     candidate: SkillCandidateInfo, *, include_instructions: bool = True
 ) -> dict[str, object]:
@@ -4053,18 +4108,30 @@ def handle_child_command(arguments: argparse.Namespace, workspace: Path, stdout:
             )
         return 0
     if arguments.child_command == "worker":
-        from coquo.background_runtime import PersistentChildWorker
+        from coquo.background_runtime import BackgroundWorkerFleet, PersistentChildWorker
 
-        worker = PersistentChildWorker(
-            workspace,
-            worker_count=arguments.worker_count,
-            idle_seconds=arguments.idle_seconds,
-        )
-        result = (
-            worker.recover_orphans()
-            if arguments.recover_only
-            else worker.run(max_items=arguments.max_items)
-        )
+        if arguments.fleet_size > 1 and arguments.daemon:
+            raise ValueError("--fleet-size and --daemon cannot be combined")
+        if arguments.fleet_size > 1:
+            result = BackgroundWorkerFleet(
+                workspace,
+                fleet_size=arguments.fleet_size,
+                worker_count=arguments.worker_count,
+                idle_seconds=arguments.idle_seconds,
+            ).run(max_items=arguments.max_items)
+        else:
+            worker = PersistentChildWorker(
+                workspace,
+                worker_count=arguments.worker_count,
+                idle_seconds=arguments.idle_seconds,
+            )
+            result = (
+                worker.recover_orphans()
+                if arguments.recover_only
+                else worker.run_forever()
+                if arguments.daemon
+                else worker.run(max_items=arguments.max_items)
+            )
         stdout.write(
             json.dumps(
                 {
@@ -4858,6 +4925,17 @@ def main(
                     "provider selection options cannot be combined with Skill inspection"
                 )
             return handle_skills_command(arguments, workspace, env, output)
+        if arguments.command == "plugin":
+            if (
+                arguments.profile is not None
+                or arguments.invocation_profile_id is not None
+                or arguments.invocation_model is not None
+                or custom_requested
+            ):
+                raise ProviderProfileError(
+                    "provider selection options cannot be combined with plugin management"
+                )
+            return handle_plugin_command(arguments, workspace, output)
         if arguments.command == "session":
             if (
                 arguments.profile is not None

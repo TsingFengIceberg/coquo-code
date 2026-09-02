@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from threading import Barrier, Lock, Thread
+from threading import Event
 
 import pytest
 
@@ -11,6 +12,7 @@ from coquo.background_runtime import (
     BackgroundRuntimeError,
     BackgroundWorkerAlreadyRunning,
     BackgroundQueueStore,
+    BackgroundWorkerFleet,
     PersistentChildRunRuntime,
     PersistentChildWorker,
 )
@@ -184,6 +186,30 @@ def test_worker_lease_is_exclusive(tmp_path: Path) -> None:
             worker.store.acquire_worker()
     finally:
         first.close()
+
+
+def test_worker_slots_and_fleet_are_independently_leased(tmp_path: Path) -> None:
+    queue = BackgroundQueueStore(tmp_path)
+    first = queue.acquire_worker(slot=0)
+    second = queue.acquire_worker(slot=1)
+    try:
+        assert queue.worker_is_running(slot=0)
+        assert queue.worker_is_running(slot=1)
+        with pytest.raises(BackgroundWorkerAlreadyRunning):
+            queue.acquire_worker(slot=0)
+    finally:
+        first.close()
+        second.close()
+    result = BackgroundWorkerFleet(tmp_path, fleet_size=2, idle_seconds=0).run()
+    assert result.outcome == "completed"
+    assert len(result.worker_results) == 2
+
+
+def test_worker_run_forever_stops_without_restarting_after_event(tmp_path: Path) -> None:
+    stop = Event()
+    stop.set()
+    result = PersistentChildWorker(tmp_path, idle_seconds=0).run_forever(stop_event=stop)
+    assert result.outcome == "stopped"
 
 
 def test_worker_runs_two_children_concurrently_with_bounded_thread_pool(tmp_path: Path) -> None:

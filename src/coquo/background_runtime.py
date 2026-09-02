@@ -48,8 +48,10 @@ MAX_BACKGROUND_QUEUE_RECORDS = 20_000
 MAX_BACKGROUND_QUEUE_BYTES = 8 * 1024 * 1024
 MAX_BACKGROUND_QUEUE_CAPACITY = 32
 MAX_BACKGROUND_WORKERS = 4
+MAX_BACKGROUND_FLEET_WORKERS = 8
 BACKGROUND_HEARTBEAT_SECONDS = 0.5
 BACKGROUND_IDLE_SECONDS = 2.0
+BACKGROUND_HEARTBEAT_STALE_SECONDS = 5.0
 BACKGROUND_RECORD_TYPES = {"background_queue_event_v1"}
 BACKGROUND_EVENTS = {"queued", "claimed", "heartbeat", "requeued", "terminal"}
 BACKGROUND_TERMINAL_STATUSES = frozenset(item.value for item in ChildRunStatus)
@@ -132,6 +134,34 @@ class BackgroundWorkerResult:
     processed_child_run_ids: tuple[str, ...] = ()
     recovered_child_run_ids: tuple[str, ...] = ()
     diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BackgroundFleetResult:
+    """Aggregate result for one bounded local worker fleet run."""
+
+    outcome: str
+    worker_results: tuple[BackgroundWorkerResult, ...]
+
+    @property
+    def processed_child_run_ids(self) -> tuple[str, ...]:
+        return tuple(
+            child_id
+            for result in self.worker_results
+            for child_id in result.processed_child_run_ids
+        )
+
+    @property
+    def recovered_child_run_ids(self) -> tuple[str, ...]:
+        return tuple(
+            child_id
+            for result in self.worker_results
+            for child_id in result.recovered_child_run_ids
+        )
+
+    @property
+    def diagnostics(self) -> tuple[str, ...]:
+        return tuple(message for result in self.worker_results for message in result.diagnostics)
 
 
 def utc_now() -> str:
@@ -362,24 +392,32 @@ class BackgroundQueueStore:
     def inspect(self, submission_id: str) -> BackgroundQueueItem:
         return self._find(_canonical_uuid(submission_id, "submission ID"))
 
-    def worker_is_running(self) -> bool:
-        if not self.worker_lock_path.exists():
-            return False
-        try:
-            descriptor = _open_file(self.worker_lock_path, writable=True)
+    def worker_is_running(self, *, slot: int | None = None) -> bool:
+        slots = range(MAX_BACKGROUND_FLEET_WORKERS) if slot is None else (slot,)
+        for selected in slots:
+            if type(selected) is not int or not 0 <= selected < MAX_BACKGROUND_FLEET_WORKERS:
+                raise ValueError("background worker slot is invalid")
+            lock_path = self._worker_lock_path(selected)
+            if not lock_path.exists():
+                continue
             try:
-                _lock(descriptor, nonblocking=True)
-            except BackgroundWorkerAlreadyRunning:
-                return True
-            _unlock(descriptor)
-            os.close(descriptor)
-            return False
-        except OSError:
-            return False
+                descriptor = _open_file(lock_path, writable=True)
+                try:
+                    _lock(descriptor, nonblocking=True)
+                except BackgroundWorkerAlreadyRunning:
+                    return True
+                _unlock(descriptor)
+                os.close(descriptor)
+            except OSError:
+                continue
+        return False
 
-    def acquire_worker(self) -> _FileLease:
+    def acquire_worker(self, *, slot: int = 0) -> _FileLease:
+        if type(slot) is not int or not 0 <= slot < MAX_BACKGROUND_FLEET_WORKERS:
+            raise ValueError("background worker slot is invalid")
         self._ensure_root()
-        descriptor = _open_file(self.worker_lock_path, writable=True)
+        lock_path = self._worker_lock_path(slot)
+        descriptor = _open_file(lock_path, writable=True)
         try:
             if os.fstat(descriptor).st_size == 0:
                 os.write(descriptor, b"coquo-background-worker-v1\n")
@@ -389,18 +427,19 @@ class BackgroundQueueStore:
                 if os.read(descriptor, 128) != b"coquo-background-worker-v1\n":
                     raise BackgroundRuntimeError("background worker lease header is invalid")
             _lock(descriptor, nonblocking=True)
-            return _FileLease(
-                self.worker_lock_path, descriptor, protocol=b"coquo-background-worker-v1\n"
-            )
+            return _FileLease(lock_path, descriptor, protocol=b"coquo-background-worker-v1\n")
         except BaseException:
             os.close(descriptor)
             raise
 
-    def write_worker_state(self, state: BackgroundWorkerState | None) -> None:
+    def write_worker_state(self, state: BackgroundWorkerState | None, *, slot: int = 0) -> None:
+        if type(slot) is not int or not 0 <= slot < MAX_BACKGROUND_FLEET_WORKERS:
+            raise ValueError("background worker slot is invalid")
         self._ensure_root()
+        state_path = self._worker_state_path(slot)
         if state is None:
             try:
-                self.worker_state_path.unlink()
+                state_path.unlink()
             except FileNotFoundError:
                 return
             except OSError as error:
@@ -417,13 +456,16 @@ class BackgroundQueueStore:
             "active_child_run_ids": list(state.active_child_run_ids),
             "last_error": state.last_error,
         }
-        _atomic_write_json(self.worker_state_path, payload, self.root)
+        _atomic_write_json(state_path, payload, self.root)
 
-    def read_worker_state(self) -> BackgroundWorkerState | None:
-        if not self.worker_state_path.exists():
+    def read_worker_state(self, *, slot: int = 0) -> BackgroundWorkerState | None:
+        if type(slot) is not int or not 0 <= slot < MAX_BACKGROUND_FLEET_WORKERS:
+            raise ValueError("background worker slot is invalid")
+        state_path = self._worker_state_path(slot)
+        if not state_path.exists():
             return None
         try:
-            data = json.loads(self.worker_state_path.read_text(encoding="utf-8"))
+            data = json.loads(state_path.read_text(encoding="utf-8"))
             if data.get("schema_version") != BACKGROUND_WORKER_STATE_SCHEMA_VERSION:
                 raise BackgroundRuntimeError("background worker state schema is unsupported")
             return BackgroundWorkerState(
@@ -618,9 +660,20 @@ class BackgroundQueueStore:
                     raise BackgroundRuntimeError("background runtime path is unsafe")
             else:
                 path.mkdir(mode=0o700)
-        for path in (self.queue_path, self.queue_lock_path, self.worker_lock_path):
+        for path in (
+            self.queue_path,
+            self.queue_lock_path,
+            self.worker_lock_path,
+            *(self._worker_lock_path(slot) for slot in range(1, MAX_BACKGROUND_FLEET_WORKERS)),
+        ):
             if path.exists() and stat.S_IMODE(path.stat().st_mode) != 0o600:
                 raise BackgroundRuntimeError("background runtime file mode is invalid")
+
+    def _worker_lock_path(self, slot: int) -> Path:
+        return self.worker_lock_path if slot == 0 else self.root / f"worker-{slot}.lock"
+
+    def _worker_state_path(self, slot: int) -> Path:
+        return self.worker_state_path if slot == 0 else self.root / f"worker-state-{slot}.json"
 
 
 class PersistentChildRunRuntime:
@@ -732,9 +785,12 @@ class PersistentChildWorker:
         executor_factory: Callable[[str], object] | None = None,
         heartbeat_seconds: float = BACKGROUND_HEARTBEAT_SECONDS,
         idle_seconds: float = BACKGROUND_IDLE_SECONDS,
+        slot: int = 0,
     ) -> None:
         if type(worker_count) is not int or not 1 <= worker_count <= MAX_BACKGROUND_WORKERS:
             raise ValueError("background worker count is invalid")
+        if type(slot) is not int or not 0 <= slot < MAX_BACKGROUND_FLEET_WORKERS:
+            raise ValueError("background worker slot is invalid")
         if heartbeat_seconds <= 0 or idle_seconds < 0:
             raise ValueError("background worker timing is invalid")
         self.workspace = Path(workspace)
@@ -743,11 +799,12 @@ class PersistentChildWorker:
         self.executor_factory = executor_factory
         self.heartbeat_seconds = heartbeat_seconds
         self.idle_seconds = idle_seconds
+        self.slot = slot
 
     def run(self, *, max_items: int | None = None) -> BackgroundWorkerResult:
         worker_id = str(uuid4())
         try:
-            lease = self.store.acquire_worker()
+            lease = self.store.acquire_worker(slot=self.slot)
         except BackgroundWorkerAlreadyRunning:
             return BackgroundWorkerResult(worker_id, "already_running")
         processed: list[str] = []
@@ -821,10 +878,62 @@ class PersistentChildWorker:
             worker_id, "completed", tuple(processed), tuple(recovered), tuple(diagnostics)
         )
 
+    def run_forever(
+        self,
+        *,
+        stop_event=None,
+        max_runtime_seconds: float | None = None,
+    ) -> BackgroundWorkerResult:
+        """Keep this worker alive until stopped, recovering abandoned work each cycle.
+
+        The queue remains the durable source of truth; each cycle may acquire
+        the slot lease independently, so a process restart cannot duplicate a
+        Child execution.  ``max_runtime_seconds`` exists for supervised tests
+        and bounded service managers and is never persisted as task state.
+        """
+        from threading import Event
+
+        token = stop_event or Event()
+        if not hasattr(token, "is_set") or not hasattr(token, "wait"):
+            raise ValueError("stop_event must provide is_set() and wait()")
+        started = time.monotonic()
+        processed: list[str] = []
+        recovered: list[str] = []
+        diagnostics: list[str] = []
+        worker_id = str(uuid4())
+        while not token.is_set():
+            if max_runtime_seconds is not None and (
+                not isinstance(max_runtime_seconds, (int, float)) or max_runtime_seconds < 0
+            ):
+                raise ValueError("max_runtime_seconds is invalid")
+            if (
+                max_runtime_seconds is not None
+                and time.monotonic() - started >= max_runtime_seconds
+            ):
+                break
+            result = self.run()
+            worker_id = result.worker_id
+            processed.extend(result.processed_child_run_ids)
+            recovered.extend(result.recovered_child_run_ids)
+            diagnostics.extend(result.diagnostics)
+            if result.outcome == "already_running":
+                token.wait(min(self.idle_seconds, 0.5) if self.idle_seconds else 0.1)
+            elif result.outcome == "failed":
+                token.wait(min(self.idle_seconds or 0.1, 1.0))
+            else:
+                token.wait(min(self.idle_seconds, 0.5) if self.idle_seconds else 0.1)
+        return BackgroundWorkerResult(
+            worker_id,
+            "stopped",
+            tuple(processed),
+            tuple(recovered),
+            tuple(diagnostics),
+        )
+
     def recover_orphans(self) -> BackgroundWorkerResult:
         worker_id = str(uuid4())
         try:
-            lease = self.store.acquire_worker()
+            lease = self.store.acquire_worker(slot=self.slot)
         except BackgroundWorkerAlreadyRunning:
             return BackgroundWorkerResult(worker_id, "already_running")
         with lease:
@@ -983,7 +1092,8 @@ class PersistentChildWorker:
                 active_submission_ids=tuple(item.submission_id for item in items),
                 active_child_run_ids=tuple(item.child_run_id for item in items),
                 last_error=last_error,
-            )
+            ),
+            slot=self.slot,
         )
 
     def _heartbeat(
@@ -1000,6 +1110,57 @@ class PersistentChildWorker:
             self._write_state(worker_id, "running", active)
         except BaseException:
             pass
+
+
+class BackgroundWorkerFleet:
+    """Run a bounded set of independently leased workers in one supervisor.
+
+    Each slot has its own OS lease and state file.  This models a small local
+    worker fleet while retaining the same queue claim protocol used by
+    separately launched processes; no distributed exactly-once guarantee is
+    implied.
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        fleet_size: int = 2,
+        worker_count: int = MAX_BACKGROUND_WORKERS,
+        executor_factory: Callable[[str], object] | None = None,
+        heartbeat_seconds: float = BACKGROUND_HEARTBEAT_SECONDS,
+        idle_seconds: float = BACKGROUND_IDLE_SECONDS,
+    ) -> None:
+        if type(fleet_size) is not int or not 1 <= fleet_size <= MAX_BACKGROUND_FLEET_WORKERS:
+            raise ValueError("background fleet size is invalid")
+        self.workspace = Path(workspace)
+        self.fleet_size = fleet_size
+        self.worker_count = worker_count
+        self.executor_factory = executor_factory
+        self.heartbeat_seconds = heartbeat_seconds
+        self.idle_seconds = idle_seconds
+
+    def run(self, *, max_items: int | None = None) -> BackgroundFleetResult:
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = tuple(
+            PersistentChildWorker(
+                self.workspace,
+                worker_count=self.worker_count,
+                executor_factory=self.executor_factory,
+                heartbeat_seconds=self.heartbeat_seconds,
+                idle_seconds=self.idle_seconds,
+                slot=slot,
+            )
+            for slot in range(self.fleet_size)
+        )
+        with ThreadPoolExecutor(
+            max_workers=self.fleet_size, thread_name_prefix="coquo-fleet"
+        ) as pool:
+            futures = tuple(pool.submit(worker.run, max_items=max_items) for worker in workers)
+            results = tuple(future.result() for future in futures)
+        outcome = "failed" if any(item.outcome == "failed" for item in results) else "completed"
+        return BackgroundFleetResult(outcome, results)
 
 
 def _open_file(path: Path, *, writable: bool) -> int:
