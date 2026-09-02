@@ -260,9 +260,13 @@ uv run coquo evolution status
 uv run coquo evolution configure propose
 uv run coquo evolution trace skill success "verified reusable workflow" --metrics '{"success_rate":0.8}'
 uv run coquo evolution patterns
+uv run coquo evolution memory-patterns
+uv run coquo evolution strategy-patterns workflow
+uv run coquo eval platform datasets
+uv run coquo eval platform run --label baseline
 ```
 
-`EvolutionController` connects bounded traces, graders, repeated patterns, and four candidate targets (memory, skill, prompt, and workflow) through one controlled lifecycle. Candidates require Trace provenance, safety checks, independent validation/test metric comparison, and explicit `approve` before `activate`; `observe`, `rollback`, `deprecate`, and `archive` provide post-release governance. The default `off` mode records traces only, while `propose` and `supervised` still never publish automatically. These commands touch only the local `.coquo/evolution/events.jsonl` ledger: they do not invoke a Provider, execute tools, or change permissions, sandboxing, ToolSet, or AgentLoop policy. See [ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md) for the full boundary.
+`EvolutionController` connects bounded traces, graders, repeated patterns, and four candidate targets (memory, skill, prompt, and workflow) through one controlled lifecycle. Committed Turns now automatically mine Memory, Prompt, and Workflow patterns; candidates still require Trace provenance, safety checks, independent validation/test metric comparison, and explicit `approve` before `activate`. `observe`, `rollback`, `deprecate`, and `archive` provide post-release governance. The default `off` mode records traces only, while `propose` and `supervised` still never publish automatically. These commands touch only the local `.coquo/evolution/events.jsonl` ledger: they do not invoke a Provider, execute tools, or change permissions, sandboxing, ToolSet, or AgentLoop policy. See [ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md) and [ADR 0165](./docs/decisions/0165-memory-strategy-eval-provider-stability.md) for the full boundary.
 
 ### Manage Tasks
 
@@ -516,13 +520,16 @@ git diff --check
 uv run coquo eval list
 uv run coquo eval run all
 uv run coquo eval run all --format json
+uv run coquo eval platform datasets
+uv run coquo eval platform run --label baseline
 uv run coquo eval task list
 tmp=$(mktemp -d)
 uv run coquo eval task prepare inventory-validation "$tmp/task"
 uv run coquo eval task score inventory-validation "$tmp/task"
 # Real Provider acceptance (run only after separately approving network, credentials, and cost)
 COQUO_REAL_PROVIDER_ACCEPT=1 uv run python scripts/real_provider_acceptance.py \
-  --profile <existing-profile> --allow-network --allow-credentials --allow-cost
+  --profile <existing-profile> --allow-network --allow-credentials --allow-cost \
+  --soak-repetitions 3
 ```
 
 `pytest` verifies functions, modules, and protocol boundaries, while `eval run` sends fixed scripted-fake trajectories through the complete Host path. `eval task prepare/score` instead creates a small code task offline and scores actual outcomes outside the candidate directory with visible and Host-private tests. Only `eval task run` with both `--real-provider` and an explicit profile/model may invoke a real vendor; it runs in a newly created isolated task directory, writes tool events to stderr, and reserves stdout for the stable Host score. After changing dependencies, run `uv lock` before checking the lockfile. Coquo does not install Node, Rust, Java, Docker, databases, or other build environments for a target workspace.

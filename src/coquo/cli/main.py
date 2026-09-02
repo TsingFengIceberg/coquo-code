@@ -207,6 +207,9 @@ from coquo.evolution import (
     EvolutionTarget,
 )
 from coquo.skill_evolution import SkillEvolutionService
+from coquo.memory_evolution import MemoryEvolutionService
+from coquo.strategy_evolution import StrategyEvolutionService
+from coquo.evals.platform import EvalPlatform, EvalPlatformError
 from coquo.session_records import workspace_fingerprint
 from coquo.skills import (
     SkillCatalogError,
@@ -579,6 +582,25 @@ def build_parser() -> argparse.ArgumentParser:
     eval_task_run.add_argument("--real-provider", action="store_true", required=True)
     eval_task_run.add_argument("--output", help="retain the new isolated task workspace")
     eval_task_run.add_argument("--format", choices=["text", "json"], default="text")
+    eval_platform_parser = eval_commands.add_parser(
+        "platform", help="inspect datasets and run the local Eval comparison platform"
+    )
+    eval_platform_commands = eval_platform_parser.add_subparsers(
+        dest="eval_platform_command", required=True
+    )
+    eval_platform_commands.add_parser("datasets", help="list registered Eval datasets")
+    eval_platform_run = eval_platform_commands.add_parser(
+        "run", help="run one built-in dataset and persist bounded run facts"
+    )
+    eval_platform_run.add_argument("dataset_id", nargs="?", default="host-baseline-v3")
+    eval_platform_run.add_argument("--label", default="baseline")
+    eval_platform_run.add_argument("--format", choices=["text", "json"], default="json")
+    eval_platform_compare = eval_platform_commands.add_parser(
+        "compare", help="compare two persisted runs and enforce the regression gate"
+    )
+    eval_platform_compare.add_argument("baseline_run_id")
+    eval_platform_compare.add_argument("candidate_run_id")
+    eval_platform_compare.add_argument("--format", choices=["text", "json"], default="json")
 
     provider_parser = subcommands.add_parser("provider", help="manage named provider profiles")
     provider_commands = provider_parser.add_subparsers(dest="provider_command", required=True)
@@ -1207,6 +1229,85 @@ def build_parser() -> argparse.ArgumentParser:
         "skill-archive", help="archive inactive evolved Skills before a timestamp"
     )
     evolution_skill_archive.add_argument("before", type=nonblank_prompt)
+    evolution_memory_patterns = evolution_commands.add_parser(
+        "memory-patterns", help="show repeated successful Memory experiences"
+    )
+    evolution_memory_patterns.add_argument("--min-successes", type=positive_turn_number, default=3)
+    evolution_memory_propose = evolution_commands.add_parser(
+        "memory-propose", help="quarantine one repeated Memory experience"
+    )
+    evolution_memory_propose.add_argument("pattern_fingerprint")
+    evolution_memory_safety = evolution_commands.add_parser(
+        "memory-safety-check", help="check one Memory evolution candidate"
+    )
+    evolution_memory_safety.add_argument("candidate_id")
+    evolution_memory_evaluate = evolution_commands.add_parser(
+        "memory-evaluate", help="evaluate one Memory evolution candidate"
+    )
+    evolution_memory_evaluate.add_argument("candidate_id")
+    evolution_memory_evaluate.add_argument("--baseline-metrics", required=True)
+    evolution_memory_evaluate.add_argument("--candidate-metrics", required=True)
+    evolution_memory_evaluate.add_argument("--validation-set", default="memory-validation-v1")
+    evolution_memory_evaluate.add_argument("--test-set", default="memory-test-v1")
+    for action, help_text in (
+        ("memory-approve", "approve one evaluated Memory candidate"),
+        ("memory-activate", "activate one approved Memory candidate"),
+        ("memory-rollback", "roll back one active Memory candidate"),
+    ):
+        command = evolution_commands.add_parser(action, help=help_text)
+        command.add_argument("candidate_id")
+    evolution_memory_observe = evolution_commands.add_parser(
+        "memory-observe", help="observe one active Memory candidate"
+    )
+    evolution_memory_observe.add_argument("candidate_id")
+    evolution_memory_observe.add_argument("--metrics", required=True)
+    evolution_memory_observe.add_argument("--not-used", action="store_true")
+    evolution_memory_archive = evolution_commands.add_parser(
+        "memory-archive", help="archive old Memory evolution candidates"
+    )
+    evolution_memory_archive.add_argument("before", type=nonblank_prompt)
+    evolution_strategy_patterns = evolution_commands.add_parser(
+        "strategy-patterns", help="show repeated successful Prompt/Workflow strategies"
+    )
+    evolution_strategy_patterns.add_argument("target", choices=["prompt", "workflow"])
+    evolution_strategy_patterns.add_argument(
+        "--min-successes", type=positive_turn_number, default=3
+    )
+    evolution_strategy_propose = evolution_commands.add_parser(
+        "strategy-propose", help="quarantine one Prompt/Workflow strategy"
+    )
+    evolution_strategy_propose.add_argument("target", choices=["prompt", "workflow"])
+    evolution_strategy_propose.add_argument("pattern_fingerprint")
+    evolution_strategy_safety = evolution_commands.add_parser(
+        "strategy-safety-check", help="check one strategy candidate"
+    )
+    evolution_strategy_safety.add_argument("candidate_id")
+    evolution_strategy_evaluate = evolution_commands.add_parser(
+        "strategy-evaluate", help="evaluate one strategy candidate"
+    )
+    evolution_strategy_evaluate.add_argument("candidate_id")
+    evolution_strategy_evaluate.add_argument("--baseline-metrics", required=True)
+    evolution_strategy_evaluate.add_argument("--candidate-metrics", required=True)
+    evolution_strategy_evaluate.add_argument("--validation-set", default="strategy-validation-v1")
+    evolution_strategy_evaluate.add_argument("--test-set", default="strategy-test-v1")
+    for action, help_text in (
+        ("strategy-approve", "approve one evaluated strategy candidate"),
+        ("strategy-activate", "activate one approved strategy candidate"),
+        ("strategy-rollback", "roll back one active strategy candidate"),
+        ("strategy-deprecate", "deprecate one strategy candidate"),
+    ):
+        command = evolution_commands.add_parser(action, help=help_text)
+        command.add_argument("candidate_id")
+    evolution_strategy_observe = evolution_commands.add_parser(
+        "strategy-observe", help="observe one active strategy candidate"
+    )
+    evolution_strategy_observe.add_argument("candidate_id")
+    evolution_strategy_observe.add_argument("--metrics", required=True)
+    evolution_strategy_observe.add_argument("--not-used", action="store_true")
+    evolution_strategy_archive = evolution_commands.add_parser(
+        "strategy-archive", help="archive old strategy candidates"
+    )
+    evolution_strategy_archive.add_argument("before", type=nonblank_prompt)
     task_parser = subcommands.add_parser("task", help="create and inspect durable workspace Tasks")
     task_commands = task_parser.add_subparsers(dest="task_command", required=True)
     task_create = task_commands.add_parser("create", help="create one ready Task")
@@ -2963,6 +3064,123 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
         for state in service.archive(before=arguments.before):
             stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
         return 0
+    if command == "memory-patterns":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        for pattern in service.patterns(min_successes=arguments.min_successes):
+            stdout.write(
+                json.dumps(pattern.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+        return 0
+    if command == "memory-propose":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        proposal = service.propose(service.pattern(arguments.pattern_fingerprint))
+        stdout.write(json.dumps(proposal.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "memory-safety-check":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        report = service.safety_check(arguments.candidate_id)
+        stdout.write(json.dumps(report.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if report.passed else 1
+    if command == "memory-evaluate":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        result = service.evaluate(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.baseline_metrics, "baseline-metrics"),
+            _evolution_json_object(arguments.candidate_metrics, "candidate-metrics"),
+            validation_set=arguments.validation_set,
+            test_set=arguments.test_set,
+        )
+        stdout.write(json.dumps(result.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if result.passed else 1
+    if command in {"memory-approve", "memory-activate", "memory-rollback"}:
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        state = getattr(service, command.replace("memory-", ""))(arguments.candidate_id)
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "memory-observe":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        state = service.observe(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.metrics, "metrics"),
+            used=not arguments.not_used,
+        )
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "memory-archive":
+        service = MemoryEvolutionService(
+            workspace, evolution=controller, scope_id=workspace_fingerprint(workspace)
+        )
+        for state in service.archive(before=arguments.before):
+            stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "strategy-patterns":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        target = EvolutionTarget(arguments.target)
+        for pattern in service.patterns(target, min_successes=arguments.min_successes):
+            stdout.write(
+                json.dumps(pattern.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+        return 0
+    if command == "strategy-propose":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        target = EvolutionTarget(arguments.target)
+        proposal = service.propose(service.pattern(target, arguments.pattern_fingerprint))
+        stdout.write(json.dumps(proposal.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "strategy-safety-check":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        report = service.safety_check(arguments.candidate_id)
+        stdout.write(json.dumps(report.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if report.passed else 1
+    if command == "strategy-evaluate":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        result = service.evaluate(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.baseline_metrics, "baseline-metrics"),
+            _evolution_json_object(arguments.candidate_metrics, "candidate-metrics"),
+            validation_set=arguments.validation_set,
+            test_set=arguments.test_set,
+        )
+        stdout.write(json.dumps(result.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0 if result.passed else 1
+    if command in {
+        "strategy-approve",
+        "strategy-activate",
+        "strategy-rollback",
+        "strategy-deprecate",
+    }:
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        state = getattr(service, command.replace("strategy-", ""))(arguments.candidate_id)
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "strategy-observe":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        state = service.observe(
+            arguments.candidate_id,
+            _evolution_json_object(arguments.metrics, "metrics"),
+            used=not arguments.not_used,
+        )
+        stdout.write(json.dumps(state.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
+    if command == "strategy-archive":
+        service = StrategyEvolutionService(workspace, evolution=controller)
+        for candidate in service.archive(before=arguments.before):
+            stdout.write(
+                json.dumps(candidate.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+        return 0
     raise EvolutionError("unknown evolution command")
 
 
@@ -4332,6 +4550,47 @@ def handle_eval_command(
     stderr: TextIO,
 ) -> int:
     """Run deterministic Host Eval or one explicitly opted-in actual coding task."""
+    if arguments.eval_command == "platform":
+        platform = EvalPlatform(invocation_workspace)
+        if arguments.eval_platform_command == "datasets":
+            for dataset in platform.datasets():
+                stdout.write(
+                    json.dumps(dataset.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            return 0
+        if arguments.eval_platform_command == "run":
+            run = platform.run_builtin(arguments.dataset_id, label=arguments.label)
+            if arguments.format == "json":
+                stdout.write(
+                    json.dumps(run.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            else:
+                stdout.write(
+                    f"{run.label}: {run.passed_cases}/{len(run.grades)} cases, "
+                    f"pass_rate={run.pass_rate:.3f}, mean_score={run.mean_score:.3f}\n"
+                )
+            return 0 if run.pass_rate == 1.0 else 1
+        if arguments.eval_platform_command == "compare":
+            runs = {run.run_id: run for run in platform.runs()}
+            try:
+                baseline = runs[arguments.baseline_run_id]
+                candidate = runs[arguments.candidate_run_id]
+            except KeyError as error:
+                raise EvalPlatformError(f"unknown persisted Eval run: {error.args[0]}") from None
+            comparison = platform.compare(baseline, candidate)
+            if arguments.format == "json":
+                stdout.write(
+                    json.dumps(comparison.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            else:
+                status = "PASS" if comparison.passed else "FAIL"
+                stdout.write(
+                    f"{status} {comparison.dataset_id}: " + ", ".join(comparison.checks) + "\n"
+                )
+                if comparison.regressions:
+                    stdout.write("regressions: " + ", ".join(comparison.regressions) + "\n")
+            return 0 if comparison.passed else 1
+        raise EvalPlatformError("unknown Eval platform command")
     if arguments.eval_command == "list":
         for case in builtin_eval_cases():
             stdout.write(f"{case.case_id}: {case.summary}\n")

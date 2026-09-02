@@ -35,6 +35,8 @@ from coquo.memory_recall import MemoryRecallService, empty_memory_recall
 from coquo.memory_extraction import MemoryCandidateExtractor
 from coquo.evolution import EvolutionController, EvolutionError, EvolutionOutcome, EvolutionTarget
 from coquo.skill_evolution import SkillEvolutionService
+from coquo.memory_evolution import MemoryEvolutionService
+from coquo.strategy_evolution import StrategyEvolutionService
 from coquo.child_supervisor import ChildRunSupervisor
 from coquo.team_records import TeamAssignmentPhase, TeamMemberState, TeamStatus
 from coquo.team_store import TeamInfo, TeamStore, TeamStoreError
@@ -1131,6 +1133,7 @@ class ProjectSession:
         self._skill_candidate_store = skill_candidate_store or SkillCandidateStore(
             self.execution_workspace
         )
+        self._memory_scope_id = workspace_fingerprint(self.workspace)
         self._skill_evolution = (
             None
             if self._child_mode
@@ -1140,8 +1143,24 @@ class ProjectSession:
                 candidates=self._skill_candidate_store,
             )
         )
+        self._memory_evolution = (
+            None
+            if self._child_mode
+            else MemoryEvolutionService(
+                self.execution_workspace,
+                evolution=self._evolution,
+                scope_id=self._memory_scope_id,
+            )
+        )
+        self._strategy_evolution = (
+            None
+            if self._child_mode
+            else StrategyEvolutionService(
+                self.execution_workspace,
+                evolution=self._evolution,
+            )
+        )
         self._hook_store = hook_store or HookStore.for_workspace(self.workspace)
-        self._memory_scope_id = workspace_fingerprint(self.workspace)
         self._memory_team_scope_id: str | None = None
         self._memory_recall_service = (
             None
@@ -7867,29 +7886,41 @@ class ProjectSession:
             outcome = EvolutionOutcome.FAILED
         else:
             outcome = EvolutionOutcome.PARTIAL
-        try:
-            trace = self._evolution.record_trace(
-                EvolutionTarget.WORKFLOW,
-                outcome,
-                f"committed turn with {turn.tool_ledger.requested} tool requests and {failures} unsuccessful outcomes",
-                source_session_id=writer.session_id,
-                source_turn=len(writer.state.turns),
-                metrics={
-                    "success_rate": 0.0 if failures else 1.0,
-                    "tool_requests": turn.tool_ledger.requested,
-                    "tool_failures": failures,
-                },
-                workflow=tuple(
-                    f"{entry.tool_name}:{entry.outcome.value}" for entry in turn.tool_ledger.entries
-                ),
-            )
-            if self._skill_evolution is not None:
-                self._skill_evolution.ingest_trace(trace)
-                self._skill_evolution.observe_turn(turn)
-        except Exception:
-            # Evolution is diagnostic state; a telemetry failure must not turn a
-            # durable Session commit into an ambiguous outcome.
-            return
+        summary = (
+            f"committed turn with {turn.tool_ledger.requested} tool requests and "
+            f"{failures} unsuccessful outcomes"
+        )
+        workflow = tuple(
+            f"{entry.tool_name}:{entry.outcome.value}" for entry in turn.tool_ledger.entries
+        )
+        trace_inputs = {
+            "source_session_id": writer.session_id,
+            "source_turn": len(writer.state.turns),
+            "metrics": {
+                "success_rate": 0.0 if failures else 1.0,
+                "tool_requests": turn.tool_ledger.requested,
+                "tool_failures": failures,
+            },
+            "workflow": workflow,
+        }
+        # Each target receives an independent content-free trace.  Evolution
+        # is diagnostic state: a single failed target must not suppress the
+        # others or turn a durable Session commit into an ambiguous outcome.
+        for target in (EvolutionTarget.WORKFLOW, EvolutionTarget.MEMORY, EvolutionTarget.PROMPT):
+            try:
+                trace = self._evolution.record_trace(target, outcome, summary, **trace_inputs)
+                if target is EvolutionTarget.WORKFLOW:
+                    if self._skill_evolution is not None:
+                        self._skill_evolution.ingest_trace(trace)
+                        self._skill_evolution.observe_turn(turn)
+                    if self._strategy_evolution is not None:
+                        self._strategy_evolution.ingest_trace(trace)
+                elif target is EvolutionTarget.MEMORY and self._memory_evolution is not None:
+                    self._memory_evolution.ingest_trace(trace)
+                elif target is EvolutionTarget.PROMPT and self._strategy_evolution is not None:
+                    self._strategy_evolution.ingest_trace(trace)
+            except Exception:
+                continue
 
     def _record_runtime_switch(self, result: RuntimeSwitchResult, reason: str) -> None:
         self._web_search.disable_sources()

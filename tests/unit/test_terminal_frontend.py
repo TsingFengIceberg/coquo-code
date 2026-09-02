@@ -224,6 +224,27 @@ def test_frontend_queue_close_releases_a_blocked_critical_event_producer() -> No
     assert result == [False]
 
 
+def test_frontend_queue_metrics_expose_backpressure_without_event_content() -> None:
+    queue = FrontendEventQueue(capacity=2)
+    queue.put(TurnSubmitted(1))
+    queue.put(TurnFinished(1, "done"))
+    result = []
+    producer = Thread(target=lambda: result.append(queue.put(TurnFinished(1, "late"))))
+    producer.start()
+    time.sleep(0.05)
+    before = queue.metrics()
+    assert before["blocked_puts"] == 1
+    assert before["depth"] == 2
+    queue.drain()
+    producer.join(1)
+    after = queue.metrics()
+    assert result == [True]
+    assert after["high_watermark"] == 2
+    assert after["enqueued"] == 3
+    assert after["drained"] == 2
+    assert "late" not in str(after)
+
+
 @pytest.mark.parametrize("render_markdown", [False, True])
 def test_queued_renderer_fallback_keeps_assistant_hanging_indent(
     render_markdown: bool,

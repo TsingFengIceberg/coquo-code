@@ -1594,6 +1594,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 142. [0162：固定命令资源限制](./decisions/0162-fixed-command-resource-limits.md)
 143. [0163：有界自进化控制器](./decisions/0163-bounded-self-evolution-controller.md)
 144. [0164：自动 Workflow 到 Skill 自进化闭环](./decisions/0164-automatic-skill-evolution-pipeline.md)
+145. [0165：Memory、策略、Eval 与 Provider 稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1750,3 +1751,13 @@ Workflow Driver在Host侧串联现有Task、Child和Team账本，最多按记录
 ## 后台副作用置信度与终态幂等
 
 后台队列记录现在携带`not-started`、`in-flight`、`confirmed`或`unknown`副作用状态。新队列记录使用schema v2，旧v1记录按事件类型推导状态继续回放。正常观察到Child终态后才标记`confirmed`；孤立的RUNNING/CANCELLING执行恢复为`interrupted`并标记`unknown`，要求人工检查可能的外部副作用。终态写入在状态与置信度完全一致时幂等，冲突观察fail-closed，不覆盖既有证据。队列仍不是Child执行事实源，也不自动重试或声称exactly-once。详见[0159：后台副作用置信度与终态幂等](./decisions/0159-background-effect-confidence.md)。
+
+## Memory、策略、Eval与Provider稳定性闭环
+
+`MemoryEvolutionService`现在从至少三次重复成功的Memory trace挖掘不可信经验候选，并通过`memory_link`把Evolution候选与本地Memory记录关联。候选保持quarantine，必须经过静态安全检查、独立validation/test指标、人工批准后才能激活；激活先进入Evolution active，再确认Memory记录，失败会尽力回滚。使用观察会保留次数和有限强化事实，回滚把确认记忆标记为stale，不改变原始Session提交。
+
+`StrategyEvolutionService`为Prompt与Workflow目标提供同一套重复模式挖掘、候选生成、评估、批准、激活、观察、回滚和归档。已提交Host Turn会分别记录Workflow、Memory和Prompt trace；所有生成内容仍是不可信声明式数据，不能改变system prompt权威、ToolSet、PermissionGate、sandbox、AgentLoop、Provider或Child/Team策略。演化关闭时只保留trace，不生成候选。
+
+`EvalPlatform`在已有离线Host Eval之上提供有界版本化dataset、互斥validation/test切分、封闭`EvalGrade`、持久化运行记录和baseline/candidate比较。运行记录只保存检查名、分数、状态和时间等受限事实，写入`.coquo/evals/runs.jsonl`，不保存prompt、回答、路径或凭据；任何缺失case、单case退化、pass-rate或平均分下降都会使regression gate fail-closed。可用`coquo eval platform datasets|run|compare`检查。
+
+Provider长稳验收新增最多8次的显式soak重复。`StreamSample`将观测分类为未流式、首delta等待、delta间隔过大或健康，只描述Host测量事实，不猜测供应商原因。TTY前台事件队列现在暴露enqueue、drain、高水位和阻塞put计数，发现背压时追加一次警告；这能区分上游没有chunk、Provider缓冲与Host呈现排队。原有取消、重试、首delta后不重放和Turn原子提交边界保持不变。详见[0165：Memory、策略、Eval与Provider稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)。

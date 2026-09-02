@@ -228,6 +228,7 @@ class TerminalApplication:
         self._provider_invocation_started_at: float | None = None
         self._provider_invocation_active: ProviderInvocationStarted | None = None
         self._provider_wait_last_heartbeat: float | None = None
+        self._reported_queue_blocked_puts = 0
         self._history_entries = _session_prompt_history(session)
         self._history = InMemoryHistory(self._history_entries)
         self._buffer = Buffer(
@@ -311,6 +312,19 @@ class TerminalApplication:
                 await self._handle_event(event)
             except Exception:
                 self._renderer.reset()
+        metrics = self._queue.metrics()
+        blocked_puts = int(metrics["blocked_puts"])
+        if blocked_puts > self._reported_queue_blocked_puts:
+            self._reported_queue_blocked_puts = blocked_puts
+            await self._write_turn_output(
+                render_turn_trace(
+                    "Host event queue backpressure observed; stream delivery is being drained.",
+                    "warning",
+                    color=self._color,
+                    width=self._current_width(),
+                )
+                + "\n"
+            )
         await self._emit_provider_wait_heartbeat()
         self._drain_child_notifications()
         self._application.invalidate()

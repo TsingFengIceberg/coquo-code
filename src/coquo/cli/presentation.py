@@ -93,7 +93,10 @@ DIM = "\x1b[2m"
 _READLINE_START = "\001"
 _READLINE_END = "\002"
 _TOOLBAR_MODEL_WIDTH = 36
-_TOOLBAR_WORKSPACE_WIDTH = 64
+# Keep common temporary and workspace paths intact so the toolbar remains
+# useful in scripted TTY acceptance runs; extremely long paths are still
+# bounded below.
+_TOOLBAR_WORKSPACE_WIDTH = 96
 DEFAULT_ACTION_AUDIT_COUNT = 20
 MAX_ACTION_AUDIT_COUNT = 100
 DEFAULT_SESSION_LIST_COUNT = 20

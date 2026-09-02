@@ -23,6 +23,15 @@ from coquo.evals.coding_tasks import (
     run_coding_task,
     score_coding_task,
 )
+from coquo.evals.platform import (
+    EvalComparison,
+    EvalDataset,
+    EvalGrade,
+    EvalPlatform,
+    EvalPlatformError,
+    EvalRun,
+    EvalRunStore,
+)
 
 __all__ = [
     "DETERMINISTIC_BASELINE_ID",
@@ -44,4 +53,11 @@ __all__ = [
     "run_eval_suite",
     "run_coding_task",
     "score_coding_task",
+    "EvalComparison",
+    "EvalDataset",
+    "EvalGrade",
+    "EvalPlatform",
+    "EvalPlatformError",
+    "EvalRun",
+    "EvalRunStore",
 ]

@@ -291,7 +291,12 @@ class EvolutionStore:
         self._lock = RLock()
 
     def _append(self, event: str, payload: Mapping[str, object]) -> None:
-        body = {"event": event, "version": 1, **payload}
+        # ``version`` is the closed event schema version.  Candidates also
+        # have a monotonic content version; keep that payload field separate
+        # so a second candidate cannot make the event log unreadable.
+        body = {"event": event, "version": 1}
+        for key, value in payload.items():
+            body["candidate_version" if event == "candidate" and key == "version" else key] = value
         raw = (
             json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
         ).encode()
@@ -498,7 +503,7 @@ class EvolutionController:
         return EvolutionCandidate(
             event["candidate_id"],
             EvolutionTarget(event["target"]),
-            event["version"],
+            event.get("candidate_version", event["version"]),
             event["summary"],
             event["content"],
             tuple(event["source_trace_ids"]),

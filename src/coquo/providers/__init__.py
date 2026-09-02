@@ -44,6 +44,13 @@ from coquo.providers.request_context import (
     estimate_serialized_input_tokens,
     evaluate_context_fit,
 )
+from coquo.providers.stability import (
+    ProviderSoakReport,
+    StreamLatencyClass,
+    StreamSample,
+    aggregate_soak,
+    classify_stream,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -78,4 +85,9 @@ __all__ = [
     "legacy_profile_id",
     "profile_fingerprint",
     "route_fingerprint",
+    "ProviderSoakReport",
+    "StreamLatencyClass",
+    "StreamSample",
+    "aggregate_soak",
+    "classify_stream",
 ]

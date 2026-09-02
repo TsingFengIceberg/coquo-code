@@ -286,17 +286,25 @@ class FrontendEventQueue:
         self._items: deque[FrontendEvent] = deque()
         self._condition = Condition()
         self._closed = False
+        self._enqueued = 0
+        self._drained = 0
+        self._blocked_puts = 0
+        self._high_watermark = 0
 
     def put(self, event: FrontendEvent) -> bool:
         """Enqueue one event; return false only when the queue is closed."""
         with self._condition:
             if self._closed:
                 return False
+            if len(self._items) >= self._capacity:
+                self._blocked_puts += 1
             while len(self._items) >= self._capacity and not self._closed:
                 self._condition.wait()
             if self._closed:
                 return False
             self._items.append(event)
+            self._enqueued += 1
+            self._high_watermark = max(self._high_watermark, len(self._items))
             self._condition.notify()
             return True
 
@@ -308,8 +316,22 @@ class FrontendEventQueue:
             while self._items and len(drained) < limit:
                 drained.append(self._items.popleft())
             if drained:
+                self._drained += len(drained)
                 self._condition.notify_all()
             return tuple(drained)
+
+    def metrics(self) -> dict[str, int | bool]:
+        """Return content-free queue facts for diagnosing presentation delay."""
+        with self._condition:
+            return {
+                "capacity": self._capacity,
+                "depth": len(self._items),
+                "high_watermark": self._high_watermark,
+                "enqueued": self._enqueued,
+                "drained": self._drained,
+                "blocked_puts": self._blocked_puts,
+                "closed": self._closed,
+            }
 
     def close(self) -> None:
         with self._condition:

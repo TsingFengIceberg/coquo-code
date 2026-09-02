@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 
+from coquo.providers.stability import StreamSample, aggregate_soak
+
 
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 MAX_OUTPUT_CHARS = 4096
@@ -62,6 +64,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="acknowledge that the Provider may charge for the requests",
     )
+    parser.add_argument(
+        "--soak-repetitions",
+        type=int,
+        default=1,
+        help="repeat the final-response scenario for bounded stability evidence (1-8)",
+    )
     return parser
 
 
@@ -84,6 +92,9 @@ def _validate_options(arguments: argparse.Namespace) -> None:
         )
     if os.environ.get("COQUO_REAL_PROVIDER_ACCEPT") != "1":
         raise SystemExit("set COQUO_REAL_PROVIDER_ACCEPT=1 for this one explicitly authorized run")
+    repetitions = getattr(arguments, "soak_repetitions", 1)
+    if type(repetitions) is not int or not 1 <= repetitions <= 8:
+        raise SystemExit("--soak-repetitions must be between 1 and 8")
     if arguments.workspace is not None:
         workspace = arguments.workspace.resolve()
         if workspace.is_symlink() or not workspace.is_dir():
@@ -253,7 +264,7 @@ def run(arguments: argparse.Namespace) -> int:
                 "refusing to overwrite caller data"
             ) from None
         _prepare_memory(workspace)
-        scenarios = (
+        scenarios = [
             _scenario(
                 "basic-final-response",
                 workspace,
@@ -275,12 +286,42 @@ def run(arguments: argparse.Namespace) -> int:
                 "Do not read files or use tools. From long-term memory, report the acceptance memory code and deployment window exactly.",
                 ("AURORA-4821", "Thursday 11:15"),
             ),
-        )
+        ]
+        for index in range(1, getattr(arguments, "soak_repetitions", 1)):
+            scenarios.append(
+                _scenario(
+                    f"stability-final-response-{index + 1}",
+                    workspace,
+                    arguments.profile,
+                    "Reply with exactly REAL_PROVIDER_ACCEPTANCE_OK and nothing else.",
+                    ("REAL_PROVIDER_ACCEPTANCE_OK",),
+                )
+            )
+        outcomes = tuple(str(item["status"]) for item in scenarios)
+        samples: list[StreamSample] = []
+        for item in scenarios:
+            raw = item.get("stream_metrics")
+            if not isinstance(raw, list) or not raw:
+                continue
+            metric = raw[0]
+            if not isinstance(metric, dict):
+                continue
+            samples.append(
+                StreamSample(
+                    metric.get("elapsed_ms"),
+                    metric.get("delta_count", 0),
+                    metric.get("first_delta_ms"),
+                    metric.get("max_delta_gap_ms"),
+                    metric.get("retry_count", 0),
+                )
+            )
+        stability = aggregate_soak(outcomes, tuple(samples), max_failures=0)
         report = {
             "suite": "coquo-real-provider-acceptance-v1",
             "profile": arguments.profile,
             "workspace": "temporary" if temporary is not None else "caller-provided",
             "scenarios": scenarios,
+            "provider_stability": stability.as_mapping(),
             "status": "passed"
             if all(item["status"] == "passed" for item in scenarios)
             else "failed",

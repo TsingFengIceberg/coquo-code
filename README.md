@@ -259,9 +259,13 @@ uv run coquo evolution status
 uv run coquo evolution configure propose
 uv run coquo evolution trace skill success "verified reusable workflow" --metrics '{"success_rate":0.8}'
 uv run coquo evolution patterns
+uv run coquo evolution memory-patterns
+uv run coquo evolution strategy-patterns workflow
+uv run coquo eval platform datasets
+uv run coquo eval platform run --label baseline
 ```
 
-`EvolutionController`把有界Trace、grader、重复模式和四类候选（memory、skill、prompt、workflow）接入同一条受控生命周期。候选必须有Trace来源，通过安全检查和独立validation/test指标比较，并经人工`approve`后才能`activate`；`observe`、`rollback`、`deprecate`和`archive`用于线上治理。默认`off`只记录Trace，`propose`和`supervised`也不会自动发布。该命令只操作`.coquo/evolution/events.jsonl`本地账本，不调用Provider、不执行工具、不改变权限、sandbox、ToolSet或AgentLoop。完整边界见[ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md)。
+`EvolutionController`把有界Trace、grader、重复模式和四类候选（memory、skill、prompt、workflow）接入同一条受控生命周期。现在已提交Turn会自动为Memory、Prompt和Workflow产生候选模式；候选必须有Trace来源，通过安全检查和独立validation/test指标比较，并经人工`approve`后才能`activate`。`observe`、`rollback`、`deprecate`和`archive`用于线上治理。默认`off`只记录Trace，`propose`和`supervised`也不会自动发布。该命令只操作`.coquo/evolution/events.jsonl`本地账本，不调用Provider、不执行工具、不改变权限、sandbox、ToolSet或AgentLoop。完整边界见[ADR 0163](./docs/decisions/0163-bounded-self-evolution-controller.md)和[ADR 0165](./docs/decisions/0165-memory-strategy-eval-provider-stability.md)。
 
 ### 管理 Task
 
@@ -515,13 +519,16 @@ git diff --check
 uv run coquo eval list
 uv run coquo eval run all
 uv run coquo eval run all --format json
+uv run coquo eval platform datasets
+uv run coquo eval platform run --label baseline
 uv run coquo eval task list
 tmp=$(mktemp -d)
 uv run coquo eval task prepare inventory-validation "$tmp/task"
 uv run coquo eval task score inventory-validation "$tmp/task"
 # 真实Provider验收（仅在单独确认网络、凭据和费用后运行）
 COQUO_REAL_PROVIDER_ACCEPT=1 uv run python scripts/real_provider_acceptance.py \
-  --profile <existing-profile> --allow-network --allow-credentials --allow-cost
+  --profile <existing-profile> --allow-network --allow-credentials --allow-cost \
+  --soak-repetitions 3
 ```
 
 `pytest`验证函数、模块和协议边界；`eval run`用scripted fake provider把固定轨迹送入完整Host路径。`eval task prepare/score`则离线创建小型代码任务，并在候选目录外以可见测试和Host私有测试评分实际结果。只有显式写出`--real-provider`并选择profile/model的`eval task run`才会调用真实厂商；它固定在新建隔离任务目录内运行，工具事件写入stderr，稳定Host评分写入stdout。依赖变化后先执行 `uv lock`，再检查锁文件。Coquo 不为目标 workspace 安装 Node、Rust、Java、Docker、数据库等项目环境。

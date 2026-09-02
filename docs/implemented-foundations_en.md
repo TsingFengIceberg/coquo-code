@@ -1777,6 +1777,8 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 141. [0161: Bounded Provider Reliability and Workflow Driver](./decisions/0161-bounded-provider-reliability-and-workflow-driver.md)
 142. [0162: Fixed Command Resource Limits](./decisions/0162-fixed-command-resource-limits.md)
 143. [0163: Bounded Self-Evolution Controller](./decisions/0163-bounded-self-evolution-controller.md)
+144. [0164: Automatic Workflow-to-Skill Evolution Pipeline](./decisions/0164-automatic-skill-evolution-pipeline.md)
+145. [0165: Memory, Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -2123,3 +2125,42 @@ possible external effects. Terminal writes are idempotent only when status and
 confidence match; conflicting observations fail closed instead of overwriting
 evidence. The queue remains an observation ledger, does not automatically retry,
 and makes no exactly-once claim. See [0159](./decisions/0159-background-effect-confidence.md).
+
+## Memory, Strategy, Eval, and Provider Stability Loop
+
+`MemoryEvolutionService` now mines an untrusted experience candidate from at
+least three repeated successful Memory traces and links it to the local Memory
+record through an append-only `memory_link` event. The candidate remains in
+quarantine until static safety checks, independent validation/test metrics, and
+explicit human approval pass. Activation first makes the Evolution candidate
+active and then confirms the Memory record; a failure attempts a rollback.
+Usage observations retain only bounded counts and optional reinforcement facts;
+rollback marks a confirmed record stale without changing the original Session
+commit.
+
+`StrategyEvolutionService` provides the same mining, evaluation, approval,
+activation, observation, rollback, and archival lifecycle for Prompt and
+Workflow strategy candidates. A committed Host Turn records independent
+Workflow, Memory, and Prompt traces. Generated text remains untrusted
+declarative data and cannot change system-prompt authority, ToolSet,
+PermissionGate, sandbox, AgentLoop, Provider, or Child/Team policy. With
+evolution disabled, traces are retained but no candidates are generated.
+
+`EvalPlatform` adds a bounded versioned dataset registry, disjoint
+validation/test splits, closed `EvalGrade` facts, durable run records, and
+baseline/candidate comparison on top of the existing offline Host Eval. Runs
+store only bounded check names, scores, statuses, and timestamps under
+`.coquo/evals/runs.jsonl`; prompts, responses, paths, and credentials are not
+stored. Missing cases, per-case regressions, or a lower suite pass rate or mean
+score fail the regression gate. Inspect it with `coquo eval platform
+datasets|run|compare`.
+
+Long-running Provider acceptance now supports up to eight explicit soak
+repetitions. `StreamSample` classifies observations as not streamed, first-delta
+wait, excessive inter-delta gap, or healthy, reporting Host measurements without
+guessing a vendor cause. The TTY event queue exposes enqueue, drain,
+high-watermark, and blocked-put counts and emits one warning when presentation
+backpressure is observed. This distinguishes missing upstream chunks, Provider
+buffering, and Host queue delay. Existing cancellation, retry, no-replay-after-
+delta, and atomic Turn commit boundaries remain unchanged. See [0165: Memory,
+Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md).
