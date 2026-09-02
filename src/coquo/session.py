@@ -209,6 +209,13 @@ from coquo.core.effective_context import (
 )
 from coquo.core.extensions import ExtensionSourceKind, ToolExecutionKind, ToolSetSnapshot
 from coquo.core.execution_scope import ExecutionScope
+from coquo.recursive_orchestration import (
+    RecursiveNode,
+    RecursiveNodeKind,
+    RecursiveNodeStatus,
+    RecursiveOrchestrationError,
+    RecursiveOrchestrationStore,
+)
 from coquo.skills import (
     ActiveSkill,
     SkillActivationInspection,
@@ -1053,6 +1060,10 @@ class ProjectSession:
         self._task_store = TaskStore(self.workspace)
         self._evolution = EvolutionController(self.workspace)
         self._child_run_store = ChildRunStore(self.workspace)
+        # The recursive ledger is a Host-owned projection.  Child, Team, and
+        # Task ledgers remain the execution source of truth; this store only
+        # binds their durable identities into one replayable lineage tree.
+        self._recursive_store = RecursiveOrchestrationStore(self.workspace)
         self._team_store = TeamStore(self.workspace)
         self._team_service = TeamAssignmentService(self.workspace)
         self._team_messaging = TeamMessagingService(self.workspace)
@@ -2017,7 +2028,7 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._task_store.create(
+            task = self._task_store.create(
                 objective,
                 owner_session=self._writer.session_id,
                 acceptance_criteria=acceptance_criteria,
@@ -2026,6 +2037,8 @@ class ProjectSession:
                 name=name,
                 budget=budget,
             )
+            self._project_recursive_task(task)
+            return task
 
     def drive_workflow(
         self,
@@ -2058,18 +2071,22 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._team_store.create(name, owner_session=self._writer.session_id)
+            team = self._team_store.create(name, owner_session=self._writer.session_id)
+            self._project_recursive_team(team)
+            return team
 
     def create_team_preallocated(self, team_id: str, name: str) -> TeamInfo:
         """Create one owned Team at an ID reserved by a validated control approval."""
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._team_store.create(
+            team = self._team_store.create(
                 name,
                 owner_session=self._writer.session_id,
                 team_id=team_id,
             )
+            self._project_recursive_team(team)
+            return team
 
     def list_teams(self, *, status: TeamStatus | None = None) -> tuple[TeamInfo, ...]:
         """List durable workspace Teams without changing Session or runtime state."""
@@ -2087,7 +2104,9 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
-            return self._team_service.close(team_id)
+            team = self._team_service.close(team_id)
+            self._project_recursive_team(team)
+            return team
 
     def add_team_member(
         self,
@@ -2561,12 +2580,21 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
-            return self._team_service.create(
+            assignment = self._team_service.create(
                 team_id,
                 member_id,
                 objective,
                 parent_permission_mode=self._permission_mode.value,
             )
+            team = self._team_store.inspect(team_id)
+            self._project_recursive_team(team, objective=objective)
+            child = assignment.child
+            if child is not None:
+                team_node = self._recursive_store.node_for_team(team.team_id)
+                self._project_recursive_child(
+                    child, parent_node_id=team_node.node_id if team_node else None
+                )
+            return assignment
 
     def list_team_assignments(
         self, team_id: str, *, limit: int = 100
@@ -2589,7 +2617,17 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             self._ensure_team_owner(team_id)
-            return self._team_service.recover(team_id, assignment_id, limit=limit)
+            result = self._team_service.recover(team_id, assignment_id, limit=limit)
+            team = self._team_store.inspect(team_id)
+            self._project_recursive_team(team)
+            for item in self._team_service.list(team_id, limit=limit):
+                if item.child is not None:
+                    team_node = self._recursive_store.node_for_team(team.team_id)
+                    self._project_recursive_child(
+                        item.child,
+                        parent_node_id=team_node.node_id if team_node is not None else None,
+                    )
+            return result
 
     def prepare_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
         with self._lock:
@@ -2678,7 +2716,14 @@ class ProjectSession:
                 ChildRunStatus.INTERRUPTED,
             }:
                 self._team_service.observe_terminal(team_id, assignment_id)
-            return self._team_service.inspect(team_id, assignment_id)
+            result = self._team_service.inspect(team_id, assignment_id)
+            if result.child is not None:
+                team_node = self._recursive_store.node_for_team(result.team.team_id)
+                self._project_recursive_child(
+                    result.child,
+                    parent_node_id=team_node.node_id if team_node is not None else None,
+                )
+            return result
 
     def start_team_assignment(self, team_id: str, assignment_id: str) -> TeamAssignmentInfo:
         with self._lock:
@@ -2701,7 +2746,14 @@ class ProjectSession:
             ).start(info.assignment.child_run_id)
         else:
             supervisor.submit(info.assignment.child_run_id)
-        return self._team_service.inspect(team_id, assignment_id)
+        result = self._team_service.inspect(team_id, assignment_id)
+        if result.child is not None:
+            team_node = self._recursive_store.node_for_team(result.team.team_id)
+            self._project_recursive_child(
+                result.child,
+                parent_node_id=team_node.node_id if team_node is not None else None,
+            )
+        return result
 
     def wait_team_assignment(
         self, team_id: str, assignment_id: str, timeout_seconds: float
@@ -2736,7 +2788,14 @@ class ProjectSession:
             ChildRunStatus.INTERRUPTED,
         }:
             self._team_service.observe_terminal(team_id, assignment_id)
-        return self._team_service.inspect(team_id, assignment_id)
+        result = self._team_service.inspect(team_id, assignment_id)
+        if result.child is not None:
+            team_node = self._recursive_store.node_for_team(result.team.team_id)
+            self._project_recursive_child(
+                result.child,
+                parent_node_id=team_node.node_id if team_node is not None else None,
+            )
+        return result
 
     def cancel_team_assignment(
         self, team_id: str, assignment_id: str, reason: str
@@ -2764,7 +2823,14 @@ class ProjectSession:
             ChildRunStatus.INTERRUPTED,
         }:
             self._team_service.observe_terminal(team_id, assignment_id)
-        return self._team_service.inspect(team_id, assignment_id)
+        result = self._team_service.inspect(team_id, assignment_id)
+        if result.child is not None:
+            team_node = self._recursive_store.node_for_team(result.team.team_id)
+            self._project_recursive_child(
+                result.child,
+                parent_node_id=team_node.node_id if team_node is not None else None,
+            )
+        return result
 
     def publish_team_assignment_handoff(self, team_id: str, assignment_id: str):
         with self._lock:
@@ -2788,7 +2854,9 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return self._child_run_store.create(objective, parent_session=self._writer.session_id)
+            info = self._child_run_store.create(objective, parent_session=self._writer.session_id)
+            self._project_recursive_child(info)
+            return info
 
     def prepare_child_run(self, child_run_id: str) -> ChildRunInfo:
         """Freeze a read-only Child envelope and bind its detached Session without Provider work."""
@@ -2817,12 +2885,14 @@ class ProjectSession:
                     and info.delegated.capability == "read-only-explorer-v1"
                 ),
             )
-            return self._child_run_store.prepare(
+            result = self._child_run_store.prepare(
                 info.child_run_id,
                 runtime_spec=spec,
                 session_store=self._session_store,
                 binding=binding_from_status(status),
             )
+            self._project_recursive_child(result)
+            return result
 
     def run_child_run(self, child_run_id: str) -> ChildRunInfo:
         """Run one prepared Child in its detached Session without changing this parent."""
@@ -2831,7 +2901,9 @@ class ProjectSession:
         with self._lock:
             self._ensure_open()
             self._ensure_not_compacting()
-            return ChildRunExecutor(self.workspace).run(child_run_id)
+            info = ChildRunExecutor(self.workspace).run(child_run_id)
+            self._project_recursive_child(info)
+            return info
 
     def start_child_run(self, child_run_id: str) -> ChildRunInfo:
         """Durably submit one ready Child, reusing an injected local supervisor when present."""
@@ -2844,6 +2916,7 @@ class ProjectSession:
             self._ensure_not_compacting()
             if self._child_supervisor is not None:
                 info = self._child_supervisor.submit(child_run_id)
+                self._project_recursive_child(info)
                 return ChildStartObservation(info, "process-local-supervisor")
 
             from coquo.background_runtime import PersistentChildRunRuntime
@@ -2855,6 +2928,7 @@ class ProjectSession:
             info = self._child_run_store.inspect(child_run_id)
             if info.parent_session_id != self._writer.session_id:
                 raise ChildRunStoreError("Child Run belongs to another parent Session")
+            self._project_recursive_child(info)
             return ChildStartObservation(
                 info,
                 "durable-background-worker",
@@ -2888,6 +2962,7 @@ class ProjectSession:
                 info = supervisor.wait(child_run_id, timeout_seconds)
             if info.parent_session_id != self._writer.session_id:
                 raise ChildRunStoreError("Child Run belongs to another parent Session")
+            self._project_recursive_child(info)
             return info
 
     def recover_child_runs(self, child_run_id: str | None = None, limit: int = 100):
@@ -2896,11 +2971,15 @@ class ProjectSession:
             self._ensure_not_compacting()
             from coquo.child_recovery import ChildRunRecoveryService
 
-            return ChildRunRecoveryService(self.workspace).recover(
+            result = ChildRunRecoveryService(self.workspace).recover(
                 parent_session_id=self._writer.session_id,
                 child_run_id=child_run_id,
                 limit=limit,
             )
+            for info in self._child_run_store.list():
+                if child_run_id is None or info.child_run_id == child_run_id:
+                    self._project_recursive_child(info)
+            return result
 
     def background_status(self):
         """Inspect the durable Child queue and restartable worker without invoking a Provider."""
@@ -2976,8 +3055,11 @@ class ProjectSession:
             self._ensure_open()
             self._ensure_not_compacting()
             if self._child_supervisor is not None:
-                return self._child_supervisor.cancel(child_run_id, reason)
-            return self._child_run_store.request_cancel(child_run_id, reason=reason)
+                info = self._child_supervisor.cancel(child_run_id, reason)
+            else:
+                info = self._child_run_store.request_cancel(child_run_id, reason=reason)
+            self._project_recursive_child(info)
+            return info
 
     def inspect_task(self, task_id: str) -> TaskInfo:
         """Strictly inspect one workspace Task without changing current state."""
@@ -3039,6 +3121,7 @@ class ProjectSession:
                     configuration,
                     confirmation_sha256,
                 )
+                self._project_recursive_task(existing)
                 return existing
             if existing is None:
                 existing = self._task_store.create_from_admission(
@@ -3059,6 +3142,7 @@ class ProjectSession:
                 TaskAdmissionOutcome.ACCEPTED,
                 task_id=existing.task_id,
             )
+            self._project_recursive_task(existing)
             return existing
 
     def accepted_task_for_admission(self, admission_id: str) -> TaskInfo:
@@ -6319,10 +6403,154 @@ class ProjectSession:
             parent_session=self._writer.session_id,
             delegation=delegated,
         )
+        self._project_recursive_child(info)
         state.record_spawn(info.child_run_id)
         info = self.prepare_child_run(info.child_run_id)
         info = self.start_child_run(info.child_run_id)
         return _child_control_success(request, _child_state_payload(info), "child_spawned")
+
+    # ------------------------------------------------------------------
+    # Host-owned Task–Child–Team lineage projection
+    # ------------------------------------------------------------------
+    def _ensure_recursive_tree(self):
+        """Load or lazily create the workspace's one bounded lineage tree."""
+        try:
+            if self._recursive_store.path.exists():
+                return self._recursive_store.inspect()
+            return self._recursive_store.create(
+                permission_mode=self._permission_mode.value,
+                objective=f"session:{self._writer.session_id}",
+            )
+        except RecursiveOrchestrationError as error:
+            # Another Session/process may have created the root between the
+            # existence check and create.  Re-read only on that benign race;
+            # malformed or inaccessible ledgers remain hard errors.
+            if self._recursive_store.path.exists():
+                return self._recursive_store.inspect()
+            raise error
+
+    def _recursive_parent_node(self) -> RecursiveNode:
+        tree = self._ensure_recursive_tree()
+        if not self._child_mode:
+            return tree.root
+        if self._current_child_run_id is None:
+            raise RecursiveOrchestrationError("Child lineage identity is unavailable")
+        node = self._recursive_store.node_for_child_run(self._current_child_run_id)
+        if node is None:
+            raise RecursiveOrchestrationError("current Child is absent from recursive lineage")
+        return node
+
+    @staticmethod
+    def _recursive_child_status(status: ChildRunStatus) -> RecursiveNodeStatus:
+        if status in {ChildRunStatus.QUEUED, ChildRunStatus.ADMITTED, ChildRunStatus.READY}:
+            return RecursiveNodeStatus.QUEUED
+        if status in {ChildRunStatus.RUNNING, ChildRunStatus.CANCELLING}:
+            return RecursiveNodeStatus.RUNNING
+        if status is ChildRunStatus.COMPLETED:
+            return RecursiveNodeStatus.COMPLETED
+        if status is ChildRunStatus.CANCELLED:
+            return RecursiveNodeStatus.CANCELLED
+        if status is ChildRunStatus.INTERRUPTED:
+            return RecursiveNodeStatus.INTERRUPTED
+        return RecursiveNodeStatus.FAILED
+
+    def _project_recursive_child(
+        self, info: ChildRunInfo, *, parent_node_id: str | None = None
+    ) -> RecursiveNode:
+        """Create/reconcile one Child projection and return its current node."""
+        node = self._recursive_store.node_for_child_run(info.child_run_id)
+        if node is None:
+            parent = (
+                self._recursive_parent_node()
+                if parent_node_id is None
+                else next(
+                    item
+                    for item in self._ensure_recursive_tree().all_nodes
+                    if item.node_id == parent_node_id
+                )
+            )
+            depth = info.delegated.depth if info.delegated is not None else parent.depth + 1
+            if depth != parent.depth + 1:
+                raise RecursiveOrchestrationError("Child delegation depth disagrees with lineage")
+            spawn = (
+                self._recursive_store.project_child
+                if parent_node_id is not None
+                and parent.kind in {RecursiveNodeKind.TEAM, RecursiveNodeKind.TASK}
+                else self._recursive_store.spawn_child
+            )
+            role_contract = info.role_contract or (
+                info.team_assignment.role_contract if info.team_assignment is not None else None
+            )
+            node = spawn(
+                parent.node_id,
+                info.objective,
+                permission_mode=(
+                    child_role_descriptor(role_contract).permission_mode
+                    if role_contract is not None
+                    else PermissionMode.READ_ONLY.value
+                ),
+                capability=(
+                    info.delegated.capability
+                    if info.delegated is not None
+                    else "read-only-explorer-v1"
+                ),
+                child_run_id=info.child_run_id,
+            )
+        desired = self._recursive_child_status(info.status)
+        if node.status is not desired:
+            node = self._recursive_store.transition(node.node_id, desired)
+        return node
+
+    def _project_recursive_team(
+        self, team: TeamInfo, *, objective: str | None = None
+    ) -> RecursiveNode:
+        node = self._recursive_store.node_for_team(team.team_id)
+        if node is None:
+            parent = self._recursive_parent_node()
+            node = self._recursive_store.spawn_team(
+                parent.node_id,
+                objective or team.name,
+                permission_mode=self._permission_mode.value,
+                team_id=team.team_id,
+            )
+        desired = (
+            RecursiveNodeStatus.COMPLETED
+            if team.status is TeamStatus.CLOSED
+            else RecursiveNodeStatus.RUNNING
+        )
+        if node.status is not desired:
+            node = self._recursive_store.transition(node.node_id, desired)
+        return node
+
+    def _project_recursive_task(self, task: TaskInfo) -> RecursiveNode:
+        node = self._recursive_store.node_for_task(task.task_id)
+        if node is None:
+            parent = self._recursive_parent_node()
+            node = self._recursive_store.spawn_task(
+                parent.node_id,
+                task.objective,
+                permission_mode=self._permission_mode.value,
+                task_id=task.task_id,
+            )
+        if task.terminal_outcome is not None:
+            desired = (
+                RecursiveNodeStatus.COMPLETED
+                if task.terminal_outcome.outcome.value == "completed"
+                else RecursiveNodeStatus.CANCELLED
+            )
+        elif task.status is TaskStatus.STAGE_IN_PROGRESS:
+            desired = RecursiveNodeStatus.RUNNING
+        else:
+            desired = RecursiveNodeStatus.QUEUED
+        if node.status is not desired:
+            node = self._recursive_store.transition(node.node_id, desired)
+        return node
+
+    def inspect_recursive_orchestration(self):
+        """Return the durable cross-runtime lineage tree for observation."""
+        with self._lock:
+            self._ensure_open()
+            return self._ensure_recursive_tree()
 
     def _prepare_task_lifecycle_request(
         self,

@@ -76,3 +76,43 @@ def test_recursive_policy_has_conservative_bounds() -> None:
     policy = RecursivePolicy()
     assert policy.max_depth == 3
     assert policy.max_nodes == 16
+
+
+def test_recursive_store_links_task_and_runtime_ids(tmp_path) -> None:
+    store = RecursiveOrchestrationStore(tmp_path)
+    tree = store.create()
+    import uuid
+
+    task_id = str(uuid.uuid4())
+    child_id = str(uuid.uuid4())
+    task = store.spawn_task(tree.root.node_id, "task objective", task_id=task_id)
+    child = store.spawn_child(task.node_id, "child objective", child_run_id=child_id)
+
+    assert store.node_for_task(task_id) == task
+    assert store.node_for_child_run(child_id) == child
+    assert child.parent_node_id == task.node_id
+
+
+def test_host_projection_binds_writable_team_child_without_relaxing_child_delegation(
+    tmp_path,
+) -> None:
+    store = RecursiveOrchestrationStore(tmp_path)
+    tree = store.create(permission_mode="workspace-write")
+    team = store.spawn_team(
+        tree.root.node_id,
+        "writer team",
+        permission_mode="workspace-write",
+    )
+
+    child = store.project_child(
+        team.node_id,
+        "write in isolated worktree",
+        permission_mode="workspace-write",
+    )
+    assert child.permission_mode == "workspace-write"
+    assert child.parent_node_id == team.node_id
+
+    with pytest.raises(RecursiveOrchestrationError, match="Host Child projection"):
+        store.project_child(child.node_id, "bypass", permission_mode="read-only")
+    with pytest.raises(RecursiveOrchestrationError, match="only read-only descendants"):
+        store.spawn_child(team.node_id, "child-owned delegation", permission_mode="workspace-write")

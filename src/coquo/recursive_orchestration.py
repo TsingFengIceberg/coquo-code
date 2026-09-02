@@ -39,6 +39,7 @@ class RecursiveOrchestrationError(RuntimeError):
 
 class RecursiveNodeKind(StrEnum):
     ROOT = "root"
+    TASK = "task"
     CHILD = "child"
     TEAM = "team"
 
@@ -98,6 +99,7 @@ class RecursiveNode:
     child_run_id: str | None = None
     team_id: str | None = None
     team_assignment_id: str | None = None
+    task_id: str | None = None
 
     def __post_init__(self) -> None:
         for value, label in ((self.node_id, "node_id"), (self.root_node_id, "root_node_id")):
@@ -123,6 +125,14 @@ class RecursiveNode:
             raise ValueError("recursive node objective digest is invalid")
         for value, label in ((self.created_at, "created_at"), (self.updated_at, "updated_at")):
             if not isinstance(value, str) or not value or len(value) > 64:
+                raise ValueError(f"{label} is invalid")
+        for value, label in (
+            (self.child_run_id, "child_run_id"),
+            (self.team_id, "team_id"),
+            (self.team_assignment_id, "team_assignment_id"),
+            (self.task_id, "task_id"),
+        ):
+            if value is not None and not _UUID4.fullmatch(value):
                 raise ValueError(f"{label} is invalid")
 
 
@@ -263,6 +273,34 @@ class RecursiveOrchestrationStore:
             child_run_id=child_run_id,
         )
 
+    def project_child(
+        self,
+        parent_node_id: str,
+        objective: str,
+        *,
+        permission_mode: str = PermissionMode.READ_ONLY.value,
+        capability: str = "read-only-explorer-v1",
+        child_run_id: str | None = None,
+    ) -> RecursiveNode:
+        """Bind a Host-created Child under an existing Team/Task projection.
+
+        ``spawn_child`` models a Child's own recursive delegation and therefore
+        retains the conservative read-only-parent rule.  Team assignments and
+        Task bridge admissions are Host operations, so their projection must be
+        able to bind a writable Child without granting that Child delegation
+        authority.  Both paths still enforce the same depth, node, and
+        permission-ceiling checks.
+        """
+        return self._spawn(
+            parent_node_id,
+            RecursiveNodeKind.CHILD,
+            objective,
+            permission_mode=permission_mode,
+            capability=capability,
+            child_run_id=child_run_id,
+            host_projection=True,
+        )
+
     def spawn_team(
         self,
         parent_node_id: str,
@@ -282,6 +320,42 @@ class RecursiveOrchestrationStore:
             team_id=team_id,
             team_assignment_id=team_assignment_id,
         )
+
+    def spawn_task(
+        self,
+        parent_node_id: str,
+        objective: str,
+        *,
+        permission_mode: str = PermissionMode.READ_ONLY.value,
+        capability: str = "task-orchestrator-v1",
+        task_id: str | None = None,
+    ) -> RecursiveNode:
+        """Project a durable Task into the Host-owned lineage tree."""
+        return self._spawn(
+            parent_node_id,
+            RecursiveNodeKind.TASK,
+            objective,
+            permission_mode=permission_mode,
+            capability=capability,
+            task_id=task_id,
+        )
+
+    def node_for_child_run(self, child_run_id: str) -> RecursiveNode | None:
+        return self._node_for_link("child_run_id", child_run_id)
+
+    def node_for_team(self, team_id: str) -> RecursiveNode | None:
+        return self._node_for_link("team_id", team_id)
+
+    def node_for_task(self, task_id: str) -> RecursiveNode | None:
+        return self._node_for_link("task_id", task_id)
+
+    def _node_for_link(self, field: str, value: str) -> RecursiveNode | None:
+        value = _uuid4(value, field)
+        with self._guard:
+            if not self.path.exists():
+                return None
+            tree = self._replay(self._read())
+        return next((node for node in tree.all_nodes if getattr(node, field) == value), None)
 
     def transition(self, node_id: str, status: RecursiveNodeStatus | str) -> RecursiveNode:
         node_id = _uuid4(node_id, "node ID")
@@ -312,7 +386,10 @@ class RecursiveOrchestrationStore:
         capability = kwargs.pop("capability")
         if kwargs.get("child_run_id") is not None:
             kwargs["child_run_id"] = _uuid4(kwargs["child_run_id"], "Child Run ID")
-        for key in ("team_id", "team_assignment_id"):
+        host_projection = kwargs.pop("host_projection", False)
+        if type(host_projection) is not bool:
+            raise RecursiveOrchestrationError("host projection flag is invalid")
+        for key in ("team_id", "team_assignment_id", "task_id"):
             if kwargs.get(key) is not None:
                 kwargs[key] = _uuid4(kwargs[key], key)
         with self._guard:
@@ -326,10 +403,17 @@ class RecursiveOrchestrationStore:
                 raise RecursiveOrchestrationError("recursive depth limit reached")
             if len(tree.all_nodes) >= tree.policy.max_nodes:
                 raise RecursiveOrchestrationError("recursive node limit reached")
+            if host_projection and parent.kind not in {
+                RecursiveNodeKind.TASK,
+                RecursiveNodeKind.TEAM,
+            }:
+                raise RecursiveOrchestrationError(
+                    "Host Child projection requires a Task or Team parent"
+                )
             if kind is RecursiveNodeKind.CHILD:
                 if not tree.policy.allow_child_delegation:
                     raise RecursiveOrchestrationError("recursive Child delegation is disabled")
-                if (
+                if not host_projection and (
                     parent.kind is not RecursiveNodeKind.ROOT
                     and parent.permission_mode != PermissionMode.READ_ONLY.value
                 ):
@@ -341,6 +425,9 @@ class RecursiveOrchestrationStore:
                     raise RecursiveOrchestrationError("nested Team delegation is disabled")
                 if parent.kind is RecursiveNodeKind.CHILD:
                     raise RecursiveOrchestrationError("Child cannot create a Team")
+            elif kind is RecursiveNodeKind.TASK:
+                if parent.kind is RecursiveNodeKind.CHILD:
+                    raise RecursiveOrchestrationError("Child cannot create a Task")
             child_permission = _permission_ceiling(parent.permission_mode, permission_mode)
             now = self._clock()
             node_id = str(uuid4())
@@ -487,6 +574,7 @@ def _node_mapping(node: RecursiveNode) -> dict[str, object]:
             "child_run_id",
             "team_id",
             "team_assignment_id",
+            "task_id",
         )
     }
 
@@ -515,6 +603,7 @@ def _node_from_mapping(value: object) -> RecursiveNode:
             child_run_id=value.get("child_run_id"),
             team_id=value.get("team_id"),
             team_assignment_id=value.get("team_assignment_id"),
+            task_id=value.get("task_id"),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise RecursiveOrchestrationError("recursive node record is invalid") from error
