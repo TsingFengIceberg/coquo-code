@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import re
+from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
 
@@ -26,6 +27,14 @@ _SELECTOR = re.compile(r"[^\x00-\x1f\x7f]{1,512}\Z")
 
 class BrowserAutomationError(RuntimeError):
     """Raised when browser policy or backend execution fails closed."""
+
+
+class BrowserRuntimeError(BrowserAutomationError):
+    """Raised when the optional real browser runtime is unavailable or unsafe."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        self.code = code
+        super().__init__(message)
 
 
 class BrowserAction(StrEnum):
@@ -202,8 +211,9 @@ class BrowserAutomation:
 class PlaywrightBrowserBackend:
     """Optional adapter around a Playwright Page-like object."""
 
-    def __init__(self, page: Any) -> None:
+    def __init__(self, page: Any, *, close_callback: Callable[[], None] | None = None) -> None:
         self.page = page
+        self._close_callback = close_callback
 
     def navigate(self, url: str, timeout_seconds: float) -> object:
         return self.page.goto(
@@ -225,7 +235,138 @@ class PlaywrightBrowserBackend:
         return self.page.screenshot()
 
     def close(self) -> None:
-        self.page.context.browser.close()
+        if self._close_callback is not None:
+            self._close_callback()
+            return
+        # Keep the injected Page adapter useful outside the real runtime.  A
+        # page-like test double may expose either page.close or its owning
+        # browser close operation.
+        close = getattr(self.page, "close", None)
+        if callable(close):
+            close()
+            return
+        context = getattr(self.page, "context", None)
+        browser = getattr(context, "browser", None)
+        close = getattr(browser, "close", None)
+        if callable(close):
+            close()
+
+
+class PlaywrightBrowserRuntime:
+    """Own a real Playwright process and its browser resources.
+
+    Playwright is imported only when ``start`` is called.  The factory never
+    downloads browser binaries and reports missing optional dependencies or
+    launch failures as typed, fail-closed errors.
+    """
+
+    def __init__(
+        self,
+        playwright: Any,
+        browser: Any,
+        context: Any,
+        page: Any,
+    ) -> None:
+        self.playwright = playwright
+        self.browser = browser
+        self.context = context
+        self.page = page
+        self.backend = PlaywrightBrowserBackend(page, close_callback=self.close)
+        self._closed = False
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        headless: bool = True,
+        browser_name: str = "chromium",
+        user_data_dir: Path | None = None,
+        playwright_factory: Callable[[], Any] | None = None,
+    ) -> "PlaywrightBrowserRuntime":
+        if type(headless) is not bool:
+            raise BrowserRuntimeError("browser headless setting is invalid", code="invalid-config")
+        if browser_name not in {"chromium", "firefox", "webkit"}:
+            raise BrowserRuntimeError("browser engine is invalid", code="invalid-config")
+        if user_data_dir is not None:
+            path = Path(user_data_dir)
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise BrowserRuntimeError(
+                    "browser user data directory is invalid", code="invalid-config"
+                )
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            if playwright_factory is None:
+                from playwright.sync_api import sync_playwright
+
+                playwright = sync_playwright().start()
+            else:
+                playwright = playwright_factory()
+        except (ImportError, ModuleNotFoundError) as error:
+            raise BrowserRuntimeError(
+                "Playwright is unavailable; install the optional runtime explicitly",
+                code="dependency-unavailable",
+            ) from error
+        except Exception as error:
+            raise BrowserRuntimeError(
+                "Playwright runtime could not start", code="runtime-start-failed"
+            ) from error
+
+        browser = context = page = None
+        try:
+            engine = getattr(playwright, browser_name, None)
+            if engine is None or not callable(getattr(engine, "launch", None)):
+                raise BrowserRuntimeError(
+                    "Playwright browser engine is unavailable", code="engine-unavailable"
+                )
+            if user_data_dir is None:
+                browser = engine.launch(headless=headless)
+                context = browser.new_context()
+            else:
+                # Persistent contexts own the browser process and intentionally
+                # do not expose an arbitrary executable or download setting.
+                context = engine.launch_persistent_context(str(path), headless=headless)
+                browser = getattr(context, "browser", None)
+            page = context.new_page()
+            return cls(playwright, browser, context, page)
+        except BrowserRuntimeError:
+            cls._close_resources(playwright, page, context, browser)
+            raise
+        except Exception as error:
+            cls._close_resources(playwright, page, context, browser)
+            raise BrowserRuntimeError(
+                "Playwright browser launch failed; browser action is unavailable",
+                code="launch-failed",
+            ) from error
+
+    @staticmethod
+    def _close_resources(playwright: Any, page: Any, context: Any, browser: Any) -> None:
+        for resource in (page, context, browser, playwright):
+            close = getattr(resource, "close", None) or getattr(resource, "stop", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    continue
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[BaseException] = []
+        # Close in dependency order.  Persistent contexts may already close
+        # their browser; idempotent Playwright implementations tolerate this.
+        for resource in (self.page, self.context, self.browser, self.playwright):
+            close = getattr(resource, "close", None) or getattr(resource, "stop", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise BrowserRuntimeError(
+                "browser runtime close was incomplete", code="close-failed"
+            ) from errors[0]
 
 
 def _canonical_origin(value: str) -> str:
@@ -284,5 +425,7 @@ __all__ = [
     "BrowserBackend",
     "BrowserObservation",
     "BrowserPolicy",
+    "BrowserRuntimeError",
+    "PlaywrightBrowserRuntime",
     "PlaywrightBrowserBackend",
 ]

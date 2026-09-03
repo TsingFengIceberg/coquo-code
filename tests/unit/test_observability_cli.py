@@ -12,6 +12,14 @@ from coquo.session_records import BindingSnapshot
 from coquo.session_store import SessionStore
 from coquo.task_store import TaskStore
 from coquo.team_store import TeamStore
+from coquo.observability import (
+    ObservationEvidence,
+    ObservationEvent,
+    ObservationPhase,
+    ObservationSource,
+    PersistentObservationStore,
+)
+from uuid import uuid4
 
 
 def _invoke(workspace: Path, arguments: list[str]) -> tuple[int, str, str]:
@@ -110,3 +118,29 @@ def test_observe_filters_and_diagnose_are_read_only(tmp_path: Path) -> None:
     assert errors == ""
     assert json.loads(output) == []
     assert path.read_bytes() == before
+
+
+def test_observe_runtime_reads_persistent_projection(tmp_path: Path) -> None:
+    source_id = str(uuid4())
+    store = PersistentObservationStore(tmp_path / ".coquo" / "observations" / "v1" / "events.jsonl")
+    store.append(
+        ObservationEvent(
+            event_id="obs-v1-" + "a" * 64,
+            trace_id=source_id,
+            source=ObservationSource.SESSION,
+            source_id=source_id,
+            sequence=0,
+            occurred_at="2026-09-03T00:00:00Z",
+            record_type="provider_started",
+            phase=ObservationPhase.STARTED,
+            status="started",
+            evidence=ObservationEvidence.HOST_OBSERVED,
+            summary="provider started",
+        )
+    )
+    status, output, errors = _invoke(
+        tmp_path, ["observe", "timeline", "runtime", "--format", "jsonl"]
+    )
+    assert status == 0
+    assert errors == ""
+    assert json.loads(output)["record_type"] == "provider_started"

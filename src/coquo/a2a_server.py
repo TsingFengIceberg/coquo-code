@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -48,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         "--model",
         help="direct Coquo model route, optionally overriding --profile for this process",
     )
+    parser.add_argument(
+        "--bearer-token-env",
+        help="environment variable containing an optional bearer token for task routes",
+    )
     arguments = parser.parse_args(argv)
     if not arguments.fixture_provider and not arguments.profile and not arguments.model:
         parser.error(
@@ -57,12 +62,18 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace.is_dir():
         parser.error("workspace must be an existing directory")
     public_url = arguments.public_url or f"http://{arguments.host}:{arguments.port}"
+    bearer_token = None
+    if arguments.bearer_token_env:
+        bearer_token = os.environ.get(arguments.bearer_token_env)
+        if not bearer_token:
+            parser.error(f"missing bearer token environment variable: {arguments.bearer_token_env}")
     app = create_app(
         workspace,
         public_url,
         profile=arguments.profile,
         model=arguments.model,
         fixture_provider=arguments.fixture_provider,
+        bearer_token=bearer_token,
     )
     if arguments.fixture_provider:
         print(

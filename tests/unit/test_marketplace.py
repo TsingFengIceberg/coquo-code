@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 
 import pytest
 
@@ -10,6 +11,7 @@ from coquo.marketplace import (
     MarketplaceError,
     MarketplaceIndex,
     MarketplaceStatus,
+    MarketplaceTrustStore,
 )
 
 
@@ -67,3 +69,64 @@ def test_marketplace_index_is_strict_and_sorted():
     assert index.entries[0].name == "z"
     with pytest.raises(MarketplaceError):
         MarketplaceIndex.from_mapping({"schema_version": 2, "entries": []})
+
+
+def test_marketplace_ed25519_signature_and_lifecycle_survive_restart(tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    package = tmp_path / "signed-pkg"
+    package.mkdir()
+    (package / "skill.md").write_text("# signed")
+    digest = package_digest(package)
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes_raw()
+    unsigned = MarketplaceEntry(
+        "signed",
+        "1.0",
+        digest,
+        "publisher",
+        "placeholder",
+        "https://example.test/p",
+        "ed25519",
+        "publisher-key-v1",
+    )
+    signature = base64.b64encode(private.sign(unsigned.signed_payload())).decode("ascii")
+    signed = MarketplaceEntry(
+        unsigned.name,
+        unsigned.version,
+        unsigned.package_sha256,
+        unsigned.publisher,
+        signature,
+        unsigned.package_url,
+        unsigned.signature_algorithm,
+        unsigned.public_key_id,
+    )
+    catalog = MarketplaceCatalog(
+        tmp_path,
+        trusted_publishers=frozenset({"publisher"}),
+        trusted_keys={"publisher-key-v1": public},
+        allow_legacy_signatures=False,
+    )
+    catalog.quarantine(signed, package)
+    catalog.approve("signed", "1.0")
+    catalog.install("signed", "1.0")
+    restarted = MarketplaceCatalog(
+        tmp_path,
+        trusted_publishers=frozenset({"publisher"}),
+        trusted_keys={"publisher-key-v1": public},
+        allow_legacy_signatures=False,
+    )
+    assert restarted.list()[0].status is MarketplaceStatus.INSTALLED
+
+
+def test_marketplace_trust_store_supports_key_rotation_and_revocation(tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes_raw()
+    store = MarketplaceTrustStore(tmp_path)
+    store.add("key-v1", "publisher", public)
+    assert store.resolve("key-v1")[0] == "publisher"
+    store.revoke("key-v1")
+    assert store.resolve("key-v1") is None
+    assert MarketplaceTrustStore(tmp_path).list()[0]["status"] == "revoked"

@@ -229,6 +229,7 @@ from coquo.observability import (
     ObservationEvidence,
     ObservationError,
     ObservationEvent,
+    PersistentObservationStore,
     diagnose_observation_events,
     filter_observation_events,
     merge_observation_events,
@@ -1407,10 +1408,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     observe_commands = observe_parser.add_subparsers(dest="observe_command", required=True)
     observe_timeline = observe_commands.add_parser(
-        "timeline", help="project existing Session, Task, Child, Team, or background records"
+        "timeline",
+        help="project existing Session, Task, Child, Team, background, or runtime records",
     )
     observe_timeline.add_argument(
-        "source", choices=("all", "session", "task", "child", "team", "background")
+        "source", choices=("all", "session", "task", "child", "team", "background", "runtime")
     )
     observe_timeline.add_argument("source_id", nargs="?")
     observe_timeline.add_argument("--format", choices=("text", "jsonl"), default="text")
@@ -1427,7 +1429,7 @@ def build_parser() -> argparse.ArgumentParser:
         "diagnose", help="diagnose one read-only observation timeline"
     )
     observe_diagnose.add_argument(
-        "source", choices=("all", "session", "task", "child", "team", "background")
+        "source", choices=("all", "session", "task", "child", "team", "background", "runtime")
     )
     observe_diagnose.add_argument("source_id", nargs="?")
     observe_diagnose.add_argument("--format", choices=("text", "json"), default="text")
@@ -3833,6 +3835,13 @@ def handle_observe_command(arguments: argparse.Namespace, workspace: Path, stdou
                 )
             )
         events = merge_observation_events(groups)
+    elif source == "runtime":
+        if arguments.source_id is not None:
+            raise ObservationError("the runtime timeline does not accept a source ID")
+        store = PersistentObservationStore(
+            workspace / ".coquo" / "observations" / "v1" / "events.jsonl"
+        )
+        events = store.read(limit=arguments.limit).events
     elif source == "background":
         if arguments.source_id is not None:
             raise ObservationError("the background timeline does not accept a source ID")

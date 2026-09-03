@@ -13,11 +13,19 @@ from enum import StrEnum
 import hashlib
 import json
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import os
+from pathlib import Path
 from threading import Condition, RLock
 import time
 from collections.abc import Callable
 from uuid import UUID, uuid4
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 class ObservationSource(StrEnum):
@@ -54,6 +62,8 @@ OBSERVATION_EVENT_SCHEMA_VERSION = 1
 MAX_OBSERVATION_SUBSCRIBER_PENDING = 1024
 MAX_OBSERVATION_READ_LIMIT = 256
 MAX_OBSERVATION_WAIT_SECONDS = 30
+MAX_PERSISTENT_OBSERVATION_BYTES = 16 * 1024 * 1024
+MAX_PERSISTENT_OBSERVATION_EVENTS = 50_000
 
 
 @dataclass(frozen=True)
@@ -228,6 +238,245 @@ class ObservationBatch:
         }
 
 
+def _decode_observation_event(value: object) -> ObservationEvent:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "event_id",
+        "trace_id",
+        "source",
+        "source_id",
+        "sequence",
+        "occurred_at",
+        "record_type",
+        "phase",
+        "status",
+        "evidence",
+        "summary",
+        "parent_event_id",
+        "related_ids",
+    }:
+        raise ValueError
+    if value["schema_version"] != OBSERVATION_EVENT_SCHEMA_VERSION:
+        raise ValueError
+    related = value["related_ids"]
+    if not isinstance(related, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str) for key, item in related.items()
+    ):
+        raise ValueError
+    try:
+        return ObservationEvent(
+            event_id=value["event_id"],
+            trace_id=value["trace_id"],
+            source=ObservationSource(value["source"]),
+            source_id=value["source_id"],
+            sequence=value["sequence"],
+            occurred_at=value["occurred_at"],
+            record_type=value["record_type"],
+            phase=ObservationPhase(value["phase"]),
+            status=value["status"],
+            evidence=ObservationEvidence(value["evidence"]),
+            summary=value["summary"],
+            parent_event_id=value["parent_event_id"],
+            related_ids=tuple(sorted(related.items())),
+        )
+    except (TypeError, ValueError):
+        raise ValueError from None
+
+
+class PersistentObservationStore:
+    """Small append-only cross-process observation projection.
+
+    Durable Session/Task/Child/Team ledgers remain authoritative.  This store
+    contains only the already-redacted ``ObservationEvent`` projection and is
+    therefore safe to rebuild or truncate after an operator-visible gap.  A
+    file lock, append+fsync, and a monotonic cursor make independent Host
+    processes share one replayable observation rail without a database.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_events: int = MAX_PERSISTENT_OBSERVATION_EVENTS,
+        max_bytes: int = MAX_PERSISTENT_OBSERVATION_BYTES,
+    ) -> None:
+        if type(max_events) is not int or not 1 <= max_events <= MAX_PERSISTENT_OBSERVATION_EVENTS:
+            raise ValueError("persistent observation event limit is invalid")
+        if type(max_bytes) is not int or not 1024 <= max_bytes <= MAX_PERSISTENT_OBSERVATION_BYTES:
+            raise ValueError("persistent observation byte limit is invalid")
+        requested = Path(path)
+        if requested.is_symlink():
+            raise ValueError("persistent observation path must not be a symlink")
+        self.path = requested
+        self.lock_path = requested.with_suffix(requested.suffix + ".lock")
+        self.max_events = max_events
+        self.max_bytes = max_bytes
+        self._guard = RLock()
+
+    def append(self, event: ObservationEvent) -> ObservationEvent:
+        if not isinstance(event, ObservationEvent):
+            raise TypeError("persistent observation requires an ObservationEvent")
+        with self._guard, self._locked():
+            events = self._read_unlocked()
+            if any(item.event_id == event.event_id for item in events):
+                return next(item for item in events if item.event_id == event.event_id)
+            cursor = events[-1].sequence + 1 if events else 0
+            # The process-local stream sequence is not the durable cursor.  A
+            # persistent event gets a fresh global sequence and identity.
+            persisted = replace(
+                event,
+                sequence=cursor,
+                event_id="obs-v1-"
+                + hashlib.sha256(
+                    f"{event.trace_id}\0persistent\0{event.source_id}\0{cursor}\0{event.record_type}".encode()
+                ).hexdigest(),
+            )
+            encoded = (
+                json.dumps(persisted.to_mapping(), sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            if len(encoded) > self.max_bytes:
+                raise ObservationError("persistent observation event exceeds byte limit")
+            existing_bytes = self.path.stat().st_size if self.path.exists() else 0
+            while events and (
+                len(events) >= self.max_events or existing_bytes + len(encoded) > self.max_bytes
+            ):
+                # Retention is explicit: drop the oldest projection and expose
+                # the resulting cursor gap to readers rather than rewriting a
+                # source ledger or pretending history is complete.
+                events = events[1:]
+                self._rewrite_unlocked(events)
+                existing_bytes = self.path.stat().st_size if self.path.exists() else 0
+            self._ensure_parent()
+            with self.path.open("ab") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return persisted
+
+    def read(
+        self,
+        *,
+        after: int = -1,
+        limit: int = MAX_OBSERVATION_READ_LIMIT,
+        trace_id: str | None = None,
+        source: ObservationSource | None = None,
+        source_id: str | None = None,
+    ) -> ObservationBatch:
+        _validate_observation_cursor(after, limit, 0.0)
+        with self._guard, self._locked():
+            events = self._read_unlocked()
+        if trace_id is not None:
+            events = tuple(item for item in events if item.trace_id == trace_id)
+        if source is not None:
+            events = tuple(item for item in events if item.source is source)
+        if source_id is not None:
+            _uuid(source_id, "observation source ID")
+            events = tuple(item for item in events if item.source_id == source_id)
+        selected = tuple(item for item in events if item.sequence > after)[:limit]
+        oldest = events[0].sequence if events else None
+        latest = events[-1].sequence if events else None
+        return ObservationBatch(
+            selected,
+            selected[-1].sequence + 1 if selected else max(after + 1, 0),
+            oldest,
+            latest,
+            self.epoch,
+            bool(oldest is not None and after + 1 < oldest),
+        )
+
+    @property
+    def epoch(self) -> int:
+        with self._guard, self._locked():
+            return self._read_epoch_unlocked()
+
+    def bump_epoch(self) -> int:
+        with self._guard, self._locked():
+            self._ensure_parent()
+            events = self._read_unlocked()
+            epoch = self._read_epoch_unlocked() + 1
+            self._write_epoch_unlocked(epoch)
+            # Epoch boundaries intentionally do not delete events; they tell a
+            # subscriber that its old cursor belongs to a different runtime.
+            del events
+            return epoch
+
+    def _ensure_parent(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def _read_unlocked(self) -> tuple[ObservationEvent, ...]:
+        if not self.path.exists():
+            return ()
+        try:
+            raw = self.path.read_bytes()
+            if len(raw) > self.max_bytes:
+                raise ValueError
+            result: list[ObservationEvent] = []
+            for line in raw.splitlines():
+                if not line:
+                    continue
+                mapping = json.loads(line.decode("utf-8"))
+                result.append(_decode_observation_event(mapping))
+            if len(result) > self.max_events:
+                raise ValueError
+            for expected, event in enumerate(result):
+                if event.sequence != (result[0].sequence + expected if result else 0):
+                    raise ValueError
+            return tuple(result)
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError):
+            raise ObservationError("persistent observation store is invalid") from None
+
+    def _read_epoch_unlocked(self) -> int:
+        epoch_path = self.path.with_suffix(self.path.suffix + ".epoch")
+        if not epoch_path.exists():
+            return 0
+        try:
+            value = int(epoch_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            raise ObservationError("persistent observation epoch is invalid") from None
+        if value < 0:
+            raise ObservationError("persistent observation epoch is invalid")
+        return value
+
+    def _write_epoch_unlocked(self, epoch: int) -> None:
+        epoch_path = self.path.with_suffix(self.path.suffix + ".epoch")
+        temporary = epoch_path.with_suffix(epoch_path.suffix + ".tmp")
+        temporary.write_text(str(epoch), encoding="ascii")
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        temporary.replace(epoch_path)
+
+    def _rewrite_unlocked(self, events: tuple[ObservationEvent, ...]) -> None:
+        self._ensure_parent()
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        data = b"".join(
+            (json.dumps(item.to_mapping(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+            for item in events
+        )
+        temporary.write_bytes(data)
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        temporary.replace(self.path)
+
+    @contextmanager
+    def _locked(self):
+        self._ensure_parent()
+        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if os.name == "nt":
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                if os.name == "nt":
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
 class ObservationSubscription:
     """Bounded, non-blocking publisher subscription for local consumers."""
 
@@ -333,14 +582,22 @@ class ObservationStream:
         source_id: str,
         context: ObservationContext,
         retention: ObservationRetentionPolicy = ObservationRetentionPolicy(),
+        store: PersistentObservationStore | None = None,
     ) -> None:
         _uuid(source_id, "observation stream source ID")
         self.source_id = source_id
         self.context = context
         self.retention = retention
+        self.store = store
         self._events: deque[ObservationEvent] = deque(maxlen=retention.max_events)
-        self._sequence = 0
-        self._stream_epoch = 0
+        if store is not None:
+            persisted = store.read(limit=MAX_OBSERVATION_READ_LIMIT, source_id=source_id).events
+            self._events.extend(persisted)
+            self._sequence = (persisted[-1].sequence + 1) if persisted else 0
+            self._stream_epoch = store.epoch
+        else:
+            self._sequence = 0
+            self._stream_epoch = 0
         self._lock = RLock()
         self._subscribers: dict[int, Callable[[ObservationEvent], None]] = {}
         self._queue_subscribers: dict[int, ObservationSubscription] = {}
@@ -375,7 +632,9 @@ class ObservationStream:
                 self.source_id = context.session_id
                 self._events.clear()
                 self._sequence = 0
-                self._stream_epoch += 1
+                self._stream_epoch = (
+                    self.store.bump_epoch() if self.store is not None else self._stream_epoch + 1
+                )
                 subscriptions = tuple(self._queue_subscribers.values())
                 stream_epoch = self._stream_epoch
             self.context = context
@@ -465,8 +724,10 @@ class ObservationStream:
                 else self.context.parent_event_id,
                 related_ids=related_ids,
             )
+            if self.store is not None:
+                event = self.store.append(event)
             self._events.append(event)
-            self._sequence += 1
+            self._sequence = event.sequence + 1
             self._expire()
             subscribers = tuple(self._subscribers.values())
             queue_subscribers = tuple(self._queue_subscribers.values())
@@ -482,6 +743,10 @@ class ObservationStream:
         return event
 
     def snapshot(self) -> tuple[ObservationEvent, ...]:
+        if self.store is not None:
+            return self.store.read(
+                limit=MAX_OBSERVATION_READ_LIMIT, source_id=self.source_id
+            ).events
         with self._lock:
             self._expire()
             return tuple(self._events)
@@ -494,6 +759,8 @@ class ObservationStream:
     ) -> ObservationBatch:
         """Read retained events with explicit stale-cursor/gap semantics."""
         _validate_observation_cursor(after, limit, 0.0)
+        if self.store is not None:
+            return self.store.read(after=after, limit=limit, source_id=self.source_id)
         with self._lock:
             self._expire()
             values = tuple(self._events)

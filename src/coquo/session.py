@@ -23,7 +23,7 @@ from coquo.agent.runtime import (
     AgentRuntimeServices,
     AgentTurnRequest,
 )
-from coquo.observability import ObservationContext, ObservationStream
+from coquo.observability import ObservationContext, ObservationStream, PersistentObservationStore
 from coquo.child_run_records import ChildRunDelegated, ChildRunStatus
 from coquo.child_run_store import ChildRunInfo, ChildRunStore, ChildRunStoreError
 from coquo.session_records import workspace_fingerprint
@@ -1218,9 +1218,13 @@ class ProjectSession:
         self._active_action_lease: ActionLease | None = None
         self._active_turn_context: EffectiveContextSnapshot | None = None
         self._active_observation_context: ObservationContext | None = None
+        self._observation_store = PersistentObservationStore(
+            self.workspace / ".coquo" / "observations" / "v1" / "events.jsonl"
+        )
         self._observation_stream = ObservationStream(
             source_id=writer.session_id,
             context=ObservationContext.new(session_id=writer.session_id),
+            store=self._observation_store,
         )
         self._active_action_binding: BindingSnapshot | None = None
         self._active_tool_set_snapshot: ToolSetSnapshot | None = None
