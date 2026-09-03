@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -20,6 +23,7 @@ from uuid import uuid4
 from a2a.server.events import Event
 from a2a.server.request_handlers import RequestHandler
 from a2a.server.routes import (
+    DefaultServerCallContextBuilder,
     add_a2a_routes_to_fastapi,
     create_agent_card_routes,
     create_jsonrpc_routes,
@@ -53,7 +57,8 @@ from a2a.types.a2a_pb2 import (
     TaskStatusUpdateEvent,
 )
 from a2a.utils.errors import TaskNotFoundError, UnsupportedOperationError
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
 
@@ -62,6 +67,7 @@ from coquo.core.cancellation import TurnCancellation, TurnCancelled
 from coquo.core.permissions import ApprovalMode, PermissionMode
 from coquo.providers.fake import ScriptedFakeProvider
 from coquo.session import ProjectSession
+from coquo.tenant import TenantError, TenantRegistry, workspace_fingerprint
 
 _TERMINAL = {
     TaskState.TASK_STATE_COMPLETED,
@@ -74,6 +80,134 @@ _MAX_OUTPUT_CHARS = 1_000_000
 
 SessionFactory = Callable[[Path], object]
 
+MAX_A2A_LEDGER_BYTES = 32 * 1024 * 1024
+MAX_A2A_LEDGER_EVENTS = 20_000
+
+
+class A2AStoreError(RuntimeError):
+    """Raised when the provider task ledger cannot be safely replayed."""
+
+
+class A2ATaskStore:
+    """Workspace-bound task event store used by the A2A boundary.
+
+    The public A2A Task is the source of truth for this boundary.  Internal
+    Coquo Session transcripts remain private and are never copied here.  A
+    process restart replays terminal tasks and marks in-flight tasks as
+    ``recovery-required`` through the protocol's failed state.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        root = Path(workspace).resolve(strict=True)
+        if not root.is_dir():
+            raise A2AStoreError("A2A workspace is not a directory")
+        self.path = root / ".coquo" / "a2a" / "v1" / "tasks.jsonl"
+        self.lock_path = self.path.with_suffix(".lock")
+        self._guard = asyncio.Lock()
+
+    async def append(
+        self,
+        kind: str,
+        task: Task,
+        *,
+        owner: str,
+        tenant: str,
+        request_digest: str | None = None,
+    ) -> None:
+        if kind not in {"accepted", "status", "artifact", "recovered"}:
+            raise A2AStoreError("A2A task event is invalid")
+        mapping = MessageToDict(task, preserving_proto_field_name=True)
+        event: dict[str, object] = {
+            "schema_version": 1,
+            "kind": kind,
+            "task": mapping,
+            "owner": owner,
+            "tenant": tenant,
+        }
+        if request_digest is not None:
+            event["request_digest"] = request_digest
+        encoded = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        async with self._guard:
+            self._append_sync(encoded)
+
+    async def replay(self) -> tuple[tuple[Task, str, str, str | None], ...]:
+        async with self._guard:
+            return self._replay_sync()
+
+    def _append_sync(self, encoded: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            _lock_file(descriptor)
+            existing = self.path.stat().st_size if self.path.exists() else 0
+            if existing + len(encoded) > MAX_A2A_LEDGER_BYTES:
+                raise A2AStoreError("A2A task ledger exceeds size limit")
+            with self.path.open("ab") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            _unlock_file(descriptor)
+            os.close(descriptor)
+
+    def _replay_sync(self) -> tuple[tuple[Task, str, str, str | None], ...]:
+        if not self.path.exists():
+            return ()
+        try:
+            raw = self.path.read_bytes()
+            if len(raw) > MAX_A2A_LEDGER_BYTES:
+                raise ValueError
+            latest: dict[tuple[str, str, str], tuple[Task, str, str, str | None]] = {}
+            count = 0
+            for line in raw.splitlines():
+                count += 1
+                if count > MAX_A2A_LEDGER_EVENTS:
+                    raise ValueError
+                value = json.loads(line.decode("utf-8"))
+                if not isinstance(value, dict) or set(value) not in (
+                    {"schema_version", "kind", "task", "owner", "tenant"},
+                    {"schema_version", "kind", "task", "owner", "tenant", "request_digest"},
+                ):
+                    raise ValueError
+                if value["schema_version"] != 1 or not isinstance(value["kind"], str):
+                    raise ValueError
+                task_value = value["task"]
+                if not isinstance(task_value, dict):
+                    raise ValueError
+                task = Task()
+                ParseDict(task_value, task)
+                owner = value["owner"]
+                tenant = value["tenant"]
+                if not isinstance(owner, str) or not isinstance(tenant, str):
+                    raise ValueError
+                key = (owner, tenant, task.id)
+                prior = latest.get(key)
+                digest = (
+                    value.get("request_digest")
+                    if isinstance(value.get("request_digest"), str)
+                    else (prior[1] if prior else None)
+                )
+                latest[key] = (task, owner, tenant, digest)
+            return tuple(latest.values())
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError):
+            raise A2AStoreError("A2A task ledger is invalid") from None
+
+
+def _lock_file(descriptor: int) -> None:
+    if os.name == "nt":
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def _unlock_file(descriptor: int) -> None:
+    if os.name == "nt":
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
 
 @dataclass
 class _TaskBinding:
@@ -82,6 +216,7 @@ class _TaskBinding:
     cancellation: TurnCancellation
     owner: str
     tenant: str
+    request_digest: str | None = None
     runner: asyncio.Task[None] | None = None
     subscribers: set[asyncio.Queue[Event]] = field(default_factory=set)
 
@@ -157,13 +292,57 @@ def build_agent_card(base_url: str) -> AgentCard:
 class CoquoA2AHandler(RequestHandler):
     """Bridge public A2A Tasks to one private, read-only ProjectSession each."""
 
-    def __init__(self, workspace: Path, *, session_factory: SessionFactory | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        session_factory: SessionFactory | None = None,
+        bearer_token: str | None = None,
+        tenant_registry: TenantRegistry | None = None,
+    ) -> None:
         self._workspace = Path(workspace).resolve(strict=True)
         if not self._workspace.is_dir():
             raise ValueError("A2A workspace is not a directory")
         self._session_factory = session_factory or self._default_session_factory
         self._tasks: dict[tuple[str, str, str], _TaskBinding] = {}
         self._lock = asyncio.Lock()
+        self._store = A2ATaskStore(self._workspace)
+        self._bearer_token = bearer_token
+        self._tenant_registry = tenant_registry
+        self._workspace_fingerprint = workspace_fingerprint(self._workspace)
+        if tenant_registry is not None and tenant_registry.workspace != self._workspace:
+            raise ValueError("A2A tenant registry workspace does not match A2A workspace")
+        if bearer_token is not None and (not bearer_token or len(bearer_token) > 4096):
+            raise ValueError("A2A bearer token is invalid")
+
+    async def restore(self) -> None:
+        """Restore public task state after a process restart.
+
+        A running local Session cannot safely be resumed by this network
+        adapter.  In-flight work is therefore retained as a public failed task
+        with a precise recovery-required message, never silently retried.
+        """
+        for task, owner, tenant, digest in await self._store.replay():
+            if task.status.state not in _TERMINAL:
+                task.status.CopyFrom(
+                    TaskStatus(
+                        state=TaskState.TASK_STATE_FAILED,
+                        message=_agent_message(
+                            "Task recovery required after A2A process restart",
+                            task.context_id,
+                            task.id,
+                        ),
+                    )
+                )
+                await self._store.append("recovered", task, owner=owner, tenant=tenant)
+            self._tasks[self._key(task.id, owner, tenant)] = _TaskBinding(
+                task=task,
+                session=None,
+                cancellation=TurnCancellation(),
+                owner=owner,
+                tenant=tenant,
+                request_digest=digest,
+            )
 
     def _default_session_factory(self, workspace: Path) -> object:
         # Never inherit an interactive CLI's permission elevation. This network
@@ -181,7 +360,10 @@ class CoquoA2AHandler(RequestHandler):
         if not isinstance(state, dict):
             state = {}
         owner = str(state.get("a2a_owner") or "anonymous")
-        tenant = str(getattr(context, "tenant", "") or "")
+        # The A2A protocol's path/request tenant is caller controlled. When
+        # tenant enforcement is enabled, only middleware's token binding is
+        # an authenticated scope fact.
+        tenant = str(state.get("coquo_tenant") or getattr(context, "tenant", "") or "")
         return owner, tenant
 
     @staticmethod
@@ -277,9 +459,39 @@ class CoquoA2AHandler(RequestHandler):
 
     async def _accept(self, params: SendMessageRequest, context: object) -> _TaskBinding:
         owner, tenant = self._scope(context)
-        message = params.message
+        message = Message()
+        message.CopyFrom(params.message)
         if not message.message_id:
             message.message_id = f"msg-{uuid4().hex}"
+        request_digest = _message_request_digest(message)
+        async with self._lock:
+            for (candidate_owner, candidate_tenant, _), candidate in self._tasks.items():
+                if candidate_owner != owner or candidate_tenant != tenant:
+                    continue
+                if (
+                    candidate.task.history
+                    and candidate.task.history[0].message_id == message.message_id
+                ):
+                    if (
+                        candidate.request_digest is not None
+                        and candidate.request_digest != request_digest
+                    ):
+                        raise ValueError("A2A message_id was reused with different message content")
+                    return candidate
+        if self._tenant_registry is not None:
+            try:
+                policy = self._tenant_registry.require_workspace(
+                    tenant, self._workspace_fingerprint
+                )
+            except TenantError as error:
+                raise ValueError(str(error)) from error
+            async with self._lock:
+                active = sum(
+                    candidate_tenant == tenant and binding.task.status.state not in _TERMINAL
+                    for (_, candidate_tenant, _), binding in self._tasks.items()
+                )
+            if active >= policy.max_active_tasks:
+                raise ValueError("tenant active task quota is exhausted")
         task_id = message.task_id or f"task-{uuid4().hex}"
         context_id = message.context_id or f"ctx-{uuid4().hex}"
         message.task_id = task_id
@@ -291,7 +503,7 @@ class CoquoA2AHandler(RequestHandler):
                 if existing.task.context_id != context_id:
                     raise ValueError("Message context_id does not match the existing Task")
                 if existing.task.status.state in _TERMINAL:
-                    raise ValueError("Task is already terminal")
+                    return existing
                 raise ValueError("Coquo A2A Tasks do not accept continuation input")
             prompt = _prompt_from_message(message)
             session = self._session_factory(self._workspace)
@@ -306,8 +518,16 @@ class CoquoA2AHandler(RequestHandler):
                 cancellation=TurnCancellation(),
                 owner=owner,
                 tenant=tenant,
+                request_digest=request_digest,
             )
             self._tasks[key] = binding
+            await self._store.append(
+                "accepted",
+                binding.task,
+                owner=owner,
+                tenant=tenant,
+                request_digest=request_digest,
+            )
             binding.runner = asyncio.create_task(self._run(binding, prompt))
             return binding
 
@@ -335,6 +555,9 @@ class CoquoA2AHandler(RequestHandler):
                 ],
             )
             binding.task.artifacts.append(artifact)
+            await self._store.append(
+                "artifact", binding.task, owner=binding.owner, tenant=binding.tenant
+            )
             await self._emit(
                 binding,
                 TaskArtifactUpdateEvent(
@@ -370,6 +593,7 @@ class CoquoA2AHandler(RequestHandler):
                 state=state, message=_agent_message(text, binding.task.context_id, binding.task.id)
             )
         )
+        await self._store.append("status", binding.task, owner=binding.owner, tenant=binding.tenant)
         await self._emit(
             binding,
             TaskStatusUpdateEvent(
@@ -466,6 +690,23 @@ def _prompt_from_message(message: Message) -> str:
     return prompt
 
 
+def _message_request_digest(message: Message) -> str:
+    """Digest message content without Host-generated routing IDs."""
+    canonical = Message()
+    canonical.CopyFrom(message)
+    # A2A clients may retry the same object after the Host has assigned these
+    # fields. They identify routing, not the caller's request content.
+    canonical.ClearField("task_id")
+    canonical.ClearField("context_id")
+    return hashlib.sha256(
+        json.dumps(
+            MessageToDict(canonical, preserving_proto_field_name=True),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _agent_message(text: str, context_id: str, task_id: str) -> Message:
     return Message(
         message_id=f"msg-{uuid4().hex}",
@@ -484,6 +725,18 @@ def _completion_data_value(result: str) -> Value:
     return value
 
 
+class _TenantContextBuilder(DefaultServerCallContextBuilder):
+    """Copy middleware-authenticated tenant identity into A2A call context."""
+
+    def build(self, request: Request):
+        context = super().build(request)
+        tenant = request.scope.get("coquo_tenant")
+        if isinstance(tenant, str) and tenant:
+            context.tenant = tenant
+            context.state["coquo_tenant"] = tenant
+        return context
+
+
 def create_app(
     workspace: Path,
     public_url: str,
@@ -492,6 +745,8 @@ def create_app(
     profile: str | None = None,
     model: str | None = None,
     fixture_provider: bool = False,
+    bearer_token: str | None = None,
+    tenant_registry: TenantRegistry | None = None,
 ) -> FastAPI:
     """Create an opt-in A2A HTTP application for one explicit workspace."""
     if session_factory is not None and (
@@ -505,14 +760,58 @@ def create_app(
             fixture_provider=fixture_provider,
         )
     app = FastAPI(title="Coquo A2A Provider", docs_url=None, redoc_url=None)
-    handler = CoquoA2AHandler(workspace, session_factory=session_factory)
+    handler = CoquoA2AHandler(
+        workspace,
+        session_factory=session_factory,
+        bearer_token=bearer_token,
+        tenant_registry=tenant_registry,
+    )
     app.state.coquo_a2a_handler = handler
+
+    @app.exception_handler(A2AStoreError)
+    async def a2a_store_error(_request: Request, error: A2AStoreError):
+        return JSONResponse(
+            {"error": "a2a_store_unavailable", "message": str(error)}, status_code=503
+        )
+
+    @app.on_event("startup")
+    async def _restore_a2a_tasks() -> None:
+        await handler.restore()
+
+    @app.middleware("http")
+    async def _authenticate_a2a(request: Request, call_next):
+        # AgentCard stays discoverable.  When configured, every task route
+        # requires an exact Bearer token without exposing the token to A2A
+        # task state or model prompts.
+        if bearer_token is not None and request.url.path.startswith("/a2a"):
+            header = request.headers.get("authorization", "")
+            expected = f"Bearer {bearer_token}"
+            if not hmac.compare_digest(header, expected):
+                return JSONResponse({"error": "A2A authentication required"}, status_code=401)
+        if tenant_registry is not None and request.url.path.startswith("/a2a"):
+            policy = tenant_registry.resolve_token(request.headers.get("x-coquo-tenant-token", ""))
+            if policy is None:
+                return JSONResponse(
+                    {"error": "A2A tenant authentication required"}, status_code=401
+                )
+            relative = request.url.path.removeprefix("/a2a").strip("/")
+            path_parts = relative.split("/") if relative else []
+            path_tenant = path_parts[0] if len(path_parts) >= 2 else ""
+            if path_tenant and path_tenant != policy.tenant_id:
+                return JSONResponse({"error": "A2A tenant scope mismatch"}, status_code=403)
+            request.scope["coquo_tenant"] = policy.tenant_id
+        return await call_next(request)
+
     card = build_agent_card(public_url)
     add_a2a_routes_to_fastapi(
         app,
         agent_card_routes=create_agent_card_routes(card),
-        jsonrpc_routes=create_jsonrpc_routes(handler, rpc_url="/a2a"),
-        rest_routes=create_rest_routes(handler, path_prefix="/a2a"),
+        jsonrpc_routes=create_jsonrpc_routes(
+            handler, rpc_url="/a2a", context_builder=_TenantContextBuilder()
+        ),
+        rest_routes=create_rest_routes(
+            handler, path_prefix="/a2a", context_builder=_TenantContextBuilder()
+        ),
     )
     return app
 

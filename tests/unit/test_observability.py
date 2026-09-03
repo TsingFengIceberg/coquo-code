@@ -13,9 +13,11 @@ from coquo.agent.tool_events import (
 )
 from coquo.observability import (
     ObservationContext,
+    ObservationError,
     ObservationEvidence,
     ObservationPhase,
     ObservationRetentionPolicy,
+    PersistentObservationStore,
     ObservationStream,
     ObservationSource,
     diagnose_observation_events,
@@ -261,6 +263,36 @@ def test_live_stream_subscribers_receive_fifo_events_and_can_unsubscribe() -> No
 
     assert received == [first, second]
     assert [event.sequence for event in received] == [0, 1]
+
+
+def test_persistent_observation_store_survives_restart_and_reports_cursor_gap(tmp_path) -> None:
+    session_id = _id()
+    context = ObservationContext.new(session_id=session_id)
+    store = PersistentObservationStore(tmp_path / "events.jsonl", max_events=2, max_bytes=4096)
+    stream = ObservationStream(source_id=session_id, context=context, store=store)
+    stream.publish(record_type="one", status="started", summary="safe")
+    stream.publish(record_type="two", status="completed", summary="safe")
+    restarted = ObservationStream(source_id=session_id, context=context, store=store)
+    assert [item.record_type for item in restarted.snapshot()] == ["one", "two"]
+    restarted.publish(record_type="three", status="completed", summary="safe")
+    batch = store.read(after=-1)
+    assert batch.gap is True
+    assert [item.record_type for item in batch.events] == ["two", "three"]
+
+
+def test_persistent_observation_store_rejects_malformed_related_ids(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        '{"schema_version":1,"event_id":"obs-v1-'
+        + "a" * 64
+        + '","trace_id":"'
+        + _id()
+        + '","source":"session","source_id":"'
+        + _id()
+        + '","sequence":0,"occurred_at":"2026-09-03T00:00:00Z","record_type":"safe","phase":"started","status":"started","evidence":"host-observed","summary":"safe","parent_event_id":null,"related_ids":{"safe":1}}\n'
+    )
+    with pytest.raises(ObservationError, match="persistent observation store is invalid"):
+        PersistentObservationStore(path).read()
 
 
 def test_queue_subscription_is_reset_when_stream_context_switches() -> None:

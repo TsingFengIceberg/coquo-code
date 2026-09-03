@@ -1597,6 +1597,7 @@ ProjectSession及Team assignment默认复用这个persistent runtime。详见[01
 145. [0165：Memory、策略、Eval 与 Provider 稳定性闭环](./decisions/0165-memory-strategy-eval-provider-stability.md)
 146. [0166：Host-gated Browser Action 与 AgentLoop 接入](./decisions/0166-browser-action-agentloop-integration.md)
 147. [0167：扩展协调与 Session 观察桥接收口](./decisions/0167-extension-coordination-and-session-observation-bridge.md)
+148. [0168：生产运行时基础](./decisions/0168-production-runtime-foundations.md)
 
 ## 上游 Provider API 错误事实与安全展示
 
@@ -1795,3 +1796,13 @@ Child/Team。`ProjectSessionManager` 对 Session 创建注册失败、后台 wor
 相同的 cursor/gap/epoch/dropped-count 批次。ObservationStream 切换 Session
 context 时会递增 epoch 并清空保留事件和订阅队列，防止旧 Session 事件泄露给
 新消费者。详见[0167：扩展协调与 Session 观察桥接收口](./decisions/0167-extension-coordination-and-session-observation-bridge.md)。
+
+## Browser、Remote Worker、Marketplace、A2A 与跨进程观察运行时
+
+真实 Browser runtime 现在由可选的 `PlaywrightBrowserRuntime` 提供：仅在显式启动时导入Playwright，绝不下载浏览器二进制；它以 page、context、browser、Playwright 的反向依赖顺序清理资源。缺依赖、启动失败和关闭不完整均会给出结构化 fail-closed 错误。Browser session JSON 存储经过文件锁、临时替换和fsync保护；遗留open状态启动时变为`recovery-required`，Host必须显式确认后才能创建新的浏览器进程。
+
+`PersistentRemoteTransport`与`coquo-remote-worker`提供workspace绑定、认证的loopback Worker控制面。任务、claim、heartbeat、completion和过期均写入带锁、append+fsync的JSONL；Worker使用HMAC身份，Remote客户端不自动重试。租约过期会留下`unknown`终态，不能静默重新排队或声称exactly-once。Marketplace以Ed25519的publisher/key ID验证包，`MarketplaceTrustStore`支持持久密钥轮换和撤销，legacy digest签名只在显式兼容模式下保留；quarantine、approval、install、revoke和rollback均可重放。
+
+A2A provider把公开Task状态单独保存在workspace账本，重复message ID幂等。重启后的非终态Task会映射为A2A `failed`及recovery-required说明，绝不伪造完成或自动重试；任务路由可由可选Bearer token保护。`PersistentObservationStore`把已脱敏的ObservationEvent投影追加到独立账本，提供跨进程cursor、gap、epoch与bounded retention；它从不存储prompt、回复、工具参数或凭据，也不取代Session/Task/Child/Team的权威账本。`coquo observe timeline runtime`用于只读检查该投影。
+
+本地/运维者控制面进一步提供 `RemoteWorkerFleet` 调度器与 `coquo-remote-fleet` 服务：Worker 显式注册，能力、权限上限、workspace fingerprint、tenant 范围和并发上限在 Host 侧校验；租约 heartbeat、完成、撤销、过期均落入持久账本，未知结果保持 `unknown`。`TenantRegistry` 将 tenant 绑定到 workspace fingerprint，仅保存 token digest；A2A、Fleet 和 Marketplace 可共享同一 tenant token，但不构成云端账号或计费系统。Marketplace lifecycle ledger 按 tenant 分区，签名 index 通过 HTTPS-only、无重定向的 Ed25519 envelope 交换。高权限自进化目标只可经 `PrivilegedEvolutionBridge` 生成阶段产物，由 Host approval receipt 与 Host-owned apply/rollback callable 驱动，模型不能直接修改 system prompt、PermissionGate、sandbox、ToolSet 或 AgentLoop。详见[0168：生产运行时基础](./decisions/0168-production-runtime-foundations.md)。

@@ -205,6 +205,7 @@ from coquo.evolution import (
     EvolutionMode,
     EvolutionOutcome,
     EvolutionTarget,
+    PrivilegedEvolutionBridge,
 )
 from coquo.skill_evolution import SkillEvolutionService
 from coquo.memory_evolution import MemoryEvolutionService
@@ -229,6 +230,7 @@ from coquo.observability import (
     ObservationEvidence,
     ObservationError,
     ObservationEvent,
+    PersistentObservationStore,
     diagnose_observation_events,
     filter_observation_events,
     merge_observation_events,
@@ -1200,6 +1202,20 @@ def build_parser() -> argparse.ArgumentParser:
         "archive", help="archive inactive candidates before a timestamp"
     )
     evolution_archive.add_argument("before", type=nonblank_prompt)
+    evolution_privileged_stage = evolution_commands.add_parser(
+        "privileged-stage", help="stage one protected evolution candidate for Host review"
+    )
+    evolution_privileged_stage.add_argument("candidate_id")
+    evolution_privileged_approve = evolution_commands.add_parser(
+        "privileged-approve", help="record explicit Host approval for a protected candidate"
+    )
+    evolution_privileged_approve.add_argument("candidate_id")
+    evolution_privileged_approve.add_argument("--approved-by", required=True)
+    evolution_privileged_revoke = evolution_commands.add_parser(
+        "privileged-revoke", help="revoke one protected candidate before Host application"
+    )
+    evolution_privileged_revoke.add_argument("candidate_id")
+    evolution_privileged_revoke.add_argument("--receipt-id")
     evolution_skill_patterns = evolution_commands.add_parser(
         "skill-patterns",
         help="show repeated successful workflow patterns eligible for Skill evolution",
@@ -1407,10 +1423,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     observe_commands = observe_parser.add_subparsers(dest="observe_command", required=True)
     observe_timeline = observe_commands.add_parser(
-        "timeline", help="project existing Session, Task, Child, Team, or background records"
+        "timeline",
+        help="project existing Session, Task, Child, Team, background, or runtime records",
     )
     observe_timeline.add_argument(
-        "source", choices=("all", "session", "task", "child", "team", "background")
+        "source", choices=("all", "session", "task", "child", "team", "background", "runtime")
     )
     observe_timeline.add_argument("source_id", nargs="?")
     observe_timeline.add_argument("--format", choices=("text", "jsonl"), default="text")
@@ -1427,7 +1444,7 @@ def build_parser() -> argparse.ArgumentParser:
         "diagnose", help="diagnose one read-only observation timeline"
     )
     observe_diagnose.add_argument(
-        "source", choices=("all", "session", "task", "child", "team", "background")
+        "source", choices=("all", "session", "task", "child", "team", "background", "runtime")
     )
     observe_diagnose.add_argument("source_id", nargs="?")
     observe_diagnose.add_argument("--format", choices=("text", "json"), default="text")
@@ -3017,6 +3034,20 @@ def handle_evolution_command(arguments: argparse.Namespace, workspace: Path, std
         for item in controller.archive(before=arguments.before):
             stdout.write(json.dumps(item.as_mapping(), ensure_ascii=False, sort_keys=True) + "\n")
         return 0
+    if command in {"privileged-stage", "privileged-approve", "privileged-revoke"}:
+        bridge = PrivilegedEvolutionBridge(workspace, evolution=controller)
+        if command == "privileged-stage":
+            value = bridge.stage(arguments.candidate_id).as_mapping()
+        elif command == "privileged-approve":
+            value = bridge.approve(
+                arguments.candidate_id, approved_by=arguments.approved_by
+            ).as_mapping()
+        else:
+            value = bridge.revoke(
+                arguments.candidate_id, receipt_id=arguments.receipt_id
+            ).as_mapping()
+        stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+        return 0
     if command == "skill-patterns":
         service = SkillEvolutionService(workspace, evolution=controller)
         for pattern in service.patterns(min_successes=arguments.min_successes):
@@ -3833,6 +3864,13 @@ def handle_observe_command(arguments: argparse.Namespace, workspace: Path, stdou
                 )
             )
         events = merge_observation_events(groups)
+    elif source == "runtime":
+        if arguments.source_id is not None:
+            raise ObservationError("the runtime timeline does not accept a source ID")
+        store = PersistentObservationStore(
+            workspace / ".coquo" / "observations" / "v1" / "events.jsonl"
+        )
+        events = store.read(limit=arguments.limit).events
     elif source == "background":
         if arguments.source_id is not None:
             raise ObservationError("the background timeline does not accept a source ID")

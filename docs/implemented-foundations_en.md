@@ -1781,6 +1781,7 @@ Every terminal Child may now append one schema-v1 `child_run_handoff_published` 
 145. [0165: Memory, Strategy, Eval, and Provider Stability Loop](./decisions/0165-memory-strategy-eval-provider-stability.md)
 146. [0166: Host-gated Browser Actions in the AgentLoop](./decisions/0166-browser-action-agentloop-integration.md)
 147. [0167: Host-Coordinated Extensions and Isolated Session Observation](./decisions/0167-extension-coordination-and-session-observation-bridge.md)
+148. [0168: Production Runtime Foundations](./decisions/0168-production-runtime-foundations.md)
 
 ## Upstream Provider API Error Facts and Safe Display
 
@@ -2205,3 +2206,13 @@ dropped-count batch. Switching the ObservationStream Session context increments
 its epoch and clears retained and queued events so a prior Session cannot leak to
 a new consumer. See [0167: Host-Coordinated Extensions and Isolated Session
 Observation](./decisions/0167-extension-coordination-and-session-observation-bridge.md).
+
+## Browser, Remote Worker, Marketplace, A2A, and Cross-Process Observation Runtime
+
+The optional `PlaywrightBrowserRuntime` now supplies a real browser process. Playwright is imported only on explicit start and browser binaries are never downloaded. Page, context, browser, and Playwright resources close in dependency order; missing dependencies, launch failures, and incomplete cleanup are typed fail-closed errors. Browser session JSON is protected by a file lock, atomic replacement, and fsync. An orphaned `open` session becomes `recovery-required` and must be explicitly acknowledged before a new browser process can be created.
+
+`PersistentRemoteTransport` and `coquo-remote-worker` provide an authenticated, workspace-bound loopback Worker control plane. Submit, claim, heartbeat, completion, and expiry are recorded in a locked append+fsync JSONL ledger; Workers use HMAC identity proofs and the HTTP client never retries automatically. Lease expiry leaves an `unknown` terminal result rather than silently requeueing or claiming exactly-once execution. Marketplace packages can use publisher-bound Ed25519 signatures and key IDs; `MarketplaceTrustStore` persists key rotation and revocation, while legacy digest signatures remain only in explicit compatibility mode. Quarantine, approval, installation, revocation, and rollback are replayable.
+
+The A2A provider persists public Task state in a separate workspace ledger and treats repeated message IDs idempotently. After restart, non-terminal Tasks map to A2A `failed` with a recovery-required explanation; completion is never fabricated and work is never automatically retried. Task routes can be protected by an optional Bearer token. `PersistentObservationStore` appends only the already-redacted `ObservationEvent` projection and provides cross-process cursors, gaps, epochs, and bounded retention. It never stores prompts, responses, tool arguments, or credentials and never replaces the authoritative Session/Task/Child/Team ledgers. Inspect it read-only with `coquo observe timeline runtime`.
+
+The local/operator control plane also provides a `RemoteWorkerFleet` scheduler and `coquo-remote-fleet` service. Workers are explicitly registered and Host-side checks enforce capability and permission ceilings, workspace fingerprints, tenant scopes, and concurrency bounds. Lease heartbeat, completion, revocation, and expiry are durable; unknown outcomes remain `unknown`. `TenantRegistry` binds a tenant to a workspace fingerprint and stores only token digests. A2A, Fleet, and Marketplace can share the same tenant token without claiming a hosted account or billing system. The Marketplace lifecycle ledger is tenant-partitioned, and signed index exchange uses an HTTPS-only, no-redirect Ed25519 envelope. Protected self-evolution targets are handled only through `PrivilegedEvolutionBridge`, a Host approval receipt, and Host-owned apply/rollback callables; model output cannot directly change the system prompt, PermissionGate, sandbox, ToolSet, or AgentLoop. See [0168: Production Runtime Foundations](./decisions/0168-production-runtime-foundations.md).

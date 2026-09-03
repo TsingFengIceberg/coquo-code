@@ -5,12 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import Callable
 from uuid import UUID, uuid4
 
 from coquo.browser import BrowserAutomation, BrowserBackend, BrowserPolicy
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 class BrowserSessionError(RuntimeError):
@@ -34,7 +40,8 @@ class BrowserSessionStore:
             raise BrowserSessionError("browser workspace is invalid")
         self.root = root / ".coquo" / "browser" / "v1"
         self.path = self.root / "sessions.json"
-        self._guard = Lock()
+        self.lock_path = self.path.with_suffix(".lock")
+        self._guard = RLock()
 
     def create(
         self, policy: BrowserPolicy, *, backend_name: str = "injected"
@@ -43,10 +50,10 @@ class BrowserSessionStore:
             raise BrowserSessionError("browser session configuration is invalid")
         now = _now()
         record = BrowserSessionRecord(str(uuid4()), policy, "created", now, now, backend_name)
-        with self._guard:
-            records = list(self.list())
+        with self._guard, self._file_lock():
+            records = list(self._list_unlocked())
             records.append(record)
-            self._write(records)
+            self._write_unlocked(records)
         return record
 
     def get(self, session_id: str) -> BrowserSessionRecord:
@@ -54,29 +61,44 @@ class BrowserSessionStore:
             UUID(session_id)
         except (ValueError, AttributeError):
             raise BrowserSessionError("browser session ID is invalid") from None
-        for record in self.list():
-            if record.session_id == session_id:
-                return record
+        with self._guard, self._file_lock():
+            for record in self._list_unlocked():
+                if record.session_id == session_id:
+                    return record
         raise BrowserSessionError("browser session was not found")
 
     def transition(self, session_id: str, state: str) -> BrowserSessionRecord:
         if state not in {"created", "open", "closed", "recovery-required"}:
             raise BrowserSessionError("browser session state is invalid")
-        current = self.get(session_id)
-        if current.state == "closed" and state != "closed":
-            raise BrowserSessionError("closed browser session cannot reopen implicitly")
-        updated = BrowserSessionRecord(
-            current.session_id,
-            current.policy,
-            state,
-            current.created_at,
-            _now(),
-            current.backend_name,
-        )
-        self._write([updated if item.session_id == session_id else item for item in self.list()])
-        return updated
+        with self._guard, self._file_lock():
+            current = next(
+                (item for item in self._list_unlocked() if item.session_id == session_id), None
+            )
+            if current is None:
+                raise BrowserSessionError("browser session was not found")
+            if current.state == "closed" and state != "closed":
+                raise BrowserSessionError("closed browser session cannot reopen implicitly")
+            updated = BrowserSessionRecord(
+                current.session_id,
+                current.policy,
+                state,
+                current.created_at,
+                _now(),
+                current.backend_name,
+            )
+            self._write_unlocked(
+                [
+                    updated if item.session_id == session_id else item
+                    for item in self._list_unlocked()
+                ]
+            )
+            return updated
 
     def list(self) -> tuple[BrowserSessionRecord, ...]:
+        with self._guard, self._file_lock():
+            return self._list_unlocked()
+
+    def _list_unlocked(self) -> tuple[BrowserSessionRecord, ...]:
         if not self.path.exists():
             return ()
         try:
@@ -87,14 +109,57 @@ class BrowserSessionStore:
         except (OSError, ValueError, json.JSONDecodeError, TypeError, KeyError) as error:
             raise BrowserSessionError("browser session store is invalid") from error
 
-    def _write(self, records: list[BrowserSessionRecord]) -> None:
+    def _write_unlocked(self, records: list[BrowserSessionRecord]) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = [_encode(item) for item in records]
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(
             json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8"
         )
+        with temporary.open("rb") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(self.path)
+        try:
+            descriptor = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # File contents are durable; directory fsync is an additional
+            # crash-safety measure unavailable on some platforms.
+            pass
+
+    def _file_lock(self):
+        return _BrowserFileLock(self.lock_path)
+
+
+class _BrowserFileLock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.descriptor: int | None = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        if os.name == "nt":
+            msvcrt.locking(self.descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(self.descriptor, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_):
+        if self.descriptor is None:
+            return
+        try:
+            if os.name == "nt":
+                msvcrt.locking(self.descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
+            self.descriptor = None
 
 
 class BrowserSessionManager:
@@ -109,12 +174,43 @@ class BrowserSessionManager:
 
     def open(self, session_id: str, *, approve=None) -> BrowserAutomation:
         record = self.store.get(session_id)
-        if record.state == "closed":
-            raise BrowserSessionError("browser session is closed")
+        if record.state != "created":
+            raise BrowserSessionError("browser session requires explicit recovery or is closed")
         browser = BrowserAutomation(self.backend_factory(record), record.policy, approve=approve)
         self._active[session_id] = browser
         self.store.transition(session_id, "open")
         return browser
+
+    def open_playwright(
+        self,
+        session_id: str,
+        *,
+        approve=None,
+        headless: bool = True,
+        browser_name: str = "chromium",
+        user_data_dir: Path | None = None,
+        playwright_factory=None,
+    ) -> BrowserAutomation:
+        """Open a real lazy Playwright runtime for a persisted browser session."""
+        from coquo.browser import PlaywrightBrowserRuntime
+
+        record = self.store.get(session_id)
+        if record.state != "created":
+            raise BrowserSessionError("browser session requires explicit recovery or is closed")
+        runtime = PlaywrightBrowserRuntime.start(
+            headless=headless,
+            browser_name=browser_name,
+            user_data_dir=user_data_dir,
+            playwright_factory=playwright_factory,
+        )
+        try:
+            browser = BrowserAutomation(runtime.backend, record.policy, approve=approve)
+            self._active[session_id] = browser
+            self.store.transition(session_id, "open")
+            return browser
+        except Exception:
+            runtime.close()
+            raise
 
     def close(self, session_id: str) -> BrowserSessionRecord:
         browser = self._active.pop(session_id, None)
@@ -128,6 +224,13 @@ class BrowserSessionManager:
             if record.state == "open":
                 recovered.append(self.store.transition(record.session_id, "recovery-required"))
         return tuple(recovered)
+
+    def reset_recovery(self, session_id: str) -> BrowserSessionRecord:
+        """Acknowledge a crashed runtime before opening a fresh browser process."""
+        record = self.store.get(session_id)
+        if record.state != "recovery-required":
+            raise BrowserSessionError("browser session does not require recovery")
+        return self.store.transition(session_id, "created")
 
 
 def _now() -> str:

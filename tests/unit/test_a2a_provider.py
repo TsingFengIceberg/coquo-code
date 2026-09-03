@@ -4,11 +4,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from a2a.types.a2a_pb2 import Message, Part, SendMessageRequest, TaskState
+from a2a.types.a2a_pb2 import Message, Part, SendMessageRequest, Task, TaskState, TaskStatus
 from google.protobuf.json_format import ParseDict
 from google.protobuf.struct_pb2 import Value
 
 from coquo.a2a_provider import (
+    A2ATaskStore,
     CoquoA2AHandler,
     build_agent_card,
     create_app,
@@ -138,5 +139,58 @@ def test_handler_rejects_file_parts_before_host_prompt(tmp_path: Path) -> None:
         handler = CoquoA2AHandler(tmp_path, session_factory=lambda workspace: _Session(workspace))
         with pytest.raises(Exception, match="accepts only text and application/json"):
             await handler.on_message_send(_request(Part(raw=b"document")), _Context())
+
+    asyncio.run(run())
+
+
+def test_handler_replays_same_message_id_idempotently(tmp_path: Path) -> None:
+    async def run() -> None:
+        handler = CoquoA2AHandler(tmp_path, session_factory=lambda workspace: _Session(workspace))
+        first = await handler.on_message_send(_request(Part(text="same request")), _Context())
+        second = await handler.on_message_send(_request(Part(text="same request")), _Context())
+        assert first.id == second.id
+        await handler._tasks[("anonymous", "tenant-a", first.id)].runner
+
+    asyncio.run(run())
+
+
+def test_handler_rejects_same_message_id_with_different_content(tmp_path: Path) -> None:
+    async def run() -> None:
+        handler = CoquoA2AHandler(tmp_path, session_factory=lambda workspace: _Session(workspace))
+        await handler.on_message_send(_request(Part(text="first request")), _Context())
+        with pytest.raises(ValueError, match="different message content"):
+            await handler.on_message_send(_request(Part(text="different request")), _Context())
+
+    asyncio.run(run())
+
+
+def test_handler_idempotency_survives_reusing_mutated_request_object(tmp_path: Path) -> None:
+    async def run() -> None:
+        handler = CoquoA2AHandler(tmp_path, session_factory=lambda workspace: _Session(workspace))
+        request = _request(Part(text="same request"))
+        first = await handler.on_message_send(request, _Context())
+        second = await handler.on_message_send(request, _Context())
+        assert first.id == second.id
+
+    asyncio.run(run())
+
+
+def test_a2a_task_store_replays_and_handler_marks_inflight_recovery(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = A2ATaskStore(tmp_path)
+        task = Task(
+            id="task-restart",
+            context_id="ctx-restart",
+            status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+        )
+        await store.append("accepted", task, owner="operator", tenant="tenant-a")
+        handler = CoquoA2AHandler(tmp_path, session_factory=lambda workspace: _Session(workspace))
+        await handler.restore()
+        restored = await handler.on_get_task(
+            type("Request", (), {"id": "task-restart"})(),
+            type("Context", (), {"state": {"a2a_owner": "operator"}, "tenant": "tenant-a"})(),
+        )
+        assert restored.status.state == TaskState.TASK_STATE_FAILED
+        assert "recovery required" in restored.status.message.parts[0].text
 
     asyncio.run(run())

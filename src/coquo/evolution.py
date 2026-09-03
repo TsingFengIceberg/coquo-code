@@ -53,6 +53,22 @@ class EvolutionTarget(StrEnum):
     SKILL = "skill"
     PROMPT = "prompt"
     WORKFLOW = "workflow"
+    SYSTEM_PROMPT = "system_prompt"
+    PERMISSIONS = "permissions"
+    SANDBOX = "sandbox"
+    TOOLSET = "toolset"
+    AGENT_LOOP = "agent_loop"
+
+
+PRIVILEGED_EVOLUTION_TARGETS = frozenset(
+    {
+        EvolutionTarget.SYSTEM_PROMPT,
+        EvolutionTarget.PERMISSIONS,
+        EvolutionTarget.SANDBOX,
+        EvolutionTarget.TOOLSET,
+        EvolutionTarget.AGENT_LOOP,
+    }
+)
 
 
 class EvolutionOutcome(StrEnum):
@@ -273,6 +289,54 @@ class EvaluationResult:
             "passed": self.passed,
             "checks": list(self.checks),
             "evaluated_at": self.evaluated_at,
+        }
+
+
+@dataclass(frozen=True)
+class PrivilegedEvolutionStage:
+    """A candidate staged for Host review, never an installed runtime change."""
+
+    candidate_id: str
+    target: EvolutionTarget
+    version: int
+    content_sha256: str
+    artifact_path: str
+    staged_at: str
+    status: str = "staged"
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "candidate_id": self.candidate_id,
+            "target": self.target.value,
+            "version": self.version,
+            "content_sha256": self.content_sha256,
+            "artifact_path": self.artifact_path,
+            "staged_at": self.staged_at,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class HostApprovalReceipt:
+    """Host approval bound to the exact candidate content and target version."""
+
+    receipt_id: str
+    candidate_id: str
+    target: EvolutionTarget
+    version: int
+    content_sha256: str
+    approved_by: str
+    approved_at: str
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "receipt_id": self.receipt_id,
+            "candidate_id": self.candidate_id,
+            "target": self.target.value,
+            "version": self.version,
+            "content_sha256": self.content_sha256,
+            "approved_by": self.approved_by,
+            "approved_at": self.approved_at,
         }
 
 
@@ -529,7 +593,11 @@ class EvolutionController:
         reasons: list[str] = []
         if _SECRET_RE.search(candidate.content):
             reasons.append("possible_secret")
-        if candidate.target in {EvolutionTarget.PROMPT, EvolutionTarget.WORKFLOW} and any(
+        if candidate.target in {
+            EvolutionTarget.PROMPT,
+            EvolutionTarget.WORKFLOW,
+            *PRIVILEGED_EVOLUTION_TARGETS,
+        } and any(
             marker in candidate.content.casefold()
             for marker in ("permissiongate", "sandbox", "tool schema", "agentloop")
         ):
@@ -605,6 +673,8 @@ class EvolutionController:
 
     def approve(self, candidate_id: str) -> EvolutionCandidate:
         candidate = self._latest_candidate(candidate_id)
+        if candidate.target in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("privileged evolution candidates require Host approval bridge")
         if candidate.status is not CandidateStatus.EVALUATED:
             raise EvolutionError("candidate must be evaluated before approval")
         if not candidate.evaluation_passed:
@@ -615,6 +685,8 @@ class EvolutionController:
 
     def activate(self, candidate_id: str) -> EvolutionCandidate:
         candidate = self._latest_candidate(candidate_id)
+        if candidate.target in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("privileged evolution candidates require Host approval bridge")
         if candidate.status is not CandidateStatus.APPROVED:
             raise EvolutionError("only an approved candidate can be activated")
         if not candidate.safety_passed:
@@ -705,6 +777,223 @@ class EvolutionController:
         return tuple(archived)
 
 
+class PrivilegedEvolutionBridge:
+    """Host-only staging and approval bridge for protected runtime targets.
+
+    The bridge records receipts and writes review artifacts under the local
+    evolution directory.  Applying a staged candidate requires a caller-owned
+    applier callable, so model output can never mutate the system prompt,
+    permissions, sandbox, ToolSet, or AgentLoop by itself.
+    """
+
+    def __init__(self, workspace: Path, *, evolution: EvolutionController | None = None) -> None:
+        self.controller = evolution or EvolutionController(workspace)
+        self.workspace = Path(workspace).resolve(strict=True)
+        self.root = self.workspace / ".coquo" / "evolution" / "privileged-v1"
+
+    def stage(self, candidate_id: str) -> PrivilegedEvolutionStage:
+        candidate = self.controller._latest_candidate(candidate_id)
+        if candidate.target not in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("candidate is not a privileged evolution target")
+        if candidate.status is not CandidateStatus.APPROVED:
+            raise EvolutionError("privileged candidate must be approved before staging")
+        if not candidate.safety_passed or not candidate.evaluation_passed:
+            raise EvolutionError("privileged candidate safety and evaluation are required")
+        digest = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+        artifact = self.root / candidate.target.value / f"v{candidate.version}-{digest}.candidate"
+        artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = artifact.with_suffix(".tmp")
+        temporary.write_text(candidate.content, encoding="utf-8")
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        temporary.replace(artifact)
+        stage = PrivilegedEvolutionStage(
+            candidate.candidate_id,
+            candidate.target,
+            candidate.version,
+            digest,
+            str(artifact),
+            _now(),
+        )
+        self.controller.store._append("privileged_stage", stage.as_mapping())
+        return stage
+
+    def approve(self, candidate_id: str, *, approved_by: str) -> HostApprovalReceipt:
+        candidate = self.controller._latest_candidate(candidate_id)
+        if candidate.target not in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("candidate is not a privileged evolution target")
+        if not isinstance(approved_by, str) or not approved_by.strip() or len(approved_by) > 128:
+            raise EvolutionError("Host approver identity is invalid")
+        if candidate.status is not CandidateStatus.EVALUATED or not candidate.evaluation_passed:
+            raise EvolutionError("privileged candidate must pass evaluation before approval")
+        if not candidate.safety_passed:
+            passed, _ = self.controller.safety_check(candidate_id)
+            if not passed:
+                raise EvolutionError("privileged candidate safety check failed")
+            candidate = self.controller._latest_candidate(candidate_id)
+        approved = replace(candidate, status=CandidateStatus.APPROVED, updated_at=_now())
+        self.controller.store._append("candidate", approved.as_mapping())
+        receipt = HostApprovalReceipt(
+            str(uuid4()),
+            candidate.candidate_id,
+            candidate.target,
+            candidate.version,
+            hashlib.sha256(candidate.content.encode("utf-8")).hexdigest(),
+            approved_by.strip(),
+            _now(),
+        )
+        self.controller.store._append("privileged_approval", receipt.as_mapping())
+        return receipt
+
+    def apply(
+        self,
+        candidate_id: str,
+        *,
+        receipt: HostApprovalReceipt,
+        applier: Any,
+    ) -> PrivilegedEvolutionStage:
+        if not isinstance(receipt, HostApprovalReceipt) or receipt.candidate_id != candidate_id:
+            raise EvolutionError("privileged Host approval receipt is invalid")
+        candidate = self.controller._latest_candidate(candidate_id)
+        digest = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+        if (
+            candidate.status is not CandidateStatus.APPROVED
+            or not candidate.safety_passed
+            or not candidate.evaluation_passed
+            or candidate.target is not receipt.target
+            or candidate.version != receipt.version
+            or digest != receipt.content_sha256
+            or not self._receipt_exists(receipt)
+        ):
+            raise EvolutionError("privileged approval does not match candidate content")
+        if any(
+            event.get("event") == "privileged_applied" and event.get("candidate_id") == candidate_id
+            for event in self.controller.store.events()
+        ):
+            raise EvolutionError("privileged candidate is already applied")
+        stage = self.stage(candidate_id)
+        if not callable(applier):
+            raise EvolutionError("privileged Host applier is required")
+        try:
+            applier(stage)
+        except Exception as error:
+            self.controller.store._append(
+                "privileged_apply_failed",
+                {
+                    "candidate_id": candidate_id,
+                    "target": candidate.target.value,
+                    "reason": str(error)[:512],
+                },
+            )
+            raise EvolutionError("privileged Host apply failed") from error
+        self.controller.store._append(
+            "privileged_applied",
+            {
+                "candidate_id": candidate_id,
+                "target": candidate.target.value,
+                "version": candidate.version,
+                "content_sha256": digest,
+                "applied_at": _now(),
+            },
+        )
+        return stage
+
+    def revoke(self, candidate_id: str, *, receipt_id: str | None = None) -> EvolutionCandidate:
+        """Revoke a privileged candidate before any future Host application."""
+        candidate = self.controller._latest_candidate(candidate_id)
+        if candidate.target not in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("candidate is not a privileged evolution target")
+        if candidate.status not in {CandidateStatus.EVALUATED, CandidateStatus.APPROVED}:
+            raise EvolutionError("privileged candidate cannot be revoked from its current state")
+        if any(
+            event.get("event") == "privileged_applied" and event.get("candidate_id") == candidate_id
+            for event in self.controller.store.events()
+        ):
+            raise EvolutionError(
+                "applied privileged candidate must be rolled back before revocation"
+            )
+        if receipt_id is not None:
+            _id(receipt_id, "receipt_id")
+        updated = replace(candidate, status=CandidateStatus.DEPRECATED, updated_at=_now())
+        self.controller.store._append("candidate", updated.as_mapping())
+        self.controller.store._append(
+            "privileged_revoked",
+            {
+                "candidate_id": candidate_id,
+                "target": candidate.target.value,
+                "receipt_id": receipt_id,
+                "revoked_at": _now(),
+            },
+        )
+        return updated
+
+    def rollback(self, candidate_id: str, *, rollbacker: Any) -> PrivilegedEvolutionStage:
+        """Ask a Host-owned rollback callable to undo one applied candidate."""
+        candidate = self.controller._latest_candidate(candidate_id)
+        if candidate.target not in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("candidate is not a privileged evolution target")
+        if not callable(rollbacker):
+            raise EvolutionError("privileged Host rollbacker is required")
+        applied = [
+            event
+            for event in self.controller.store.events()
+            if event.get("event") == "privileged_applied"
+            and event.get("candidate_id") == candidate_id
+        ]
+        if not applied:
+            raise EvolutionError("privileged candidate has not been applied")
+        stage = self.stage(candidate_id) if candidate.status is CandidateStatus.APPROVED else None
+        if stage is None:
+            digest = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+            artifact = (
+                self.root / candidate.target.value / f"v{candidate.version}-{digest}.candidate"
+            )
+            if not artifact.is_file():
+                raise EvolutionError("privileged candidate artifact is missing")
+            stage = PrivilegedEvolutionStage(
+                candidate.candidate_id,
+                candidate.target,
+                candidate.version,
+                digest,
+                str(artifact),
+                _now(),
+            )
+        try:
+            rollbacker(stage)
+        except Exception as error:
+            self.controller.store._append(
+                "privileged_rollback_failed",
+                {
+                    "candidate_id": candidate_id,
+                    "target": candidate.target.value,
+                    "reason": str(error)[:512],
+                },
+            )
+            raise EvolutionError("privileged Host rollback failed") from error
+        self.controller.store._append(
+            "privileged_rolled_back",
+            {
+                "candidate_id": candidate_id,
+                "target": candidate.target.value,
+                "version": candidate.version,
+                "rolled_back_at": _now(),
+            },
+        )
+        self.controller.store._append(
+            "candidate",
+            replace(candidate, status=CandidateStatus.ROLLED_BACK, updated_at=_now()).as_mapping(),
+        )
+        return stage
+
+    def _receipt_exists(self, receipt: HostApprovalReceipt) -> bool:
+        expected = receipt.as_mapping()
+        return any(
+            event.get("event") == "privileged_approval"
+            and all(event.get(key) == value for key, value in expected.items())
+            for event in self.controller.store.events()
+        )
+
+
 def _lock_file(stream: Any) -> None:
     if os.name == "nt":
         stream.seek(0)
@@ -732,5 +1021,9 @@ __all__ = [
     "EvolutionStore",
     "EvolutionTarget",
     "EvolutionTrace",
+    "HostApprovalReceipt",
+    "PRIVILEGED_EVOLUTION_TARGETS",
+    "PrivilegedEvolutionBridge",
+    "PrivilegedEvolutionStage",
     "TraceAssessment",
 ]
