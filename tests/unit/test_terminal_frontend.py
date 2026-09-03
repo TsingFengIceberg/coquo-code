@@ -207,6 +207,32 @@ def test_frontend_queue_preserves_each_text_delta_in_arrival_order() -> None:
     )
 
 
+def test_frontend_queue_wakes_owner_for_each_arriving_event() -> None:
+    queue = FrontendEventQueue(capacity=4)
+    wakeups = Event()
+    count = []
+
+    def wake() -> None:
+        count.append(1)
+        wakeups.set()
+
+    queue.set_wakeup(wake)
+    assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("a")))
+    assert wakeups.wait(1)
+    wakeups.clear()
+    assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("b")))
+    assert wakeups.wait(1)
+    assert len(count) == 2
+
+
+def test_frontend_queue_wakeup_failure_does_not_drop_event() -> None:
+    queue = FrontendEventQueue(capacity=4)
+    queue.set_wakeup(lambda: (_ for _ in ()).throw(RuntimeError("closed loop")))
+
+    assert queue.put(PromptActivity(1, AssistantResponseTextDeltaReceived("a")))
+    assert queue.drain(1) == (PromptActivity(1, AssistantResponseTextDeltaReceived("a")),)
+
+
 def test_frontend_queue_close_releases_a_blocked_critical_event_producer() -> None:
     queue = FrontendEventQueue(capacity=2)
     queue.put(TurnSubmitted(1))

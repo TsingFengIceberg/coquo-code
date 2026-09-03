@@ -994,6 +994,112 @@ class PrivilegedEvolutionBridge:
         )
 
 
+@dataclass(frozen=True)
+class HostOwnedRuntimeInstallation:
+    """Durable identity of one installed protected runtime candidate."""
+
+    target: EvolutionTarget
+    candidate_id: str
+    version: int
+    content_sha256: str
+    installed_at: str
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "target": self.target.value,
+            "candidate_id": self.candidate_id,
+            "version": self.version,
+            "content_sha256": self.content_sha256,
+            "installed_at": self.installed_at,
+        }
+
+
+class HostOwnedApplierRegistry:
+    """Central registry for explicit Host-owned protected-runtime appliers.
+
+    A protected target must be registered by the Host with paired install and
+    rollback callables.  Candidate content, approval receipts, and state
+    records are checked by ``PrivilegedEvolutionBridge`` before either
+    callable is reached; model output never receives these callables.
+    """
+
+    def __init__(self, workspace: Path, *, bridge: PrivilegedEvolutionBridge | None = None) -> None:
+        self.bridge = bridge or PrivilegedEvolutionBridge(workspace)
+        self._appliers: dict[EvolutionTarget, tuple[Any, Any]] = {}
+        self._guard = RLock()
+
+    def register(self, target: EvolutionTarget, *, apply: Any, rollback: Any) -> None:
+        if target not in PRIVILEGED_EVOLUTION_TARGETS:
+            raise EvolutionError("Host applier target is not protected")
+        if not callable(apply) or not callable(rollback):
+            raise EvolutionError("Host applier requires apply and rollback callables")
+        with self._guard:
+            if target in self._appliers:
+                raise EvolutionError("Host applier target is already registered")
+            self._appliers[target] = (apply, rollback)
+
+    def registered_targets(self) -> tuple[EvolutionTarget, ...]:
+        with self._guard:
+            return tuple(sorted(self._appliers, key=lambda item: item.value))
+
+    def apply(
+        self, candidate_id: str, *, receipt: HostApprovalReceipt
+    ) -> HostOwnedRuntimeInstallation:
+        candidate = self.bridge.controller._latest_candidate(candidate_id)
+        callback = self._callback(candidate.target, 0)
+        stage = self.bridge.apply(candidate_id, receipt=receipt, applier=callback)
+        installation = HostOwnedRuntimeInstallation(
+            stage.target, stage.candidate_id, stage.version, stage.content_sha256, _now()
+        )
+        self.bridge.controller.store._append(
+            "privileged_runtime_installed", installation.as_mapping()
+        )
+        return installation
+
+    def rollback(self, candidate_id: str) -> HostOwnedRuntimeInstallation:
+        candidate = self.bridge.controller._latest_candidate(candidate_id)
+        callback = self._callback(candidate.target, 1)
+        stage = self.bridge.rollback(candidate_id, rollbacker=callback)
+        installation = HostOwnedRuntimeInstallation(
+            stage.target, stage.candidate_id, stage.version, stage.content_sha256, _now()
+        )
+        self.bridge.controller.store._append(
+            "privileged_runtime_rolled_back", installation.as_mapping()
+        )
+        return installation
+
+    def active(self) -> tuple[HostOwnedRuntimeInstallation, ...]:
+        latest: dict[EvolutionTarget, HostOwnedRuntimeInstallation] = {}
+        for event in self.bridge.controller.store.events():
+            if event.get("event") == "privileged_runtime_installed":
+                try:
+                    installation = HostOwnedRuntimeInstallation(
+                        EvolutionTarget(event["target"]),
+                        event["candidate_id"],
+                        event["version"],
+                        event["content_sha256"],
+                        event["installed_at"],
+                    )
+                except (KeyError, TypeError, ValueError):
+                    raise EvolutionError(
+                        "privileged runtime installation record is invalid"
+                    ) from None
+                latest[installation.target] = installation
+            elif event.get("event") == "privileged_runtime_rolled_back":
+                try:
+                    latest.pop(EvolutionTarget(event["target"]), None)
+                except (KeyError, ValueError):
+                    raise EvolutionError("privileged runtime rollback record is invalid") from None
+        return tuple(sorted(latest.values(), key=lambda item: item.target.value))
+
+    def _callback(self, target: EvolutionTarget, index: int) -> Any:
+        with self._guard:
+            callbacks = self._appliers.get(target)
+        if callbacks is None:
+            raise EvolutionError(f"no Host applier registered for {target.value}")
+        return callbacks[index]
+
+
 def _lock_file(stream: Any) -> None:
     if os.name == "nt":
         stream.seek(0)
@@ -1022,6 +1128,8 @@ __all__ = [
     "EvolutionTarget",
     "EvolutionTrace",
     "HostApprovalReceipt",
+    "HostOwnedApplierRegistry",
+    "HostOwnedRuntimeInstallation",
     "PRIVILEGED_EVOLUTION_TARGETS",
     "PrivilegedEvolutionBridge",
     "PrivilegedEvolutionStage",

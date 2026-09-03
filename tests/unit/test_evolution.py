@@ -16,6 +16,7 @@ from coquo.evolution import (
     EvolutionOutcome,
     EvolutionTarget,
     HostApprovalReceipt,
+    HostOwnedApplierRegistry,
     PrivilegedEvolutionBridge,
 )
 
@@ -223,6 +224,45 @@ def test_privileged_evolution_requires_host_receipt_and_explicit_rollback(tmp_pa
     assert (
         controller._latest_candidate(candidate.candidate_id).status is CandidateStatus.ROLLED_BACK
     )
+
+
+def test_host_owned_applier_registry_registers_applies_and_replays_runtime_state(
+    tmp_path: Path,
+) -> None:
+    controller = EvolutionController(tmp_path)
+    controller.configure(EvolutionMode.SUPERVISED)
+    trace = controller.record_trace(
+        EvolutionTarget.SYSTEM_PROMPT, EvolutionOutcome.SUCCESS, "reviewed prompt experiment"
+    )
+    candidate = controller.propose(
+        EvolutionTarget.SYSTEM_PROMPT,
+        "prompt candidate",
+        "Use a reviewed prompt variant.",
+        (trace.trace_id,),
+    )
+    controller.evaluate(
+        candidate.candidate_id,
+        {"quality": 0.5},
+        {"quality": 0.6},
+        validation_set="v1",
+        test_set="t1",
+    )
+    bridge = PrivilegedEvolutionBridge(tmp_path, evolution=controller)
+    receipt = bridge.approve(candidate.candidate_id, approved_by="operator")
+    applied: list[str] = []
+    rolled_back: list[str] = []
+    registry = HostOwnedApplierRegistry(tmp_path, bridge=bridge)
+    registry.register(
+        EvolutionTarget.SYSTEM_PROMPT,
+        apply=lambda stage: applied.append(stage.content_sha256),
+        rollback=lambda stage: rolled_back.append(stage.content_sha256),
+    )
+    installation = registry.apply(candidate.candidate_id, receipt=receipt)
+    assert installation.content_sha256 == applied[0]
+    assert registry.active() == (installation,)
+    registry.rollback(candidate.candidate_id)
+    assert rolled_back == [installation.content_sha256]
+    assert HostOwnedApplierRegistry(tmp_path).active() == ()
 
 
 def test_privileged_receipt_tampering_and_revoke_after_apply_are_rejected(tmp_path: Path) -> None:

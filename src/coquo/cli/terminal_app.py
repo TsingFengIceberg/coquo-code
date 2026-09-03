@@ -229,6 +229,7 @@ class TerminalApplication:
         self._provider_invocation_active: ProviderInvocationStarted | None = None
         self._provider_wait_last_heartbeat: float | None = None
         self._reported_queue_blocked_puts = 0
+        self._event_wakeup: asyncio.Event | None = None
         self._history_entries = _session_prompt_history(session)
         self._history = InMemoryHistory(self._history_entries)
         self._buffer = Buffer(
@@ -299,15 +300,41 @@ class TerminalApplication:
         return 0
 
     def _start_event_pump(self) -> None:
+        loop = asyncio.get_running_loop()
+        self._event_wakeup = asyncio.Event()
+        self._queue.set_wakeup(
+            lambda: (
+                loop.call_soon_threadsafe(self._event_wakeup.set)
+                if self._event_wakeup is not None
+                else None
+            )
+        )
         self._application.create_background_task(self._event_pump())
 
     async def _event_pump(self) -> None:
         while not self._application.is_done:
-            await self._drain_events()
-            await asyncio.sleep(0.025)
+            await self._drain_events(limit=1)
+            metrics = self._queue.metrics()
+            if int(metrics["depth"]) > 0:
+                # Yield between individual events so a provider burst cannot
+                # become one redraw batch.
+                await asyncio.sleep(0)
+                continue
+            wakeup = self._event_wakeup
+            if wakeup is None:
+                await asyncio.sleep(0.025)
+                continue
+            wakeup.clear()
+            # Close the enqueue/clear race before sleeping.
+            if int(self._queue.metrics()["depth"]) > 0:
+                continue
+            try:
+                await asyncio.wait_for(wakeup.wait(), timeout=0.1)
+            except TimeoutError:
+                pass
 
-    async def _drain_events(self) -> None:
-        for event in self._queue.drain():
+    async def _drain_events(self, *, limit: int = 64) -> None:
+        for event in self._queue.drain(limit):
             try:
                 await self._handle_event(event)
             except Exception:

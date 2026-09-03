@@ -31,6 +31,7 @@ MAX_REMOTE_LEDGER_EVENTS = 50_000
 MAX_REMOTE_LEDGER_BYTES = 16 * 1024 * 1024
 REMOTE_WORKER_ID_MAX = 128
 MAX_REMOTE_HTTP_BODY_BYTES = 1024 * 1024
+MAX_REMOTE_RESULT_PAYLOAD_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,42 @@ class RemoteResult:
     result_sha256: str | None = None
     diagnostic: str | None = None
     unknown: bool = False
+    result_payload: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            UUID(self.task_id)
+            UUID(self.lease_id)
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("remote result identity is invalid") from None
+        if self.status not in {"completed", "failed", "cancelled", "unknown"}:
+            raise ValueError("remote result status is invalid")
+        if self.result_sha256 is not None and (
+            not isinstance(self.result_sha256, str)
+            or len(self.result_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.result_sha256)
+        ):
+            raise ValueError("remote result digest is invalid")
+        if self.diagnostic is not None and (
+            not isinstance(self.diagnostic, str)
+            or len(self.diagnostic.encode("utf-8")) > 512
+            or "\x00" in self.diagnostic
+        ):
+            raise ValueError("remote result diagnostic is invalid")
+        if type(self.unknown) is not bool:
+            raise ValueError("remote result unknown flag is invalid")
+        if self.result_payload is not None:
+            if not isinstance(self.result_payload, str) or "\x00" in self.result_payload:
+                raise ValueError("remote result payload is invalid")
+            try:
+                payload_bytes = self.result_payload.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("remote result payload must be valid UTF-8") from None
+            if len(payload_bytes) > MAX_REMOTE_RESULT_PAYLOAD_BYTES:
+                raise ValueError("remote result payload exceeds size limit")
+            digest = hashlib.sha256(payload_bytes).hexdigest()
+            if self.result_sha256 != digest:
+                raise ValueError("remote result payload digest does not match")
 
 
 class RemoteWorkerTransport(Protocol):
@@ -693,18 +730,30 @@ def _result_mapping(result: RemoteResult) -> dict[str, object]:
         "result_sha256": result.result_sha256,
         "diagnostic": result.diagnostic,
         "unknown": result.unknown,
+        "result_payload": result.result_payload,
     }
 
 
 def _decode_result(value: object) -> RemoteResult:
-    if not isinstance(value, dict) or set(value) != {
-        "task_id",
-        "lease_id",
-        "status",
-        "result_sha256",
-        "diagnostic",
-        "unknown",
-    }:
+    if not isinstance(value, dict) or set(value) not in (
+        {
+            "task_id",
+            "lease_id",
+            "status",
+            "result_sha256",
+            "diagnostic",
+            "unknown",
+        },
+        {
+            "task_id",
+            "lease_id",
+            "status",
+            "result_sha256",
+            "diagnostic",
+            "unknown",
+            "result_payload",
+        },
+    ):
         raise RemoteWorkerError("remote result ledger record is invalid")
     try:
         result = RemoteResult(**value)

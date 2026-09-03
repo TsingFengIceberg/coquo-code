@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from threading import Condition
+from collections.abc import Callable
 
 from coquo.core.action_coordinator import ApprovalPromptRequest
 
@@ -290,9 +291,18 @@ class FrontendEventQueue:
         self._drained = 0
         self._blocked_puts = 0
         self._high_watermark = 0
+        self._wakeup: Callable[[], None] | None = None
+
+    def set_wakeup(self, callback: Callable[[], None] | None) -> None:
+        """Install a best-effort callback that wakes the owning UI loop."""
+        if callback is not None and not callable(callback):
+            raise TypeError("frontend queue wakeup must be callable or None")
+        with self._condition:
+            self._wakeup = callback
 
     def put(self, event: FrontendEvent) -> bool:
         """Enqueue one event; return false only when the queue is closed."""
+        wakeup: Callable[[], None] | None
         with self._condition:
             if self._closed:
                 return False
@@ -305,8 +315,15 @@ class FrontendEventQueue:
             self._items.append(event)
             self._enqueued += 1
             self._high_watermark = max(self._high_watermark, len(self._items))
+            wakeup = self._wakeup
             self._condition.notify()
-            return True
+        if wakeup is not None:
+            try:
+                wakeup()
+            except Exception:
+                # UI wakeup is an optimization; queue delivery remains truth.
+                pass
+        return True
 
     def drain(self, limit: int = 64) -> tuple[FrontendEvent, ...]:
         if type(limit) is not int or limit < 1:

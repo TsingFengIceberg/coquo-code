@@ -148,6 +148,7 @@ def _result_mapping(result: RemoteResult) -> dict[str, object]:
         "result_sha256": result.result_sha256,
         "diagnostic": result.diagnostic,
         "unknown": result.unknown,
+        "result_payload": result.result_payload,
     }
 
 

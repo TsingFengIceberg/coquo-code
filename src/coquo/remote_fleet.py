@@ -169,6 +169,7 @@ class FleetTask:
     created_at: float = 0.0
     updated_at: float = 0.0
     diagnostic: str | None = None
+    result_payload: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -208,6 +209,13 @@ class FleetTask:
             or self.lease_expires_at is None
         ):
             raise RemoteWorkerError("assigned fleet task lease is incomplete")
+        if self.result_payload is not None:
+            if (
+                not isinstance(self.result_payload, str)
+                or "\x00" in self.result_payload
+                or len(self.result_payload.encode("utf-8")) > 64 * 1024
+            ):
+                raise RemoteWorkerError("fleet result payload is invalid")
 
     def as_mapping(self) -> dict[str, object]:
         return {
@@ -224,6 +232,7 @@ class FleetTask:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "diagnostic": self.diagnostic,
+            "result_payload": self.result_payload,
         }
 
 
@@ -670,6 +679,7 @@ class RemoteWorkerFleet:
                 lease_expires_at=None,
                 updated_at=_now(),
                 diagnostic=result.diagnostic,
+                result_payload=result.result_payload,
             )
             self._append_unlocked(
                 "task_completed", {"task": finished.as_mapping(), "result": _result_mapping(result)}
@@ -875,6 +885,7 @@ def _task_from_mapping(value: object) -> FleetTask:
             created_at=value["created_at"],
             updated_at=value["updated_at"],
             diagnostic=value["diagnostic"],
+            result_payload=value.get("result_payload"),
         )
     except (KeyError, TypeError, ValueError):
         raise ValueError from None
@@ -931,6 +942,7 @@ def _result_mapping(result: RemoteResult) -> dict[str, object]:
         "result_sha256": result.result_sha256,
         "diagnostic": result.diagnostic,
         "unknown": result.unknown,
+        "result_payload": result.result_payload,
     }
 
 
